@@ -15,6 +15,9 @@ use crate::grid::SpatialGrid;
 use crate::rng::SimRng;
 use crate::species::SpeciesRegistry;
 use crate::sun::SunMap;
+use crate::vision::{
+    build_cell_to_carrion, sector_to_angle, VisionBuf, VisionPass, SECTORS, VISION_LEN,
+};
 use serde::{Deserialize, Serialize};
 
 /// Internal body radius (world units) per genome `size` unit. Render layer
@@ -65,6 +68,10 @@ pub struct World {
     pub live_species_count: u32,
     pub first_move_fired: bool,
     pub first_eat_fired: bool,
+    /// Per-creature vision cache (index-aligned with CreatureSoA). Milestone C.12.
+    pub vision: Vec<VisionBuf>,
+    /// Per-cell carrion lookup, rebuilt each tick before vision pass. Size = HASH_DIM².
+    cell_to_carrion: Vec<Vec<u32>>,
     /// Species ids that lost a creature this tick; checked after removals to
     /// emit extinction events. Drained each `finalize_extinctions`.
     pending_extinction_check: Vec<u32>,
@@ -113,6 +120,8 @@ impl World {
             live_species_count: 1,
             first_move_fired: false,
             first_eat_fired: false,
+            vision: vec![[0.0f32; VISION_LEN]], // 1 for the founder
+            cell_to_carrion: Vec::new(),
             pending_extinction_check: Vec::new(),
         }
     }
@@ -132,15 +141,23 @@ impl World {
         // 1. Rebuild spatial hash grid from start-of-tick positions.
         self.grid.rebuild(&self.creatures.x, &self.creatures.y);
 
-        // 2. Vision pass — stubbed for Milestone B.
-        //    Milestone D wires the real raycasts via grid.for_each_in_radius.
+        // 2. Vision pass (Milestone C.12).
+        self.run_vision_pass();
 
-        // 3. Choose action (Milestone B placeholder).
-        for i in 0..self.creatures.len() {
-            let e = self.creatures.energy[i];
-            let cooldown = self.creatures.digestion_cooldown[i];
-            let chosen = pick_action_b(&self.creatures.genomes[i], e, cooldown);
-            self.creatures.action_this_tick[i] = chosen;
+        // 3. Choose action (Milestone C hardcoded picker — replaced in D by NN).
+        let n = self.creatures.len();
+        for i in 0..n {
+            let (vx, vy, action) = pick_action_c(
+                i,
+                &self.vision[i],
+                &self.creatures.genomes[i],
+                self.creatures.energy[i],
+                self.creatures.digestion_cooldown[i],
+                self.creatures.id[i],
+            );
+            self.creatures.vx[i] = vx;
+            self.creatures.vy[i] = vy;
+            self.creatures.action_this_tick[i] = action;
         }
 
         // 4. Apply velocities + soft repulsion + wall clamp; rebuild grid.
@@ -161,6 +178,13 @@ impl World {
         // 9. Deaths → carrion.
         let died = self.collect_deaths();
         if !died.is_empty() {
+            // Mirror swap_remove on vision vec to keep it index-aligned.
+            // Walk from back just like remove_indices does.
+            for &k in died.iter().rev() {
+                if k < self.vision.len() {
+                    self.vision.swap_remove(k);
+                }
+            }
             self.creatures.remove_indices(&died);
         }
 
@@ -650,14 +674,107 @@ impl World {
         self.finalize_extinctions();
         alive
     }
+
+    /// Rebuild the per-cell carrion index and run the vision pass.
+    /// Ensures self.vision is index-aligned with self.creatures.
+    fn run_vision_pass(&mut self) {
+        let n = self.creatures.len();
+        // Ensure vision buffer is large enough.
+        if self.vision.len() < n {
+            self.vision.resize(n, [0.0f32; VISION_LEN]);
+        }
+        // Rebuild per-cell carrion index (O(N+C), reuses cached Vec<Vec<u32>>).
+        build_cell_to_carrion(&self.carrion, &mut self.cell_to_carrion);
+        let pass = VisionPass {
+            creatures: &self.creatures,
+            carrion: &self.carrion,
+            grid: &self.grid,
+            cell_to_carrion: &self.cell_to_carrion,
+        };
+        pass.run(&mut self.vision[..n]);
+    }
 }
 
-fn pick_action_b(_g: &Genome, energy: f32, _cooldown: u32) -> Action {
-    if energy >= SPLIT_PLACEHOLDER {
+/// Hardcoded vision-driven action picker (Milestone C placeholder).
+/// Replaced wholesale by NN forward pass in Milestone D.
+///
+/// Priority order:
+/// 1. Split if energy >= SPLIT_PLACEHOLDER.
+/// 2. Scavenge if nearest visible target is carrion-colored AND scavenge_efficiency > 0.
+/// 3. Eat if nearest visible target is a creature AND eat_efficiency > 0 AND cooldown == 0.
+/// 4. Photosynth (fallback).
+///
+/// Velocity: head toward closest visible target at genome.move_speed; if no
+/// target, drift at 30% speed along a deterministic per-id angle so
+/// distance_travelled accumulates. Uses creature id (not loop index i) to
+/// stay stable across swap_removes.
+fn pick_action_c(
+    i: usize,
+    vision_buf: &VisionBuf,
+    genome: &Genome,
+    energy: f32,
+    cooldown: u32,
+    creature_id: u64,
+) -> (f32, f32, Action) {
+    let speed = genome.move_speed;
+
+    // 1. Find closest visible target.
+    let mut best_sector: Option<usize> = None;
+    let mut best_dist = f32::MAX;
+    let mut best_features = [0.0f32; 5];
+    for s in 0..SECTORS {
+        let off = s * 5;
+        let d = vision_buf[off];
+        if d <= 0.0 {
+            continue;
+        }
+        if d < best_dist {
+            best_dist = d;
+            best_sector = Some(s);
+            best_features.copy_from_slice(&vision_buf[off..off + 5]);
+        }
+    }
+
+    // Helper: is this sector's target carrion-colored?
+    let target_is_carrion = best_sector.is_some()
+        && (best_features[2] - crate::vision::CARRION_R).abs() < 1e-4
+        && (best_features[3] - crate::vision::CARRION_G).abs() < 1e-4
+        && (best_features[4] - crate::vision::CARRION_B).abs() < 1e-4;
+
+    // 2. Action selection.
+    let action = if energy >= SPLIT_PLACEHOLDER {
         Action::Split
+    } else if target_is_carrion && genome.scavenge_efficiency > 0.0 {
+        Action::Scavenge
+    } else if best_sector.is_some()
+        && !target_is_carrion
+        && genome.eat_efficiency > 0.0
+        && cooldown == 0
+    {
+        Action::Eat
     } else {
         Action::Photosynth
-    }
+    };
+
+    // 3. Velocity.
+    let (vx, vy) = if let Some(s) = best_sector {
+        if speed > 0.0 {
+            let theta = sector_to_angle(s, &genome.eye_offsets, genome.eye_count);
+            (speed * theta.cos(), speed * theta.sin())
+        } else {
+            (0.0, 0.0)
+        }
+    } else if speed > 0.0 {
+        // Drift: deterministic per creature id so it's stable across swap_removes.
+        let theta = (creature_id as f32 * 1.618_034).rem_euclid(std::f32::consts::TAU);
+        (0.3 * speed * theta.cos(), 0.3 * speed * theta.sin())
+    } else {
+        (0.0, 0.0)
+    };
+
+    // Suppress unused parameter warning for i (kept for future D use).
+    let _ = i;
+    (vx, vy, action)
 }
 
 #[cfg(test)]
@@ -730,5 +847,34 @@ mod tests {
             }
         }
         assert!(w.tick > 0);
+    }
+
+    /// C.12 test 6: vision + movement loop under real-ish conditions.
+    /// Force the founder to have move_speed + eyes so that the vision loop
+    /// and movement cost accounting both exercise the hot paths.
+    #[test]
+    fn world_runs_2000_ticks_with_movement() {
+        let mut w = World::new("movement-smoke");
+        // Patch the founder's genome to have eyes and move_speed.
+        w.creatures.genomes[0].move_speed = 1.0;
+        w.creatures.genomes[0].vision_range = 30.0;
+        w.creatures.genomes[0].eye_count = 4;
+        for _ in 0..2000 {
+            if !w.tick_once() {
+                break;
+            }
+        }
+        // World ran for at least 1 tick without panicking.
+        assert!(w.tick > 0);
+    }
+
+    /// C.12 test 7: vision layout contract for D.
+    /// VISION_LEN == 120 and NN_INPUTS == 10 + VISION_LEN + 6 (== 136).
+    #[test]
+    fn vision_layout_matches_nn_input_block() {
+        use crate::vision::VISION_LEN;
+        assert_eq!(VISION_LEN, 120);
+        // D's NN input block: 10 self-state + 120 vision + 6 last_action one-hot.
+        assert_eq!(NN_INPUTS, 10 + VISION_LEN + 6);
     }
 }

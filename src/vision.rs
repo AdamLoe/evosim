@@ -32,10 +32,10 @@ pub const CARRION_B: f32 = 0.4;
 /// Position 0 (eye_count == 0) is unused (no active sectors).
 pub const EYE_STRIDE: [u8; 8] = [0, 12, 8, 6, 4, 3, 2, 1];
 
-/// Ray hit from DDA traversal.
+/// Ray hit from DDA traversal. Distance is the second field.
 enum RayHit {
     Creature(usize, f32),
-    Carrion(usize, f32),
+    Carrion(#[allow(dead_code)] usize, f32),
 }
 
 pub struct VisionPass<'a> {
@@ -283,8 +283,8 @@ pub fn sector_to_angle(s: usize, eye_offsets: &[f32; EYE_SLOTS], eye_count: u8) 
     if k == 0 {
         return 0.0;
     }
-    let stride = 24 / k;
-    let active_index = if stride > 0 { s / stride } else { 0 };
+    let stride = 24usize.checked_div(k).unwrap_or(0);
+    let active_index = s.checked_div(stride).unwrap_or(0);
     let offset = if active_index < eye_offsets.len() {
         eye_offsets[active_index]
     } else {
@@ -335,13 +335,7 @@ mod tests {
         dst
     }
 
-    fn simple_creature(
-        soa: &mut CreatureSoA,
-        id: u64,
-        x: f32,
-        y: f32,
-        genome: Genome,
-    ) -> usize {
+    fn simple_creature(soa: &mut CreatureSoA, id: u64, x: f32, y: f32, genome: Genome) -> usize {
         let mut rng = SimRng::from_u64(42);
         let brain = Brain::founder(&mut rng);
         soa.push(id, x, y, 100.0, 0, 0, 0, genome, brain)
@@ -377,7 +371,10 @@ mod tests {
         };
         let mut vision = vec![[0.0f32; VISION_LEN]; 2];
         pass.run(&mut vision);
-        assert_eq!(vision[0], [0.0f32; VISION_LEN], "blind creature must see nothing");
+        assert_eq!(
+            vision[0], [0.0f32; VISION_LEN],
+            "blind creature must see nothing"
+        );
     }
 
     #[test]
@@ -432,13 +429,16 @@ mod tests {
 
         // Sector 0 points east (theta = 0). With eye_count=24, stride=1,
         // every sector is active, so sector 0 is active.
-        let slot = 0 * FEATURES_PER_SECTOR;
+        let slot = 0; // sector 0 × FEATURES_PER_SECTOR
         let dist = vision[0][slot];
         // ray_circle_hit: mx = 100 - 110 = -10, my = 0; dx=1, dy=0.
         // b = -10, c = 100 - 1 = 99. disc = 100 - 99 = 1. t = 10 - 1 = 9.
         assert!(dist > 0.0, "sector 0 should have a hit");
         assert!((dist - 9.0).abs() < 0.1, "expected dist ~9, got {dist}");
-        assert!((vision[0][slot + 1] - 1.0).abs() < 1e-5, "size should be 1.0");
+        assert!(
+            (vision[0][slot + 1] - 1.0).abs() < 1e-5,
+            "size should be 1.0"
+        );
         assert!((vision[0][slot + 2] - 0.9).abs() < 1e-5, "r should be 0.9");
         assert!((vision[0][slot + 3] - 0.1).abs() < 1e-5, "g should be 0.1");
         assert!((vision[0][slot + 4] - 0.2).abs() < 1e-5, "b should be 0.2");
@@ -446,10 +446,7 @@ mod tests {
         // Other sectors (1..23) should all be zero (nothing else to see).
         for s in 1..SECTORS {
             let off = s * FEATURES_PER_SECTOR;
-            assert_eq!(
-                vision[0][off], 0.0,
-                "sector {s} distance should be zero"
-            );
+            assert_eq!(vision[0][off], 0.0, "sector {s} distance should be zero");
         }
     }
 
@@ -483,7 +480,7 @@ mod tests {
 
         // eye_count=4 → stride=6, active sectors: 0, 6, 12, 18.
         // Sector 0 points east → should see carrion.
-        let slot = 0 * FEATURES_PER_SECTOR;
+        let slot = 0; // sector 0 × FEATURES_PER_SECTOR
         let dist = vision[0][slot];
         assert!(dist > 0.0, "sector 0 should see carrion");
         assert!(
@@ -523,8 +520,8 @@ mod tests {
         let mut vision = vec![[0.0f32; VISION_LEN]; 2];
         pass.run(&mut vision);
 
-        let slot = 0 * FEATURES_PER_SECTOR;
-        // 191 - 100 = 91 units; radius A=1, radius B=1 → surface-to-surface = 89 > 80.
+        let slot = 0; // sector 0 × FEATURES_PER_SECTOR
+                      // 191 - 100 = 91 units; radius A=1, radius B=1 → surface-to-surface = 89 > 80.
         assert_eq!(
             vision[0][slot], 0.0,
             "target out of range must yield zero distance"
