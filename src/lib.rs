@@ -12,6 +12,7 @@ pub mod grid;
 pub mod rng;
 pub mod species;
 pub mod sun;
+pub mod vision;
 pub mod world;
 
 mod wasm_api;

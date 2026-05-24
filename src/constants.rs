@@ -114,6 +114,14 @@ pub const SPECIES_W_BRAIN: f32 = 1.0;
 pub const SPECIES_THRESHOLD: f32 = 4.0;
 pub const SPECIES_EYE_JUMP_COST: f32 = 1.5;
 
+// ---- Vision (v5 §10, v6 §E, Milestone C.12) ----
+/// Fixed radius used when a ray hits a carrion blob (not in spec — DECISIONS).
+pub const CARRION_RADIUS_FOR_VISION: f32 = 1.5;
+/// Maximum grid cells walked per ray; bounds worst-case DDA cost (v5 §3.6).
+/// vision_range_max = 80u; HASH_CELL = 5u → ~16 cells along a ray axis.
+/// Worst diagonal ≈ 32; double for slack.
+pub const MAX_CELLS_PER_RAY: usize = 64;
+
 // ---- Acceptance test (v5 §16) ----
 pub const ACCEPTANCE_TICKS: u32 = 10_000;
 pub const ACCEPTANCE_SEED: &str = "evosim-test-001";
