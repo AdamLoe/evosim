@@ -20,8 +20,20 @@ function openDb(): Promise<IDBDatabase> {
   return dbPromise;
 }
 
+interface CameraState {
+  zoom: number;
+  cx: number;
+  cy: number;
+}
+
 self.onmessage = async (ev: MessageEvent) => {
-  const msg = ev.data as { type: string; json?: string; seed?: string; tick?: number };
+  const msg = ev.data as {
+    type: string;
+    json?: string;
+    seed?: string;
+    tick?: number;
+    camera?: CameraState;
+  };
   if (msg?.type === "save") {
     try {
       const db = await openDb();
@@ -33,6 +45,7 @@ self.onmessage = async (ev: MessageEvent) => {
         tick: msg.tick!,
         seed: msg.seed!,
         saved_at_ms: Date.now(),
+        camera: msg.camera,
       };
       const putReq = store.put(row);
       putReq.onerror = () => {

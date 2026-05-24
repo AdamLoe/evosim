@@ -3,12 +3,22 @@
 
 import PersistenceWorker from "./worker?worker";
 
+export interface CameraState {
+  zoom: number;
+  cx: number;
+  cy: number;
+}
+
 export interface SavedRow {
   key: "current";
   json: string;
   tick: number;
   seed: string;
   saved_at_ms: number;
+  /** F.26 + v6 §C: camera persisted alongside the wasm save string. May be
+   * absent on rows written by older builds that wrapped camera into `json`
+   * as a `{wasm, camera}` envelope. */
+  camera?: CameraState;
 }
 
 export class PersistenceClient {
@@ -34,8 +44,11 @@ export class PersistenceClient {
     this.onErrorCb = opts.onError;
   }
 
-  save(json: string, seed: string, tick: number): void {
-    this.worker.postMessage({ type: "save", json, seed, tick });
+  save(json: string, seed: string, tick: number, camera?: CameraState): void {
+    // Camera is passed as a structured-cloneable object so the main thread
+    // never has to JSON.parse/stringify the (large) wasm save string just to
+    // wrap a few floats into an envelope.
+    this.worker.postMessage({ type: "save", json, seed, tick, camera });
   }
 
   loadCurrent(): Promise<SavedRow | null> {

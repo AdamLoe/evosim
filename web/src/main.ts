@@ -37,31 +37,33 @@ const AUTOSAVE_WALL_FLOOR_MS = 3000; // never save more often than 3s wall-clock
 let lastSavedTick = -1;
 let lastSavedWallMs = 0;
 
-// F.26 + v6 §C: camera state is persisted in the autosave envelope so resume
-// restores zoom + pan. The wasm save string is wrapped in `{ wasm, camera }`
-// JSON; older saves without the wrapper load with camera = default (handled in
-// unwrapSaveEnvelope).
-interface SaveEnvelope {
-  wasm: unknown; // JSON.parse(world.snapshot_json())
-  camera: { zoom: number; cx: number; cy: number };
-}
+// F.26 + v6 §C: camera state is persisted alongside the wasm save so resume
+// restores zoom + pan. We pass camera through to the worker as a separate
+// structured-cloned field rather than wrapping the (large) wasm JSON in an
+// envelope — wrapping previously cost a JSON.parse + JSON.stringify of the
+// full save (brains × creatures) on the main thread every autosave tick,
+// producing a ~hundreds-of-ms pulse every ~3 s.
+//
+// Legacy saves written before this change used `{ wasm, camera }` envelope
+// JSON in `row.json`; unwrapLegacySaveEnvelope below preserves load-side
+// backward compatibility for those rows.
+type CameraState = { zoom: number; cx: number; cy: number };
 
-function buildSaveEnvelope(world: WorldHandle, cam: { zoom: number; cx: number; cy: number }): string {
-  const env: SaveEnvelope = {
-    wasm: JSON.parse(world.snapshot_json()),
-    camera: { zoom: cam.zoom, cx: cam.cx, cy: cam.cy },
-  };
-  return JSON.stringify(env);
-}
-
-function unwrapSaveEnvelope(json: string): { wasmJson: string; camera: SaveEnvelope["camera"] | null } {
+function unwrapLegacySaveEnvelope(json: string): {
+  wasmJson: string;
+  camera: CameraState | null;
+} {
+  // Cheap pre-check: a bare SaveV1 starts with `{"schema_version":` so we
+  // avoid parsing the (potentially MB-scale) JSON unless it really looks
+  // like the old envelope (`{"wasm":…}`).
+  if (!json.startsWith("{\"wasm\"") && !json.startsWith("{ \"wasm\"")) {
+    return { wasmJson: json, camera: null };
+  }
   try {
-    const parsed = JSON.parse(json) as Partial<SaveEnvelope> & { schema_version?: number };
+    const parsed = JSON.parse(json) as { wasm?: unknown; camera?: CameraState };
     if (parsed && "wasm" in parsed && parsed.wasm) {
-      const camera = parsed.camera ?? null;
-      return { wasmJson: JSON.stringify(parsed.wasm), camera };
+      return { wasmJson: JSON.stringify(parsed.wasm), camera: parsed.camera ?? null };
     }
-    // Bare wasm save (no envelope) — backwards compatible.
     return { wasmJson: json, camera: null };
   } catch {
     return { wasmJson: json, camera: null };
@@ -70,7 +72,7 @@ function unwrapSaveEnvelope(json: string): { wasmJson: string; camera: SaveEnvel
 
 function maybeAutosave(
   world: WorldHandle,
-  cam: { zoom: number; cx: number; cy: number },
+  cam: CameraState,
   nowMs: number,
   persistence: PersistenceClient,
 ): void {
@@ -78,7 +80,14 @@ function maybeAutosave(
   if (t === lastSavedTick) return;
   if (lastSavedTick >= 0 && t - lastSavedTick < AUTOSAVE_TICK_INTERVAL) return;
   if (nowMs - lastSavedWallMs < AUTOSAVE_WALL_FLOOR_MS) return;
-  persistence.save(buildSaveEnvelope(world, cam), world.seed, t);
+  // snapshot_json() is the unavoidable wasm-side serde cost (~tens of ms);
+  // passing the string straight to the worker keeps the main thread off the
+  // parse/stringify path entirely.
+  persistence.save(world.snapshot_json(), world.seed, t, {
+    zoom: cam.zoom,
+    cx: cam.cx,
+    cy: cam.cy,
+  });
   lastSavedTick = t;
   lastSavedWallMs = nowMs;
 }
@@ -134,7 +143,16 @@ async function main(): Promise<void> {
         });
         if (userChose === "resume") {
           try {
-            const { wasmJson, camera } = unwrapSaveEnvelope(row.json);
+            // New saves: row.json is the raw wasm save string and row.camera
+            // is a separate field. Legacy saves: row.camera is undefined and
+            // row.json may still be the `{wasm,camera}` envelope — unwrap it.
+            let wasmJson = row.json;
+            let camera = row.camera ?? null;
+            if (!camera) {
+              const unwrapped = unwrapLegacySaveEnvelope(row.json);
+              wasmJson = unwrapped.wasmJson;
+              camera = unwrapped.camera;
+            }
             world = WorldHandle.fromJson(wasmJson);
             restoredCamera = camera;
           } catch (e) {
