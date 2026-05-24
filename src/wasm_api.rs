@@ -213,16 +213,23 @@ impl WorldHandle {
         unsafe { js_sys::Float64Array::view(&self.id_buf) }
     }
 
-    /// Returns the SoA index of the topmost creature whose body circle contains
-    /// (world_x, world_y), or None. O(N); called only on click (≤ 1 Hz).
+    /// Returns the SoA index of the topmost creature whose body circle (or
+    /// tap-tolerance bubble) contains (world_x, world_y), or None.
+    /// O(N); called only on click (≤ 1 Hz).
+    ///
+    /// `tolerance_world` is an additional world-space radius added on top of
+    /// the creature's body radius so that small creatures remain clickable.
+    /// Pass `6.0 / cam.zoom` from JS so the minimum tap target is 6 screen px.
+    ///
     /// Returns an index, not a stable id — see DECISIONS.
     #[wasm_bindgen]
-    pub fn creature_at(&self, world_x: f32, world_y: f32) -> Option<u32> {
+    pub fn creature_at(&self, world_x: f32, world_y: f32, tolerance_world: f32) -> Option<u32> {
         let n = self.inner.creatures.len();
         for i in 0..n {
             let dx = self.inner.creatures.x[i] - world_x;
             let dy = self.inner.creatures.y[i] - world_y;
-            let r = self.inner.creatures.genomes[i].size * BODY_RADIUS_PER_SIZE;
+            let body_r = self.inner.creatures.genomes[i].size * BODY_RADIUS_PER_SIZE;
+            let r = body_r + tolerance_world;
             if dx * dx + dy * dy <= r * r {
                 return Some(i as u32);
             }
@@ -464,10 +471,14 @@ mod tests {
         let handle = WorldHandle::new("e21-creature-at");
         let cx = WORLD_SIZE * 0.5;
         let cy = WORLD_SIZE * 0.5;
-        let result = handle.creature_at(cx, cy);
+        // Zero tolerance: hit exactly at the center.
+        let result = handle.creature_at(cx, cy, 0.0);
         assert_eq!(result, Some(0), "founder must be found at world center");
-        // Far outside any creature — should return None.
-        let miss = handle.creature_at(0.0, 0.0);
+        // With tolerance: hit just outside the body radius should still hit.
+        let result_tol = handle.creature_at(cx + 2.0, cy, 3.0);
+        assert_eq!(result_tol, Some(0), "founder must be found within tolerance radius");
+        // Far outside any creature — should return None even with tolerance.
+        let miss = handle.creature_at(0.0, 0.0, 1.5);
         assert!(miss.is_none(), "empty corner must return None");
     }
 

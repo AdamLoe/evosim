@@ -80,6 +80,11 @@ export interface CreatureInspectJson {
 }
 
 function openInspector(data: CreatureInspectJson, rail: RailState): void {
+  // Remove the previous creature's permanent highlight before switching
+  // selection, so only one ring is ever visible at a time (Bug 2 fix).
+  if (state.kind === "selected" && state.creatureId !== data.id) {
+    highlights.delete(state.creatureId);
+  }
   state = { kind: "selected", creatureId: data.id };
   highlights.set(data.id, HIGHLIGHT_PERMANENT);
   renderInspector(data);
@@ -147,7 +152,15 @@ export function refreshInspector(
 }
 
 /**
- * Install canvas click handler (tap detection < 4px / < 250ms, not a drag).
+ * Install canvas click handler.
+ *
+ * Tap detection thresholds (chosen to be forgiving at high sim speeds):
+ *   - movement: < 10 px  (was 4 — too strict; cursor naturally drifts while reading)
+ *   - elapsed:  < 500 ms (was 250 — too strict; deliberate targeting takes longer)
+ *
+ * Hit-test uses a tolerance_world radius of 6 / cam.zoom so that the minimum
+ * tap target is always at least 6 screen pixels regardless of creature size or
+ * zoom level (fixes the 4 screen-px hit target for size-1 creatures at zoom 4).
  */
 export function installCanvasClickHandler(
   canvas: HTMLCanvasElement,
@@ -173,15 +186,17 @@ export function installCanvasClickHandler(
     const dy = e.clientY - downY;
     const elapsed = performance.now() - downTime;
     const dist = Math.sqrt(dx * dx + dy * dy);
-    // Tap detection: < 4px movement, < 250ms elapsed.
-    if (dist >= 4 || elapsed >= 250) return;
+    // Tap detection: < 10 px movement, < 500 ms elapsed.
+    if (dist >= 10 || elapsed >= 500) return;
 
     const { w, h } = getView();
     const rect = canvas.getBoundingClientRect();
     const sx = e.clientX - rect.left;
     const sy = e.clientY - rect.top;
     const [wx, wy] = screenToWorld(cam, w, h, sx, sy);
-    const idx = world.creature_at(wx, wy);
+    // Tolerance in world units so tap target is at least 6 screen pixels wide.
+    const toleranceWorld = 6.0 / cam.zoom;
+    const idx = world.creature_at(wx, wy, toleranceWorld);
 
     if (idx === undefined || idx === null) {
       clearSelection(rail);
