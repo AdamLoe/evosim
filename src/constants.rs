@@ -147,6 +147,14 @@ pub const N_CHUNKS: usize = 8;
 /// Thresholds that fire a PopulationMilestone event once per threshold ever (v5 §11).
 pub const POPULATION_MILESTONES: [u32; 6] = [10, 50, 100, 500, 1000, 2000];
 
+// ---- Vision geometry (v5 §3.5, v6 §E; perf-1 sector sin/cos cache) ----
+/// Number of vision sectors per creature. Matches EYE_SLOTS; kept in both
+/// vision.rs (re-export) and constants.rs (source of truth for creature.rs).
+pub const SECTORS: usize = 24;
+/// Lookup: index = position of eye_count in EYE_VALID; value = sector stride.
+/// EYE_VALID = [0, 2, 3, 4, 6, 8, 12, 24] → strides [-, 12, 8, 6, 4, 3, 2, 1].
+pub const EYE_STRIDE: [u8; 8] = [0, 12, 8, 6, 4, 3, 2, 1];
+
 // ---- Acceptance test (v5 §16) ----
 pub const ACCEPTANCE_TICKS: u32 = 10_000;
 pub const ACCEPTANCE_SEED: &str = "evosim-test-001";

@@ -15,7 +15,7 @@ use crate::constants::*;
 use crate::creature::CreatureSoA;
 use crate::grid::SpatialGrid;
 
-pub const SECTORS: usize = 24;
+pub use crate::constants::{EYE_STRIDE, SECTORS};
 pub const FEATURES_PER_SECTOR: usize = 5; // dist, size, r, g, b
 pub const VISION_LEN: usize = SECTORS * FEATURES_PER_SECTOR; // 120
 
@@ -26,11 +26,6 @@ pub type VisionBuf = [f32; VISION_LEN];
 pub const CARRION_R: f32 = 0.4;
 pub const CARRION_G: f32 = 0.4;
 pub const CARRION_B: f32 = 0.4;
-
-/// Lookup: index = position of eye_count in EYE_VALID; value = sector stride.
-/// EYE_VALID = [0, 2, 3, 4, 6, 8, 12, 24] → strides [-, 12, 8, 6, 4, 3, 2, 1].
-/// Position 0 (eye_count == 0) is unused (no active sectors).
-pub const EYE_STRIDE: [u8; 8] = [0, 12, 8, 6, 4, 3, 2, 1];
 
 /// Ray hit from DDA traversal. Distance is the second field.
 enum RayHit {
@@ -59,6 +54,10 @@ impl<'a> VisionPass<'a> {
 
     /// Fill `buf` for creature index `i`.
     fn fill_one(&self, i: usize, buf: &mut VisionBuf) {
+        debug_assert_eq!(
+            self.creatures.eye_trig.len(),
+            self.creatures.x.len() * SECTORS * 2
+        );
         let g = &self.creatures.genomes[i];
         // Short-circuit: blind or zero-range creature → all zeros.
         if g.eye_count == 0 || g.vision_range <= 0.0 {
@@ -82,21 +81,11 @@ impl<'a> VisionPass<'a> {
         // Zero the buffer first; inactive sectors stay zero.
         *buf = [0.0; VISION_LEN];
 
-        // Walk all 24 sectors; fire a ray only for active sectors.
-        for s in 0..SECTORS {
-            if s % stride != 0 {
-                continue; // inactive sector
-            }
-            let active_index = s / stride;
-            let offset = if active_index < g.eye_offsets.len() {
-                g.eye_offsets[active_index]
-            } else {
-                0.0
-            };
-            let theta_center = std::f32::consts::TAU * (s as f32) / (SECTORS as f32);
-            let theta_ray = theta_center + offset;
-            let dx = theta_ray.cos();
-            let dy = theta_ray.sin();
+        let trig_base = i * SECTORS * 2;
+        // Walk only active sectors using step_by(stride); read (dx, dy) from cache.
+        for s in (0..SECTORS).step_by(stride) {
+            let dx = self.creatures.eye_trig[trig_base + s * 2];
+            let dy = self.creatures.eye_trig[trig_base + s * 2 + 1];
 
             if let Some(hit) = self.raycast(i, ox, oy, dx, dy, max_dist) {
                 let slot = s * FEATURES_PER_SECTOR;

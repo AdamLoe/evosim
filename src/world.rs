@@ -875,7 +875,7 @@ impl World {
         }
     }
 
-    fn handle_births(&mut self) {
+    pub(crate) fn handle_births(&mut self) {
         let n = self.creatures.len();
         if n == 0 {
             return;
@@ -1387,6 +1387,7 @@ mod tests {
         w.creatures.genomes[0].move_speed = 1.0;
         w.creatures.genomes[0].vision_range = 30.0;
         w.creatures.genomes[0].eye_count = 4;
+        w.creatures.recompute_eye_trig_at(0);
         for _ in 0..2000 {
             if !w.tick_once() {
                 break;
@@ -2112,5 +2113,47 @@ mod tests {
                 "Note: live speciation not observed in 20 short runs; synthetic path confirmed OK."
             );
         }
+    }
+
+    /// perf-1 T2: child's trig cache is populated on birth; parent's is unchanged.
+    #[test]
+    fn eye_trig_recomputed_on_birth() {
+        use crate::brain::Brain;
+        use crate::creature::CreatureSoA;
+        use crate::rng::SimRng;
+        use crate::vision::SECTORS;
+
+        let mut w = World::new("perf1-birth");
+        // Coerce the founder to definitely split this tick.
+        w.creatures.energy[0] = 1_000.0;
+        w.creatures.action_this_tick[0] = Action::Split;
+        let parent_trig_before: Vec<f32> = w.creatures.eye_trig[..SECTORS * 2].to_vec();
+        w.handle_births();
+        assert!(w.creatures.len() >= 2, "birth must have produced a child");
+        // Parent's cache unchanged (cache is genome-derived, parent genome
+        // didn't change).
+        assert_eq!(
+            &w.creatures.eye_trig[..SECTORS * 2],
+            parent_trig_before.as_slice()
+        );
+        // Child's cache matches a fresh recompute from its genome.
+        let child_idx = w.creatures.len() - 1;
+        let mut expected = CreatureSoA::with_capacity(1);
+        expected.push(
+            0,
+            0.0,
+            0.0,
+            0.0,
+            0,
+            0,
+            0,
+            w.creatures.genomes[child_idx].clone(),
+            Brain::founder(&mut SimRng::from_u64(0)), // brain irrelevant for cache
+        );
+        let off = child_idx * SECTORS * 2;
+        assert_eq!(
+            &w.creatures.eye_trig[off..off + SECTORS * 2],
+            &expected.eye_trig[..SECTORS * 2]
+        );
     }
 }

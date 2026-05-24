@@ -7,6 +7,7 @@
 //! loops, except for the hot ones lifted out into the SoA arrays below).
 
 use crate::brain::Brain;
+use crate::constants::{EYE_STRIDE, EYE_VALID, SECTORS};
 use crate::genome::Genome;
 use serde::{Deserialize, Serialize};
 
@@ -60,6 +61,13 @@ pub struct CreatureSoA {
     pub birth_tick: Vec<u32>,
     pub genomes: Vec<Genome>,
     pub brains: Vec<Brain>,
+    /// Pre-computed (dx, dy) per sector per creature; interleaved as
+    /// [s0_dx, s0_dy, s1_dx, s1_dy, …, s23_dx, s23_dy] per creature.
+    /// Length invariant: == x.len() * SECTORS * 2.
+    /// Inactive sectors are zero. Recomputed by `recompute_eye_trig_at`.
+    /// Excluded from save (re-derived on push) and from snapshot_hash
+    /// (would double-count the genome bytes it derives from).
+    pub eye_trig: Vec<f32>,
 }
 
 impl CreatureSoA {
@@ -83,6 +91,7 @@ impl CreatureSoA {
             birth_tick: Vec::with_capacity(cap),
             genomes: Vec::with_capacity(cap),
             brains: Vec::with_capacity(cap),
+            eye_trig: Vec::with_capacity(cap * SECTORS * 2),
         }
     }
 
@@ -125,7 +134,16 @@ impl CreatureSoA {
         self.birth_tick.push(birth_tick);
         self.genomes.push(genome);
         self.brains.push(brain);
-        self.x.len() - 1
+        // Extend trig buffer by one chunk of zeros, then populate.
+        debug_assert_eq!(
+            self.eye_trig.len(),
+            self.x.len().saturating_sub(1) * SECTORS * 2
+        );
+        let new_len = self.eye_trig.len() + SECTORS * 2;
+        self.eye_trig.resize(new_len, 0.0);
+        let i = self.x.len() - 1;
+        self.recompute_eye_trig_at(i);
+        i
     }
 
     /// Remove indices `dead` (must be sorted ascending). Uses swap_remove
@@ -151,6 +169,114 @@ impl CreatureSoA {
             self.birth_tick.swap_remove(k);
             self.genomes.swap_remove(k);
             self.brains.swap_remove(k);
+            swap_remove_chunk(&mut self.eye_trig, k, SECTORS * 2);
         }
+    }
+
+    /// Recompute the 48 trig values for creature index `i` from its genome.
+    /// Caller must have already pushed the genome at `i`.
+    ///
+    /// Zeroes the full 48-slot window first. For zero-range / zero-eye creatures
+    /// all 48 slots stay zero (matching `fill_one`'s short-circuit). For sighted
+    /// creatures, active-sector slots are overwritten below.
+    ///
+    /// MUST also be called after any in-place edit of `genomes[i].eye_count` or
+    /// `genomes[i].eye_offsets` (e.g. test fixtures in world.rs and vision.rs::tests).
+    pub(crate) fn recompute_eye_trig_at(&mut self, i: usize) {
+        let g = &self.genomes[i];
+        let base = i * SECTORS * 2;
+        // Zero the 48-slot window first; inactive sectors stay zero.
+        for v in &mut self.eye_trig[base..base + SECTORS * 2] {
+            *v = 0.0;
+        }
+        let k = g.eye_count as usize;
+        if k == 0 || g.vision_range <= 0.0 {
+            return;
+        }
+        let k_idx = EYE_VALID.iter().position(|&v| v as usize == k).unwrap_or(0);
+        if k_idx == 0 {
+            return;
+        }
+        let stride = EYE_STRIDE[k_idx] as usize;
+        for s in (0..SECTORS).step_by(stride) {
+            let active_index = s / stride;
+            let offset = if active_index < g.eye_offsets.len() {
+                g.eye_offsets[active_index]
+            } else {
+                0.0
+            };
+            let theta_center = std::f32::consts::TAU * (s as f32) / (SECTORS as f32);
+            let theta_ray = theta_center + offset;
+            self.eye_trig[base + s * 2] = theta_ray.cos();
+            self.eye_trig[base + s * 2 + 1] = theta_ray.sin();
+        }
+    }
+}
+
+#[inline]
+fn swap_remove_chunk(buf: &mut Vec<f32>, k: usize, chunk: usize) {
+    debug_assert_eq!(buf.len() % chunk, 0);
+    let n = buf.len() / chunk;
+    debug_assert!(k < n);
+    let last = n - 1;
+    if k != last {
+        // Swap two chunk-sized windows.
+        for off in 0..chunk {
+            buf.swap(k * chunk + off, last * chunk + off);
+        }
+    }
+    buf.truncate(last * chunk);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::brain::Brain;
+    use crate::genome::Genome;
+    use crate::rng::SimRng;
+
+    #[test]
+    fn eye_trig_matches_manual_compute_for_4_eyes() {
+        let mut soa = CreatureSoA::with_capacity(1);
+        let mut g = Genome::founder();
+        g.eye_count = 4;
+        g.vision_range = 80.0;
+        g.eye_offsets = [
+            0.1, 0.2, 0.3, 0.4, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        ];
+        let brain = Brain::founder(&mut SimRng::from_u64(0));
+        soa.push(1, 0.0, 0.0, 1.0, 0, 0, 0, g.clone(), brain);
+
+        // eye_count=4 → stride=6, active sectors 0, 6, 12, 18.
+        for (active_index, &s) in [0usize, 6, 12, 18].iter().enumerate() {
+            let theta_center = std::f32::consts::TAU * (s as f32) / 24.0;
+            let theta_ray = theta_center + g.eye_offsets[active_index];
+            assert_eq!(soa.eye_trig[s * 2], theta_ray.cos(), "sector {s} dx");
+            assert_eq!(soa.eye_trig[s * 2 + 1], theta_ray.sin(), "sector {s} dy");
+        }
+        // Inactive sectors must be zero.
+        for s in 0..24 {
+            if [0, 6, 12, 18].contains(&s) {
+                continue;
+            }
+            assert_eq!(soa.eye_trig[s * 2], 0.0, "inactive sector {s} dx");
+            assert_eq!(soa.eye_trig[s * 2 + 1], 0.0, "inactive sector {s} dy");
+        }
+    }
+
+    #[test]
+    fn eye_trig_len_invariant_after_remove() {
+        let mut soa = CreatureSoA::with_capacity(4);
+        let mut rng = SimRng::from_u64(1);
+        for i in 0..4u64 {
+            let g = Genome::founder();
+            let b = Brain::founder(&mut rng);
+            soa.push(i, i as f32 * 10.0, 0.0, 100.0, 0, 0, 0, g, b);
+        }
+        assert_eq!(soa.eye_trig.len(), 4 * SECTORS * 2);
+        soa.remove_indices(&[1]);
+        assert_eq!(soa.eye_trig.len(), 3 * SECTORS * 2);
+        assert_eq!(soa.x.len(), 3);
     }
 }
