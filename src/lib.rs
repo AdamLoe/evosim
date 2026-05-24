@@ -11,6 +11,8 @@ pub mod genome;
 pub mod grid;
 pub mod hof;
 pub mod rng;
+pub mod save;
+pub mod snapshot_hash;
 pub mod species;
 pub mod sun;
 pub mod vision;

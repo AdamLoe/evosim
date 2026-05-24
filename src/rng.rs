@@ -3,10 +3,11 @@
 
 use rand_xoshiro::rand_core::{RngCore, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
+use serde::{Deserialize, Serialize};
 use std::hash::Hasher;
 use twox_hash::XxHash64;
 
-#[derive(Clone)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SimRng(pub Xoshiro256PlusPlus);
 
 impl SimRng {

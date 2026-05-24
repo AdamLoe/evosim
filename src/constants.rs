@@ -140,3 +140,8 @@ pub const POPULATION_MILESTONES: [u32; 6] = [10, 50, 100, 500, 1000, 2000];
 // ---- Acceptance test (v5 §16) ----
 pub const ACCEPTANCE_TICKS: u32 = 10_000;
 pub const ACCEPTANCE_SEED: &str = "evosim-test-001";
+
+// ---- Persistence (v5 §13, F.26/F.28) ----
+/// Ticks per "day" — used by resume prompt + eulogy card day count (F.26, F.28).
+/// At sim 1× (30 ticks/s), one "day" ≈ 33 wall-seconds. v5 §11 + F.26 DECISIONS.
+pub const DAY_TICKS: u32 = 1000;

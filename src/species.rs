@@ -89,6 +89,12 @@ impl SpeciesRegistry {
     pub fn get(&self, id: u32) -> &Species {
         &self.list[id as usize]
     }
+
+    /// Reconstruct a SpeciesRegistry from a persisted list + recomputed next_id.
+    /// Called by F.26 `world_from_save_v1`.
+    pub fn from_snapshot(list: Vec<Species>, next_id: u32) -> Self {
+        Self { list, next_id }
+    }
 }
 
 /// Lineage suffix rule from v6 §H: depth 1 → numeric ("1","2",…),
