@@ -50,13 +50,15 @@ The user wants you to keep your own context at the high level (milestone plans, 
 
 For each milestone (or substantial step within a milestone):
 
-1. **Planner subagent** — produces a detailed plan: file layout, function signatures, integration points with prior milestones, test plan. Output: a plan blurb to you. Brief the planner with: the milestone goal, the specific v5/v6 sections that govern it, what's already been built, what comes next.
+1. **Planner subagent** — produces a detailed plan: file layout, function signatures, integration points with prior milestones, test plan. **The planner must write its plan to `docs/plans/milestone-<X>.md`** (e.g. `docs/plans/milestone-A.md`, `docs/plans/milestone-B.md`). For substeps within a milestone, use sections within the same file rather than separate files. Output to you: a short summary + the path to the plan doc. Brief the planner with: the milestone goal, the specific v5/v6 sections that govern it, what's already been built, what comes next, and the path it should write to.
 
-2. **Plan-review subagent** (skip for trivial milestones) — critiques the plan for spec compliance, missing edge cases, integration issues. Output: approve or revise notes. Brief the reviewer with the plan + the same spec sections.
+2. **Plan-review subagent** (skip for trivial milestones) — critiques the plan for spec compliance, missing edge cases, integration issues. **Edits the plan doc in place** — appending a "## Review feedback" section, or directly editing sections it wants to revise. Output to you: approve or revise notes summary. Brief the reviewer with the plan doc path + the same spec sections.
 
-3. **Implementer subagent** — implements per the approved plan. Output: file list, test results, any `DECISIONS.md` entries, brief summary. Brief with the approved plan, the relevant spec sections, and the project's existing conventions (Cargo layout, module style, etc.).
+3. **Implementer subagent** — implements per the approved plan. **Reads the plan doc as its primary brief**, not a verbose prompt from you. Output: file list, test results, any `DECISIONS.md` entries, brief summary. Brief with the plan doc path, the relevant spec sections, and the project's existing conventions (Cargo layout, module style, etc.).
 
-4. **Code-review subagent** (skip for trivial milestones) — reviews for spec compliance, bugs, missing tests. Output: approve or fix list. If fixes needed, hand back to implementer subagent.
+4. **Code-review subagent** (skip for trivial milestones) — reviews for spec compliance, bugs, missing tests. Output: approve or fix list. If fixes needed, hand back to implementer subagent. **Appends review findings to the plan doc** under a "## Code review" section so the history is preserved.
+
+The plan docs in `docs/plans/` serve double duty: they're the working spec each subagent reads, AND they become the durable record of how the build proceeded — useful for the end-of-build report and for any future debugging.
 
 ### Adapting review depth per milestone
 
