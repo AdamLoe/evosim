@@ -139,31 +139,10 @@ impl World {
         self.run_vision_pass();
 
         // 3. NN forward pass + action decode (Milestone D).
-        // Chunked per v6 §J for future rayon parallelism. Sequential default.
+        // Chunked per v6 §J; sequential by default, parallel behind `threads` feature.
         let n = self.creatures.len();
         let ranges = chunk_ranges(n);
-        for &(lo, hi) in &ranges {
-            let mut input_buf = [0.0f32; NN_INPUTS];
-            let mut hidden_buf = [0.0f32; NN_HIDDEN];
-            let mut output_buf = [0.0f32; NN_OUTPUTS];
-            for i in lo..hi {
-                let overlap = self.count_carrion_overlap(i);
-                let is_at_wall = self.compute_is_at_wall(i);
-                let (vx, vy, action) = pick_action_d(
-                    i,
-                    &mut input_buf,
-                    &mut hidden_buf,
-                    &mut output_buf,
-                    &self.creatures,
-                    &self.vision[i],
-                    overlap,
-                    is_at_wall,
-                );
-                self.creatures.vx[i] = vx;
-                self.creatures.vy[i] = vy;
-                self.creatures.action_this_tick[i] = action;
-            }
-        }
+        self.nn_forward_all_chunks(&ranges, n);
 
         // 4. Apply velocities + soft repulsion + wall clamp; rebuild grid.
         self.apply_movement_and_repulsion();
@@ -227,6 +206,114 @@ impl World {
             return false;
         }
         true
+    }
+
+    /// Run the NN forward pass for all creatures across fixed chunks (v6 §J).
+    /// Sequential by default; rayon-parallel behind `cfg(feature = "threads")`.
+    /// Results are bit-identical because the forward pass contains no RNG.
+    fn nn_forward_all_chunks(&mut self, ranges: &[(usize, usize); N_CHUNKS], n: usize) {
+        let _ = n; // used in threads path; suppress unused-variable in default build
+        #[cfg(not(feature = "threads"))]
+        {
+            for &(lo, hi) in ranges {
+                let mut input_buf = [0.0f32; NN_INPUTS];
+                let mut hidden_buf = [0.0f32; NN_HIDDEN];
+                let mut output_buf = [0.0f32; NN_OUTPUTS];
+                for i in lo..hi {
+                    let overlap = self.count_carrion_overlap(i);
+                    let is_at_wall = self.compute_is_at_wall(i);
+                    let (vx, vy, action) = pick_action_d(
+                        i,
+                        &mut input_buf,
+                        &mut hidden_buf,
+                        &mut output_buf,
+                        &self.creatures,
+                        &self.vision[i],
+                        overlap,
+                        is_at_wall,
+                    );
+                    self.creatures.vx[i] = vx;
+                    self.creatures.vy[i] = vy;
+                    self.creatures.action_this_tick[i] = action;
+                }
+            }
+        }
+
+        #[cfg(feature = "threads")]
+        {
+            use rayon::prelude::*;
+            // Collect (vx, vy, action) per creature into a flat Vec,
+            // then drain back into SoA. Avoids shared-mutable-SoA hazards.
+            // Read-only refs are Sync; write happens after join.
+            let creatures_ref = &self.creatures;
+            let vision_ref = &self.vision[..n];
+            let carrion_ref = &self.carrion;
+            let cell_to_carrion_ref = &self.cell_to_carrion;
+
+            // Produce results in chunk order (deterministic).
+            let results: Vec<(f32, f32, Action)> = ranges
+                .par_iter()
+                .flat_map(|&(lo, hi)| {
+                    let mut input_buf = [0.0f32; NN_INPUTS];
+                    let mut hidden_buf = [0.0f32; NN_HIDDEN];
+                    let mut output_buf = [0.0f32; NN_OUTPUTS];
+                    (lo..hi)
+                        .map(|i| {
+                            // Inline carrion overlap + is_at_wall for the threaded path.
+                            let xi = creatures_ref.x[i];
+                            let yi = creatures_ref.y[i];
+                            let ri = creatures_ref.genomes[i].size * BODY_RADIUS_PER_SIZE;
+                            let r2 = ri * ri;
+                            let cx_cell = (xi / HASH_CELL).floor() as i32;
+                            let cy_cell = (yi / HASH_CELL).floor() as i32;
+                            let dim = HASH_DIM as i32;
+                            let mut overlap = 0u32;
+                            for dy in -1i32..=1 {
+                                for dx in -1i32..=1 {
+                                    let nx = cx_cell + dx;
+                                    let ny = cy_cell + dy;
+                                    if nx < 0 || ny < 0 || nx >= dim || ny >= dim {
+                                        continue;
+                                    }
+                                    let cell_idx =
+                                        ny as usize * HASH_DIM + nx as usize;
+                                    for &ci in &cell_to_carrion_ref[cell_idx] {
+                                        let c = &carrion_ref[ci as usize];
+                                        let ddx = c.x - xi;
+                                        let ddy = c.y - yi;
+                                        if ddx * ddx + ddy * ddy <= r2 {
+                                            overlap += 1;
+                                        }
+                                    }
+                                }
+                            }
+                            let near = xi
+                                .min(yi)
+                                .min(WORLD_SIZE - xi)
+                                .min(WORLD_SIZE - yi);
+                            let is_at_wall =
+                                if near < ri + WALL_THRESHOLD_PAD { 1.0f32 } else { 0.0f32 };
+                            pick_action_d(
+                                i,
+                                &mut input_buf,
+                                &mut hidden_buf,
+                                &mut output_buf,
+                                creatures_ref,
+                                &vision_ref[i],
+                                overlap,
+                                is_at_wall,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+
+            for (i, (vx, vy, action)) in results.into_iter().enumerate() {
+                self.creatures.vx[i] = vx;
+                self.creatures.vy[i] = vy;
+                self.creatures.action_this_tick[i] = action;
+            }
+        }
     }
 
     fn apply_movement_and_repulsion(&mut self) {
@@ -683,6 +770,8 @@ impl World {
 
     /// Count the number of carrion blobs overlapping creature `i`'s body circle.
     /// Uses the cached `cell_to_carrion` index (rebuilt before vision pass).
+    /// Used in the sequential (non-threads) path; threads path inlines equivalent logic.
+    #[cfg_attr(feature = "threads", allow(dead_code))]
     fn count_carrion_overlap(&self, i: usize) -> u32 {
         let xi = self.creatures.x[i];
         let yi = self.creatures.y[i];
@@ -715,6 +804,8 @@ impl World {
 
     /// Returns 1.0 if creature `i` is within `WALL_THRESHOLD_PAD` of any wall edge.
     /// Uses creature radius (size × BODY_RADIUS_PER_SIZE) for consistency with physics step.
+    /// Used in the sequential (non-threads) path; threads path inlines equivalent logic.
+    #[cfg_attr(feature = "threads", allow(dead_code))]
     fn compute_is_at_wall(&self, i: usize) -> f32 {
         let x = self.creatures.x[i];
         let y = self.creatures.y[i];
