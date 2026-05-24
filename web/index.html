@@ -19,7 +19,17 @@
       <span id="save-indicator" aria-live="polite" aria-label="Saving…">saving…</span>
     </div>
 
+    <!-- ui-stats: free-standing Stats widget, top-left, always visible.
+         Owns #chart-pop and #chart-species (evicted from #rail-stats). -->
+    <div id="stats-box" class="overlay-widget">
+      <canvas id="chart-pop" width="260" height="80"></canvas>
+      <canvas id="chart-species" width="260" height="80"></canvas>
+    </div>
+
     <!-- E.21: right rail shell -->
+    <!-- v1.1: rail hidden via CSS (#right-rail { display: none; }) per
+         master plan §8.1; DOM kept for future re-enable. Stats charts
+         moved out into #stats-box (see ui-stats plan). -->
     <aside id="right-rail">
       <nav id="rail-tabs" role="tablist">
         <button data-tab="stats" class="rail-tab is-active">Stats</button>
@@ -30,8 +40,6 @@
       <!-- Events panel hidden for v1.1 revisit -->
       <section id="rail-events" class="rail-panel" style="display:none"></section>
       <section id="rail-stats" class="rail-panel is-active">
-        <canvas id="chart-pop" width="260" height="80"></canvas>
-        <canvas id="chart-species" width="260" height="80"></canvas>
         <div id="profiler-panel">
           <label class="profiler-toggle">
             <input type="checkbox" id="profiler-enable" />

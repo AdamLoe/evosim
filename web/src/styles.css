@@ -47,6 +47,42 @@ body {
   pointer-events: auto;
 }
 
+/* ui-stats: free-standing overlay widget convention used by the three
+   evicted-from-rail boxes. Default pointer-events: auto so opaque
+   widgets (ui-inspector, ui-perf) capture clicks correctly without any
+   override. ui-stats and ui-perf set pointer-events: none on their own
+   outer IDs because they are non-interactive display surfaces that must
+   not block camera-drag events on their padded margins; ui-inspector
+   inherits auto (no override needed). */
+.overlay-widget {
+  position: fixed;
+  padding: 8px 10px;
+  background: var(--rail-bg);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  font: 12px ui-monospace, monospace;
+  color: var(--fg);
+  z-index: 5;
+  pointer-events: auto;
+}
+
+/* ui-stats: top-left, under the top-bar gradient.
+   pointer-events: none so the padded box area doesn't block
+   camera-drag events; the chart canvases are pure render targets that
+   don't need click handling, so no child opt-back is required. */
+#stats-box {
+  top: 8px;
+  left: 8px;
+  pointer-events: none;
+}
+#stats-box canvas {
+  display: block;
+  margin-bottom: 6px;
+}
+#stats-box canvas:last-child {
+  margin-bottom: 0;
+}
+
 /* E.21: Right rail shell (v5 §11 — 280px, overlays aquarium). */
 #right-rail {
   position: fixed;
@@ -61,6 +97,12 @@ body {
   flex-direction: column;
   z-index: 5;
   overflow: hidden;
+}
+/* v1.1: rail hidden by default (master plan §8.1).
+   DOM stays so installRail/pollRail and the inspector tab-injection
+   code path don't break; re-enable by removing this rule. */
+#right-rail {
+  display: none;
 }
 #rail-tabs {
   display: flex;
