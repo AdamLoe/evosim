@@ -330,6 +330,27 @@ impl WorldHandle {
     }
 
     // ─────────────────────────────────────────────────────────────────────
+    // Profiler API (see docs/plans/perf-timing.md)
+
+    /// Enable or disable the in-app profiler. Default: false (D9).
+    /// The toggle state is NOT persisted — every page load returns to OFF.
+    #[wasm_bindgen]
+    pub fn profile_enable(&self, on: bool) {
+        self.inner.profile.set_enabled(on);
+    }
+
+    /// JSON report of the current rolling 60-second profile tree.
+    /// Walks ~30 nodes, prunes stale samples, writes ~5 KB string.
+    /// Stable shape — see docs/plans/perf-timing.md §D5.
+    ///
+    /// Returns ONLY the Rust `tick` subtree root. The TS-side `frame`
+    /// subtree is maintained separately in `web/src/perf.ts` (R4).
+    #[wasm_bindgen]
+    pub fn profile_report_json(&self) -> String {
+        self.inner.profile.report_json()
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
     // F.28 — eulogy card (hof_json)
 
     /// JSON of the hall-of-fame eulogy snapshot (F.28).
@@ -476,7 +497,11 @@ mod tests {
         assert_eq!(result, Some(0), "founder must be found at world center");
         // With tolerance: hit just outside the body radius should still hit.
         let result_tol = handle.creature_at(cx + 2.0, cy, 3.0);
-        assert_eq!(result_tol, Some(0), "founder must be found within tolerance radius");
+        assert_eq!(
+            result_tol,
+            Some(0),
+            "founder must be found within tolerance radius"
+        );
         // Far outside any creature — should return None even with tolerance.
         let miss = handle.creature_at(0.0, 0.0, 1.5);
         assert!(miss.is_none(), "empty corner must return None");

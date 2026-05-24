@@ -95,6 +95,10 @@ pub struct World {
     /// Species ids that lost a creature this tick; checked after removals to
     /// emit extinction events. Drained each `finalize_extinctions`.
     pending_extinction_check: Vec<u32>,
+    /// In-app hierarchical profiler. Runtime-toggleable, default OFF.
+    /// Excluded from SaveV1 and from the §16 snapshot hash (D10).
+    /// See docs/plans/perf-timing.md for the full design.
+    pub profile: crate::profiler::Profiler,
 }
 
 impl World {
@@ -157,6 +161,7 @@ impl World {
             vision: vec![[0.0f32; VISION_LEN]], // 1 for the founder
             cell_to_carrion: Vec::new(),
             pending_extinction_check: Vec::new(),
+            profile: crate::profiler::Profiler::new(),
         }
     }
 
@@ -172,98 +177,143 @@ impl World {
 
         self.sun.refill_rate = self.sliders.base_sun_rate;
 
+        // Profiler: outer "tick" span wraps the entire step.
+        // Each sub-span is brace-scoped so its guard drops before the next
+        // sibling span pushes (required for correct parent attribution).
+        crate::profile_span!(&self.profile, "tick");
+
         // 1. Rebuild spatial hash grid from start-of-tick positions.
-        self.grid.rebuild(&self.creatures.x, &self.creatures.y);
+        {
+            crate::profile_span!(&self.profile, "grid_rebuild_1");
+            self.grid.rebuild(&self.creatures.x, &self.creatures.y);
+        }
 
         // 2. Vision pass (Milestone C.12).
-        self.run_vision_pass();
+        {
+            crate::profile_span!(&self.profile, "vision_pass");
+            self.run_vision_pass();
+        }
 
         // 3. NN forward pass + action decode (Milestone D).
         // Chunked per v6 §J; sequential by default, parallel behind `threads` feature.
-        let n = self.creatures.len();
-        let ranges = chunk_ranges(n);
-        self.nn_forward_all_chunks(&ranges, n);
+        {
+            crate::profile_span!(&self.profile, "nn_forward");
+            let n = self.creatures.len();
+            let ranges = chunk_ranges(n);
+            self.nn_forward_all_chunks(&ranges, n);
+        }
 
         // 4. Apply velocities + soft repulsion + wall clamp; rebuild grid.
-        self.apply_movement_and_repulsion();
+        {
+            crate::profile_span!(&self.profile, "movement_and_repulsion");
+            self.apply_movement_and_repulsion();
+        }
 
         // 5. Photosynth two-pass.
-        self.photosynth_two_pass();
+        {
+            crate::profile_span!(&self.profile, "photosynth_two_pass");
+            self.photosynth_two_pass();
+        }
 
         // 6. Eat / scavenge resolution.
-        self.eat_and_scavenge();
+        {
+            crate::profile_span!(&self.profile, "eat_and_scavenge");
+            self.eat_and_scavenge();
+        }
 
         // 7. Sun refill.
-        self.sun.refill();
+        {
+            crate::profile_span!(&self.profile, "sun_refill");
+            self.sun.refill();
+        }
 
         // 8. Energy bookkeeping.
-        self.energy_bookkeeping();
+        {
+            crate::profile_span!(&self.profile, "energy_bookkeeping");
+            self.energy_bookkeeping();
+        }
 
-        // 9. Deaths → carrion.
-        let died = self.collect_deaths();
-        if !died.is_empty() {
-            // Mirror swap_remove on vision vec to keep it index-aligned.
-            // Walk from back just like remove_indices does.
-            for &k in died.iter().rev() {
-                if k < self.vision.len() {
-                    self.vision.swap_remove(k);
+        // 9. Deaths → carrion. Span widened (R9) to cover the dead-removal
+        //    swap_remove loop and creatures.remove_indices (step 9, scales with die-off).
+        {
+            crate::profile_span!(&self.profile, "collect_deaths");
+            let died = self.collect_deaths();
+            if !died.is_empty() {
+                // Mirror swap_remove on vision vec to keep it index-aligned.
+                // Walk from back just like remove_indices does.
+                for &k in died.iter().rev() {
+                    if k < self.vision.len() {
+                        self.vision.swap_remove(k);
+                    }
                 }
+                self.creatures.remove_indices(&died);
             }
-            self.creatures.remove_indices(&died);
         }
 
         // 10. Carrion decay.
-        self.decay_carrion();
+        {
+            crate::profile_span!(&self.profile, "decay_carrion");
+            self.decay_carrion();
+        }
 
         // 11. Births.
-        self.handle_births();
-
-        // 12. Species detection (full §12 metric lands in Milestone E).
-
-        // Promote this-tick action → next-tick last_action (v6 §1 / §E).
-        for i in 0..self.creatures.len() {
-            self.creatures.last_action[i] = self.creatures.action_this_tick[i];
+        {
+            crate::profile_span!(&self.profile, "handle_births");
+            self.handle_births();
         }
 
-        self.tick = self.tick.saturating_add(1);
-        let pop = self.creatures.len() as u32;
-        if pop > self.peak_population {
-            self.peak_population = pop;
-        }
-        if self.live_species_count > self.peak_species_count {
-            self.peak_species_count = self.live_species_count;
-        }
+        // 12. Step-12 tail: last_action promotion, tick bump, milestone events,
+        //     world-end check. Cheap today; future-proofs for Milestone E species
+        //     detection (R9: bookkeeping_tail span).
+        {
+            crate::profile_span!(&self.profile, "bookkeeping_tail");
 
-        // E.25.a: PopulationMilestone events (v5 §11 — once per threshold ever).
-        for (k, &threshold) in POPULATION_MILESTONES.iter().enumerate() {
-            let bit = 1u32 << k;
-            if pop >= threshold && (self.population_milestones_fired & bit) == 0 {
-                self.population_milestones_fired |= bit;
+            // Promote this-tick action → next-tick last_action (v6 §1 / §E).
+            for i in 0..self.creatures.len() {
+                self.creatures.last_action[i] = self.creatures.action_this_tick[i];
+            }
+
+            self.tick = self.tick.saturating_add(1);
+            let pop = self.creatures.len() as u32;
+            if pop > self.peak_population {
+                self.peak_population = pop;
+            }
+            if self.live_species_count > self.peak_species_count {
+                self.peak_species_count = self.live_species_count;
+            }
+
+            // E.25.a: PopulationMilestone events (v5 §11 — once per threshold ever).
+            for (k, &threshold) in POPULATION_MILESTONES.iter().enumerate() {
+                let bit = 1u32 << k;
+                if pop >= threshold && (self.population_milestones_fired & bit) == 0 {
+                    self.population_milestones_fired |= bit;
+                    if self.events_enabled {
+                        self.events.push(Event {
+                            tick: self.tick,
+                            kind: EventKind::PopulationMilestone {
+                                population: threshold,
+                            },
+                        });
+                    }
+                }
+            }
+
+            if self.creatures.is_empty() {
+                self.world_ended = true;
                 if self.events_enabled {
                     self.events.push(Event {
                         tick: self.tick,
-                        kind: EventKind::PopulationMilestone {
-                            population: threshold,
+                        kind: EventKind::WorldEnded {
+                            ticks_lived: self.tick,
+                            peak_population: self.peak_population,
+                            peak_species: self.peak_species_count,
                         },
                     });
                 }
+                return false;
             }
         }
 
-        if self.creatures.is_empty() {
-            self.world_ended = true;
-            if self.events_enabled {
-                self.events.push(Event {
-                    tick: self.tick,
-                    kind: EventKind::WorldEnded {
-                        ticks_lived: self.tick,
-                        peak_population: self.peak_population,
-                        peak_species: self.peak_species_count,
-                    },
-                });
-            }
-            return false;
-        }
         true
     }
 
@@ -1055,6 +1105,8 @@ impl World {
             vision,
             cell_to_carrion: Vec::new(),
             pending_extinction_check: Vec::new(),
+            // Profiler is never saved/loaded — always start fresh (D9/D10).
+            profile: crate::profiler::Profiler::new(),
         })
     }
 
@@ -1729,7 +1781,7 @@ mod tests {
     fn e25b_first_to_move_fires_on_movement_step() {
         let mut w = World::new("e25b-move");
         w.events_enabled = true; // enable logging so we can assert event contents
-        // Give founder move_speed so movement cost applies.
+                                 // Give founder move_speed so movement cost applies.
         w.creatures.genomes[0].move_speed = 5.0;
         // Set velocity directly so movement fires deterministically.
         w.creatures.vx[0] = 5.0;

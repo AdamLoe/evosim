@@ -74,6 +74,39 @@ fn acceptance_t10000() {
     );
 }
 
+/// Test 7 (profiler plan): enabling the profiler at t=0 must NOT change
+/// the golden snapshot hash. This asserts the observation-purity guarantee
+/// (D10): profiler is a pure observer and has zero effect on sim state.
+#[test]
+fn profile_does_not_change_hash() {
+    let mut w = World::new(SEED);
+
+    // Enable the profiler from tick 0 — the strongest possible test.
+    w.profile.set_enabled(true);
+
+    for _ in 0..TICKS {
+        if !w.tick_once() {
+            break;
+        }
+    }
+
+    let hash = evosim::snapshot_hash::snapshot_hash(&w);
+
+    let golden_str = std::fs::read_to_string(GOLDEN_PATH).expect(
+        "golden file missing; bootstrap with: \
+         EVOSIM_WRITE_GOLDEN=1 cargo test --release --test acceptance",
+    );
+    let golden_str = golden_str.trim();
+    let golden: u64 = u64::from_str_radix(golden_str.trim_start_matches("0x"), 16)
+        .expect("malformed golden hash in tests/golden_snapshot_t10000.txt");
+
+    assert_eq!(
+        hash, golden,
+        "profiler-enabled hash mismatch: got {hash:#018x}, golden {golden:#018x}; \
+         the profiler must be a pure observer (D10)",
+    );
+}
+
 /// F.26 round-trip: save at tick N, load, step M more, hash must equal
 /// the no-save reference. Closes the F reviewer non-blocker about lacking
 /// an end-to-end save/load determinism test.

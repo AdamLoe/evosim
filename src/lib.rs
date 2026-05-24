@@ -10,6 +10,7 @@ pub mod events;
 pub mod genome;
 pub mod grid;
 pub mod hof;
+pub mod profiler;
 pub mod rng;
 pub mod save;
 pub mod snapshot_hash;

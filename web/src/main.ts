@@ -7,6 +7,7 @@ import { PersistenceClient } from "./persistence";
 import { showResumePrompt, showSchemaMismatchModal } from "./persistence/ui";
 import { showAutosaveFailureToast } from "./persistence/toast";
 import { showEulogyCard } from "./eulogy";
+import { attachProfiler, timed, span } from "./perf";
 
 const status = document.getElementById("status") as HTMLSpanElement;
 const canvas = document.getElementById("aquarium") as HTMLCanvasElement;
@@ -242,39 +243,49 @@ async function main(): Promise<void> {
   // E.24: canvas click → inspector.
   installCanvasClickHandler(canvas, cam, () => ({ w: viewW, h: viewH }), world, rail);
 
+  // Profiler: attach world after construction so the TS profiler can
+  // forward enable/disable calls to the Rust side (D1, D9).
+  attachProfiler(world);
+
   // Sim + render loop.
   let lastRender = performance.now();
   function frame(now: number): void {
-    const delta = now - lastRender;
-    lastRender = now;
-    const ticksThisFrame =
-      speed === 0 ? 0 : Math.min(200, Math.max(1, Math.round((speed * delta) / 16.66)));
+    const frameSpan = span("frame");
+    try {
+      const delta = now - lastRender;
+      lastRender = now;
+      const ticksThisFrame =
+        speed === 0 ? 0 : Math.min(200, Math.max(1, Math.round((speed * delta) / 16.66)));
 
-    if (ticksThisFrame > 0 && !world!.world_ended) {
-      world!.step_n(ticksThisFrame);
+      if (ticksThisFrame > 0 && !world!.world_ended) {
+        timed("step_n", () => world!.step_n(ticksThisFrame));
+      }
+
+      // F.26: autosave after each frame batch.
+      if (!world!.world_ended) {
+        timed("maybeAutosave", () => maybeAutosave(world!, cam, now, persistence));
+      }
+
+      // F.28: eulogy — fire once when world ends.
+      if (world!.world_ended && !eulogyShown) {
+        eulogyShown = true;
+        showEulogyCard(world!, persistence);
+      }
+
+      // Fetch ids buffer once per frame (index-aligned with creatures_buffer).
+      const ids = world!.creature_ids_buffer() as unknown as Float64Array;
+
+      // E.21/E.22/E.23/E.24: poll the rail (events, toasts, highlights, stats, inspector).
+      timed("pollRail", () => pollRail(rail, world!, ids));
+
+      timed("renderWorld", () =>
+        renderWorld(ctx!, cam, viewW, viewH, world!, stride, ids, highlights, now));
+
+      const ended = world!.world_ended ? "  (world ended)" : "";
+      status.textContent = `seed: ${world!.seed}  ·  tick ${world!.tick}  ·  pop ${world!.population}  ·  species ${world!.species_count}${ended}`;
+    } finally {
+      frameSpan.close();
     }
-
-    // F.26: autosave after each frame batch.
-    if (!world!.world_ended) {
-      maybeAutosave(world!, cam, now, persistence);
-    }
-
-    // F.28: eulogy — fire once when world ends.
-    if (world!.world_ended && !eulogyShown) {
-      eulogyShown = true;
-      showEulogyCard(world!, persistence);
-    }
-
-    // Fetch ids buffer once per frame (index-aligned with creatures_buffer).
-    const ids = world!.creature_ids_buffer() as unknown as Float64Array;
-
-    // E.21/E.22/E.23/E.24: poll the rail (events, toasts, highlights, stats, inspector).
-    pollRail(rail, world!, ids);
-
-    renderWorld(ctx!, cam, viewW, viewH, world!, stride, ids, highlights, now);
-
-    const ended = world!.world_ended ? "  (world ended)" : "";
-    status.textContent = `seed: ${world!.seed}  ·  tick ${world!.tick}  ·  pop ${world!.population}  ·  species ${world!.species_count}${ended}`;
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
