@@ -689,7 +689,11 @@ impl World {
 
             if g.size > self.creatures.max_size_reached[i] {
                 self.creatures.max_size_reached[i] = g.size;
-                // E.25.d: biggest_ever hall-of-fame.
+            }
+            // E.25.d: biggest_ever hall-of-fame. v1 has no in-life growth, so
+            // this fires per-tick against the global champion; any newborn
+            // with a larger genome.size becomes the new biggest.
+            {
                 let current_best = self.biggest_ever.as_ref().map_or(0.0, |h| h.captured_size);
                 if g.size > current_best {
                     let species_name = self.species.get(self.creatures.species_id[i]).name.clone();
