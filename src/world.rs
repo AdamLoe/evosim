@@ -337,6 +337,19 @@ impl World {
             self.creatures.distance_travelled[i] += dist;
             self.creatures.x[i] += cvx;
             self.creatures.y[i] += cvy;
+            // E.25.b: FirstToMove fires here (on the actual crossing tick) per v6 §L.
+            if !self.first_move_fired
+                && self.creatures.genomes[i].move_speed > 0.0
+                && self.creatures.distance_travelled[i] >= 5.0
+            {
+                self.first_move_fired = true;
+                self.events.push(Event {
+                    tick: self.tick,
+                    kind: EventKind::FirstToMove {
+                        creature_id: self.creatures.id[i],
+                    },
+                });
+            }
         }
 
         self.grid.rebuild(&self.creatures.x, &self.creatures.y);
@@ -628,22 +641,6 @@ impl World {
     fn collect_deaths(&mut self) -> Vec<usize> {
         let mut dead: Vec<usize> = Vec::new();
         let n = self.creatures.len();
-        if !self.first_move_fired {
-            for i in 0..n {
-                if self.creatures.genomes[i].move_speed > 0.0
-                    && self.creatures.distance_travelled[i] >= 5.0
-                {
-                    self.first_move_fired = true;
-                    self.events.push(Event {
-                        tick: self.tick,
-                        kind: EventKind::FirstToMove {
-                            creature_id: self.creatures.id[i],
-                        },
-                    });
-                    break;
-                }
-            }
-        }
         let mut species_lost: Vec<u32> = Vec::new();
         for i in 0..n {
             if self.creatures.energy[i] <= 0.0 {
@@ -1406,6 +1403,43 @@ mod tests {
             "Expected always-valid action, got {:?}",
             act
         );
+    }
+
+    // ---- E.25.b test ----
+
+    /// E.25.b: FirstToMove fires inside apply_movement_and_repulsion when
+    /// distance_travelled crosses 5.0 (v6 §L: "actually traveled ≥ 5u in lifetime").
+    #[test]
+    fn e25b_first_to_move_fires_on_movement_step() {
+        let mut w = World::new("e25b-move");
+        // Give founder move_speed so movement cost applies.
+        w.creatures.genomes[0].move_speed = 5.0;
+        // Set velocity directly so movement fires deterministically.
+        w.creatures.vx[0] = 5.0;
+        w.creatures.vy[0] = 0.0;
+        // Pre-condition: distance_travelled starts at 0, event not fired.
+        assert!(!w.first_move_fired);
+        assert_eq!(w.creatures.distance_travelled[0], 0.0);
+        let creature_id = w.creatures.id[0];
+
+        // Run the movement step directly.
+        w.apply_movement_and_repulsion();
+
+        // After movement, distance_travelled should be >= 5.0 and event should fire.
+        assert!(
+            w.creatures.distance_travelled[0] >= 5.0,
+            "distance_travelled = {}",
+            w.creatures.distance_travelled[0]
+        );
+        assert!(w.first_move_fired, "first_move_fired must be true after crossing 5.0");
+        let ev = w.events.all.iter()
+            .find(|e| matches!(e.kind, EventKind::FirstToMove { .. }));
+        assert!(ev.is_some(), "FirstToMove event must be in log");
+        if let Some(ev) = ev {
+            if let EventKind::FirstToMove { creature_id: cid } = &ev.kind {
+                assert_eq!(*cid, creature_id, "FirstToMove creature_id must match");
+            }
+        }
     }
 
     // ---- E.20 tests ----
