@@ -2,6 +2,7 @@ import init, { WorldHandle, creature_stride } from "../wasm/evosim";
 import { makeCamera, renderWorld } from "./render";
 import { attachCameraControls } from "./camera";
 import { installRail, pollRail, highlights } from "./rail/index";
+import { installProfilerPanel } from "./rail/stats";
 import { installCanvasClickHandler } from "./rail/inspector";
 import { PersistenceClient } from "./persistence";
 import { showResumePrompt, showSchemaMismatchModal } from "./persistence/ui";
@@ -246,6 +247,9 @@ async function main(): Promise<void> {
   // Profiler: attach world after construction so the TS profiler can
   // forward enable/disable calls to the Rust side (D1, D9).
   attachProfiler(world);
+
+  // Perf-timing: install the Stats-panel toggle + 1Hz polling loop.
+  installProfilerPanel(world);
 
   // Sim + render loop.
   let lastRender = performance.now();

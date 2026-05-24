@@ -291,6 +291,51 @@ body {
   font: inherit;
 }
 
+/* Profiler panel (perf-timing plan) */
+#profiler-panel {
+  margin-top: 8px;
+}
+.profiler-toggle {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  font-size: 11px;
+  cursor: pointer;
+  user-select: none;
+}
+.profiler-stabilizing {
+  font-size: 10px;
+  font-family: ui-monospace, monospace;
+  color: rgba(255, 200, 100, 0.85);
+  margin: 3px 0;
+}
+.profiler-table {
+  width: 100%;
+  font: 11px ui-monospace, monospace;
+  border-collapse: collapse;
+  color: var(--fg);
+  margin-top: 4px;
+  table-layout: fixed;
+}
+.profiler-table th,
+.profiler-table td {
+  padding: 1px 3px;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.profiler-table th:first-child,
+.profiler-table td.pf-name {
+  text-align: left;
+}
+.profiler-table th { opacity: 0.55; font-weight: normal; }
+.profiler-table tr.pf-depth-0 td.pf-name { font-weight: bold; }
+.profiler-table tr.pf-depth-1 td.pf-name { padding-left: 12px; }
+.profiler-table tr.pf-depth-2 td.pf-name { padding-left: 24px; }
+.profiler-table tr.pf-depth-3 td.pf-name { padding-left: 36px; }
+.profiler-table tr.pf-depth-4 td.pf-name { padding-left: 48px; }
+
 /* F.28: Eulogy card */
 .eulogy-backdrop {
   background: rgba(8, 12, 20, 0.7);

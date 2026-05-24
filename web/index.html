@@ -32,6 +32,22 @@
       <section id="rail-stats" class="rail-panel is-active">
         <canvas id="chart-pop" width="260" height="80"></canvas>
         <canvas id="chart-species" width="260" height="80"></canvas>
+        <div id="profiler-panel">
+          <label class="profiler-toggle">
+            <input type="checkbox" id="profiler-enable" />
+            profiler
+          </label>
+          <div id="profiler-stabilizing" class="profiler-stabilizing" style="display:none"></div>
+          <table id="profiler-table" class="profiler-table">
+            <thead>
+              <tr>
+                <th>Stage</th><th>total ms</th><th>calls</th>
+                <th>/call us</th><th>calls/par</th><th>share %</th>
+              </tr>
+            </thead>
+            <tbody id="profiler-tbody"></tbody>
+          </table>
+        </div>
       </section>
       <section id="rail-inspector" class="rail-panel">
         <dl>
