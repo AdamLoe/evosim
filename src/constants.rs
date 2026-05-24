@@ -127,6 +127,12 @@ pub const CARRION_RADIUS_FOR_VISION: f32 = 1.5;
 /// Worst diagonal ≈ 32; double for slack.
 pub const MAX_CELLS_PER_RAY: usize = 64;
 
+// ---- Deterministic chunking (v6 §J) ----
+/// Fixed number of chunks for deterministic parallelism. Results identical
+/// regardless of actual core count (v6 §J). Pinned at 8 (matches typical
+/// core counts; v6 §J example value).
+pub const N_CHUNKS: usize = 8;
+
 // ---- Acceptance test (v5 §16) ----
 pub const ACCEPTANCE_TICKS: u32 = 10_000;
 pub const ACCEPTANCE_SEED: &str = "evosim-test-001";
