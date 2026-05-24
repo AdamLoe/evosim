@@ -1,8 +1,9 @@
 # evosim
 
 Browser-deployed idle evolution sandbox. Rust → wasm sim, plain-TS Vite shell,
-Canvas 2D rendering. Spec lives in [docs/PITCH-v5.md](docs/PITCH-v5.md) and
-[docs/PITCH-v6.md](docs/PITCH-v6.md); v6 supersedes v5 on conflict.
+Canvas 2D rendering. Spec lives in [docs/archive/PITCH-v5.md](docs/archive/PITCH-v5.md) and
+[docs/archive/PITCH-v6.md](docs/archive/PITCH-v6.md); v6 supersedes v5 on conflict.
+See [docs/README.md](docs/README.md) for the full documentation index.
 
 ## Repo layout
 
@@ -11,7 +12,8 @@ Canvas 2D rendering. Spec lives in [docs/PITCH-v5.md](docs/PITCH-v5.md) and
 /src                   simulation engine
 /web                   Vite + TypeScript shell
 /web/wasm              wasm-pack output (gitignored, regenerated each build)
-/docs                  PITCH-v1..v6, ORCHESTRATOR.md, original notes
+/docs                  README, architecture, development, contributing guides
+/docs/archive          PITCH-v1..v6, ORCHESTRATOR.md, original notes, milestone plans
 /DECISIONS.md          running log of orchestrator decisions outside v5+v6
 ```
 
@@ -50,8 +52,9 @@ single-threaded path if isolation is unavailable.
 ## Tests
 
 ```bash
-cargo test           # native unit tests
+cargo test --lib                          # 77 unit tests
+cargo test --release --test acceptance    # §16 acceptance gate (golden hash)
 cd web && pnpm typecheck
 ```
 
-A headless acceptance test (PITCH v5 §16) lands in Milestone F.
+See [docs/development.md](docs/development.md) for full details including how to re-bootstrap the golden snapshot.
