@@ -12,10 +12,14 @@ export default defineConfig({
   root: ".",
   server: {
     host: true,
+    port: 47821,
+    strictPort: true,
     headers: crossOriginIsolationHeaders,
   },
   preview: {
     host: true,
+    port: 47821,
+    strictPort: true,
     headers: crossOriginIsolationHeaders,
   },
   build: {
