@@ -256,6 +256,20 @@ body {
   100% { opacity: 0; }
 }
 
+/* F.26: Saving indicator — fades in when a save is in-flight, fades out on ack */
+#save-indicator {
+  font-size: 11px;
+  font-family: ui-monospace, monospace;
+  opacity: 0;
+  transition: opacity 300ms ease;
+  pointer-events: none;
+  align-self: center;
+  color: rgba(150, 200, 255, 0.8);
+}
+#save-indicator.is-saving {
+  opacity: 1;
+}
+
 /* F.27: Seed pill in top bar */
 .seed-pill {
   margin-left: 12px;

@@ -25,6 +25,7 @@ export class PersistenceClient {
   private worker = new PersistenceWorker();
   private onErrorCb?: (code: string, message: string) => void;
   private onSavedCb?: (tick: number) => void;
+  private onSavingCb?: () => void;
 
   constructor() {
     // Default message handler routes saved/error; overridden transiently by
@@ -37,9 +38,11 @@ export class PersistenceClient {
   }
 
   setHandlers(opts: {
+    onSaving?: () => void;
     onSaved?: (tick: number) => void;
     onError?: (code: string, message: string) => void;
   }): void {
+    this.onSavingCb = opts.onSaving;
     this.onSavedCb = opts.onSaved;
     this.onErrorCb = opts.onError;
   }
@@ -48,6 +51,7 @@ export class PersistenceClient {
     // Camera is passed as a structured-cloneable object so the main thread
     // never has to JSON.parse/stringify the (large) wasm save string just to
     // wrap a few floats into an envelope.
+    this.onSavingCb?.();
     this.worker.postMessage({ type: "save", json, seed, tick, camera });
   }
 

@@ -32,8 +32,11 @@ type Speed = 0 | 1 | 10 | 100;
 let speed: Speed = 1;
 
 // F.26: autosave parameters (v5 §13, F.26 DECISIONS).
-const AUTOSAVE_TICK_INTERVAL = 300; // 10 sim-seconds at 30-tick/s baseline
-const AUTOSAVE_WALL_FLOOR_MS = 3000; // never save more often than 3s wall-clock
+// AUTOSAVE_WALL_INTERVAL_MS is the primary throttle — one save per 5 minutes.
+// AUTOSAVE_TICK_INTERVAL is a minor guard that prevents saving twice in the
+// same sim tick (e.g. if the frame loop fires very fast in tests).
+const AUTOSAVE_TICK_INTERVAL = 100;
+const AUTOSAVE_WALL_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 let lastSavedTick = -1;
 let lastSavedWallMs = 0;
 
@@ -77,9 +80,11 @@ function maybeAutosave(
   persistence: PersistenceClient,
 ): void {
   const t = world.tick;
+  // Primary gate: wall-clock interval (5 min). Tick guard only prevents a
+  // double-save at the exact same tick (e.g. rapid frame bursts in tests).
   if (t === lastSavedTick) return;
   if (lastSavedTick >= 0 && t - lastSavedTick < AUTOSAVE_TICK_INTERVAL) return;
-  if (nowMs - lastSavedWallMs < AUTOSAVE_WALL_FLOOR_MS) return;
+  if (nowMs - lastSavedWallMs < AUTOSAVE_WALL_INTERVAL_MS) return;
   // snapshot_json() is the unavoidable wasm-side serde cost (~tens of ms);
   // passing the string straight to the worker keeps the main thread off the
   // parse/stringify path entirely.
@@ -118,8 +123,23 @@ async function main(): Promise<void> {
 
   // F.26: persistence client.
   const persistence = new PersistenceClient();
+
+  // Saving indicator: shown while the worker round-trip is in flight.
+  const saveIndicator = document.getElementById("save-indicator") as HTMLSpanElement | null;
+  function showSaveIndicator(): void {
+    saveIndicator?.classList.add("is-saving");
+  }
+  function hideSaveIndicator(): void {
+    saveIndicator?.classList.remove("is-saving");
+  }
+
   persistence.setHandlers({
-    onError: (_code, _msg) => showAutosaveFailureToast(),
+    onSaving: showSaveIndicator,
+    onSaved: () => hideSaveIndicator(),
+    onError: (_code, _msg) => {
+      hideSaveIndicator();
+      showAutosaveFailureToast();
+    },
   });
 
   const params = new URLSearchParams(window.location.search);
@@ -180,6 +200,22 @@ async function main(): Promise<void> {
 
   // F.27: seed display.
   installSeedDisplay(world.seed);
+
+  // F.26: flush a save when the user navigates away so we don't lose up to
+  // 5 minutes of sim. The postMessage to the worker is fire-and-forget —
+  // modern browsers give service workers ~a few seconds on beforeunload but
+  // a dedicated worker gets no such grace period guarantee. We attempt it
+  // anyway; partial success is better than none. We do NOT call
+  // event.preventDefault() / returnValue so we never block navigation.
+  window.addEventListener("beforeunload", () => {
+    if (world && !world.world_ended) {
+      persistence.save(world.snapshot_json(), world.seed, world.tick, {
+        zoom: cam.zoom,
+        cx: cam.cx,
+        cy: cam.cy,
+      });
+    }
+  });
 
   const stride = creature_stride();
   const cam = makeCamera(world.world_size);
