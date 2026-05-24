@@ -54,6 +54,10 @@ pub struct World {
     pub carrion: Vec<Carrion>,
     pub species: SpeciesRegistry,
     pub events: EventLog,
+    /// When false (default), `self.events.push(...)` calls are suppressed.
+    /// Set to true in tests that assert event log contents. v1.1 will flip
+    /// this to true for all runs when the Events UI is re-enabled.
+    pub events_enabled: bool,
     pub sliders: DevSliders,
     pub next_creature_id: u64,
     pub peak_population: u32,
@@ -131,6 +135,7 @@ impl World {
             carrion: Vec::new(),
             species,
             events: EventLog::new(),
+            events_enabled: false,
             sliders: DevSliders::default(),
             next_creature_id: 1,
             peak_population: 1,
@@ -234,25 +239,29 @@ impl World {
             let bit = 1u32 << k;
             if pop >= threshold && (self.population_milestones_fired & bit) == 0 {
                 self.population_milestones_fired |= bit;
-                self.events.push(Event {
-                    tick: self.tick,
-                    kind: EventKind::PopulationMilestone {
-                        population: threshold,
-                    },
-                });
+                if self.events_enabled {
+                    self.events.push(Event {
+                        tick: self.tick,
+                        kind: EventKind::PopulationMilestone {
+                            population: threshold,
+                        },
+                    });
+                }
             }
         }
 
         if self.creatures.is_empty() {
             self.world_ended = true;
-            self.events.push(Event {
-                tick: self.tick,
-                kind: EventKind::WorldEnded {
-                    ticks_lived: self.tick,
-                    peak_population: self.peak_population,
-                    peak_species: self.peak_species_count,
-                },
-            });
+            if self.events_enabled {
+                self.events.push(Event {
+                    tick: self.tick,
+                    kind: EventKind::WorldEnded {
+                        ticks_lived: self.tick,
+                        peak_population: self.peak_population,
+                        peak_species: self.peak_species_count,
+                    },
+                });
+            }
             return false;
         }
         true
@@ -405,12 +414,14 @@ impl World {
                     captured_size: g.size,
                     captured_age: self.creatures.age[i],
                 });
-                self.events.push(Event {
-                    tick: self.tick,
-                    kind: EventKind::FirstToMove {
-                        creature_id: self.creatures.id[i],
-                    },
-                });
+                if self.events_enabled {
+                    self.events.push(Event {
+                        tick: self.tick,
+                        kind: EventKind::FirstToMove {
+                            creature_id: self.creatures.id[i],
+                        },
+                    });
+                }
             }
         }
 
@@ -639,12 +650,14 @@ impl World {
                 }
                 if got_a_bite[i] && !self.first_eat_fired {
                     self.first_eat_fired = true;
-                    self.events.push(Event {
-                        tick: self.tick,
-                        kind: EventKind::FirstToEat {
-                            creature_id: self.creatures.id[i],
-                        },
-                    });
+                    if self.events_enabled {
+                        self.events.push(Event {
+                            tick: self.tick,
+                            kind: EventKind::FirstToEat {
+                                creature_id: self.creatures.id[i],
+                            },
+                        });
+                    }
                 }
             }
             if attempted_scavenge[i] {
@@ -862,16 +875,18 @@ impl World {
                     child_brain.weights.clone(),
                     self.tick,
                 );
-                let new_name = self.species.get(new_species_id).name.clone();
-                self.events.push(Event {
-                    tick: self.tick,
-                    kind: EventKind::Speciation {
-                        new_species_id,
-                        parent_species_id: parent_species,
-                        new_species_name: new_name,
-                        creature_id: new_id,
-                    },
-                });
+                if self.events_enabled {
+                    let new_name = self.species.get(new_species_id).name.clone();
+                    self.events.push(Event {
+                        tick: self.tick,
+                        kind: EventKind::Speciation {
+                            new_species_id,
+                            parent_species_id: parent_species,
+                            new_species_name: new_name,
+                            creature_id: new_id,
+                        },
+                    });
+                }
                 (new_species_id, parent_species)
             } else {
                 (parent_species, parent_species)
@@ -902,14 +917,16 @@ impl World {
                 let species = &mut self.species.list[cand as usize];
                 if species.died_tick.is_none() {
                     species.died_tick = Some(self.tick);
-                    let name = species.name.clone();
-                    self.events.push(Event {
-                        tick: self.tick,
-                        kind: EventKind::Extinction {
-                            species_id: cand,
-                            species_name: name,
-                        },
-                    });
+                    if self.events_enabled {
+                        let name = species.name.clone();
+                        self.events.push(Event {
+                            tick: self.tick,
+                            kind: EventKind::Extinction {
+                                species_id: cand,
+                                species_name: name,
+                            },
+                        });
+                    }
                 }
             }
         }
@@ -1016,6 +1033,7 @@ impl World {
             carrion: save.carrion,
             species,
             events,
+            events_enabled: false,
             sliders: save.sliders,
             next_creature_id: save.next_creature_id,
             peak_population: save.peak_population,
@@ -1661,6 +1679,7 @@ mod tests {
         use crate::vision::VISION_LEN;
 
         let mut w = World::new("e25-milestones");
+        w.events_enabled = true; // enable logging so we can assert event contents
         let mut seeder = SimRng::from_string("e25-seed");
 
         // Manually push 9 extra creatures to hit threshold 10.
@@ -1709,6 +1728,7 @@ mod tests {
     #[test]
     fn e25b_first_to_move_fires_on_movement_step() {
         let mut w = World::new("e25b-move");
+        w.events_enabled = true; // enable logging so we can assert event contents
         // Give founder move_speed so movement cost applies.
         w.creatures.genomes[0].move_speed = 5.0;
         // Set velocity directly so movement fires deterministically.
@@ -1933,6 +1953,7 @@ mod tests {
         // inserted via handle_births-style logic to confirm the event fires.
         // This is more reliable than depending on a live sim to accumulate drift.
         let mut w = World::new("e20-direct");
+        w.events_enabled = true; // enable logging so we can assert event contents
 
         // Confirm the speciate path fires: manufacture a child with huge drift
         // and push it through the species check directly (mirrors handle_births).
@@ -2008,6 +2029,7 @@ mod tests {
         for seed_n in 0u32..20 {
             let seed = format!("e20-live-{seed_n}");
             let mut w2 = World::new(&seed);
+            w2.events_enabled = true; // enable logging so we can assert event contents
             w2.sliders.mutation_rate_multiplier = 20.0;
             w2.sliders.nn_mutation_sigma = 0.3;
             // Also boost sun so creatures survive long enough to accumulate drift.

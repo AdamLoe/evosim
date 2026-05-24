@@ -113,6 +113,14 @@ Format: `<topic>: <choice> — <one-line why>`.
 - Speciation toast rate-limit added (web/src/rail/toast.ts): first Speciation toast within any 2-second wall-clock window shows; subsequent ones are suppressed (events still land in the log). Belt-and-suspenders UX fix independent of sim behavior.
 - Golden snapshot regenerated after threshold change (see commit; EVOSIM_WRITE_GOLDEN=1 cargo test --release --test acceptance).
 
+## Events disable (v1.1 revisit)
+
+- events_enabled flag on World (default false): wraps all `self.events.push(...)` call sites in world.rs — simplest reversible approach; avoids deletion churn and keeps the regression tests alive by flipping the flag to true in the three tests that assert event log contents (e25_population_milestones_fire_once, e25b_first_to_move_fires_on_movement_step, e20_speciation_event_lands_in_log_when_threshold_crossed).
+- Events tab + panel: removed from index.html; Stats tab promoted to default-active; rail-events section kept in DOM with display:none so IDs remain stable for v1.1.
+- Event-diff polling removed from rail/index.ts (section 2 of pollRail); species list, stats, inspector, highlight management all unchanged.
+- pushToast no-op in rail/toast.ts: toast-stack DOM node and tickToasts remain; re-enablement is a one-liner revert.
+- API surface kept intact: EventKind, EventLog, recent_events_json, events_total_count — all still compile and return empty/zero.
+
 ## F.30 (balance tuning — orchestrator owns these per ORCHESTRATOR.md)
 
 > NOTE: The F implementer subagent surfaced these tuning needs while bootstrapping

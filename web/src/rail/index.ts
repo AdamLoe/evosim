@@ -1,18 +1,17 @@
 // Rail orchestrator: boot + pollRail. Called from main.ts each RAF frame.
-// E.21: Events panel + species list.
-// E.22: Toast routing + highlight management.
+// E.21: Species list (Events panel hidden for v1.1 revisit).
+// E.22: Highlight management (toasts suppressed for v1.1 revisit).
 // E.23: Stats sampling.
 // E.24: Inspector refresh.
 
 import type { WorldHandle } from "../../wasm/evosim";
 import {
   renderSpeciesList,
-  appendEventRow,
   type SpeciesRow,
 } from "./events";
 import { maybeSampleStats } from "./stats";
 import { refreshInspector } from "./inspector";
-import { pushToast, tickToasts } from "./toast";
+import { tickToasts } from "./toast";
 import { addHighlight, pruneHighlights, highlights } from "./highlight";
 
 // ---- Event shape (matches EventKind #[serde(tag = "type")]) ----
@@ -40,7 +39,7 @@ export interface RailState {
 // ---- Tab switching ----
 
 function installTabs(): RailState {
-  let activeTab = "events";
+  let activeTab = "stats"; // Events tab hidden; Stats is default for v1.1 revisit
 
   function switchTab(name: string): void {
     activeTab = name;
@@ -67,38 +66,11 @@ function installTabs(): RailState {
 }
 
 // ---- Event polling state ----
-let lastSeenTotalCount = 0;
+// Event polling removed for v1.1 revisit (events_enabled=false on backend).
 let lastSpeciesPoll = -Infinity;
 
-// Species name cache for toast parent-name lookups.
+// Species name cache for highlight lookups.
 const speciesNameCache: Map<number, string> = new Map();
-
-function handleNewEvent(ev: EvEvent): void {
-  const k = ev.kind;
-  switch (k.type) {
-    case "Speciation": {
-      const parentName = speciesNameCache.get(k.parent_species_id) ?? "(unknown)";
-      pushToast(`New species: ${k.new_species_name} from ${parentName}`, true);
-      addHighlight(k.creature_id);
-      break;
-    }
-    case "Extinction":
-      pushToast(`Extinct: ${k.species_name}`);
-      break;
-    case "FirstToMove":
-      pushToast("First mover");
-      addHighlight(k.creature_id);
-      break;
-    case "FirstToEat":
-      pushToast("First bite");
-      addHighlight(k.creature_id);
-      break;
-    case "PopulationMilestone":
-    case "WorldEnded":
-      // Log-only; no toast (v6 §B policy).
-      break;
-  }
-}
 
 // ---- installRail ----
 
@@ -137,25 +109,7 @@ export function pollRail(
     lastSpeciesPoll = now;
   }
 
-  // 2. Diff events using events_total_count (PIN C: monotone, survives ring overflow).
-  const totalCount = world.events_total_count;
-  const newCount = totalCount - lastSeenTotalCount;
-  if (newCount > 0) {
-    let recent: EvEvent[] = [];
-    try {
-      recent = JSON.parse(world.recent_events_json()) as EvEvent[];
-    } catch (e) {
-      console.warn("rail: recent_events_json parse failed", e);
-    }
-    // Take at most the last `newCount` events from the ring.
-    const start = Math.max(0, recent.length - newCount);
-    for (let i = start; i < recent.length; i++) {
-      const ev = recent[i];
-      handleNewEvent(ev);
-      appendEventRow(ev, speciesNameCache);
-    }
-    lastSeenTotalCount = totalCount;
-  }
+  // 2. Event diff removed for v1.1 revisit (events_enabled=false on backend).
 
   // 3. Stats sample (E.23).
   maybeSampleStats(world);
