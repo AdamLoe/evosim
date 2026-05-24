@@ -10,6 +10,7 @@ pub struct Event {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type")]
 pub enum EventKind {
     Speciation {
         new_species_id: u32,
