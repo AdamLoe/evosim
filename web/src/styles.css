@@ -51,9 +51,9 @@ body {
 #right-rail {
   position: fixed;
   top: 36px; /* clear the top-bar */
+  bottom: 0;  /* stretch to viewport bottom */
   right: 0;
   width: 280px;
-  max-height: calc(100vh - 36px);
   background: var(--rail-bg);
   border-left: 1px solid rgba(255, 255, 255, 0.08);
   font-size: 12px;

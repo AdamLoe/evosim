@@ -11,11 +11,23 @@ const stack: ToastEntry[] = [];
 let nextId = 0;
 const MAX_TOASTS = 6;
 
+// Rate-limit speciation toasts: only show the first within a 2-second window.
+// Events still all land in the log; this only suppresses the UX pop-up burst.
+const SPECIATION_TOAST_WINDOW_MS = 2000;
+let lastSpeciationToastAt = -Infinity;
+
 /**
- * Push a new toast. Drops the oldest if cap is exceeded.
+ * Push a new toast, with optional rate-limiting for Speciation events.
+ * Pass isSpeciation=true to apply the 2-second dedup window.
  */
-export function pushToast(text: string): void {
+export function pushToast(text: string, isSpeciation = false): void {
   const now = performance.now();
+  if (isSpeciation) {
+    if (now - lastSpeciationToastAt < SPECIATION_TOAST_WINDOW_MS) {
+      return; // suppress; event is already in the log
+    }
+    lastSpeciationToastAt = now;
+  }
   // Enforce cap: remove oldest (index 0 = oldest in stack order).
   while (stack.length >= MAX_TOASTS) {
     const oldest = stack.shift()!;
