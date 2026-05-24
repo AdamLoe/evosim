@@ -1,0 +1,55 @@
+[package]
+name = "evosim"
+version = "0.1.0"
+edition = "2021"
+description = "Browser-deployed idle evolution sandbox (Rust -> wasm)"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+getrandom = { version = "0.2", features = ["js"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wide = "0.7"
+rand_xoshiro = "0.6"
+rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
+twox-hash = { version = "1.6", default-features = false }
+
+[dependencies.web-sys]
+version = "0.3"
+features = [
+  "console",
+  "Window",
+  "Document",
+  "Element",
+  "HtmlCanvasElement",
+  "CanvasRenderingContext2d",
+  "Performance",
+]
+
+# wasm-bindgen-rayon is optional, behind feature flag (requires COOP/COEP + SAB).
+# v1: ship without rayon by default; enable via feature when ready.
+[features]
+default = []
+threads = ["wasm-bindgen-rayon", "rayon"]
+
+[dependencies.wasm-bindgen-rayon]
+version = "1.2"
+optional = true
+
+[dependencies.rayon]
+version = "1.10"
+optional = true
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+opt-level = 1

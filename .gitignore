@@ -1,0 +1,10 @@
+/target
+/pkg
+/web/node_modules
+/web/dist
+/web/.vite
+**/*.rs.bk
+Cargo.lock.bak
+.DS_Store
+*.log
+node_modules/

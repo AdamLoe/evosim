@@ -1,0 +1,48 @@
+:root {
+  color-scheme: dark;
+  --bg: #0b0f14;
+  --fg: #e6edf3;
+  --rail-bg: rgba(15, 22, 32, 0.85);
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
+  overflow: hidden;
+}
+
+#aquarium {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  display: block;
+  touch-action: none;
+}
+
+#top-bar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  padding: 8px 12px;
+  font-size: 13px;
+  display: flex;
+  gap: 12px;
+  pointer-events: none;
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0.55), transparent);
+}
+
+#top-bar > * {
+  pointer-events: auto;
+}
