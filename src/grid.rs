@@ -10,6 +10,13 @@ pub struct SpatialGrid {
     /// `starts[k+1]` is past-the-end. `indices` holds them in cell order.
     pub starts: Vec<u32>,
     pub indices: Vec<u32>,
+    /// Scratch cursors for the scatter pass of `rebuild`.
+    /// Length matches `starts` (HASH_DIM * HASH_DIM + 1 = 14 401).
+    /// Reused across rebuilds via `copy_from_slice(&starts)` to
+    /// avoid the per-tick allocation that `starts.clone()` would
+    /// otherwise cost (~57 kB × 3 rebuilds/tick = ~173 kB/tick).
+    /// Must always be the same length as `starts`; resize both in lockstep.
+    cursors: Vec<u32>,
 }
 
 impl Default for SpatialGrid {
@@ -20,9 +27,12 @@ impl Default for SpatialGrid {
 
 impl SpatialGrid {
     pub fn new() -> Self {
+        let starts = vec![0; HASH_DIM * HASH_DIM + 1];
+        let cursors = vec![0; starts.len()];
         Self {
-            starts: vec![0; HASH_DIM * HASH_DIM + 1],
+            starts,
             indices: Vec::with_capacity(2048),
+            cursors,
         }
     }
 
@@ -47,13 +57,13 @@ impl SpatialGrid {
         }
         self.indices.clear();
         self.indices.resize(n, 0);
-        // scratch cursors (reuse a buffer to avoid alloc — store inline)
-        let mut cursors = self.starts.clone();
+        // Reset cursors to the prefix-sum boundaries without allocating.
+        self.cursors.copy_from_slice(&self.starts);
         for k in 0..n {
             let c = Self::cell_of(xs[k], ys[k]);
-            let pos = cursors[c] as usize;
+            let pos = self.cursors[c] as usize;
             self.indices[pos] = k as u32;
-            cursors[c] += 1;
+            self.cursors[c] += 1;
         }
     }
 
@@ -117,5 +127,37 @@ mod tests {
         g.for_each_in_radius(110.0, 100.0, 15.0, |i| hits.push(i));
         hits.sort();
         assert_eq!(hits, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn rebuild_twice_with_different_positions_is_correct() {
+        // First build: 3 creatures clustered near (0,0).
+        let xs = vec![1.0, 2.0, 3.0];
+        let ys = vec![1.0, 2.0, 3.0];
+        let mut g = SpatialGrid::new();
+        g.rebuild(&xs, &ys);
+
+        // Second build: same creatures moved to the opposite corner.
+        let xs2 = vec![590.0, 591.0, 592.0];
+        let ys2 = vec![590.0, 591.0, 592.0];
+        g.rebuild(&xs2, &ys2);
+
+        // After the second rebuild, the near-origin cell must be empty
+        // and the far-corner cell must contain all three creatures.
+        let mut near = vec![];
+        g.for_each_in_radius(0.0, 0.0, 1.0, |i| near.push(i));
+        assert!(
+            near.is_empty(),
+            "near-origin cell should be empty after rebuild; got {near:?}"
+        );
+
+        let mut far = vec![];
+        g.for_each_in_radius(595.0, 595.0, 10.0, |i| far.push(i));
+        far.sort();
+        assert_eq!(
+            far,
+            vec![0, 1, 2],
+            "far-corner cell should contain all three creatures after the second rebuild"
+        );
     }
 }
