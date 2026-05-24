@@ -26,6 +26,29 @@
       <canvas id="chart-species" width="260" height="80"></canvas>
     </div>
 
+    <!-- ui-inspector: Inspector pop-up. Hidden by default; shown by
+         canvas click handler on creature hit. -->
+    <div id="inspector-box" class="overlay-widget" style="display:none">
+      <button id="inspector-close" type="button" aria-label="Close">×</button>
+      <dl>
+        <dt>Species</dt><dd id="ins-species"></dd>
+        <dt>Parent</dt><dd id="ins-parent"></dd>
+        <dt>Action</dt><dd id="ins-action"></dd>
+        <dt>Age</dt><dd id="ins-age"></dd>
+        <dt>Energy</dt><dd id="ins-energy"></dd>
+        <dt>Size</dt><dd id="ins-size"></dd>
+        <dt>Photo eff</dt><dd id="ins-photo"></dd>
+        <dt>Eat eff</dt><dd id="ins-eat"></dd>
+        <dt>Scav eff</dt><dd id="ins-scav"></dd>
+        <dt>Move speed</dt><dd id="ins-move"></dd>
+        <dt>Eyes</dt><dd id="ins-eyes"></dd>
+        <dt>Vision</dt><dd id="ins-vision"></dd>
+        <dt>Armor</dt><dd id="ins-armor"></dd>
+        <dt>Bite reach</dt><dd id="ins-bite"></dd>
+        <dt>Pigment</dt><dd id="ins-pigment"></dd>
+      </dl>
+    </div>
+
     <!-- E.21: right rail shell -->
     <!-- v1.1: rail hidden via CSS (#right-rail { display: none; }) per
          master plan §8.1; DOM kept for future re-enable. Stats charts
@@ -57,25 +80,8 @@
           </table>
         </div>
       </section>
-      <section id="rail-inspector" class="rail-panel">
-        <dl>
-          <dt>Species</dt><dd id="ins-species"></dd>
-          <dt>Parent</dt><dd id="ins-parent"></dd>
-          <dt>Action</dt><dd id="ins-action"></dd>
-          <dt>Age</dt><dd id="ins-age"></dd>
-          <dt>Energy</dt><dd id="ins-energy"></dd>
-          <dt>Size</dt><dd id="ins-size"></dd>
-          <dt>Photo eff</dt><dd id="ins-photo"></dd>
-          <dt>Eat eff</dt><dd id="ins-eat"></dd>
-          <dt>Scav eff</dt><dd id="ins-scav"></dd>
-          <dt>Move speed</dt><dd id="ins-move"></dd>
-          <dt>Eyes</dt><dd id="ins-eyes"></dd>
-          <dt>Vision</dt><dd id="ins-vision"></dd>
-          <dt>Armor</dt><dd id="ins-armor"></dd>
-          <dt>Bite reach</dt><dd id="ins-bite"></dd>
-          <dt>Pigment</dt><dd id="ins-pigment"></dd>
-        </dl>
-      </section>
+      <!-- Inspector content evicted to #inspector-box (ui-inspector). -->
+      <section id="rail-inspector" class="rail-panel"></section>
     </aside>
 
     <!-- E.22: toast container, top-right just left of the rail -->

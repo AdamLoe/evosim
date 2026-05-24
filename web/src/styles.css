@@ -201,20 +201,42 @@ body {
   margin-right: 6px;
 }
 
-/* E.21: Inspector */
-#rail-inspector dl {
+/* ui-inspector: top-right overlay widget (content evicted from #rail-inspector). */
+#inspector-box {
+  top: 8px;
+  right: 8px;
+  max-width: 280px;       /* mirrors current rail width */
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+  position: relative;     /* anchor for close button absolute positioning */
+}
+
+#inspector-box dl {
   display: grid;
-  grid-template-columns: 110px 1fr;
+  grid-template-columns: 110px 1fr;   /* mirrors existing #rail-inspector dl */
   gap: 2px 6px;
   margin: 0;
 }
-#rail-inspector dt {
+#inspector-box dt { opacity: 0.55; }
+#inspector-box dd { margin: 0; word-break: break-all; }
+
+#inspector-close {
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  color: var(--fg);
+  font: inherit;
+  font-size: 16px;
+  line-height: 18px;
+  cursor: pointer;
   opacity: 0.55;
 }
-#rail-inspector dd {
-  margin: 0;
-  word-break: break-all;
-}
+#inspector-close:hover { opacity: 1; }
 
 /* E.23: Stats charts */
 #rail-stats canvas {

@@ -14,6 +14,18 @@ let state: IS = { kind: "empty" };
 // The Inspector tab button (injected dynamically into #rail-tabs).
 let inspectorTab: HTMLButtonElement | null = null;
 
+function getInspectorBox(): HTMLElement | null {
+  return document.getElementById("inspector-box");
+}
+function getInspectorClose(): HTMLButtonElement | null {
+  return document.getElementById("inspector-close") as HTMLButtonElement | null;
+}
+function isRailHidden(): boolean {
+  const rail = document.getElementById("right-rail");
+  return !rail || rail.style.display === "none" ||
+         getComputedStyle(rail).display === "none";
+}
+
 function ensureInspectorTab(rail: RailState): HTMLButtonElement {
   if (inspectorTab) return inspectorTab;
   const btn = document.createElement("button");
@@ -88,9 +100,14 @@ function openInspector(data: CreatureInspectJson, rail: RailState): void {
   state = { kind: "selected", creatureId: data.id };
   highlights.set(data.id, HIGHLIGHT_PERMANENT);
   renderInspector(data);
-  const tab = ensureInspectorTab(rail);
-  tab.classList.remove("hidden");
-  rail.switchTab("inspector");
+  const box = getInspectorBox();
+  if (box) box.style.display = "block";
+  // Legacy rail tab injection — guarded no-op while rail is hidden (D2).
+  if (!isRailHidden()) {
+    const tab = ensureInspectorTab(rail);
+    tab.classList.remove("hidden");
+    rail.switchTab("inspector");
+  }
 }
 
 function clearSelection(rail: RailState): void {
@@ -98,11 +115,14 @@ function clearSelection(rail: RailState): void {
     highlights.delete(state.creatureId);
   }
   state = { kind: "empty" };
-  if (inspectorTab) {
-    inspectorTab.classList.add("hidden");
-  }
-  if ((rail as { activeTab?: string }).activeTab === "inspector") {
-    rail.switchTab("events");
+  const box = getInspectorBox();
+  if (box) box.style.display = "none";
+  // Legacy rail tab cleanup — guarded no-op while rail is hidden (D2).
+  if (!isRailHidden()) {
+    if (inspectorTab) inspectorTab.classList.add("hidden");
+    if ((rail as { activeTab?: string }).activeTab === "inspector") {
+      rail.switchTab("events");
+    }
   }
 }
 
@@ -115,6 +135,14 @@ export function refreshInspector(
   idsBuffer: Float64Array,
   rail: RailState,
 ): void {
+  const box = getInspectorBox();
+  // Primary guard: skip all wasm calls when the box is closed (D3).
+  // The display check is the explicit contract for "closed = no wasm calls"
+  // and protects against future state-vs-DOM drift.
+  if (box && box.style.display === "none") return;
+  // Defensive guard: steady-state fallback; in practice clearSelection()
+  // already sets state.kind = "empty" before the display-none check can
+  // be reached, so both guards agree — this is belt-and-braces only.
   if (state.kind !== "selected") return;
   const { creatureId } = state;
 
@@ -169,6 +197,11 @@ export function installCanvasClickHandler(
   world: WorldHandle,
   rail: RailState,
 ): void {
+  const closeBtn = getInspectorClose();
+  if (closeBtn) {
+    closeBtn.addEventListener("click", () => clearSelection(rail));
+  }
+
   let downX = 0;
   let downY = 0;
   let downTime = 0;
