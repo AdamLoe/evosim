@@ -619,6 +619,7 @@ impl World {
                 &self.creatures.brains[i],
                 &mut self.rng,
                 self.sliders.nn_mutation_sigma,
+                self.sliders.mutation_rate_multiplier,
             );
             let jitter_x = self.rng.symm() * FOUNDER_SPLIT_JITTER;
             let jitter_y = self.rng.symm() * FOUNDER_SPLIT_JITTER;

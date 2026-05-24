@@ -34,9 +34,11 @@ impl Brain {
     }
 
     /// Child gets parent weights, then geometric-skip mutation per v6 §E.
-    pub fn child_from(parent: &Brain, rng: &mut SimRng, sigma: f32) -> Self {
+    /// `multiplier` is the `mutation_rate_multiplier` slider from v6 §K;
+    /// it scales the NN mutation rate just as it scales body mutation rates.
+    pub fn child_from(parent: &Brain, rng: &mut SimRng, sigma: f32, multiplier: f32) -> Self {
         let mut child = parent.clone();
-        let p = parent.nn_mutation_rate.clamp(0.0, 1.0);
+        let p = (parent.nn_mutation_rate * multiplier).clamp(0.0, 1.0);
         if p > 0.0 && sigma > 0.0 {
             let n = child.weights.len();
             let mut i = rng.geom_skip(p);
@@ -73,7 +75,7 @@ mod tests {
         let mut rng = SimRng::from_u64(1);
         let mut parent = Brain::founder(&mut rng);
         parent.nn_mutation_rate = 0.0;
-        let child = Brain::child_from(&parent, &mut rng, 0.02);
+        let child = Brain::child_from(&parent, &mut rng, 0.02, 1.0);
         assert_eq!(parent.weights, child.weights);
     }
 
@@ -82,14 +84,24 @@ mod tests {
         let mut rng = SimRng::from_u64(1);
         let mut parent = Brain::founder(&mut rng);
         parent.nn_mutation_rate = 0.1;
-        let child = Brain::child_from(&parent, &mut rng, 0.02);
+        let child = Brain::child_from(&parent, &mut rng, 0.02, 1.0);
         let diffs = parent
             .weights
             .iter()
             .zip(child.weights.iter())
             .filter(|(a, b)| a != b)
             .count();
-        // Expected ≈ 0.1 × 3360 ≈ 336. Just confirm "some".
+        // Expected ≈ 0.1 × 3456 ≈ 346. Just confirm "some but not all".
         assert!(diffs > 100 && diffs < 800, "diffs = {diffs}");
+    }
+
+    #[test]
+    fn child_mutation_multiplier_scales_rate() {
+        // With multiplier=0, mutation_rate becomes 0 → no weights change.
+        let mut rng = SimRng::from_u64(42);
+        let mut parent = Brain::founder(&mut rng);
+        parent.nn_mutation_rate = 0.5; // high rate, but multiplier zeroes it
+        let child = Brain::child_from(&parent, &mut rng, 0.02, 0.0);
+        assert_eq!(parent.weights, child.weights);
     }
 }
