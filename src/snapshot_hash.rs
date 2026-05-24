@@ -135,7 +135,10 @@ mod tests {
         }
         let h1 = snapshot_hash(&w);
         let h2 = snapshot_hash(&w);
-        assert_eq!(h1, h2, "hash must be identical across two calls on the same state");
+        assert_eq!(
+            h1, h2,
+            "hash must be identical across two calls on the same state"
+        );
     }
 
     /// Two worlds from the same seed produce the same hash at the same tick.

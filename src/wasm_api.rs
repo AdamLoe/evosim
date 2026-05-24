@@ -240,8 +240,9 @@ impl WorldHandle {
         }
         let g = &self.inner.creatures.genomes[i];
         let sp = self.inner.species.get(self.inner.creatures.species_id[i]);
-        let parent_name: Option<String> =
-            sp.parent_id.map(|pid| self.inner.species.get(pid).name.clone());
+        let parent_name: Option<String> = sp
+            .parent_id
+            .map(|pid| self.inner.species.get(pid).name.clone());
         let action_name = format!("{:?}", self.inner.creatures.action_this_tick[i]);
         let json = serde_json::json!({
             "index": idx,
@@ -431,16 +432,20 @@ mod tests {
 
         // Create a second species via speciate but don't put any creature in it.
         // It should NOT appear in species_list_json.
+        use crate::brain::Brain;
         use crate::genome::Genome;
         use crate::rng::SimRng;
-        use crate::brain::Brain;
         let mut rng = SimRng::from_u64(42);
         let g = Genome::founder();
         let b = Brain::founder(&mut rng);
         let _phantom_id = handle.inner.species.speciate(0, g, b.weights, 0);
         let json2 = handle.species_list_json_inner();
         let rows2: Vec<serde_json::Value> = serde_json::from_str(&json2).unwrap();
-        assert_eq!(rows2.len(), 1, "phantom species (no creatures) must be filtered out");
+        assert_eq!(
+            rows2.len(),
+            1,
+            "phantom species (no creatures) must be filtered out"
+        );
     }
 
     /// E.21: creature_inspect_json returns None for out-of-range idx.
@@ -499,8 +504,14 @@ mod tests {
         };
         let json = serde_json::to_string(&ev).unwrap();
         // Flat tag means {"tick":42,"kind":{"type":"Speciation","new_species_id":1,...}}
-        assert!(json.contains("\"type\":\"Speciation\""), "flat tag must be present: {json}");
-        assert!(!json.contains("\"Speciation\":{"), "nested form must NOT be present: {json}");
+        assert!(
+            json.contains("\"type\":\"Speciation\""),
+            "flat tag must be present: {json}"
+        );
+        assert!(
+            !json.contains("\"Speciation\":{"),
+            "nested form must NOT be present: {json}"
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -515,8 +526,16 @@ mod tests {
         }
         let json = handle.snapshot_json();
         let handle2 = WorldHandle::from_json(&json).expect("fromJson must succeed");
-        assert_eq!(handle2.tick(), handle.tick(), "tick must match after round-trip");
-        assert_eq!(handle2.population(), handle.population(), "population must match");
+        assert_eq!(
+            handle2.tick(),
+            handle.tick(),
+            "tick must match after round-trip"
+        );
+        assert_eq!(
+            handle2.population(),
+            handle.population(),
+            "population must match"
+        );
     }
 
     /// fromJson returns a schema-mismatch JsValue for version 999.
@@ -555,14 +574,30 @@ mod tests {
     fn f28_hof_json_includes_all_slots() {
         let handle = WorldHandle::new("f28-hof");
         let json = handle.hof_json();
-        let v: serde_json::Value = serde_json::from_str(&json).expect("hof_json must be valid JSON");
-        assert!(v.get("first_mover").is_some(), "first_mover key must be present");
+        let v: serde_json::Value =
+            serde_json::from_str(&json).expect("hof_json must be valid JSON");
+        assert!(
+            v.get("first_mover").is_some(),
+            "first_mover key must be present"
+        );
         assert!(v.get("biggest").is_some(), "biggest key must be present");
         assert!(v.get("weirdest").is_some(), "weirdest key must be present");
-        assert!(v.get("last_survivor").is_some(), "last_survivor key must be present");
-        assert!(v.get("day_count").is_some(), "day_count key must be present");
-        assert!(v.get("peak_population").is_some(), "peak_population key must be present");
-        assert!(v.get("peak_species").is_some(), "peak_species key must be present");
+        assert!(
+            v.get("last_survivor").is_some(),
+            "last_survivor key must be present"
+        );
+        assert!(
+            v.get("day_count").is_some(),
+            "day_count key must be present"
+        );
+        assert!(
+            v.get("peak_population").is_some(),
+            "peak_population key must be present"
+        );
+        assert!(
+            v.get("peak_species").is_some(),
+            "peak_species key must be present"
+        );
         assert!(v.get("seed").is_some(), "seed key must be present");
     }
 
@@ -591,8 +626,8 @@ mod tests {
     /// hof_json weirdest falls back to longest_lived when weirdest is None.
     #[test]
     fn f28_hof_json_weirdest_falls_back_to_longest_lived() {
-        use crate::hof::HallOfFame;
         use crate::genome::Genome;
+        use crate::hof::HallOfFame;
         let mut handle = WorldHandle::new("f28-fallback");
         // Inject a longest_lived but leave weirdest as None.
         handle.inner.longest_lived = Some(HallOfFame {

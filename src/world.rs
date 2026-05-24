@@ -12,8 +12,8 @@ use crate::creature::{Action, CreatureSoA};
 use crate::events::{Event, EventKind, EventLog};
 use crate::genome::Genome;
 use crate::grid::SpatialGrid;
-use crate::rng::SimRng;
 use crate::hof::HallOfFame;
+use crate::rng::SimRng;
 use crate::species::{species_distance, SpeciesRegistry};
 use crate::sun::SunMap;
 use crate::vision::{build_cell_to_carrion, VisionBuf, VisionPass, VISION_LEN};
@@ -236,7 +236,9 @@ impl World {
                 self.population_milestones_fired |= bit;
                 self.events.push(Event {
                     tick: self.tick,
-                    kind: EventKind::PopulationMilestone { population: threshold },
+                    kind: EventKind::PopulationMilestone {
+                        population: threshold,
+                    },
                 });
             }
         }
@@ -393,8 +395,7 @@ impl World {
             {
                 self.first_move_fired = true;
                 let g = self.creatures.genomes[i].clone();
-                let species_name =
-                    self.species.get(self.creatures.species_id[i]).name.clone();
+                let species_name = self.species.get(self.creatures.species_id[i]).name.clone();
                 // E.25.d: capture first_mover_snapshot for F.28.
                 self.first_mover_snapshot = Some(HallOfFame {
                     creature_id: self.creatures.id[i],
@@ -739,8 +740,7 @@ impl World {
                 // E.25.d: hall-of-fame tracking on death.
                 let age = self.creatures.age[i];
                 let g_clone = self.creatures.genomes[i].clone();
-                let species_name =
-                    self.species.get(self.creatures.species_id[i]).name.clone();
+                let species_name = self.species.get(self.creatures.species_id[i]).name.clone();
 
                 // last_survivor: overwrite on every death; final overwrite is the
                 // latest death tick (pop=0 means no more deaths after this).
@@ -1667,7 +1667,8 @@ mod tests {
         for k in 1u64..10 {
             let g = Genome::founder();
             let b = Brain::founder(&mut seeder);
-            w.creatures.push(k, 100.0 + k as f32, 100.0, FOUNDER_ENERGY, 0, 0, 0, g, b);
+            w.creatures
+                .push(k, 100.0 + k as f32, 100.0, FOUNDER_ENERGY, 0, 0, 0, g, b);
             w.vision.push([0.0f32; VISION_LEN]);
         }
         assert_eq!(w.population(), 10);
@@ -1675,17 +1676,30 @@ mod tests {
         // tick_once calls step() which checks milestones.
         w.tick_once();
 
-        let milestone10_events: Vec<_> = w.events.all.iter()
+        let milestone10_events: Vec<_> = w
+            .events
+            .all
+            .iter()
             .filter(|e| matches!(e.kind, EventKind::PopulationMilestone { population: 10 }))
             .collect();
-        assert_eq!(milestone10_events.len(), 1, "threshold 10 must fire exactly once");
+        assert_eq!(
+            milestone10_events.len(),
+            1,
+            "threshold 10 must fire exactly once"
+        );
 
         // Tick again — must not re-fire.
         w.tick_once();
-        let milestone10_count = w.events.all.iter()
+        let milestone10_count = w
+            .events
+            .all
+            .iter()
             .filter(|e| matches!(e.kind, EventKind::PopulationMilestone { population: 10 }))
             .count();
-        assert_eq!(milestone10_count, 1, "threshold 10 must not re-fire after first crossing");
+        assert_eq!(
+            milestone10_count, 1,
+            "threshold 10 must not re-fire after first crossing"
+        );
     }
 
     // ---- E.25.b test ----
@@ -1714,8 +1728,14 @@ mod tests {
             "distance_travelled = {}",
             w.creatures.distance_travelled[0]
         );
-        assert!(w.first_move_fired, "first_move_fired must be true after crossing 5.0");
-        let ev = w.events.all.iter()
+        assert!(
+            w.first_move_fired,
+            "first_move_fired must be true after crossing 5.0"
+        );
+        let ev = w
+            .events
+            .all
+            .iter()
             .find(|e| matches!(e.kind, EventKind::FirstToMove { .. }));
         assert!(ev.is_some(), "FirstToMove event must be in log");
         if let Some(ev) = ev {
@@ -1768,8 +1788,14 @@ mod tests {
         w.creatures.energy[0] = -1.0; // trigger death
         let dead = w.collect_deaths();
         assert_eq!(dead.len(), 1);
-        assert!(w.weirdest.is_none(), "age 400 must not qualify for weirdest");
-        assert!(w.longest_lived.is_some(), "longest_lived must track unconditionally");
+        assert!(
+            w.weirdest.is_none(),
+            "age 400 must not qualify for weirdest"
+        );
+        assert!(
+            w.longest_lived.is_some(),
+            "longest_lived must track unconditionally"
+        );
 
         // Fresh world, age 500 — should qualify.
         let mut w2 = World::new("e25-weird2");
@@ -1794,7 +1820,8 @@ mod tests {
         // Add a second creature.
         let g2 = Genome::founder();
         let b2 = Brain::founder(&mut seeder);
-        w.creatures.push(1, 200.0, 200.0, FOUNDER_ENERGY, 0, 0, 0, g2, b2);
+        w.creatures
+            .push(1, 200.0, 200.0, FOUNDER_ENERGY, 0, 0, 0, g2, b2);
         w.vision.push([0.0f32; VISION_LEN]);
         assert_eq!(w.creatures.len(), 2);
 
@@ -1816,8 +1843,14 @@ mod tests {
 
         // last_survivor must be updated to creature 1 (later tick).
         let ls2 = w.last_survivor.as_ref().unwrap();
-        assert_eq!(ls2.creature_id, id1, "last_survivor must be the creature that died last");
-        assert_eq!(ls2.captured_tick, 10, "captured_tick must match the second death tick");
+        assert_eq!(
+            ls2.creature_id, id1,
+            "last_survivor must be the creature that died last"
+        );
+        assert_eq!(
+            ls2.captured_tick, 10,
+            "captured_tick must match the second death tick"
+        );
     }
 
     // ---- E.20 tests ----
@@ -1879,7 +1912,10 @@ mod tests {
             w.tick,
         );
         assert_ne!(new_species_id, parent_species);
-        assert_eq!(w.species.get(new_species_id).parent_id, Some(parent_species));
+        assert_eq!(
+            w.species.get(new_species_id).parent_id,
+            Some(parent_species)
+        );
         assert!(
             w.species.get(new_species_id).name.starts_with("Lineage A"),
             "name = {}",
@@ -1916,7 +1952,10 @@ mod tests {
             &child_brain.weights,
             &anchor.anchor_brain_weights,
         );
-        assert!(dist > SPECIES_THRESHOLD, "synthetic dist = {dist} should exceed {SPECIES_THRESHOLD}");
+        assert!(
+            dist > SPECIES_THRESHOLD,
+            "synthetic dist = {dist} should exceed {SPECIES_THRESHOLD}"
+        );
 
         // Simulate what handle_births does:
         let new_species_id = w.species.speciate(
@@ -1938,13 +1977,24 @@ mod tests {
 
         // Verify event fired and has correct shape.
         assert!(
-            w.events.all.iter().any(|e| matches!(e.kind, EventKind::Speciation { .. })),
+            w.events
+                .all
+                .iter()
+                .any(|e| matches!(e.kind, EventKind::Speciation { .. })),
             "Speciation event must be in log"
         );
-        let ev = w.events.all.iter()
+        let ev = w
+            .events
+            .all
+            .iter()
             .find(|e| matches!(e.kind, EventKind::Speciation { .. }))
             .unwrap();
-        if let EventKind::Speciation { new_species_id: nsid, parent_species_id: psid, .. } = &ev.kind {
+        if let EventKind::Speciation {
+            new_species_id: nsid,
+            parent_species_id: psid,
+            ..
+        } = &ev.kind
+        {
             let new_sp = w.species.get(*nsid);
             assert_eq!(new_sp.parent_id, Some(*psid));
             assert_ne!(*nsid, *psid);
@@ -1966,7 +2016,12 @@ mod tests {
                 if !w2.tick_once() {
                     break;
                 }
-                if w2.events.all.iter().any(|e| matches!(e.kind, EventKind::Speciation { .. })) {
+                if w2
+                    .events
+                    .all
+                    .iter()
+                    .any(|e| matches!(e.kind, EventKind::Speciation { .. }))
+                {
                     found = true;
                     break;
                 }
@@ -1979,7 +2034,9 @@ mod tests {
             // Acceptable: the live path may not accumulate enough drift in 5k ticks × 20 seeds.
             // The synthetic path above already confirmed the registry + event wiring is correct.
             // The wiring in handle_births is confirmed by the synthetic-large-drift test.
-            println!("Note: live speciation not observed in 20 short runs; synthetic path confirmed OK.");
+            println!(
+                "Note: live speciation not observed in 20 short runs; synthetic path confirmed OK."
+            );
         }
     }
 }

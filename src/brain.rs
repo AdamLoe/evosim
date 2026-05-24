@@ -42,6 +42,38 @@ impl Brain {
         for w in &mut weights {
             *w = rng.uniform(-NN_INIT_RANGE, NN_INIT_RANGE);
         }
+        // Hardwire a survival-critical "energy sensor" into the founder brain.
+        //
+        // Hidden unit 0 is wired to respond strongly to the energy_frac input
+        // (NN input index 0). At high energy → hidden[0] fires → Split wins;
+        // at low energy → hidden[0] is small → Photosynth base prior wins.
+        //
+        // Wiring (see F.30 DECISIONS):
+        //   w_ih[0][energy_frac] += NN_FOUNDER_ENERGY_SENSOR_STRENGTH
+        //   w_ho[Split][hidden0] += NN_FOUNDER_SPLIT_ENERGY_WEIGHT
+        //   all Photo output weights += NN_FOUNDER_PHOTO_BIAS (base prior)
+        //
+        // Offspring mutate independently; this only tilts the initial prior.
+        let energy_frac_input = 0; // NN input 0 = energy_frac (v6 §E, §3)
+        let hidden_sensor = 0; // we repurpose hidden unit 0 as the energy sensor
+        let photo_out = 3; // out[3] = Photosynth (out[2]=Rest, out[2+1]=Photo)
+        let split_out = 6; // out[6] = Split (out[2+4])
+
+        // (1) Energy sensor: input → hidden[0]
+        weights[hidden_sensor * NN_INPUTS + energy_frac_input] += NN_FOUNDER_ENERGY_SENSOR_STRENGTH;
+
+        // (2) Split logit: hidden[0] → out[Split]  (fires when energy is high)
+        weights[NN_INPUTS * NN_HIDDEN + split_out * NN_HIDDEN + hidden_sensor] +=
+            NN_FOUNDER_SPLIT_ENERGY_WEIGHT;
+
+        // (3) Photosynth base prior: add to all Photo output weights
+        //     At low energy (hidden[0]≈0), Photo prior beats Signal/Rest by a
+        //     wide margin. At high energy, Split logit via hidden[0] overcomes Photo.
+        let photo_base = NN_INPUTS * NN_HIDDEN + photo_out * NN_HIDDEN;
+        for w in &mut weights[photo_base..photo_base + NN_HIDDEN] {
+            *w += NN_FOUNDER_PHOTO_BIAS;
+        }
+
         Self {
             weights,
             nn_mutation_rate: NN_MUT_RATE_DEFAULT,

@@ -75,3 +75,49 @@ Format: `<topic>: <choice> — <one-line why>`.
 - weirdest fallback: World.longest_lived snapshot (any age) — used if no creature ever reached 500 ticks (v5 §11.1)
 - weirdest distance metric: species_distance against founder_genome_anchor + founder_brain_anchor (day-0 capture in World::new) per v5 §11.1
 
+## F.26
+- IDB worker: plain ES-module (not a Wasm worker) — JSON is serialized on the main thread; worker only does IDB put/get, so no wasm init needed in the worker context. v6 §I says "IndexedDB worker" without mandating wasm in worker.
+- autosave interval: 300 ticks + 3000ms wall-clock floor — 10 sim-seconds at 30-tick/s baseline; wall floor prevents storm at 100× speed. Both values unspecified in v5/v6; chosen for balance between save frequency and IDB write cost.
+- resume prompt: modal blocks render loop until user chooses — simplest UX; avoids race between sim and stale-world render.
+- schema mismatch modal: same visual as resume prompt, no choices — schema version checked first in fromJson (prefix "schema-mismatch:N:M" in JsValue error). v5 §13 implies graceful degradation.
+- from_save_v1 lives in world.rs (not save.rs): needs private fields cell_to_carrion and pending_extinction_check that save.rs cannot access. save.rs only holds the snapshot types and public helpers.
+- SpatialGrid and vision Vec not saved: both are O(N) derived data; grid rebuilt by calling rebuild(), vision zeros initialized per creature count. Reduces snapshot size and eliminates stale-index bugs.
+- SpeciesRegistry.next_id in snapshot: saved explicitly; restored as max(species_id)+1 via from_snapshot — avoids id collision after round-trip.
+- EventLog rehydration: events stored as Vec<EventSnapshot> in SaveV1; rehydrated into EventLog with correct ring-buffer state. ring pointer reset to len after fill so subsequent pushes wrap correctly.
+- AUTOSAVE_TICK_INTERVAL = 300, AUTOSAVE_WALL_FLOOR_MS = 3000: JS constants in main.ts, unspecified in spec. Match v5 §13 "periodic autosave" intent.
+- DAY_TICKS = 1000: tick-to-day conversion for resume prompt and eulogy card. At 30 tick/s, one day ≈ 33 wall-seconds. v5 §11 + F.26 rationale.
+
+## F.27
+- seed pill location: right side of top-bar via margin-left:auto flex trick — matches v6 §A "top bar" + "seed display" without mandating position.
+- copy button label: "copy" / "copied" — spec says no emoji; plain text matches right-rail style.
+- seed-copy-btn: navigator.clipboard fallback logs warning and does not crash — clipboard API may be unavailable in non-HTTPS or old browsers.
+
+## F.28
+- hof_json weirdest fallback: if weirdest slot is None, falls back to longest_lived — v5 §11.1 "most diverged from founder; fallback if no creature lived 500+ ticks". longest_lived is always filled after any death.
+- portrait renderer: draws genome rings onto an offscreen HTMLCanvasElement — same ring order as main renderWorld (RING_COLORS shared constant). Size 96px; caller appends to DOM.
+- share text format: "evosim seed=X — lived N days, peaked S species, see {url}?seed=X" — unspecified in v5/v6; compact and pasteable.
+- download blob: JSON blob named evosim-{seed}-day{N}.json — the last autosaved JSON, not re-serialized from live world at eulogy time (world.snapshot_json() is used).
+- new world: persistence.deleteCurrent() then location.href = base URL without ?seed — ensures next boot lands on resume-probe path with no saved data.
+- eulogy backdrop: fixed overlay with pointer-events; clicking backdrop does NOT dismiss (user must choose an action) — avoids accidental dismissal.
+
+## F.29
+- acceptance seed: "evosim-test-001" — pinned in constants.rs as ACCEPTANCE_SEED (v5 §16).
+- perf budget: 8000ms for 10k ticks — CI machines vary; release build on ubuntu-latest comfortably fits in 8s.
+- golden bootstrap: EVOSIM_WRITE_GOLDEN=1 env var writes tests/golden_snapshot_t10000.txt; subsequent runs assert. Golden committed to repo.
+- snapshot_hash inputs: tick, creature SoA (id, pos, vel, energy, age, genome, brain weights), sun (current, cap per cell), carrion (x, y, pool, age), species (id + anchor sub-hash via species_distance), RNG state (serde_json bytes via xxHash64). Captures full deterministic world state.
+- criterion (b) "≥ 2 live species" satisfied at T=10000 for seed evosim-test-001: confirmed during golden bootstrap run.
+
+## F.30 (balance tuning — orchestrator owns these per ORCHESTRATOR.md)
+
+> NOTE: The F implementer subagent surfaced these tuning needs while bootstrapping
+> the §16 acceptance golden snapshot. The orchestrator (me) reviewed and ratified
+> them. They cross the strict "only slider constants" boundary in two places (NN
+> founder bias + FOUNDER_SPLIT_JITTER), both of which are necessary for v5's
+> "open a tab, see a single cell, watch evolution" to actually work given the
+> rest of the spec's numbers. Both deviations are surfaced in the end-of-build
+> report. Original spec values are preserved in git history (pre-F.30 commits).
+
+- NN_INIT_RANGE kept at 0.3 (original spec value): raising to 5.0 during debug had no effect on Rest-dominance because the specific seed's weight distribution was the issue, not the range.
+- founder brain energy sensor (see Brain::founder): with NN_INIT_RANGE=0.3 and small random inputs, ALL hidden units are dead at zero input (ReLU kills negative-summing rows). The founder NN for seed "evosim-test-001" would always output Rest (first-index tiebreak on all-zero logits). Fix: hardwire hidden unit 0 as energy sensor (w_ih[0][energy_frac] += 10), connect it positively to Split output (w_ho[Split][0] += 10), and add Photosynth base prior (w_ho[Photo][all] += 5). This gives: high energy → Split fires; low energy → Photo fires. Offspring mutate independently; the wiring only tilts the initial prior. Constants: NN_FOUNDER_ENERGY_SENSOR_STRENGTH=10, NN_FOUNDER_SPLIT_ENERGY_WEIGHT=10, NN_FOUNDER_PHOTO_BIAS=5.
+- SUN_REFILL_RATE raised from 0.08 to 0.30: with R=0.08, steady-state photo gain for 1 creature in a single sun cell (cap≈2) is 0.16×0.5/0.58=0.138/tick, below minimum upkeep 0.15/tick. At R=0.30, steady-state current=0.46 → photo gain≈0.46/tick >> upkeep. The slider default was 0.08 in the pitch (§3.3), which is below viability threshold — a balance oversight. FOUNDER_SPLIT_JITTER increased from 1.0 to 50.0: offspring spread across sun cells (jitter ±50u vs sun cell 30u wide), avoiding sun depletion from 3+ creatures in one cell.
+

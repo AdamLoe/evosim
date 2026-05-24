@@ -120,7 +120,10 @@ impl std::fmt::Display for LoadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             LoadError::SchemaVersionMismatch { found, expected } => {
-                write!(f, "schema version mismatch: found {found}, expected {expected}")
+                write!(
+                    f,
+                    "schema version mismatch: found {found}, expected {expected}"
+                )
             }
             LoadError::InvalidJson(e) => write!(f, "invalid json: {e}"),
             LoadError::StructuralError(s) => write!(f, "structural error: {s}"),
@@ -281,7 +284,10 @@ mod tests {
         assert_eq!(w2.population(), pop_before, "population must match");
         assert_eq!(w2.tick, tick_before, "tick must match");
         assert_eq!(w2.seed, seed_before, "seed must match");
-        assert_eq!(w2.peak_population, peak_before, "peak_population must match");
+        assert_eq!(
+            w2.peak_population, peak_before,
+            "peak_population must match"
+        );
     }
 
     #[test]
@@ -308,7 +314,10 @@ mod tests {
                 w2.creatures.cumulative_upkeep[i], w.creatures.cumulative_upkeep[i],
                 "cumulative_upkeep[{i}]"
             );
-            assert_eq!(w2.creatures.species_id[i], w.creatures.species_id[i], "species_id[{i}]");
+            assert_eq!(
+                w2.creatures.species_id[i], w.creatures.species_id[i],
+                "species_id[{i}]"
+            );
             assert_eq!(
                 w2.creatures.parent_species_id[i], w.creatures.parent_species_id[i],
                 "parent_species_id[{i}]"
@@ -329,7 +338,10 @@ mod tests {
                 w2.creatures.distance_travelled[i], w.creatures.distance_travelled[i],
                 "distance_travelled[{i}]"
             );
-            assert_eq!(w2.creatures.birth_tick[i], w.creatures.birth_tick[i], "birth_tick[{i}]");
+            assert_eq!(
+                w2.creatures.birth_tick[i], w.creatures.birth_tick[i],
+                "birth_tick[{i}]"
+            );
             assert_eq!(
                 w2.creatures.genomes[i].size, w.creatures.genomes[i].size,
                 "genome.size[{i}]"
@@ -358,7 +370,8 @@ mod tests {
             w2.tick_once();
         }
         assert_eq!(
-            w1.population(), w2.population(),
+            w1.population(),
+            w2.population(),
             "population must match after 100 more ticks (RNG divergence canary)"
         );
     }
@@ -371,7 +384,10 @@ mod tests {
         save.schema_version = 999;
         let result = World::from_save_v1(save);
         match result {
-            Err(LoadError::SchemaVersionMismatch { found: 999, expected: 1 }) => {}
+            Err(LoadError::SchemaVersionMismatch {
+                found: 999,
+                expected: 1,
+            }) => {}
             Err(e) => panic!("expected SchemaVersionMismatch, got: {e}"),
             Ok(_) => panic!("expected Err, got Ok"),
         }
@@ -405,11 +421,13 @@ mod tests {
         let w2 = World::from_save_v1(save2).expect("from_save_v1");
 
         assert_eq!(
-            w2.events.all.len(), all_len_before,
+            w2.events.all.len(),
+            all_len_before,
             "full event log length must match"
         );
         assert_eq!(
-            w2.events.all.last().map(|e| e.tick), last_event_tick,
+            w2.events.all.last().map(|e| e.tick),
+            last_event_tick,
             "last event tick must match"
         );
     }

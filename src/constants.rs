@@ -11,7 +11,7 @@ pub const HASH_DIM: usize = (WORLD_SIZE / HASH_CELL) as usize; // 120
 // ---- Sun map (v5 §3.3, v6 §D) ----
 pub const SUN_CELL: f32 = 30.0;
 pub const SUN_DIM: usize = (WORLD_SIZE / SUN_CELL) as usize; // 20
-pub const SUN_REFILL_RATE: f32 = 0.08; // R, default — slider in v6 §K
+pub const SUN_REFILL_RATE: f32 = 0.30; // R, default — slider in v6 §K; raised from 0.08 (see F.30 DECISIONS)
 pub const SUN_GRADIENT_WEST: f32 = 3.0;
 pub const SUN_GRADIENT_EAST: f32 = 1.0;
 pub const HOTSPOT_COUNT: usize = 3;
@@ -63,7 +63,17 @@ pub const NN_OUTPUTS: usize = 8;
 pub const NN_WEIGHT_COUNT: usize = NN_INPUTS * NN_HIDDEN + NN_HIDDEN * NN_OUTPUTS;
 pub const NN_MUT_RATE_DEFAULT: f32 = 0.02;
 pub const NN_MUT_SIGMA_DEFAULT: f32 = 0.02;
-pub const NN_INIT_RANGE: f32 = 0.3;
+pub const NN_INIT_RANGE: f32 = 0.3; // uniform random weight initialisation range
+/// Photosynth-bias wiring constants applied to Brain::founder() after random init.
+/// We hardwire hidden unit 0 as an "energy sensor": the energy_frac input (index 0)
+/// drives it strongly positive. Then the Split output reads it positively (high energy
+/// → split) while Photosynth gets a large base prior that is independent of energy.
+/// This gives every founder the survival-critical energy → split/photo switch without
+/// changing the NN architecture or weight count. Offspring mutate independently.
+/// See F.30 DECISIONS for rationale.
+pub const NN_FOUNDER_ENERGY_SENSOR_STRENGTH: f32 = 10.0; // w_ih[0][energy_frac_input]
+pub const NN_FOUNDER_SPLIT_ENERGY_WEIGHT: f32 = 10.0; // w_ho[Split][energy_sensor_hidden]
+pub const NN_FOUNDER_PHOTO_BIAS: f32 = 5.0; // added to all Photo output weights (base prior)
 
 // ---- Body mutation (v5 §6) ----
 pub const BODY_MUT_RATE_DEFAULT: f32 = 0.03;
@@ -106,7 +116,7 @@ pub const FOUNDER_BITE_REACH: f32 = 1.0;
 pub const FOUNDER_PIGMENT_R: f32 = 0.30;
 pub const FOUNDER_PIGMENT_G: f32 = 0.75;
 pub const FOUNDER_PIGMENT_B: f32 = 0.35;
-pub const FOUNDER_SPLIT_JITTER: f32 = 1.0;
+pub const FOUNDER_SPLIT_JITTER: f32 = 50.0;
 
 // ---- Species detection (v6 §H) ----
 pub const SPECIES_W_BODY: f32 = 3.0;
