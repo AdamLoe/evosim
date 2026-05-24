@@ -121,7 +121,7 @@ pub const FOUNDER_SPLIT_JITTER: f32 = 50.0;
 // ---- Species detection (v6 §H) ----
 pub const SPECIES_W_BODY: f32 = 3.0;
 pub const SPECIES_W_BRAIN: f32 = 1.0;
-pub const SPECIES_THRESHOLD: f32 = 4.0;
+pub const SPECIES_THRESHOLD: f32 = 6.0; // raised from 4.0 (see DECISIONS — speciation-rate tuning)
 pub const SPECIES_EYE_JUMP_COST: f32 = 1.5;
 
 // ---- NN input normalization (v6 §E, §3; see DECISIONS for unspecified bases) ----

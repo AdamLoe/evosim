@@ -107,6 +107,12 @@ Format: `<topic>: <choice> — <one-line why>`.
 - snapshot_hash inputs: tick, creature SoA (id, pos, vel, energy, age, genome, brain weights), sun (current, cap per cell), carrion (x, y, pool, age), species (id + anchor sub-hash via species_distance), RNG state (serde_json bytes via xxHash64). Captures full deterministic world state.
 - criterion (b) "≥ 2 live species" satisfied at T=10000 for seed evosim-test-001: confirmed during golden bootstrap run.
 
+## F.31 (speciation-rate tuning — orchestrator-owned per ORCHESTRATOR.md)
+
+- SPECIES_THRESHOLD raised 4.0 → 6.0: with rapid population growth (SUN_REFILL_RATE=0.30, FOUNDER_SPLIT_JITTER=50) many births fire per tick; NN drift across a lineage crosses 4.0 within tens of generations, causing nonstop Speciation events. v6 §H calls 4.0 the "default" but does not pin it as immutable. 8.0 was tried first but the acceptance criterion (b) "≥ 2 species at T=10000" failed for seed evosim-test-001; 6.0 passes and targets roughly one speciation per 1–2 minutes of sim time. σ_t scales and W_body/W_brain weights unchanged.
+- Speciation toast rate-limit added (web/src/rail/toast.ts): first Speciation toast within any 2-second wall-clock window shows; subsequent ones are suppressed (events still land in the log). Belt-and-suspenders UX fix independent of sim behavior.
+- Golden snapshot regenerated after threshold change (see commit; EVOSIM_WRITE_GOLDEN=1 cargo test --release --test acceptance).
+
 ## F.30 (balance tuning — orchestrator owns these per ORCHESTRATOR.md)
 
 > NOTE: The F implementer subagent surfaced these tuning needs while bootstrapping

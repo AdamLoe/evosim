@@ -78,7 +78,7 @@ function handleNewEvent(ev: EvEvent): void {
   switch (k.type) {
     case "Speciation": {
       const parentName = speciesNameCache.get(k.parent_species_id) ?? "(unknown)";
-      pushToast(`New species: ${k.new_species_name} from ${parentName}`);
+      pushToast(`New species: ${k.new_species_name} from ${parentName}`, true);
       addHighlight(k.creature_id);
       break;
     }
