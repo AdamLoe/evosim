@@ -4,6 +4,7 @@
 //! Bootstrap: `EVOSIM_WRITE_GOLDEN=1 cargo test --release --test acceptance`
 //! writes `tests/golden_snapshot_t10000.txt`. Subsequent runs assert against it.
 
+use evosim::save::SaveV1;
 use evosim::snapshot_hash::snapshot_hash;
 use evosim::world::World;
 use std::time::Instant;
@@ -70,5 +71,45 @@ fn acceptance_t10000() {
     assert_eq!(
         hash, golden,
         "(d) snapshot hash mismatch: got {hash:#018x}, golden {golden:#018x}",
+    );
+}
+
+/// F.26 round-trip: save at tick N, load, step M more, hash must equal
+/// the no-save reference. Closes the F reviewer non-blocker about lacking
+/// an end-to-end save/load determinism test.
+#[test]
+fn save_load_step_preserves_determinism() {
+    const SAVE_AT: u32 = 1_000;
+    const RESUME_STEPS: u32 = 500;
+
+    // Reference path: run SAVE_AT + RESUME_STEPS straight through.
+    let mut reference = World::new(SEED);
+    for _ in 0..(SAVE_AT + RESUME_STEPS) {
+        if !reference.tick_once() {
+            break;
+        }
+    }
+    let ref_hash = snapshot_hash(&reference);
+
+    // Save/load path: run SAVE_AT, save, load into a fresh World, run RESUME_STEPS.
+    let mut original = World::new(SEED);
+    for _ in 0..SAVE_AT {
+        assert!(original.tick_once(), "original died before save point");
+    }
+    let save_json = serde_json::to_string(&SaveV1::from_world(&original)).expect("serialize");
+    let save: SaveV1 = serde_json::from_str(&save_json).expect("deserialize");
+    let mut loaded = World::from_save_v1(save).expect("from_save_v1");
+    for _ in 0..RESUME_STEPS {
+        if !loaded.tick_once() {
+            break;
+        }
+    }
+    let loaded_hash = snapshot_hash(&loaded);
+
+    assert_eq!(
+        ref_hash, loaded_hash,
+        "save→load→step{RESUME_STEPS} diverged from reference at tick {}; \
+         ref={ref_hash:#018x}, loaded={loaded_hash:#018x}",
+        loaded.tick,
     );
 }

@@ -37,13 +37,48 @@ const AUTOSAVE_WALL_FLOOR_MS = 3000; // never save more often than 3s wall-clock
 let lastSavedTick = -1;
 let lastSavedWallMs = 0;
 
-function maybeAutosave(world: WorldHandle, nowMs: number, persistence: PersistenceClient): void {
+// F.26 + v6 §C: camera state is persisted in the autosave envelope so resume
+// restores zoom + pan. The wasm save string is wrapped in `{ wasm, camera }`
+// JSON; older saves without the wrapper load with camera = default (handled in
+// unwrapSaveEnvelope).
+interface SaveEnvelope {
+  wasm: unknown; // JSON.parse(world.snapshot_json())
+  camera: { zoom: number; cx: number; cy: number };
+}
+
+function buildSaveEnvelope(world: WorldHandle, cam: { zoom: number; cx: number; cy: number }): string {
+  const env: SaveEnvelope = {
+    wasm: JSON.parse(world.snapshot_json()),
+    camera: { zoom: cam.zoom, cx: cam.cx, cy: cam.cy },
+  };
+  return JSON.stringify(env);
+}
+
+function unwrapSaveEnvelope(json: string): { wasmJson: string; camera: SaveEnvelope["camera"] | null } {
+  try {
+    const parsed = JSON.parse(json) as Partial<SaveEnvelope> & { schema_version?: number };
+    if (parsed && "wasm" in parsed && parsed.wasm) {
+      const camera = parsed.camera ?? null;
+      return { wasmJson: JSON.stringify(parsed.wasm), camera };
+    }
+    // Bare wasm save (no envelope) — backwards compatible.
+    return { wasmJson: json, camera: null };
+  } catch {
+    return { wasmJson: json, camera: null };
+  }
+}
+
+function maybeAutosave(
+  world: WorldHandle,
+  cam: { zoom: number; cx: number; cy: number },
+  nowMs: number,
+  persistence: PersistenceClient,
+): void {
   const t = world.tick;
   if (t === lastSavedTick) return;
   if (lastSavedTick >= 0 && t - lastSavedTick < AUTOSAVE_TICK_INTERVAL) return;
   if (nowMs - lastSavedWallMs < AUTOSAVE_WALL_FLOOR_MS) return;
-  const json = world.snapshot_json();
-  persistence.save(json, world.seed, t);
+  persistence.save(buildSaveEnvelope(world, cam), world.seed, t);
   lastSavedTick = t;
   lastSavedWallMs = nowMs;
 }
@@ -82,6 +117,7 @@ async function main(): Promise<void> {
   const urlSeed = params.get("seed");
 
   let world: WorldHandle | null = null;
+  let restoredCamera: { zoom: number; cx: number; cy: number } | null = null;
 
   // F.26: boot-path resume logic.
   if (!urlSeed) {
@@ -98,7 +134,9 @@ async function main(): Promise<void> {
         });
         if (userChose === "resume") {
           try {
-            world = WorldHandle.fromJson(row.json);
+            const { wasmJson, camera } = unwrapSaveEnvelope(row.json);
+            world = WorldHandle.fromJson(wasmJson);
+            restoredCamera = camera;
           } catch (e) {
             const msg = String(e);
             if (msg.startsWith("schema-mismatch:")) {
@@ -127,6 +165,11 @@ async function main(): Promise<void> {
 
   const stride = creature_stride();
   const cam = makeCamera(world.world_size);
+  if (restoredCamera) {
+    cam.zoom = restoredCamera.zoom;
+    cam.cx = restoredCamera.cx;
+    cam.cy = restoredCamera.cy;
+  }
   attachCameraControls(
     canvas,
     cam,
@@ -159,7 +202,7 @@ async function main(): Promise<void> {
 
     // F.26: autosave after each frame batch.
     if (!world!.world_ended) {
-      maybeAutosave(world!, now, persistence);
+      maybeAutosave(world!, cam, now, persistence);
     }
 
     // F.28: eulogy — fire once when world ends.

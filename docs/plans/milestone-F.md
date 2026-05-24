@@ -2320,3 +2320,79 @@ web/                             (+/edit existing)
   tick to advance).
 - Lineage tree visualization for the eulogy card and rail.
 - Trait histograms in Stats overlay.
+
+## Code review — APPROVED
+
+F.26 persistence is solid: `src/save.rs` SaveV1 has `schema_version: 1`
+checked first in `World::from_save_v1` (src/world.rs:939), all per-subsystem
+snapshots present (creatures SoA, sun, carrion, species, full event log,
+sliders, HoF, RNG, founder anchors, all bookkeeping). `rand_xoshiro`
+`serde1` feature pinned in Cargo.toml so `SimRng` round-trips exactly; the
+`f26_round_trip_preserves_rng` test in src/save.rs:357 acts as the
+divergence canary (ticks 100, snapshots, restores, ticks 100 more in both,
+asserts pop matches). SoA length validation, brain weight-count check, and
+grid+vision+cell_to_carrion rebuild on load all present and correct
+(src/world.rs:946-1040). Worker (`web/src/persistence/worker.ts`) is plain
+ES-module via `?worker`, single `"current"` IDB key. Autosave 300-tick +
+3000ms wall floor honored in `maybeAutosave` (web/src/main.ts:40-49). Resume
+prompt only fires when no `?seed=` and a save exists; `?seed=` always wins
+(web/src/main.ts:87-119). Schema-mismatch + corrupt-save both route to the
+single-button "New World" modal per v6 §I. Quota toast `web/src/persistence/toast.ts`
+fades after 6s and replaces (not stacks).
+
+F.28 eulogy: `WorldHandle::hof_json` (src/wasm_api.rs:344) emits all four
+slots with weirdest→longest_lived fallback (src/wasm_api.rs:346-350) and
+`day_count = tick / DAY_TICKS`. `web/src/eulogy.ts` shows the 2×2 grid,
+Copy Share Text format matches spec (`evosim seed=… — lived N days, peaked
+S species, see {url}`), Download Save uses `evosim-{seed}-day{N}.json`,
+New World calls `persistence.deleteCurrent()` then reloads sans `?seed=`.
+`eulogyShown` boolean (web/src/main.ts:52) gates single-fire. `DAY_TICKS =
+1000` lives in src/constants.rs:157.
+
+F.29 acceptance: `src/snapshot_hash.rs` orders inputs per v6 §M (tick →
+creatures with id/pos/vel/energy/age/genome-in-struct-order/NN-weights →
+sun row-major → carrion (x,y,pool,age — no id per DECISIONS) → species
+(id+anchor sub-hash) → RNG serde_json bytes), f32s via `to_bits()`, shared
+`hash_genome` helper. `tests/acceptance.rs` asserts all four DoD criteria
+with helpful messages; `EVOSIM_WRITE_GOLDEN=1` bootstrap path works;
+golden pinned at `0xc35be8a7905c7f05`. CI wires `cargo test --release
+--test acceptance` between `test (native)` and wasm-pack (ci.yml:25-26).
+`snapshot_hash_is_deterministic` and `snapshot_hash_same_seed_same_hash`
+tests in src/snapshot_hash.rs:131-158 confirm in-process determinism.
+
+F.30 sanity: `Brain::founder` in src/brain.rs:40-81 adds hardwired weights
+*after* random init; `child_from` (src/brain.rs:168-186) clones parent
+weights then mutates, so hardwired bias propagates correctly. SUN_REFILL_RATE
+= 0.30 (src/constants.rs:14), `DevSliders::default()` wires
+`base_sun_rate: SUN_REFILL_RATE` (src/world.rs:38). FOUNDER_SPLIT_JITTER =
+50.0 applied only in handle_births split logic (src/world.rs:840-841);
+founder placement at world center (src/world.rs:109-110) is untouched.
+
+Non-blockers (defer to v1.1 or capture in a follow-up):
+
+1. **Camera state not persisted.** v6 §C line 60 says "Camera state IS
+   persisted in autosave (zoom level + pan center). On resume, restored. On
+   New World, reset to default." The current SaveV1 (src/save.rs) and JS
+   loader (web/src/main.ts) ship neither a camera field in the JSON nor a
+   separate IDB key. The plan's prose at milestone-F.md:164 says
+   "Camera/UI state lives on JS side (see F.27)" but F.27 only adds the
+   seed-pill; no camera-restore code lands. DECISIONS has no line excusing
+   this. Recommend either (a) add `camera: { zoom, cx, cy }` field to
+   SaveV1 (bumps schema_version, invalidating any current saves) and
+   restore on load, or (b) add an explicit DECISIONS punt line for v1.1.
+   Treating as non-blocker because the rest of F.26 works and saves
+   round-trip cleanly; camera defaults to founder cell on every load.
+
+2. **No explicit save→load→step-N hash-equality test** as suggested in the
+   priority-check list. The existing `f26_round_trip_preserves_rng`
+   (src/save.rs:357) ticks 100 → snapshot → restore → tick 100 more in
+   both worlds and asserts population matches, which catches RNG drift but
+   not all-state drift. A stronger version comparing `snapshot_hash` after
+   the second 100 ticks would be more discriminating; safe to add in a
+   touch-up commit but not blocking F.
+
+3. F.26 plan mentioned "audit `nn_forward_all_chunks` to confirm rayon
+   feature off doesn't change the hash" — not directly verified here, but
+   the acceptance test passes (orchestrator confirms) and the same chunk
+   ranges are used either way per v6 §J, so the assumption holds.
+
