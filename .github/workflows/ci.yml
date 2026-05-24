@@ -22,6 +22,8 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: test (native)
         run: cargo test --lib
+      - name: acceptance test (perf gate + golden snapshot)
+        run: cargo test --release --test acceptance
       - name: install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
       - name: wasm-pack build
