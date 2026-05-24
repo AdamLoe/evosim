@@ -23,6 +23,13 @@ mod wasm_api;
 
 pub use wasm_api::*;
 
+// Threads: re-export `init_thread_pool` so wasm-bindgen emits an
+// `initThreadPool(num_threads: number) => Promise<void>` JS export.
+// JS must `await initThreadPool(navigator.hardwareConcurrency)` before
+// the first WorldHandle construction; see web/src/main.ts.
+#[cfg(feature = "threads")]
+pub use wasm_bindgen_rayon::init_thread_pool;
+
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(start)]

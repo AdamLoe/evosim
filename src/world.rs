@@ -1243,6 +1243,12 @@ impl World {
 /// `lo == hi`. Single-threaded path iterates them sequentially; the rayon
 /// path (behind `cfg(feature = "threads")`) iterates them in parallel —
 /// results are bit-identical because no RNG is consumed in the forward pass.
+///
+/// **Invariant (perf-4):** `vision.rs` uses `par_chunks_mut(n.div_ceil(N_CHUNKS).max(1))`
+/// which produces the same partition as this function for all `n`. Do not
+/// change one without updating the other, or vision and NN will partition
+/// creatures differently within a single tick and the threaded golden will
+/// silently drift.
 fn chunk_ranges(n: usize) -> [(usize, usize); N_CHUNKS] {
     let base = n.div_ceil(N_CHUNKS);
     let mut out = [(0usize, 0usize); N_CHUNKS];

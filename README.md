@@ -19,11 +19,14 @@ See [docs/README.md](docs/README.md) for the full documentation index.
 
 ## Local development
 
-Prereqs: Rust stable with `wasm32-unknown-unknown`, `wasm-pack`, Node 20+, pnpm.
+Prereqs: Rust stable + nightly (for wasm atomics) with `wasm32-unknown-unknown`,
+`wasm-pack`, Node 20+, pnpm.
 
 ```bash
-# 1. build the Rust → wasm package
-wasm-pack build --target web --out-dir web/wasm --dev
+# 1. build the Rust → wasm package (requires nightly for atomics/build-std)
+rustup toolchain install nightly --component rust-src
+rustup target add wasm32-unknown-unknown --toolchain nightly
+rustup run nightly wasm-pack build --target web --out-dir web/wasm --dev --features threads
 
 # 2. run the dev server (serves with COOP/COEP set for SharedArrayBuffer)
 cd web

@@ -24,10 +24,16 @@ jobs:
         run: cargo test --lib
       - name: acceptance test (perf gate + golden snapshot)
         run: cargo test --release --test acceptance
+      - name: acceptance test (threaded golden)
+        run: cargo test --release --features threads --test acceptance
       - name: install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: install nightly + rust-src (required for wasm atomics / build-std)
+        run: |
+          rustup toolchain install nightly --component rust-src
+          rustup target add wasm32-unknown-unknown --toolchain nightly
       - name: wasm-pack build
-        run: wasm-pack build --target web --out-dir web/wasm --release
+        run: rustup run nightly wasm-pack build --target web --out-dir web/wasm --release --features threads
 
   web:
     name: web typecheck + build
@@ -41,8 +47,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: install nightly + rust-src (required for wasm atomics / build-std)
+        run: |
+          rustup toolchain install nightly --component rust-src
+          rustup target add wasm32-unknown-unknown --toolchain nightly
       - name: wasm-pack build
-        run: wasm-pack build --target web --out-dir web/wasm --release
+        run: rustup run nightly wasm-pack build --target web --out-dir web/wasm --release --features threads
       - uses: actions/setup-node@v4
         with:
           node-version: "20"

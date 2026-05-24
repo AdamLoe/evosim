@@ -1,4 +1,4 @@
-import init, { WorldHandle, creature_stride } from "../wasm/evosim";
+import init, { WorldHandle, creature_stride, initThreadPool } from "../wasm/evosim";
 import { makeCamera, renderWorld } from "./render";
 import { attachCameraControls } from "./camera";
 import { installRail, pollRail, highlights } from "./rail/index";
@@ -122,6 +122,21 @@ function installSeedDisplay(seed: string): void {
 
 async function main(): Promise<void> {
   await init();
+
+  // Threads: spin up the rayon worker pool BEFORE any WorldHandle is
+  // constructed so the first tick gets parallelism. SAB feature-detect:
+  // browsers without SharedArrayBuffer skip initThreadPool — the wasm
+  // still works, just sequentially (rayon falls back to the calling
+  // thread when no workers are registered). See docs/plans/perf-4-threads.md.
+  if (typeof SharedArrayBuffer !== "undefined") {
+    try {
+      await initThreadPool(navigator.hardwareConcurrency);
+    } catch (e) {
+      console.warn("initThreadPool failed; continuing single-threaded:", e);
+    }
+  } else {
+    console.warn("SharedArrayBuffer not available; running single-threaded");
+  }
 
   // F.26: persistence client.
   const persistence = new PersistenceClient();

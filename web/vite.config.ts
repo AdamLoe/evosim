@@ -28,6 +28,14 @@ export default defineConfig({
     emptyOutDir: true,
     sourcemap: true,
   },
+  // wasm-bindgen-rayon spawns Web Workers via new URL('./workerHelpers.js',
+  // import.meta.url). Vite must bundle those workers as ES modules (not the
+  // default IIFE) so that code-splitting works. Without this, `pnpm build`
+  // errors with "UMD and IIFE output formats are not supported for
+  // code-splitting builds". See docs/plans/perf-4-threads.md §2d.
+  worker: {
+    format: "es",
+  },
   // Ensure the .wasm artifact next to the JS glue is treated as an asset Vite
   // can fingerprint and emit.
   assetsInclude: ["**/*.wasm"],

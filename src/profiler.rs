@@ -921,18 +921,24 @@ mod tests {
         clear_fake_clock();
 
         let t0 = clock_now_us();
-        // A tiny busy-spin to advance the real clock by at least a few µs.
-        let mut _sink = 0u64;
-        for i in 0..10_000u64 {
-            _sink = _sink.wrapping_add(i);
-        }
+        // Sleep to guarantee ≥1 µs elapsed on the real clock even under heavy
+        // CPU contention (e.g. rayon threads active during parallel test builds).
+        // Previously a busy-spin of 10_000 iterations, which was unreliable when
+        // the timer resolution is coarse or the spin finishes in < 1 µs.
+        std::thread::sleep(std::time::Duration::from_millis(1));
         let t1 = clock_now_us();
 
-        assert!(t1 >= t0, "clock_now_us must be non-decreasing (monotone): t0={t0} t1={t1}");
+        assert!(
+            t1 >= t0,
+            "clock_now_us must be non-decreasing (monotone): t0={t0} t1={t1}"
+        );
         // The OnceLock epoch is set on first call; both t0 and t1 are elapsed-from-epoch.
         // t0 could theoretically be 0 if called in the same µs as EPOCH init,
         // but t1 must be > 0 after the busy-spin.
-        assert!(t1 > 0, "clock_now_us must return non-zero after warm-up: t1={t1}");
+        assert!(
+            t1 > 0,
+            "clock_now_us must return non-zero after warm-up: t1={t1}"
+        );
     }
 
     /// Test: sample-cap behavior — when SAMPLES_PER_NODE is exceeded, oldest is dropped.

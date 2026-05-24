@@ -135,3 +135,43 @@ Format: `<topic>: <choice> — <one-line why>`.
 - founder brain energy sensor (see Brain::founder): with NN_INIT_RANGE=0.3 and small random inputs, ALL hidden units are dead at zero input (ReLU kills negative-summing rows). The founder NN for seed "evosim-test-001" would always output Rest (first-index tiebreak on all-zero logits). Fix: hardwire hidden unit 0 as energy sensor (w_ih[0][energy_frac] += 10), connect it positively to Split output (w_ho[Split][0] += 10), and add Photosynth base prior (w_ho[Photo][all] += 5). This gives: high energy → Split fires; low energy → Photo fires. Offspring mutate independently; the wiring only tilts the initial prior. Constants: NN_FOUNDER_ENERGY_SENSOR_STRENGTH=10, NN_FOUNDER_SPLIT_ENERGY_WEIGHT=10, NN_FOUNDER_PHOTO_BIAS=5.
 - SUN_REFILL_RATE raised from 0.08 to 0.30: with R=0.08, steady-state photo gain for 1 creature in a single sun cell (cap≈2) is 0.16×0.5/0.58=0.138/tick, below minimum upkeep 0.15/tick. At R=0.30, steady-state current=0.46 → photo gain≈0.46/tick >> upkeep. The slider default was 0.08 in the pitch (§3.3), which is below viability threshold — a balance oversight. FOUNDER_SPLIT_JITTER increased from 1.0 to 50.0: offspring spread across sun cells (jitter ±50u vs sun cell 30u wide), avoiding sun depletion from 3+ creatures in one cell.
 
+## Threads (perf-4)
+
+- **Dual-golden design.** `tests/golden_snapshot_t10000.txt` pins the
+  default-build (sequential) hash and stays bit-stable across perf
+  pieces. `tests/golden_snapshot_t10000_threaded.txt` pins the
+  `--features threads` hash. Threaded acceptance test asserts a
+  separate golden file because the bootstrap may yield identical OR
+  different hash; either outcome is acceptable and the dual-file
+  design future-proofs both cases. Each codepath is deterministic
+  against itself; we do not promise bit-identity between codepaths.
+  (Bootstrap result: hashes are **identical** — `0xb76e907c6221f7f5` —
+  confirming the static-analysis prediction that arithmetic is
+  bit-identical across sequential and parallel paths.)
+- **Bootstrap.** Sequential: `EVOSIM_WRITE_GOLDEN=1 cargo test --release
+  --test acceptance`. Threaded: `EVOSIM_WRITE_GOLDEN_THREADED=1 cargo
+  test --release --features threads --test acceptance
+  acceptance_t10000_threaded`. Regen rule: only regen a golden when its
+  codepath intentionally changes — never as a fix for accidental drift.
+- **Build behavior.** `pnpm build` and CI both build the wasm artifact
+  with `--features threads`. SAB-less browsers fall through the JS-side
+  `typeof SharedArrayBuffer !== 'undefined'` gate in `web/src/main.ts`
+  and skip `initThreadPool`; rayon runs work on the calling thread
+  with no perf change vs today.
+- **Nightly wasm build.** `wasm-bindgen-rayon` requires `-C
+  target-feature=+atomics,+bulk-memory,+mutable-globals` and
+  `-Z build-std=panic_abort,std` for the wasm32 target (atomics
+  are not yet stabilized in the wasm target). `.cargo/config.toml`
+  sets these flags for `[target.wasm32-unknown-unknown]` only; native
+  (`x86_64`) builds use stable Rust unaffected. CI gains a
+  `rust-toolchain.toml` pointing to nightly for the wasm-pack steps.
+  `vite.config.ts` gains `worker: { format: "es" }` so Vite bundles
+  the rayon worker helper as an ES module (not IIFE).
+- **WSL2 rayon overhead.** On WSL2, rayon with 8+ threads is ~9× slower
+  than sequential for the 10k-tick acceptance test due to kernel thread
+  scheduling overhead. The threaded perf budget check (`PERF_BUDGET_MS =
+  8_000`) passes on real Linux CI (ubuntu-latest) where rayon is faster
+  than sequential; on WSL2 use `RAYON_NUM_THREADS=1` to run the gate
+  locally. Bootstrap path skips the perf check to always succeed.
+- **Plan ref.** `docs/plans/perf-4-threads.md`.
+

@@ -1,0 +1,10 @@
+# Target-specific flags for the wasm32 build with threads.
+# Required by wasm-bindgen-rayon: atomics + bulk-memory enable SharedArrayBuffer
+# thread spawning in the browser. build-std rebuilds std with atomics support.
+# These flags are ONLY active when building for wasm32-unknown-unknown.
+# Native (x86_64) builds are unaffected.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+atomics,+bulk-memory,+mutable-globals"]
+
+[unstable]
+build-std = ["panic_abort", "std"]

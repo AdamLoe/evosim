@@ -45,10 +45,42 @@ pub struct VisionPass<'a> {
 impl<'a> VisionPass<'a> {
     /// Populate `out[i]` for every creature with the post-grid-rebuild state.
     /// `out.len() >= creatures.len()` precondition.
+    ///
+    /// Sequential by default. Behind `cfg(feature = "threads")` the work is
+    /// partitioned into at most `N_CHUNKS` disjoint creature ranges via
+    /// rayon `par_chunks_mut` (mirrors the v6 §J chunking used by
+    /// `nn_forward_all_chunks`). Vision is RNG-free and writes only to its
+    /// own `out[i]`, so the parallel path is bit-identical to the sequential
+    /// path (no sub-RNG plumbing required).
     pub fn run(&self, out: &mut [VisionBuf]) {
         let n = self.creatures.len();
-        for i in 0..n {
-            self.fill_one(i, &mut out[i]);
+
+        #[cfg(not(feature = "threads"))]
+        {
+            for i in 0..n {
+                self.fill_one(i, &mut out[i]);
+            }
+        }
+
+        #[cfg(feature = "threads")]
+        {
+            use rayon::prelude::*;
+            // Fixed N_CHUNKS partitioning per v6 §J. div_ceil + max(1)
+            // ensures rayon yields at most N_CHUNKS chunks even when
+            // n < N_CHUNKS (the tail chunks just have len 0 / 1).
+            // SAB-less browsers reach this code but rayon runs the work on the
+            // calling thread (silent fallback per wasm-bindgen-rayon docs when
+            // initThreadPool was never awaited).
+            let chunk_size = n.div_ceil(crate::constants::N_CHUNKS).max(1);
+            out[..n]
+                .par_chunks_mut(chunk_size)
+                .enumerate()
+                .for_each(|(chunk_idx, sub)| {
+                    let lo = chunk_idx * chunk_size;
+                    for k in 0..sub.len() {
+                        self.fill_one(lo + k, &mut sub[k]);
+                    }
+                });
         }
     }
 

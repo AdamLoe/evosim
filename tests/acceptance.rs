@@ -4,6 +4,7 @@
 //! Bootstrap: `EVOSIM_WRITE_GOLDEN=1 cargo test --release --test acceptance`
 //! writes `tests/golden_snapshot_t10000.txt`. Subsequent runs assert against it.
 
+#[cfg(not(feature = "threads"))]
 use evosim::save::SaveV1;
 use evosim::snapshot_hash::snapshot_hash;
 use evosim::world::World;
@@ -12,8 +13,10 @@ use std::time::Instant;
 const SEED: &str = "evosim-test-001";
 const TICKS: u32 = 10_000;
 const PERF_BUDGET_MS: u128 = 8_000;
+#[cfg(not(feature = "threads"))]
 const GOLDEN_PATH: &str = "tests/golden_snapshot_t10000.txt";
 
+#[cfg(not(feature = "threads"))]
 #[test]
 fn acceptance_t10000() {
     let mut w = World::new(SEED);
@@ -77,6 +80,7 @@ fn acceptance_t10000() {
 /// Test 7 (profiler plan): enabling the profiler at t=0 must NOT change
 /// the golden snapshot hash. This asserts the observation-purity guarantee
 /// (D10): profiler is a pure observer and has zero effect on sim state.
+#[cfg(not(feature = "threads"))]
 #[test]
 fn profile_does_not_change_hash() {
     let mut w = World::new(SEED);
@@ -110,6 +114,7 @@ fn profile_does_not_change_hash() {
 /// F.26 round-trip: save at tick N, load, step M more, hash must equal
 /// the no-save reference. Closes the F reviewer non-blocker about lacking
 /// an end-to-end save/load determinism test.
+#[cfg(not(feature = "threads"))]
 #[test]
 fn save_load_step_preserves_determinism() {
     const SAVE_AT: u32 = 1_000;
@@ -144,5 +149,84 @@ fn save_load_step_preserves_determinism() {
         "save→load→step{RESUME_STEPS} diverged from reference at tick {}; \
          ref={ref_hash:#018x}, loaded={loaded_hash:#018x}",
         loaded.tick,
+    );
+}
+
+/// Threaded acceptance test (perf-4 dual-golden protocol).
+///
+/// Runs the same 10k-tick scenario as `acceptance_t10000` but with the
+/// `threads` feature active (parallel NN forward + parallel vision).
+/// Asserts against a SEPARATE pinned golden file. Static inspection of
+/// the threaded NN-forward block (src/world.rs:351–424) vs the
+/// sequential helpers (src/world.rs:1117–1161) shows bit-identical
+/// arithmetic, and vision is RNG-free, so the bootstrapped threaded
+/// hash MAY equal the sequential one. If it differs, the source is
+/// parallel f32 reduction order across chunks. Either outcome is
+/// acceptable; each codepath is deterministic against itself.
+///
+/// Bootstrap:
+///   EVOSIM_WRITE_GOLDEN_THREADED=1 cargo test --release \
+///       --features threads --test acceptance acceptance_t10000_threaded
+///
+/// See docs/plans/perf-4-threads.md §7 for the full bootstrap recipe.
+#[cfg(feature = "threads")]
+#[test]
+fn acceptance_t10000_threaded() {
+    const GOLDEN_PATH_THREADED: &str = "tests/golden_snapshot_t10000_threaded.txt";
+
+    let mut w = World::new(SEED);
+    let started = Instant::now();
+    for _ in 0..TICKS {
+        if !w.tick_once() {
+            break;
+        }
+    }
+    let elapsed_ms = started.elapsed().as_millis();
+
+    assert!(
+        w.population() > 0,
+        "(a) population must be > 0 at tick {TICKS}"
+    );
+    assert!(
+        w.live_species_count >= 2,
+        "(b) live_species_count must be ≥ 2"
+    );
+
+    let hash = snapshot_hash(&w);
+
+    // Bootstrap mode: write the golden file and skip the perf/hash assertions.
+    // Run with: EVOSIM_WRITE_GOLDEN_THREADED=1 cargo test --release
+    //            --features threads --test acceptance acceptance_t10000_threaded
+    if std::env::var("EVOSIM_WRITE_GOLDEN_THREADED").is_ok() {
+        std::fs::write(GOLDEN_PATH_THREADED, format!("{hash:#018x}\n"))
+            .expect("write threaded golden");
+        eprintln!(
+            "wrote threaded golden snapshot: {hash:#018x}  (tick={})",
+            w.tick
+        );
+        return;
+    }
+
+    // (c) wall-clock under budget — checked after bootstrap path so bootstrap
+    // always succeeds even on slow environments (WSL2, low-core CI). On real
+    // Linux CI this comfortably fits in 8 s; rayon's thread-pool overhead
+    // in WSL2 can exceed the budget, but WSL2 is not a CI target.
+    assert!(
+        elapsed_ms < PERF_BUDGET_MS,
+        "(c) threaded sim took {elapsed_ms} ms; budget {PERF_BUDGET_MS} ms",
+    );
+
+    let golden_str = std::fs::read_to_string(GOLDEN_PATH_THREADED).expect(
+        "threaded golden file missing; bootstrap with: \
+         EVOSIM_WRITE_GOLDEN_THREADED=1 cargo test --release \
+         --features threads --test acceptance acceptance_t10000_threaded",
+    );
+    let golden_str = golden_str.trim();
+    let golden: u64 = u64::from_str_radix(golden_str.trim_start_matches("0x"), 16)
+        .expect("malformed threaded golden hash");
+
+    assert_eq!(
+        hash, golden,
+        "(d) threaded snapshot hash mismatch: got {hash:#018x}, golden {golden:#018x}",
     );
 }
