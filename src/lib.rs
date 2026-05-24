@@ -9,6 +9,7 @@ pub mod creature;
 pub mod events;
 pub mod genome;
 pub mod grid;
+pub mod hof;
 pub mod rng;
 pub mod species;
 pub mod sun;
