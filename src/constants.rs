@@ -133,6 +133,10 @@ pub const MAX_CELLS_PER_RAY: usize = 64;
 /// core counts; v6 §J example value).
 pub const N_CHUNKS: usize = 8;
 
+// ---- Population milestones (v5 §11, E.25.a) ----
+/// Thresholds that fire a PopulationMilestone event once per threshold ever (v5 §11).
+pub const POPULATION_MILESTONES: [u32; 6] = [10, 50, 100, 500, 1000, 2000];
+
 // ---- Acceptance test (v5 §16) ----
 pub const ACCEPTANCE_TICKS: u32 = 10_000;
 pub const ACCEPTANCE_SEED: &str = "evosim-test-001";

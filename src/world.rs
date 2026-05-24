@@ -61,6 +61,9 @@ pub struct World {
     pub live_species_count: u32,
     pub first_move_fired: bool,
     pub first_eat_fired: bool,
+    /// Bitset of population milestone thresholds that have fired (v5 §11, E.25.a).
+    /// Bit k = POPULATION_MILESTONES[k] was crossed. One-shot: never cleared.
+    pub population_milestones_fired: u32,
     /// Per-creature vision cache (index-aligned with CreatureSoA). Milestone C.12.
     pub vision: Vec<VisionBuf>,
     /// Per-cell carrion lookup, rebuilt each tick before vision pass. Size = HASH_DIM².
@@ -113,6 +116,7 @@ impl World {
             live_species_count: 1,
             first_move_fired: false,
             first_eat_fired: false,
+            population_milestones_fired: 0,
             vision: vec![[0.0f32; VISION_LEN]], // 1 for the founder
             cell_to_carrion: Vec::new(),
             pending_extinction_check: Vec::new(),
@@ -185,11 +189,24 @@ impl World {
         }
 
         self.tick = self.tick.saturating_add(1);
-        if self.creatures.len() as u32 > self.peak_population {
-            self.peak_population = self.creatures.len() as u32;
+        let pop = self.creatures.len() as u32;
+        if pop > self.peak_population {
+            self.peak_population = pop;
         }
         if self.live_species_count > self.peak_species_count {
             self.peak_species_count = self.live_species_count;
+        }
+
+        // E.25.a: PopulationMilestone events (v5 §11 — once per threshold ever).
+        for (k, &threshold) in POPULATION_MILESTONES.iter().enumerate() {
+            let bit = 1u32 << k;
+            if pop >= threshold && (self.population_milestones_fired & bit) == 0 {
+                self.population_milestones_fired |= bit;
+                self.events.push(Event {
+                    tick: self.tick,
+                    kind: EventKind::PopulationMilestone { population: threshold },
+                });
+            }
         }
 
         if self.creatures.is_empty() {
@@ -1403,6 +1420,42 @@ mod tests {
             "Expected always-valid action, got {:?}",
             act
         );
+    }
+
+    // ---- E.25.a test ----
+
+    /// E.25.a: PopulationMilestone events fire once per threshold, never repeat.
+    #[test]
+    fn e25_population_milestones_fire_once() {
+        use crate::brain::Brain;
+        use crate::vision::VISION_LEN;
+
+        let mut w = World::new("e25-milestones");
+        let mut seeder = SimRng::from_string("e25-seed");
+
+        // Manually push 9 extra creatures to hit threshold 10.
+        for k in 1u64..10 {
+            let g = Genome::founder();
+            let b = Brain::founder(&mut seeder);
+            w.creatures.push(k, 100.0 + k as f32, 100.0, FOUNDER_ENERGY, 0, 0, 0, g, b);
+            w.vision.push([0.0f32; VISION_LEN]);
+        }
+        assert_eq!(w.population(), 10);
+
+        // tick_once calls step() which checks milestones.
+        w.tick_once();
+
+        let milestone10_events: Vec<_> = w.events.all.iter()
+            .filter(|e| matches!(e.kind, EventKind::PopulationMilestone { population: 10 }))
+            .collect();
+        assert_eq!(milestone10_events.len(), 1, "threshold 10 must fire exactly once");
+
+        // Tick again — must not re-fire.
+        w.tick_once();
+        let milestone10_count = w.events.all.iter()
+            .filter(|e| matches!(e.kind, EventKind::PopulationMilestone { population: 10 }))
+            .count();
+        assert_eq!(milestone10_count, 1, "threshold 10 must not re-fire after first crossing");
     }
 
     // ---- E.25.b test ----
