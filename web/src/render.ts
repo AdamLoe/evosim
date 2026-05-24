@@ -2,6 +2,17 @@
 // requestAnimationFrame from main.ts with a fresh creature/sun/carrion snapshot.
 
 import type { WorldHandle } from "../wasm/evosim";
+import type { GenomeJson } from "./eulogy"; // used by renderCreaturePortrait below
+
+/// Ring colors per v6 §B: eye=white, move=yellow, scav=brown, mouth=red, armor=silver.
+/// Shared between drawCreatures (SoA path) and renderCreaturePortrait (F.28).
+export const RING_COLORS = {
+  eye: "rgba(255,255,255,0.85)",
+  move: "rgba(240,220, 80,0.85)",
+  scav: "rgba(140, 90, 40,0.85)",
+  mouth: "rgba(255, 80, 80,0.85)",
+  armor: "rgba(200,200,210,0.85)",
+} as const;
 
 export interface Camera {
   zoom: number; // 1 = 1 world-unit / pixel × (px-per-size-base)
@@ -143,7 +154,7 @@ export function drawCreatures(
     // Active-trait rings (v6 §B) — drawn inward from the body edge.
     // Ring order (innermost→outermost): eye(white), move(yellow),
     // scav(brown), mouth(red), armor(silver). v6 §B fixes eye=innermost;
-    // rest ordered by DECISIONS (see DECISIONS.md).
+    // rest ordered by DECISIONS (see DECISIONS.md). Colors from RING_COLORS.
     let ringR = radiusPx - 1;
     const RING_STEP = 1.5;
     const drawRing = (color: string): void => {
@@ -155,11 +166,11 @@ export function drawCreatures(
       ctx.stroke();
       ringR -= RING_STEP;
     };
-    if (flagEye)   drawRing("rgba(255,255,255,0.85)"); // white  — innermost
-    if (flagMove)  drawRing("rgba(240,220, 80,0.85)"); // yellow
-    if (flagScav)  drawRing("rgba(140, 90, 40,0.85)"); // brown
-    if (flagMouth) drawRing("rgba(255, 80, 80,0.85)"); // red
-    if (flagArmor) drawRing("rgba(200,200,210,0.85)"); // silver — outermost
+    if (flagEye)   drawRing(RING_COLORS.eye);   // white  — innermost
+    if (flagMove)  drawRing(RING_COLORS.move);  // yellow
+    if (flagScav)  drawRing(RING_COLORS.scav);  // brown
+    if (flagMouth) drawRing(RING_COLORS.mouth); // red
+    if (flagArmor) drawRing(RING_COLORS.armor); // silver — outermost
 
     // E.22: highlight ring — golden rgb(255,200,50), 2px, fades over 1.5s (v6 §B).
     if (highlightIdx.has(idx)) {
@@ -211,4 +222,54 @@ export function renderWorld(
   drawAquariumFrame(ctx, cam, viewW, viewH, world.world_size);
   drawCarrion(ctx, cam, viewW, viewH, world.carrion_buffer());
   drawCreatures(ctx, cam, viewW, viewH, world.creatures_buffer(), ids, stride, highlightMap, nowMs);
+}
+
+/// F.28 — single-creature portrait renderer. Renders a creature from a GenomeJson
+/// into a fresh offscreen canvas (canvasSize × canvasSize px), centered.
+/// Used by the eulogy card image grid. Ring colors match RING_COLORS.
+export function renderCreaturePortrait(genome: GenomeJson, canvasSize = 96): HTMLCanvasElement {
+  const c = document.createElement("canvas");
+  c.width = canvasSize;
+  c.height = canvasSize;
+  const ctx = c.getContext("2d")!;
+
+  // Dark background to match aquarium.
+  ctx.fillStyle = "rgba(8, 12, 20, 1)";
+  ctx.fillRect(0, 0, canvasSize, canvasSize);
+
+  const cx = canvasSize / 2;
+  const cy = canvasSize / 2;
+
+  // Pick a fixed portrait zoom: largest size we expect (~10) should fit with
+  // 8px margin. radius_px = size × portraitScale. Want 10 × scale = canvasSize/2 - 8.
+  const portraitScale = (canvasSize / 2 - 8) / 10;
+  const radiusPx = Math.max(6, genome.size * portraitScale);
+
+  // Body fill (pigment).
+  const r = Math.round(genome.pigment_r * 255);
+  const g = Math.round(genome.pigment_g * 255);
+  const b = Math.round(genome.pigment_b * 255);
+  ctx.fillStyle = `rgb(${r},${g},${b})`;
+  ctx.beginPath();
+  ctx.arc(cx, cy, radiusPx, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Active-trait rings (same order as drawCreatures; RING_COLORS shared).
+  let ringR = radiusPx - 1;
+  const drawPortraitRing = (color: string): void => {
+    if (ringR < 1) return;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(cx, cy, ringR, 0, Math.PI * 2);
+    ctx.stroke();
+    ringR -= 1.5;
+  };
+  if (genome.eye_count > 0)            drawPortraitRing(RING_COLORS.eye);
+  if (genome.move_speed > 0)           drawPortraitRing(RING_COLORS.move);
+  if (genome.scavenge_efficiency > 0)  drawPortraitRing(RING_COLORS.scav);
+  if (genome.eat_efficiency > 0)       drawPortraitRing(RING_COLORS.mouth);
+  if (genome.armor > 0)                drawPortraitRing(RING_COLORS.armor);
+
+  return c;
 }

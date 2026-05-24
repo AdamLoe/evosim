@@ -3,6 +3,10 @@ import { makeCamera, renderWorld } from "./render";
 import { attachCameraControls } from "./camera";
 import { installRail, pollRail, highlights } from "./rail/index";
 import { installCanvasClickHandler } from "./rail/inspector";
+import { PersistenceClient } from "./persistence";
+import { showResumePrompt, showSchemaMismatchModal } from "./persistence/ui";
+import { showAutosaveFailureToast } from "./persistence/toast";
+import { showEulogyCard } from "./eulogy";
 
 const status = document.getElementById("status") as HTMLSpanElement;
 const canvas = document.getElementById("aquarium") as HTMLCanvasElement;
@@ -27,19 +31,107 @@ resize();
 type Speed = 0 | 1 | 10 | 100;
 let speed: Speed = 1;
 
+// F.26: autosave parameters (v5 §13, F.26 DECISIONS).
+const AUTOSAVE_TICK_INTERVAL = 300; // 10 sim-seconds at 30-tick/s baseline
+const AUTOSAVE_WALL_FLOOR_MS = 3000; // never save more often than 3s wall-clock
+let lastSavedTick = -1;
+let lastSavedWallMs = 0;
+
+function maybeAutosave(world: WorldHandle, nowMs: number, persistence: PersistenceClient): void {
+  const t = world.tick;
+  if (t === lastSavedTick) return;
+  if (lastSavedTick >= 0 && t - lastSavedTick < AUTOSAVE_TICK_INTERVAL) return;
+  if (nowMs - lastSavedWallMs < AUTOSAVE_WALL_FLOOR_MS) return;
+  const json = world.snapshot_json();
+  persistence.save(json, world.seed, t);
+  lastSavedTick = t;
+  lastSavedWallMs = nowMs;
+}
+
+// F.28: eulogy gate — shown exactly once per session.
+let eulogyShown = false;
+
+// F.27: seed display + copy button.
+function installSeedDisplay(seed: string): void {
+  const valueEl = document.getElementById("seed-value");
+  if (valueEl) valueEl.textContent = seed;
+  const btn = document.getElementById("seed-copy-btn") as HTMLButtonElement | null;
+  if (btn) {
+    btn.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(seed);
+        btn.textContent = "copied";
+        setTimeout(() => (btn.textContent = "copy"), 1200);
+      } catch (e) {
+        console.warn("clipboard copy failed", e);
+      }
+    });
+  }
+}
+
 async function main(): Promise<void> {
   await init();
 
+  // F.26: persistence client.
+  const persistence = new PersistenceClient();
+  persistence.setHandlers({
+    onError: (_code, _msg) => showAutosaveFailureToast(),
+  });
+
   const params = new URLSearchParams(window.location.search);
-  const seed = params.get("seed") ?? "";
-  const world = new WorldHandle(seed);
+  const urlSeed = params.get("seed");
+
+  let world: WorldHandle | null = null;
+
+  // F.26: boot-path resume logic.
+  if (!urlSeed) {
+    // No explicit seed → probe for a saved world.
+    try {
+      const row = await persistence.loadCurrent();
+      if (row) {
+        const DAY_TICKS = 1000;
+        const day = Math.floor(row.tick / DAY_TICKS);
+        const userChose = await showResumePrompt({
+          day,
+          seed: row.seed,
+          savedAtMs: row.saved_at_ms,
+        });
+        if (userChose === "resume") {
+          try {
+            world = WorldHandle.fromJson(row.json);
+          } catch (e) {
+            const msg = String(e);
+            if (msg.startsWith("schema-mismatch:")) {
+              await showSchemaMismatchModal();
+            } else {
+              console.warn("load failed (treating as unusable save):", msg);
+              await showSchemaMismatchModal();
+            }
+            // Fall through to fresh world.
+          }
+        }
+        // userChose === "new" → fall through to fresh world.
+      }
+    } catch (e) {
+      // Worker error at load time — log and proceed fresh (no toast; user wasn't expecting feedback).
+      console.warn("resume probe failed:", e);
+    }
+  }
+
+  if (!world) {
+    world = new WorldHandle(urlSeed ?? "");
+  }
+
+  // F.27: seed display.
+  installSeedDisplay(world.seed);
+
   const stride = creature_stride();
   const cam = makeCamera(world.world_size);
   attachCameraControls(
     canvas,
     cam,
     () => ({ w: viewW, h: viewH }),
-    () => world.world_size,
+    () => world!.world_size,
   );
 
   status.textContent = `seed: ${world.seed}  ·  tick 0  ·  pop ${world.population}`;
@@ -53,26 +145,39 @@ async function main(): Promise<void> {
   // E.24: canvas click → inspector.
   installCanvasClickHandler(canvas, cam, () => ({ w: viewW, h: viewH }), world, rail);
 
-  // Sim loop.
+  // Sim + render loop.
   let lastRender = performance.now();
   function frame(now: number): void {
     const delta = now - lastRender;
     lastRender = now;
-    const ticksThisFrame = speed === 0 ? 0 : Math.min(200, Math.max(1, Math.round((speed * delta) / 16.66)));
-    if (ticksThisFrame > 0) {
-      world.step_n(ticksThisFrame);
+    const ticksThisFrame =
+      speed === 0 ? 0 : Math.min(200, Math.max(1, Math.round((speed * delta) / 16.66)));
+
+    if (ticksThisFrame > 0 && !world!.world_ended) {
+      world!.step_n(ticksThisFrame);
+    }
+
+    // F.26: autosave after each frame batch.
+    if (!world!.world_ended) {
+      maybeAutosave(world!, now, persistence);
+    }
+
+    // F.28: eulogy — fire once when world ends.
+    if (world!.world_ended && !eulogyShown) {
+      eulogyShown = true;
+      showEulogyCard(world!, persistence);
     }
 
     // Fetch ids buffer once per frame (index-aligned with creatures_buffer).
-    const ids = world.creature_ids_buffer() as unknown as Float64Array;
+    const ids = world!.creature_ids_buffer() as unknown as Float64Array;
 
     // E.21/E.22/E.23/E.24: poll the rail (events, toasts, highlights, stats, inspector).
-    pollRail(rail, world, ids);
+    pollRail(rail, world!, ids);
 
-    renderWorld(ctx!, cam, viewW, viewH, world, stride, ids, highlights, now);
+    renderWorld(ctx!, cam, viewW, viewH, world!, stride, ids, highlights, now);
 
-    const ended = world.world_ended ? "  (world ended)" : "";
-    status.textContent = `seed: ${world.seed}  ·  tick ${world.tick}  ·  pop ${world.population}  ·  species ${world.species_count}${ended}`;
+    const ended = world!.world_ended ? "  (world ended)" : "";
+    status.textContent = `seed: ${world!.seed}  ·  tick ${world!.tick}  ·  pop ${world!.population}  ·  species ${world!.species_count}${ended}`;
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
@@ -84,7 +189,7 @@ function installSpeedControls(): void {
   wrap.style.marginLeft = "auto";
   for (const s of [0, 1, 10, 100] as const) {
     const btn = document.createElement("button");
-    btn.textContent = s === 0 ? "❚❚" : `${s}×`;
+    btn.textContent = s === 0 ? "pause" : `${s}x`;
     btn.style.marginLeft = "4px";
     btn.style.background = "rgba(255,255,255,0.08)";
     btn.style.color = "var(--fg)";

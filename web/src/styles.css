@@ -179,3 +179,144 @@ body {
   display: block;
   margin-bottom: 8px;
 }
+
+/* F.26: Resume + schema-mismatch modals */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 30;
+}
+.modal-card {
+  background: var(--rail-bg);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  padding: 20px 28px;
+  min-width: 320px;
+  max-width: 480px;
+  color: var(--fg);
+}
+.modal-card h2 {
+  margin: 0 0 8px 0;
+  font-size: 16px;
+}
+.modal-card p {
+  margin: 4px 0;
+  font-size: 13px;
+}
+.modal-card p.muted {
+  opacity: 0.55;
+  font-size: 11px;
+}
+.modal-card .modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+.modal-card button {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: var(--fg);
+  padding: 6px 14px;
+  border-radius: 3px;
+  font: inherit;
+  cursor: pointer;
+}
+.modal-card button.primary {
+  background: rgba(80, 140, 200, 0.35);
+  border-color: rgba(120, 180, 240, 0.45);
+}
+.modal-card button:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+/* F.26: Autosave failure status toast (top-center, red, 6s) */
+#autosave-toast.status-toast {
+  position: fixed;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(180, 60, 60, 0.95);
+  color: #fff;
+  padding: 6px 12px;
+  border-radius: 4px;
+  font-size: 12px;
+  z-index: 20;
+  animation: status-toast-fade 6s ease-out forwards;
+  pointer-events: none;
+}
+@keyframes status-toast-fade {
+  0% { opacity: 0; }
+  5% { opacity: 1; }
+  90% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+/* F.27: Seed pill in top bar */
+.seed-pill {
+  margin-left: 12px;
+  padding: 2px 6px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 3px;
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+}
+#seed-copy-btn {
+  background: transparent;
+  color: var(--fg);
+  border: 0;
+  padding: 0 2px;
+  cursor: pointer;
+  font: inherit;
+}
+
+/* F.28: Eulogy card */
+.eulogy-backdrop {
+  background: rgba(8, 12, 20, 0.7);
+}
+.eulogy-card {
+  min-width: 480px;
+  max-width: 580px;
+  text-align: center;
+}
+.eulogy-card h2 {
+  font-size: 18px;
+  margin-bottom: 12px;
+}
+.eulogy-headline {
+  font-size: 14px;
+}
+.eulogy-seed code {
+  background: rgba(255, 255, 255, 0.08);
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-family: ui-monospace, monospace;
+}
+.eulogy-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin: 20px 0;
+}
+.eulogy-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+.eulogy-cell-canvas {
+  width: 96px;
+  height: 96px;
+}
+.eulogy-cell-caption {
+  font-size: 11px;
+  opacity: 0.75;
+  font-family: ui-monospace, monospace;
+}
