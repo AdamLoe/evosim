@@ -2,7 +2,7 @@ import init, { WorldHandle, creature_stride, initThreadPool } from "../wasm/evos
 import { makeCamera, renderWorld } from "./render";
 import { attachCameraControls } from "./camera";
 import { installRail, pollRail, highlights } from "./rail/index";
-import { installProfilerPanel } from "./rail/stats";
+import { installProfilerPanel } from "./widgets/perf-panel";
 import { installCanvasClickHandler } from "./rail/inspector";
 import { PersistenceClient } from "./persistence";
 import { showResumePrompt, showSchemaMismatchModal } from "./persistence/ui";

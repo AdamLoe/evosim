@@ -358,10 +358,24 @@ body {
   font: inherit;
 }
 
-/* Profiler panel (perf-timing plan) */
-#profiler-panel {
-  margin-top: 8px;
+/* ui-perf: free-standing perf widget (bottom-left, always visible).
+   Builds on .overlay-widget (defined by ui-stats). */
+#perf-box {
+  bottom: 8px;
+  left: 8px;
+  min-width: 560px;
+  max-width: 760px;
+  overflow-x: auto;
+  pointer-events: none;
 }
+/* Interactive children opt back in; the text/layout regions
+   (padding, stabilizing banner) remain pointer-events: none so
+   canvas pan-through works on all non-interactive areas (M4/M5). */
+.profiler-toggle,
+.profiler-table {
+  pointer-events: auto;
+}
+
 .profiler-toggle {
   display: inline-flex;
   gap: 4px;
@@ -376,21 +390,22 @@ body {
   color: rgba(255, 200, 100, 0.85);
   margin: 3px 0;
 }
+
+/* Widened: auto column sizing, nowrap to prevent mid-cell wrap,
+   generous horizontal padding so columns don't visually collide. */
 .profiler-table {
+  table-layout: auto;
   width: 100%;
-  font: 11px ui-monospace, monospace;
   border-collapse: collapse;
+  font: 11px ui-monospace, monospace;
   color: var(--fg);
   margin-top: 4px;
-  table-layout: fixed;
+  white-space: nowrap;
 }
 .profiler-table th,
 .profiler-table td {
-  padding: 1px 3px;
+  padding: 2px 8px;
   text-align: right;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .profiler-table th:first-child,
 .profiler-table td.pf-name {
@@ -402,6 +417,14 @@ body {
 .profiler-table tr.pf-depth-2 td.pf-name { padding-left: 24px; }
 .profiler-table tr.pf-depth-3 td.pf-name { padding-left: 36px; }
 .profiler-table tr.pf-depth-4 td.pf-name { padding-left: 48px; }
+
+/* D5: empty-state hint inside tbody when no samples are recorded. */
+.profiler-table tr td.pf-empty-hint {
+  text-align: center;
+  opacity: 0.45;
+  font-style: italic;
+  padding: 8px 0;
+}
 
 /* F.28: Eulogy card */
 .eulogy-backdrop {

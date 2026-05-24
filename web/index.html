@@ -63,26 +63,28 @@
       <!-- Events panel hidden for v1.1 revisit -->
       <section id="rail-events" class="rail-panel" style="display:none"></section>
       <section id="rail-stats" class="rail-panel is-active">
-        <div id="profiler-panel">
-          <label class="profiler-toggle">
-            <input type="checkbox" id="profiler-enable" />
-            profiler
-          </label>
-          <div id="profiler-stabilizing" class="profiler-stabilizing" style="display:none"></div>
-          <table id="profiler-table" class="profiler-table">
-            <thead>
-              <tr>
-                <th>Stage</th><th>total ms</th><th>calls</th>
-                <th>/call us</th><th>calls/par</th><th>share %</th>
-              </tr>
-            </thead>
-            <tbody id="profiler-tbody"></tbody>
-          </table>
-        </div>
       </section>
       <!-- Inspector content evicted to #inspector-box (ui-inspector). -->
       <section id="rail-inspector" class="rail-panel"></section>
     </aside>
+
+    <!-- ui-perf: free-standing perf widget (bottom-left, always visible) -->
+    <div id="perf-box" class="overlay-widget perf-widget">
+      <label class="profiler-toggle">
+        <input type="checkbox" id="profiler-enable" />
+        profiler
+      </label>
+      <div id="profiler-stabilizing" class="profiler-stabilizing" style="display:none"></div>
+      <table id="profiler-table" class="profiler-table">
+        <thead>
+          <tr>
+            <th>Stage</th><th>total ms</th><th>calls</th>
+            <th>/call us</th><th>calls/par</th><th>share %</th>
+          </tr>
+        </thead>
+        <tbody id="profiler-tbody"></tbody>
+      </table>
+    </div>
 
     <!-- E.22: toast container, top-right just left of the rail -->
     <div id="toast-stack" aria-live="polite"></div>
