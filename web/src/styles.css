@@ -208,7 +208,10 @@ body {
   max-width: 280px;       /* mirrors current rail width */
   max-height: calc(100vh - 16px);
   overflow-y: auto;
-  position: relative;     /* anchor for close button absolute positioning */
+  /* keep .overlay-widget's position: fixed (do NOT override to relative —
+     that breaks viewport pinning). #inspector-close uses position: absolute,
+     which already anchors against the nearest positioned ancestor, and a
+     fixed-positioned box is a valid containing block for absolute children. */
 }
 
 #inspector-box dl {
