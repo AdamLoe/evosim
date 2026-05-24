@@ -114,6 +114,11 @@ pub const SPECIES_W_BRAIN: f32 = 1.0;
 pub const SPECIES_THRESHOLD: f32 = 4.0;
 pub const SPECIES_EYE_JUMP_COST: f32 = 1.5;
 
+// ---- NN input normalization (v6 §E, §3; see DECISIONS for unspecified bases) ----
+/// Normalization base for carrion_overlap_norm NN input (v6 §3; no canonical base in spec).
+/// 4 overlapping corpses ≈ "corpse-rich zone". DECISIONS: carrion_overlap_norm base.
+pub const CARRION_OVERLAP_NORM_BASE: f32 = 4.0;
+
 // ---- Vision (v5 §10, v6 §E, Milestone C.12) ----
 /// Fixed radius used when a ray hits a carrion blob (not in spec — DECISIONS).
 pub const CARRION_RADIUS_FOR_VISION: f32 = 1.5;
