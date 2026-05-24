@@ -98,8 +98,21 @@ export function drawCreatures(
   viewW: number,
   viewH: number,
   data: Float32Array,
+  ids: Float64Array,
   stride: number,
+  highlightMap: Map<number, number>,
+  nowMs: number,
 ): void {
+  // Build a transient set of SoA indices to highlight (E.22).
+  const highlightIdx = new Set<number>();
+  if (highlightMap.size > 0) {
+    for (let k = 0; k < ids.length; k++) {
+      const cid = ids[k];
+      const exp = highlightMap.get(cid);
+      if (exp !== undefined && nowMs < exp) highlightIdx.add(k);
+    }
+  }
+
   for (let i = 0; i < data.length; i += stride) {
     const x = data[i];
     const y = data[i + 1];
@@ -116,6 +129,7 @@ export function drawCreatures(
     const flagMouth = data[i + 11] > 0.5;
     const flagArmor = data[i + 12] > 0.5;
 
+    const idx = i / stride;
     const [sx, sy] = worldToScreen(cam, viewW, viewH, x, y);
     const radiusPx = Math.max(1, radiusWorld * PX_PER_SIZE * cam.zoom);
     const cr = Math.round(255 * r);
@@ -146,6 +160,22 @@ export function drawCreatures(
     if (flagScav)  drawRing("rgba(140, 90, 40,0.85)"); // brown
     if (flagMouth) drawRing("rgba(255, 80, 80,0.85)"); // red
     if (flagArmor) drawRing("rgba(200,200,210,0.85)"); // silver — outermost
+
+    // E.22: highlight ring — golden rgb(255,200,50), 2px, fades over 1.5s (v6 §B).
+    if (highlightIdx.has(idx)) {
+      const cid = ids[idx];
+      const exp = highlightMap.get(cid)!;
+      const remainingMs = exp - nowMs;
+      const alpha =
+        exp >= Number.MAX_SAFE_INTEGER - 1
+          ? 1 // permanent (inspector selection)
+          : Math.min(1, remainingMs / 1500);
+      ctx.strokeStyle = `rgba(255, 200, 50, ${alpha.toFixed(3)})`;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(sx, sy, radiusPx + 3, 0, Math.PI * 2);
+      ctx.stroke();
+    }
   }
 }
 
@@ -171,11 +201,14 @@ export function renderWorld(
   viewH: number,
   world: WorldHandle,
   stride: number,
+  ids: Float64Array,
+  highlightMap: Map<number, number>,
+  nowMs: number,
 ): void {
   ctx.fillStyle = "#04070b";
   ctx.fillRect(0, 0, viewW, viewH);
   drawSunMap(ctx, cam, viewW, viewH, world.world_size, world.sun_dim, world.sun_buffer(), world.sun_capacity_buffer());
   drawAquariumFrame(ctx, cam, viewW, viewH, world.world_size);
   drawCarrion(ctx, cam, viewW, viewH, world.carrion_buffer());
-  drawCreatures(ctx, cam, viewW, viewH, world.creatures_buffer(), stride);
+  drawCreatures(ctx, cam, viewW, viewH, world.creatures_buffer(), ids, stride, highlightMap, nowMs);
 }

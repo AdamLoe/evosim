@@ -1,6 +1,8 @@
 import init, { WorldHandle, creature_stride } from "../wasm/evosim";
 import { makeCamera, renderWorld } from "./render";
 import { attachCameraControls } from "./camera";
+import { installRail, pollRail, highlights } from "./rail/index";
+import { installCanvasClickHandler } from "./rail/inspector";
 
 const status = document.getElementById("status") as HTMLSpanElement;
 const canvas = document.getElementById("aquarium") as HTMLCanvasElement;
@@ -45,8 +47,13 @@ async function main(): Promise<void> {
   // Speed buttons in the top bar.
   installSpeedControls();
 
-  // Sim loop: at 1× we run ~30 ticks per render frame; at 10× → 300; at 100× → 3000.
-  // Practical cap: 200 ticks per frame to keep the main thread responsive.
+  // E.21: install right rail.
+  const rail = installRail(world);
+
+  // E.24: canvas click → inspector.
+  installCanvasClickHandler(canvas, cam, () => ({ w: viewW, h: viewH }), world, rail);
+
+  // Sim loop.
   let lastRender = performance.now();
   function frame(now: number): void {
     const delta = now - lastRender;
@@ -55,7 +62,15 @@ async function main(): Promise<void> {
     if (ticksThisFrame > 0) {
       world.step_n(ticksThisFrame);
     }
-    renderWorld(ctx!, cam, viewW, viewH, world, stride);
+
+    // Fetch ids buffer once per frame (index-aligned with creatures_buffer).
+    const ids = world.creature_ids_buffer() as unknown as Float64Array;
+
+    // E.21/E.22/E.23/E.24: poll the rail (events, toasts, highlights, stats, inspector).
+    pollRail(rail, world, ids);
+
+    renderWorld(ctx!, cam, viewW, viewH, world, stride, ids, highlights, now);
+
     const ended = world.world_ended ? "  (world ended)" : "";
     status.textContent = `seed: ${world.seed}  ·  tick ${world.tick}  ·  pop ${world.population}  ·  species ${world.species_count}${ended}`;
     requestAnimationFrame(frame);

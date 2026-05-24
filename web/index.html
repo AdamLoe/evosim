@@ -9,9 +9,48 @@
   </head>
   <body>
     <canvas id="aquarium"></canvas>
+
     <div id="top-bar">
       <span id="status">booting…</span>
     </div>
+
+    <!-- E.21: right rail shell -->
+    <aside id="right-rail">
+      <nav id="rail-tabs" role="tablist">
+        <button data-tab="events" class="rail-tab is-active">Events</button>
+        <button data-tab="stats" class="rail-tab">Stats</button>
+        <!-- Inspector tab injected dynamically when a creature is selected -->
+      </nav>
+
+      <section id="rail-events" class="rail-panel is-active"></section>
+      <section id="rail-stats" class="rail-panel">
+        <canvas id="chart-pop" width="260" height="80"></canvas>
+        <canvas id="chart-species" width="260" height="80"></canvas>
+      </section>
+      <section id="rail-inspector" class="rail-panel">
+        <dl>
+          <dt>Species</dt><dd id="ins-species"></dd>
+          <dt>Parent</dt><dd id="ins-parent"></dd>
+          <dt>Action</dt><dd id="ins-action"></dd>
+          <dt>Age</dt><dd id="ins-age"></dd>
+          <dt>Energy</dt><dd id="ins-energy"></dd>
+          <dt>Size</dt><dd id="ins-size"></dd>
+          <dt>Photo eff</dt><dd id="ins-photo"></dd>
+          <dt>Eat eff</dt><dd id="ins-eat"></dd>
+          <dt>Scav eff</dt><dd id="ins-scav"></dd>
+          <dt>Move speed</dt><dd id="ins-move"></dd>
+          <dt>Eyes</dt><dd id="ins-eyes"></dd>
+          <dt>Vision</dt><dd id="ins-vision"></dd>
+          <dt>Armor</dt><dd id="ins-armor"></dd>
+          <dt>Bite reach</dt><dd id="ins-bite"></dd>
+          <dt>Pigment</dt><dd id="ins-pigment"></dd>
+        </dl>
+      </section>
+    </aside>
+
+    <!-- E.22: toast container, top-right just left of the rail -->
+    <div id="toast-stack" aria-live="polite"></div>
+
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
