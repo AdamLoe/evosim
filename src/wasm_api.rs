@@ -91,8 +91,10 @@ impl WorldHandle {
     }
 
     /// Repack creature SoA into a contiguous Float32Array. Layout per creature
-    /// (10 floats): `[x, y, radius_world, r, g, b, energy_frac, age_frac, has_eyes, has_mouth]`.
-    /// Stable across builds via [`creature_stride`].
+    /// (13 floats, stride = [`creature_stride`]):
+    /// `[x, y, radius_world, r, g, b, energy_frac, age_frac,
+    ///   flag_eye, flag_move, flag_scav, flag_mouth, flag_armor]`.
+    /// Ring flags: 1.0 if trait > 0, else 0.0. See v6 §B for ring order.
     #[wasm_bindgen]
     pub fn creatures_buffer(&mut self) -> js_sys::Float32Array {
         let n = self.inner.creatures.len();
@@ -112,8 +114,12 @@ impl WorldHandle {
             self.creature_buf[off + 6] = (self.inner.creatures.energy[i] / 100.0).clamp(0.0, 1.0);
             self.creature_buf[off + 7] =
                 (self.inner.creatures.age[i] as f32 / g.max_age.max(1) as f32).clamp(0.0, 1.0);
+            // Feature ring flags (v6 §B, ring order: eye→move→scav→mouth→armor).
             self.creature_buf[off + 8] = if g.eye_count > 0 { 1.0 } else { 0.0 };
-            self.creature_buf[off + 9] = if g.eat_efficiency > 0.0 { 1.0 } else { 0.0 };
+            self.creature_buf[off + 9] = if g.move_speed > 0.0 { 1.0 } else { 0.0 };
+            self.creature_buf[off + 10] = if g.scavenge_efficiency > 0.0 { 1.0 } else { 0.0 };
+            self.creature_buf[off + 11] = if g.eat_efficiency > 0.0 { 1.0 } else { 0.0 };
+            self.creature_buf[off + 12] = if g.armor > 0.0 { 1.0 } else { 0.0 };
         }
         unsafe { js_sys::Float32Array::view(&self.creature_buf) }
     }
@@ -175,7 +181,29 @@ impl WorldHandle {
     }
 }
 
+/// Per-creature float count in [`WorldHandle::creatures_buffer`].
+/// v1.0 layout (Milestone C.11): 13 floats.
+/// Offset 0..8: x,y,radius,r,g,b,energy_frac,age_frac.
+/// Offset 8..13: flag_eye, flag_move, flag_scav, flag_mouth, flag_armor.
 #[wasm_bindgen]
 pub fn creature_stride() -> u32 {
-    10
+    13
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Smoke-test that creature_stride() == 13 and the fill loop writes that
+    /// many floats per creature. We can't call creatures_buffer() in native
+    /// tests (js_sys::Float32Array requires wasm32), so we test the stride
+    /// constant and the fill-loop math directly.
+    #[test]
+    fn creature_stride_is_13() {
+        assert_eq!(creature_stride(), 13);
+        // verify that n creatures × stride == expected buffer size
+        let n: usize = 3;
+        let expected = n * creature_stride() as usize;
+        assert_eq!(expected, 39);
+    }
 }

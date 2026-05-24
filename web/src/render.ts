@@ -109,8 +109,12 @@ export function drawCreatures(
     const b = data[i + 5];
     // const energyFrac = data[i + 6]; // reserved for future visual cue
     // const ageFrac = data[i + 7];
-    const hasEyes = data[i + 8] > 0.5;
-    const hasMouth = data[i + 9] > 0.5;
+    // Feature ring flags (v6 §B, Milestone C.11): eye→move→scav→mouth→armor
+    const flagEye   = data[i + 8] > 0.5;
+    const flagMove  = data[i + 9] > 0.5;
+    const flagScav  = data[i + 10] > 0.5;
+    const flagMouth = data[i + 11] > 0.5;
+    const flagArmor = data[i + 12] > 0.5;
 
     const [sx, sy] = worldToScreen(cam, viewW, viewH, x, y);
     const radiusPx = Math.max(1, radiusWorld * PX_PER_SIZE * cam.zoom);
@@ -123,25 +127,25 @@ export function drawCreatures(
     ctx.fill();
 
     // Active-trait rings (v6 §B) — drawn inward from the body edge.
-    // Innermost: eye (white). Outermost ring added: mouth (red).
-    // Milestone B has only eye/mouth gates exposed in the buffer; armor +
-    // move-speed + scavenge wire up when Milestone C lands.
+    // Ring order (innermost→outermost): eye(white), move(yellow),
+    // scav(brown), mouth(red), armor(silver). v6 §B fixes eye=innermost;
+    // rest ordered by DECISIONS (see DECISIONS.md).
     let ringR = radiusPx - 1;
-    if (hasEyes && ringR > 0) {
-      ctx.strokeStyle = "rgba(255, 255, 255, 0.85)";
+    const RING_STEP = 1.5;
+    const drawRing = (color: string): void => {
+      if (ringR < 1) return;
+      ctx.strokeStyle = color;
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.arc(sx, sy, ringR, 0, Math.PI * 2);
       ctx.stroke();
-      ringR -= 1.5;
-    }
-    if (hasMouth && ringR > 0) {
-      ctx.strokeStyle = "rgba(255, 80, 80, 0.85)";
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.arc(sx, sy, ringR, 0, Math.PI * 2);
-      ctx.stroke();
-    }
+      ringR -= RING_STEP;
+    };
+    if (flagEye)   drawRing("rgba(255,255,255,0.85)"); // white  — innermost
+    if (flagMove)  drawRing("rgba(240,220, 80,0.85)"); // yellow
+    if (flagScav)  drawRing("rgba(140, 90, 40,0.85)"); // brown
+    if (flagMouth) drawRing("rgba(255, 80, 80,0.85)"); // red
+    if (flagArmor) drawRing("rgba(200,200,210,0.85)"); // silver — outermost
   }
 }
 
