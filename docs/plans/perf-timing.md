@@ -1234,3 +1234,30 @@ Add to risk table.
 - `web/index.html` lines 32–35 (`#rail-stats`) — UI insertion point.
 - `Cargo.toml` lines 22–32 — `web-sys` features (Performance already enabled, line 31).
 - `docs/architecture.md` lines 41–60 — tick ordering reference for span placement.
+
+---
+
+## Code review — FIXES REQUIRED
+
+Reviewer: code-review agent, 2026-05-24. Commit reviewed: `e334039 feat(profiler): in-app perf timing tree + Stats-panel table`.
+
+Verified green: 10 profiler unit tests pass, acceptance test 7 (`profile_does_not_change_hash`) passes, `pnpm build` (tsc + vite) clean, clippy clean. R1 (totals recomputed), R2 (no `self_us` in JSON), R3 (`effective_window_ms` per node in JSON), R4 (no `profile_record_external` on wasm side, `perf.ts` is purely TS-side), R7/D9 (toggle not persisted — confirmed no localStorage writes), R9 (all 12 v5 §3.5 tick steps wrapped, including `bookkeeping_tail` and widened `collect_deaths`), R12 / save+hash exclusion (`profile` field not in `SaveV1` or `snapshot_hash.rs`) are all satisfied. Macro brace pattern in `World::step` is correct (outer `tick` guard lives function-wide; each sub-span lives in its own brace block — sibling pushes attribute under `tick`, verified by `profiler_siblings_do_not_nest` test).
+
+Blocking issues:
+
+1. **`web/src/rail/stats.ts`, `web/index.html`, `web/src/styles.css` — UI completely missing.** The plan's headline deliverable ("Stats-panel table" per commit title, plan §"Files & function signatures") is not implemented. No `installProfilerPanel` function exists, no `<input id="profiler-enable">` checkbox in `index.html`, no `<table id="profiler-table">`, no `.profiler-table` CSS rules, no `setInterval(1000)` polling of `profile_report_json()`, no rendering of either the Rust or TS subtree. `web/src/perf.ts::setProfilerEnabled` is exported but never called from `main.ts` or anywhere else (`grep` confirms zero call sites outside its definition). User cannot enable the profiler from the UI at all — this is the whole point of the feature.
+
+   Fix: implement `installProfilerPanel(world)` per plan §"web/src/rail/stats.ts edits"; add the HTML toggle + table per plan §"web/index.html edits"; add `.profiler-table` rules per plan §"web/src/styles.css additions"; wire it from `rail/index.ts::installRail`; on checkbox change call `setProfilerEnabled(checked)`; while enabled, `setInterval(1000)` polls `world.profile_report_json()` and `reportJson()` from `perf.ts`, parses both, concatenates the two `tree` arrays, renders the table; show the R3 "stabilizing…" banner when any node's `effective_window_ms < 0.9 * window_ms`.
+
+2. **`src/profiler.rs:393–395, 418–420` — wrong wasm clock source.** Both `clock_now_ms` and `clock_now_us` use `js_sys::Date::now()` which returns wall-clock milliseconds with ms (not sub-ms) resolution. Plan §D7 explicitly requires `web_sys::Performance::now()` (sub-µs resolution after Spectre clamping) — the feature is even enabled in `Cargo.toml:31`. With `Date::now()`, every span shorter than ~1 ms registers as 0 µs (so `grid_rebuild_1`, `sun_refill`, `bookkeeping_tail`, and the per-creature-cheap stages report total_us=0/call_count=N, giving meaningless "share" and "/call" numbers in the table). `Date::now()` is also non-monotonic — a user clock adjustment can produce negative `now - start_us` durations which then underflow on `(now_us - self.start_us)` (u64 subtraction wraps).
+
+   Fix: replace both wasm impls with `web_sys::window().unwrap().performance().unwrap().now()` (returning f64 ms), and compute µs as `(perf.now() * 1000.0) as u64`. The browser-side TS code in `perf.ts:67,75,76,96` already uses `performance.now()` correctly; only the Rust side is wrong.
+
+3. **`tests/acceptance.rs:81–106` — Test 7 covers determinism with profiler ON, but there is no Test 6 equivalent asserting the default-off path. Acceptance hash with profiler default-OFF is presumably covered by the existing pre-PR acceptance tests passing unchanged — non-blocker, but worth noting that "default off does not change hash" is only implicitly tested.
+
+Non-blocking observations:
+- `src/profiler.rs:464–479` `push_with_duration` test helper is only used by tests (correctly gated `#[cfg(test)]`); fine.
+- `src/profiler.rs:240–244` `ensure_child` MAX_NODES fallback silently records into the parent node — under pathological span explosion this would inflate a parent's call_count. Acceptable for v1 (MAX_NODES=256 vs ~30 expected); document if it ever fires.
+- `src/profiler.rs:114–119` `set_enabled(true)` resets `epoch_ms` but does not call `clear_samples`. Safe in practice because `set_enabled(false)` always clears; if a future caller ever flips on→on (idempotent), stale samples would have ts > new now_ms_relative and survive pruning forever. Add `clear_samples()` to the enable branch for robustness, or guard against the double-enable case.
+- Overhead test (`profiler_overhead_within_5us_per_span`) measures absolute span cost not the plan's "< 5% of step()" budget; the implementer noted this trade-off in the test doc. Acceptable.
+
