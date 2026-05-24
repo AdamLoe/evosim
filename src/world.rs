@@ -99,6 +99,19 @@ pub struct World {
     /// Excluded from SaveV1 and from the §16 snapshot hash (D10).
     /// See docs/plans/perf-timing.md for the full design.
     pub profile: crate::profiler::Profiler,
+    // Per-tick scratch buffers, promoted from in-function `vec!` to long-lived
+    // fields to eliminate ~300 KB/tick allocator pressure (perf-final-report
+    // §3 item 2). Excluded from SaveV1 and from snapshot_hash by omission —
+    // mirrors the `vision` / `cell_to_carrion` / `profile` pattern.
+    scratch_fx: Vec<f32>,
+    scratch_fy: Vec<f32>,
+    scratch_neighbors: Vec<usize>,
+    scratch_damage: Vec<f32>,
+    scratch_gain: Vec<f32>,
+    scratch_cooldown_set: Vec<bool>,
+    scratch_attempted_eat: Vec<bool>,
+    scratch_attempted_scavenge: Vec<bool>,
+    scratch_got_a_bite: Vec<bool>,
 }
 
 impl World {
@@ -162,6 +175,15 @@ impl World {
             cell_to_carrion: Vec::new(),
             pending_extinction_check: Vec::new(),
             profile: crate::profiler::Profiler::new(),
+            scratch_fx: Vec::new(),
+            scratch_fy: Vec::new(),
+            scratch_neighbors: Vec::new(),
+            scratch_damage: Vec::new(),
+            scratch_gain: Vec::new(),
+            scratch_cooldown_set: Vec::new(),
+            scratch_attempted_eat: Vec::new(),
+            scratch_attempted_scavenge: Vec::new(),
+            scratch_got_a_bite: Vec::new(),
         }
     }
 
@@ -477,20 +499,29 @@ impl World {
 
         self.grid.rebuild(&self.creatures.x, &self.creatures.y);
 
-        let mut fx = vec![0.0_f32; n];
-        let mut fy = vec![0.0_f32; n];
+        // Reset/grow the force accumulators in place. resize() is O(1) when the
+        // capacity is already >= n (the common case after the first tick).
+        self.scratch_fx.resize(n, 0.0);
+        self.scratch_fy.resize(n, 0.0);
+        self.scratch_fx.fill(0.0);
+        self.scratch_fy.fill(0.0);
         for i in 0..n {
             let xi = self.creatures.x[i];
             let yi = self.creatures.y[i];
             let ri = self.creatures.genomes[i].size * BODY_RADIUS_PER_SIZE;
             let search = ri + SIZE_MAX * BODY_RADIUS_PER_SIZE;
-            let mut neighbors: Vec<usize> = Vec::with_capacity(16);
+            // std::mem::take releases the self.scratch_neighbors borrow so we can
+            // simultaneously borrow self.grid and self.creatures inside the closure
+            // and the inner loop. The high-water-mark allocation travels with the
+            // local binding and is returned to the field at the end of each iteration.
+            let mut neighbors = std::mem::take(&mut self.scratch_neighbors);
+            neighbors.clear();
             self.grid.for_each_in_radius(xi, yi, search, |j| {
                 if j > i {
                     neighbors.push(j);
                 }
             });
-            for j in neighbors {
+            for &j in &neighbors {
                 let xj = self.creatures.x[j];
                 let yj = self.creatures.y[j];
                 let rj = self.creatures.genomes[j].size * BODY_RADIUS_PER_SIZE;
@@ -505,10 +536,10 @@ impl World {
                         let f = (REPULSION_K * overlap).clamp(0.0, REPULSION_MAX);
                         let ux = dx / d;
                         let uy = dy / d;
-                        fx[i] -= ux * f;
-                        fy[i] -= uy * f;
-                        fx[j] += ux * f;
-                        fy[j] += uy * f;
+                        self.scratch_fx[i] -= ux * f;
+                        self.scratch_fy[i] -= uy * f;
+                        self.scratch_fx[j] += ux * f;
+                        self.scratch_fy[j] += uy * f;
                     } else {
                         // Co-located (newborn siblings) — deterministic nudge.
                         let angle =
@@ -516,18 +547,19 @@ impl World {
                         let ux = angle.cos();
                         let uy = angle.sin();
                         let f = REPULSION_MAX;
-                        fx[i] -= ux * f;
-                        fy[i] -= uy * f;
-                        fx[j] += ux * f;
-                        fy[j] += uy * f;
+                        self.scratch_fx[i] -= ux * f;
+                        self.scratch_fy[i] -= uy * f;
+                        self.scratch_fx[j] += ux * f;
+                        self.scratch_fy[j] += uy * f;
                     }
                 }
             }
+            self.scratch_neighbors = neighbors;
         }
 
         for i in 0..n {
-            let mut x = self.creatures.x[i] + fx[i];
-            let mut y = self.creatures.y[i] + fy[i];
+            let mut x = self.creatures.x[i] + self.scratch_fx[i];
+            let mut y = self.creatures.y[i] + self.scratch_fy[i];
             let r = self.creatures.genomes[i].size * BODY_RADIUS_PER_SIZE;
             if x < r {
                 x = r;
@@ -608,17 +640,23 @@ impl World {
         if n == 0 {
             return;
         }
-        let mut damage = vec![0.0_f32; n];
-        let mut gain = vec![0.0_f32; n];
-        let mut cooldown_set = vec![false; n];
-        let mut attempted_eat = vec![false; n];
-        let mut attempted_scavenge = vec![false; n];
-        let mut got_a_bite = vec![false; n];
+        self.scratch_damage.resize(n, 0.0);
+        self.scratch_gain.resize(n, 0.0);
+        self.scratch_cooldown_set.resize(n, false);
+        self.scratch_attempted_eat.resize(n, false);
+        self.scratch_attempted_scavenge.resize(n, false);
+        self.scratch_got_a_bite.resize(n, false);
+        self.scratch_damage.fill(0.0);
+        self.scratch_gain.fill(0.0);
+        self.scratch_cooldown_set.fill(false);
+        self.scratch_attempted_eat.fill(false);
+        self.scratch_attempted_scavenge.fill(false);
+        self.scratch_got_a_bite.fill(false);
 
         for i in 0..n {
             match self.creatures.action_this_tick[i] {
                 Action::Eat => {
-                    attempted_eat[i] = true;
+                    self.scratch_attempted_eat[i] = true;
                     if self.creatures.digestion_cooldown[i] > 0 {
                         continue;
                     }
@@ -660,14 +698,14 @@ impl World {
                     if let Some((j, _)) = best {
                         let dmg = EAT_DAMAGE_COEFF * g_i.size;
                         let armor = self.creatures.genomes[j].armor.clamp(0.0, 1.0);
-                        damage[j] += dmg * (1.0 - armor);
-                        gain[i] += EAT_GAIN_COEFF * g_i.eat_efficiency;
-                        cooldown_set[i] = true;
-                        got_a_bite[i] = true;
+                        self.scratch_damage[j] += dmg * (1.0 - armor);
+                        self.scratch_gain[i] += EAT_GAIN_COEFF * g_i.eat_efficiency;
+                        self.scratch_cooldown_set[i] = true;
+                        self.scratch_got_a_bite[i] = true;
                     }
                 }
                 Action::Scavenge => {
-                    attempted_scavenge[i] = true;
+                    self.scratch_attempted_scavenge[i] = true;
                     let g_i = self.creatures.genomes[i].clone();
                     if g_i.scavenge_efficiency <= 0.0 {
                         continue;
@@ -683,7 +721,7 @@ impl World {
                         if d2 <= r_i * r_i {
                             let take = c.pool.min(want);
                             c.pool -= take;
-                            gain[i] += take;
+                            self.scratch_gain[i] += take;
                             break;
                         }
                     }
@@ -693,12 +731,12 @@ impl World {
         }
 
         for i in 0..n {
-            if attempted_eat[i] {
+            if self.scratch_attempted_eat[i] {
                 self.creatures.energy[i] -= COST_EAT_ATTEMPT;
-                if cooldown_set[i] {
+                if self.scratch_cooldown_set[i] {
                     self.creatures.digestion_cooldown[i] = DIGESTION_COOLDOWN_TICKS;
                 }
-                if got_a_bite[i] && !self.first_eat_fired {
+                if self.scratch_got_a_bite[i] && !self.first_eat_fired {
                     self.first_eat_fired = true;
                     if self.events_enabled {
                         self.events.push(Event {
@@ -710,11 +748,11 @@ impl World {
                     }
                 }
             }
-            if attempted_scavenge[i] {
+            if self.scratch_attempted_scavenge[i] {
                 self.creatures.energy[i] -= COST_SCAVENGE_ATTEMPT;
             }
-            self.creatures.energy[i] += gain[i];
-            self.creatures.energy[i] -= damage[i];
+            self.creatures.energy[i] += self.scratch_gain[i];
+            self.creatures.energy[i] -= self.scratch_damage[i];
         }
     }
 
@@ -1107,6 +1145,15 @@ impl World {
             pending_extinction_check: Vec::new(),
             // Profiler is never saved/loaded — always start fresh (D9/D10).
             profile: crate::profiler::Profiler::new(),
+            scratch_fx: Vec::new(),
+            scratch_fy: Vec::new(),
+            scratch_neighbors: Vec::new(),
+            scratch_damage: Vec::new(),
+            scratch_gain: Vec::new(),
+            scratch_cooldown_set: Vec::new(),
+            scratch_attempted_eat: Vec::new(),
+            scratch_attempted_scavenge: Vec::new(),
+            scratch_got_a_bite: Vec::new(),
         })
     }
 
@@ -2155,5 +2202,66 @@ mod tests {
             &w.creatures.eye_trig[off..off + SECTORS * 2],
             &expected.eye_trig[..SECTORS * 2]
         );
+    }
+
+    // ---- perf-2 tests ----
+
+    /// perf-2 test 1: scratch_fx / scratch_fy are zeroed at the start of each tick.
+    /// Pre-poison the buffers with sentinel values, run one tick, confirm sentinels
+    /// are gone (i.e. the resize+fill zeroing in apply_movement_and_repulsion fired).
+    #[test]
+    fn scratch_fx_fy_zeroed_at_tick_start() {
+        let mut w = World::new("perf2-zeroing");
+        for _ in 0..5 {
+            w.tick_once();
+        }
+        let n = w.creatures.len();
+        // Pre-poison with out-of-range sentinel values.
+        w.scratch_fx.resize(n, 0.0);
+        w.scratch_fy.resize(n, 0.0);
+        for i in 0..n {
+            w.scratch_fx[i] = 999.0;
+            w.scratch_fy[i] = -999.0;
+        }
+        w.tick_once();
+        // After a tick, every entry must be a real repulsion force in
+        // [-REPULSION_MAX, REPULSION_MAX] (or zero if no contact).
+        // A surviving 999.0 sentinel would corrupt creature positions via the
+        // write-back loop and also leave an out-of-range value here.
+        for i in 0..w.creatures.len() {
+            assert!(
+                w.scratch_fx[i].abs() <= REPULSION_MAX + 1e-3,
+                "scratch_fx[{i}] = {} not reset (sentinel survived)",
+                w.scratch_fx[i]
+            );
+            assert!(
+                w.scratch_fy[i].abs() <= REPULSION_MAX + 1e-3,
+                "scratch_fy[{i}] = {} not reset (sentinel survived)",
+                w.scratch_fy[i]
+            );
+        }
+    }
+
+    /// perf-2 test 2: all scratch Vecs grow with the population over 500 ticks.
+    #[test]
+    fn scratch_grows_with_population() {
+        let mut w = World::new("perf2-grow");
+        let n0 = w.creatures.len();
+        // Run until population grows past the initial scratch capacity.
+        for _ in 0..500 {
+            w.tick_once();
+        }
+        let n1 = w.creatures.len();
+        assert!(n1 > n0, "test setup: population should have grown");
+        // Scratch Vecs MUST be at least as long as the current population.
+        assert!(w.scratch_fx.len() >= n1);
+        assert!(w.scratch_fy.len() >= n1);
+        assert!(w.scratch_damage.len() >= n1);
+        assert!(w.scratch_gain.len() >= n1);
+        assert!(w.scratch_cooldown_set.len() >= n1);
+        assert!(w.scratch_attempted_eat.len() >= n1);
+        assert!(w.scratch_attempted_scavenge.len() >= n1);
+        assert!(w.scratch_got_a_bite.len() >= n1);
+        // No panic across 500 ticks of growth confirms resize handles growth.
     }
 }
