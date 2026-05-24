@@ -387,11 +387,16 @@ fn push_f64(out: &mut String, v: f64) {
 
 // ─── Clock abstraction ───────────────────────────────────────────────────────
 
-/// Current time in milliseconds. On wasm32, uses `performance.now()`.
-/// On native (tests), uses a monotonic Instant against a static epoch.
+/// Current time in milliseconds. On wasm32, uses `web_sys::Performance::now()`
+/// (monotonic, sub-microsecond resolution). On native (tests), uses a
+/// monotonic Instant against a static epoch.
 #[cfg(target_arch = "wasm32")]
 fn clock_now_ms() -> f64 {
-    js_sys::Date::now()
+    web_sys::window()
+        .expect("no window")
+        .performance()
+        .expect("no performance")
+        .now()
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -413,10 +418,17 @@ fn clock_now_ms() -> f64 {
     epoch.elapsed().as_secs_f64() * 1000.0
 }
 
-/// Current time in microseconds (u64). Same abstraction as clock_now_ms.
+/// Current time in microseconds (u64). On wasm32, uses `Performance::now()`
+/// which returns fractional milliseconds — multiply by 1000 for µs resolution.
+/// Non-monotonic risk eliminated: `Performance::now()` is monotonic by spec.
 #[cfg(target_arch = "wasm32")]
 fn clock_now_us() -> u64 {
-    (js_sys::Date::now() * 1000.0) as u64
+    let ms = web_sys::window()
+        .expect("no window")
+        .performance()
+        .expect("no performance")
+        .now();
+    (ms * 1000.0) as u64
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -898,6 +910,29 @@ mod tests {
             "effective_window_ms={ew} expected ~5000"
         );
         clear_fake_clock();
+    }
+
+    /// Test: native (non-wasm) clock path produces monotone, non-zero µs values.
+    /// Guards against regressions where the std::time path returns constant 0
+    /// or regresses to a non-monotonic source.
+    #[test]
+    fn profiler_native_clock_is_monotone_and_nonzero() {
+        // Use the real clock (no fake clock override).
+        clear_fake_clock();
+
+        let t0 = clock_now_us();
+        // A tiny busy-spin to advance the real clock by at least a few µs.
+        let mut _sink = 0u64;
+        for i in 0..10_000u64 {
+            _sink = _sink.wrapping_add(i);
+        }
+        let t1 = clock_now_us();
+
+        assert!(t1 >= t0, "clock_now_us must be non-decreasing (monotone): t0={t0} t1={t1}");
+        // The OnceLock epoch is set on first call; both t0 and t1 are elapsed-from-epoch.
+        // t0 could theoretically be 0 if called in the same µs as EPOCH init,
+        // but t1 must be > 0 after the busy-spin.
+        assert!(t1 > 0, "clock_now_us must return non-zero after warm-up: t1={t1}");
     }
 
     /// Test: sample-cap behavior — when SAMPLES_PER_NODE is exceeded, oldest is dropped.
