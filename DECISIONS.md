@@ -41,3 +41,37 @@ Format: `<topic>: <choice> — <one-line why>`.
 - output activation 0..1: tanh post-forward (in pick_action_d), not in Brain::forward — keeps Brain::forward a pure linear-ReLU-linear graph; activation lives at decode site
 - pick_action_c lifetime: deleted on D land — dead code; D replaces it
 
+# Milestone E decisions
+
+## E.20
+- speciation event parent name: NOT in event payload — UI resolves via species_list_json (avoids stale-name drift across renames in future)
+- speciation anchor clone cost: ~14KB Vec<f32> per speciation event — acceptable at v1 scale; revisit in v1.1 if NN_WEIGHT_COUNT grows
+
+## E.21
+- creature_at returns SoA index (not stable id) — caller re-resolves via creature_ids_buffer + creature_inspect_json each frame; cheap at v1 sizes
+- species_list_json frequency: 1Hz (not every frame) — counts are O(N) and the panel doesn't need sub-second freshness
+- creature_ids_buffer uses Float64Array: u64 ids fit in f64 mantissa for the v1 session lifetime
+- stats sampling cadence: every 10 sim-ticks via tick % 10 == 0 check; 500-sample ring buffer TS-side (≈ 5000 ticks visible)
+
+## E.22
+- toast/highlight timing: wall-clock seconds (4s toast, 1.5s ring) per v6 §B; not sim-tick scaled
+- toast variants: Speciation/Extinction/FirstToMove/FirstToEat fire toasts; PopulationMilestone/WorldEnded log-only (avoid spam + eulogy supersedes)
+- toast stack cap: 6 visible; newer toasts at top (column-reverse)
+- EventKind serde: #[serde(tag = "type")] flat shape — adopted in E because E adds the only TS consumer
+- event diff: by events_total_count (monotone u32), not ring length — survives ring overflow
+
+## E.23
+- stats charts use Canvas2D directly: zero deps, < 100 LOC, no interaction needed (v6 §A plain TS)
+- stats x-axis = sim-tick (not wall-clock): consistent with sim semantics; player can pause and the chart freezes
+
+## E.24
+- inspector tap detection: < 4px movement + < 250ms elapsed in pointerdown/pointerup listener — disambiguates from drag-to-pan
+- inspector creature-died UX: 2-second placeholder then auto-clear — avoids the user clicking and immediately losing context
+
+## E.25
+- population milestones: bitset of fired flags (one-shot per threshold ever) — v5 §11 "only once per threshold ever"
+- first-to-move fire-site: apply_movement_and_repulsion (was collect_deaths) per v6 §L "actually traveled ≥ 5u in its lifetime"
+- hall-of-fame snapshots: clone Genome (~120B) into a HallOfFame struct on World — pre-staged for F.28; brain weights NOT cloned (only genome image needed for eulogy render)
+- weirdest fallback: World.longest_lived snapshot (any age) — used if no creature ever reached 500 ticks (v5 §11.1)
+- weirdest distance metric: species_distance against founder_genome_anchor + founder_brain_anchor (day-0 capture in World::new) per v5 §11.1
+
