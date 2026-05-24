@@ -23,3 +23,21 @@ Format: `<topic>: <choice> — <one-line why>`.
 - cell-to-carrion index: rebuilt every tick (O(N+C)); simpler than incremental maintenance; trivial at v1 sizes
 - hardcoded picker energy threshold: 80 (matches B's SPLIT_PLACEHOLDER) — same starvation reason as B's DECISIONS entry
 
+# Milestone D decisions
+
+- nn-input energy_frac: clamp(energy/100,0,1) — v5/v6 unspecified; matches SPLIT_THRESHOLD×2
+- nn-input size norm: /SIZE_MAX — keeps in [0,1] for activation parity
+- nn-input vx/vy norm: /MOVE_SPEED_MAX — keeps in roughly [-1,+1]; fast movers saturate at ±1
+- nn-input vx/vy timing: previous-tick post-clip velocities ÷ MOVE_SPEED_MAX — gives NN feedback on its own motion
+- is_at_wall: uses creature radius (size × BODY_RADIUS_PER_SIZE), not raw size — keeps "creature touches wall" semantics consistent with physics step
+- carrion_overlap_norm: count/4, clamp at 1 — v6 §3 unspecified; 4 ≈ "corpse-rich zone"
+- vision distance norm: none (raw world units) — v6 §E silent; NN learns scale via weights
+- NN biases: none — spec'd weight count (3456 = 136×24 + 24×8) matches no-bias exactly
+- weight layout: row-major, hidden-units / outputs contiguous — best cache behavior for SIMD matmul
+- hidden and output scratch: stack per call (96+32 bytes) — no alloc; trivially thread-safe
+- threads default off: feature flag `threads` wires rayon; v1 single-threaded by default; F.29 perf result decides whether to enable for §16 acceptance
+- N_CHUNKS value: 8 — v6 §J's example value; matches typical core counts
+- nn-mutation-rate-multiplier: applied at child_from per v6 §K — was missing in B; D fixes
+- output activation 0..1: tanh post-forward (in pick_action_d), not in Brain::forward — keeps Brain::forward a pure linear-ReLU-linear graph; activation lives at decode site
+- pick_action_c lifetime: deleted on D land — dead code; D replaces it
+

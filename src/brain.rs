@@ -15,8 +15,14 @@ use wide::f32x8;
 const _: () = assert!(NN_INPUTS == 136);
 const _: () = assert!(NN_HIDDEN == 24);
 const _: () = assert!(NN_OUTPUTS == 8);
-const _: () = assert!(NN_INPUTS % 8 == 0, "NN_INPUTS must be multiple of 8 for SIMD chunks");
-const _: () = assert!(NN_HIDDEN % 8 == 0, "NN_HIDDEN must be multiple of 8 for output matmul");
+const _: () = assert!(
+    NN_INPUTS.is_multiple_of(8),
+    "NN_INPUTS must be multiple of 8 for SIMD chunks"
+);
+const _: () = assert!(
+    NN_HIDDEN.is_multiple_of(8),
+    "NN_HIDDEN must be multiple of 8 for output matmul"
+);
 const _: () = assert!(NN_WEIGHT_COUNT == NN_INPUTS * NN_HIDDEN + NN_HIDDEN * NN_OUTPUTS);
 
 /// Number of 8-wide SIMD chunks in the input vector (17).
@@ -207,7 +213,10 @@ mod tests {
         let mut hidden = [0.0f32; NN_HIDDEN];
         brain.forward(&input, &mut output, &mut hidden);
         assert_eq!(output.len(), 8);
-        assert!(output.iter().all(|&v| v == 0.0), "zero weights → zero output");
+        assert!(
+            output.iter().all(|&v| v == 0.0),
+            "zero weights → zero output"
+        );
 
         // Non-zero weights → finite outputs.
         let mut rng = SimRng::from_u64(99);
@@ -217,7 +226,10 @@ mod tests {
         let mut hid2 = [0.0f32; NN_HIDDEN];
         brain2.forward(&input2, &mut out2, &mut hid2);
         assert_eq!(out2.len(), 8);
-        assert!(out2.iter().all(|&v| v.is_finite()), "non-zero weights → finite");
+        assert!(
+            out2.iter().all(|&v| v.is_finite()),
+            "non-zero weights → finite"
+        );
     }
 
     /// D.15 test 2 (CRITICAL): SIMD and scalar agree within 1e-5 relative error.
@@ -283,7 +295,7 @@ mod tests {
         // Set hidden→output weights for hidden unit 0 to +100 in brain_a.
         let ho_offset = NN_INPUTS * NN_HIDDEN;
         for o in 0..NN_OUTPUTS {
-            brain_a.weights[ho_offset + o * NN_HIDDEN + 0] = 100.0;
+            brain_a.weights[ho_offset + o * NN_HIDDEN] = 100.0;
         }
 
         let brain_b = Brain::zero(); // all zeros → output zero regardless
@@ -298,10 +310,7 @@ mod tests {
         brain_b.forward(&input, &mut out_b, &mut hid_b);
 
         // hidden[0] in brain_a should be 0 (ReLU of -136).
-        assert_eq!(
-            hid_a[0], 0.0,
-            "ReLU must clip negative pre-activation to 0"
-        );
+        assert_eq!(hid_a[0], 0.0, "ReLU must clip negative pre-activation to 0");
         // Since hidden[0] = 0, the large w_ho weights don't contribute.
         assert_eq!(out_a, out_b, "clipped hidden unit must not affect outputs");
     }
@@ -343,7 +352,13 @@ mod tests {
         let mut hid2 = [0.0f32; NN_HIDDEN];
         brain.forward(&input, &mut out2, &mut hid2);
 
-        assert_eq!(out1, out2, "forward pass must be bit-identical on same input");
-        assert_eq!(hid1, hid2, "hidden layer must be bit-identical on same input");
+        assert_eq!(
+            out1, out2,
+            "forward pass must be bit-identical on same input"
+        );
+        assert_eq!(
+            hid1, hid2,
+            "hidden layer must be bit-identical on same input"
+        );
     }
 }

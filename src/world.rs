@@ -22,7 +22,6 @@ use serde::{Deserialize, Serialize};
 /// scales this further (`size × 2.5` pixels per v6 §B at base zoom).
 pub const BODY_RADIUS_PER_SIZE: f32 = 1.0;
 
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DevSliders {
     pub base_sun_rate: f32,
@@ -275,8 +274,7 @@ impl World {
                                     if nx < 0 || ny < 0 || nx >= dim || ny >= dim {
                                         continue;
                                     }
-                                    let cell_idx =
-                                        ny as usize * HASH_DIM + nx as usize;
+                                    let cell_idx = ny as usize * HASH_DIM + nx as usize;
                                     for &ci in &cell_to_carrion_ref[cell_idx] {
                                         let c = &carrion_ref[ci as usize];
                                         let ddx = c.x - xi;
@@ -287,12 +285,12 @@ impl World {
                                     }
                                 }
                             }
-                            let near = xi
-                                .min(yi)
-                                .min(WORLD_SIZE - xi)
-                                .min(WORLD_SIZE - yi);
-                            let is_at_wall =
-                                if near < ri + WALL_THRESHOLD_PAD { 1.0f32 } else { 0.0f32 };
+                            let near = xi.min(yi).min(WORLD_SIZE - xi).min(WORLD_SIZE - yi);
+                            let is_at_wall = if near < ri + WALL_THRESHOLD_PAD {
+                                1.0f32
+                            } else {
+                                0.0f32
+                            };
                             pick_action_d(
                                 i,
                                 &mut input_buf,
@@ -810,10 +808,7 @@ impl World {
         let x = self.creatures.x[i];
         let y = self.creatures.y[i];
         let r = self.creatures.genomes[i].size * BODY_RADIUS_PER_SIZE;
-        let near = x
-            .min(y)
-            .min(WORLD_SIZE - x)
-            .min(WORLD_SIZE - y);
+        let near = x.min(y).min(WORLD_SIZE - x).min(WORLD_SIZE - y);
         if near < r + WALL_THRESHOLD_PAD {
             1.0
         } else {
@@ -891,7 +886,7 @@ fn build_nn_input(
     buf[5] = is_at_wall_flag; // is_at_wall
     buf[6] = cooldown as f32 / DIGESTION_COOLDOWN_TICKS as f32; // cooldown_frac
     buf[7] = (carrion_overlap_count as f32 / CARRION_OVERLAP_NORM_BASE).min(1.0); // carrion_overlap_norm
-    // buf[8], buf[9]: reserved zero (v5 §5.1).
+                                                                                  // buf[8], buf[9]: reserved zero (v5 §5.1).
 
     // 10..130: vision passthrough (raw world units, C.12 contract).
     buf[10..130].copy_from_slice(vision);
@@ -1115,7 +1110,11 @@ mod tests {
             *v = k as f32 * 0.01;
         }
         let inp = build_nn_input(0, &w.creatures, &vis, 0, 0.0);
-        assert_eq!(&inp[10..130], &vis[..], "vision passthrough must be byte-exact");
+        assert_eq!(
+            &inp[10..130],
+            &vis[..],
+            "vision passthrough must be byte-exact"
+        );
     }
 
     /// D.16 test 10: last_action one-hot at offsets 130..136.
@@ -1129,7 +1128,8 @@ mod tests {
         for k in 0..6 {
             let expected = if k == eat_idx { 1.0 } else { 0.0 };
             assert_eq!(
-                inp[130 + k], expected,
+                inp[130 + k],
+                expected,
                 "last_action one-hot[{k}] = {} (expected {expected})",
                 inp[130 + k]
             );
@@ -1265,7 +1265,10 @@ mod tests {
             }
             t
         };
-        assert_eq!(ticks_a, ticks_b, "same seed must produce identical tick count");
+        assert_eq!(
+            ticks_a, ticks_b,
+            "same seed must produce identical tick count"
+        );
     }
 
     // ---- D.19 smoke test ----
@@ -1291,17 +1294,7 @@ mod tests {
             let b = Brain::founder(&mut seeder);
             let x = seeder.uniform(10.0, WORLD_SIZE - 10.0);
             let y = seeder.uniform(10.0, WORLD_SIZE - 10.0);
-            w.creatures.push(
-                k + 1,
-                x,
-                y,
-                FOUNDER_ENERGY,
-                0,
-                0,
-                0,
-                g,
-                b,
-            );
+            w.creatures.push(k + 1, x, y, FOUNDER_ENERGY, 0, 0, 0, g, b);
             w.vision.push([0.0f32; VISION_LEN]);
         }
 
@@ -1370,14 +1363,14 @@ mod tests {
         let mut g = Genome::founder();
         g.eat_efficiency = 0.0; // Eat invalid
         g.scavenge_efficiency = 0.0; // Scavenge invalid
-        // Give Split the highest logit (energy=0 → invalid), Eat 2nd (eff=0 → invalid),
-        // Scavenge 3rd (eff=0 → invalid). Rest, Photo, Signal should all be valid.
-        // Rest is index 0, make it the lowest logit so Photo or Signal wins first,
-        // but confirm that the function returns a valid action regardless.
+                                     // Give Split the highest logit (energy=0 → invalid), Eat 2nd (eff=0 → invalid),
+                                     // Scavenge 3rd (eff=0 → invalid). Rest, Photo, Signal should all be valid.
+                                     // Rest is index 0, make it the lowest logit so Photo or Signal wins first,
+                                     // but confirm that the function returns a valid action regardless.
         let logits = [-5.0f32, 2.0, -3.0, -3.0, 10.0, 3.0]; // Split>Signal>Photo>...
         let act = decode_action(&logits, &g, 0.0, 1); // energy=0 → Split invalid; cooldown>0 → Eat invalid
-        // Photosynth (idx 1, logit=2) and Signal (idx 5, logit=3) are both valid;
-        // Signal has higher logit so it wins.
+                                                      // Photosynth (idx 1, logit=2) and Signal (idx 5, logit=3) are both valid;
+                                                      // Signal has higher logit so it wins.
         assert!(
             matches!(act, Action::Photosynth | Action::Signal | Action::Rest),
             "Expected always-valid action, got {:?}",
