@@ -54,19 +54,21 @@ impl<'a> VisionPass<'a> {
 
     /// Fill `buf` for creature index `i`.
     fn fill_one(&self, i: usize, buf: &mut VisionBuf) {
+        // perf-5: hot reads use g_* mirrors; cold reads (eye_offsets, pigment_*) stay on &self.creatures.genomes[i].
         debug_assert_eq!(
             self.creatures.eye_trig.len(),
             self.creatures.x.len() * SECTORS * 2
         );
-        let g = &self.creatures.genomes[i];
+        let eye_count_i = self.creatures.g_eye_count[i];
+        let vision_range_i = self.creatures.g_vision_range[i];
         // Short-circuit: blind or zero-range creature → all zeros.
-        if g.eye_count == 0 || g.vision_range <= 0.0 {
+        if eye_count_i == 0 || vision_range_i <= 0.0 {
             *buf = [0.0; VISION_LEN];
             return;
         }
 
         // Find eye_count position in EYE_VALID to get stride.
-        let k = g.eye_count as usize;
+        let k = eye_count_i as usize;
         let k_idx = EYE_VALID.iter().position(|&v| v as usize == k).unwrap_or(0);
         if k_idx == 0 {
             // eye_count not in valid set → treat as blind
@@ -76,7 +78,7 @@ impl<'a> VisionPass<'a> {
         let stride = EYE_STRIDE[k_idx] as usize; // 24 / k
         let ox = self.creatures.x[i];
         let oy = self.creatures.y[i];
-        let max_dist = g.vision_range;
+        let max_dist = vision_range_i;
 
         // Zero the buffer first; inactive sectors stay zero.
         *buf = [0.0; VISION_LEN];
@@ -91,14 +93,14 @@ impl<'a> VisionPass<'a> {
                 let slot = s * FEATURES_PER_SECTOR;
                 match hit {
                     RayHit::Creature(j, dist) => {
-                        let gj = &self.creatures.genomes[j];
-                        // Ensure dist is never near-zero (disambiguate from empty sector).
+                        let pigment = &self.creatures.genomes[j]; // for pigment_r/g/b only (cold)
+                                                                  // Ensure dist is never near-zero (disambiguate from empty sector).
                         let d = dist.max(1e-4);
                         buf[slot] = d;
-                        buf[slot + 1] = gj.size;
-                        buf[slot + 2] = gj.pigment_r;
-                        buf[slot + 3] = gj.pigment_g;
-                        buf[slot + 4] = gj.pigment_b;
+                        buf[slot + 1] = self.creatures.g_size[j]; // perf-5: mirror
+                        buf[slot + 2] = pigment.pigment_r;
+                        buf[slot + 3] = pigment.pigment_g;
+                        buf[slot + 4] = pigment.pigment_b;
                     }
                     RayHit::Carrion(_, dist) => {
                         let d = dist.max(1e-4);
@@ -185,7 +187,7 @@ impl<'a> VisionPass<'a> {
                     if j == self_idx {
                         continue;
                     }
-                    let rj = self.creatures.genomes[j].size * BODY_RADIUS_PER_SIZE;
+                    let rj = self.creatures.g_size[j] * BODY_RADIUS_PER_SIZE; // perf-5: mirror
                     if let Some(t) =
                         ray_circle_hit(ox, oy, dx, dy, self.creatures.x[j], self.creatures.y[j], rj)
                     {

@@ -393,7 +393,7 @@ impl World {
                             // Inline carrion overlap + is_at_wall for the threaded path.
                             let xi = creatures_ref.x[i];
                             let yi = creatures_ref.y[i];
-                            let ri = creatures_ref.genomes[i].size * BODY_RADIUS_PER_SIZE;
+                            let ri = creatures_ref.g_size[i] * BODY_RADIUS_PER_SIZE; // perf-5: mirror
                             let r2 = ri * ri;
                             let cx_cell = (xi / HASH_CELL).floor() as i32;
                             let cy_cell = (yi / HASH_CELL).floor() as i32;
@@ -451,8 +451,9 @@ impl World {
         if n == 0 {
             return;
         }
+        // perf-5: hot reads use g_* mirrors; cold reads (bite_reach, etc.) stay on &self.creatures.genomes[i].
         for i in 0..n {
-            let speed_cap = self.creatures.genomes[i].move_speed;
+            let speed_cap = self.creatures.g_move_speed[i];
             let vx = self.creatures.vx[i];
             let vy = self.creatures.vy[i];
             let mag2 = vx * vx + vy * vy;
@@ -471,7 +472,7 @@ impl World {
             self.creatures.y[i] += cvy;
             // E.25.b: FirstToMove fires here (on the actual crossing tick) per v6 §L.
             if !self.first_move_fired
-                && self.creatures.genomes[i].move_speed > 0.0
+                && self.creatures.g_move_speed[i] > 0.0
                 && self.creatures.distance_travelled[i] >= 5.0
             {
                 self.first_move_fired = true;
@@ -508,7 +509,7 @@ impl World {
         for i in 0..n {
             let xi = self.creatures.x[i];
             let yi = self.creatures.y[i];
-            let ri = self.creatures.genomes[i].size * BODY_RADIUS_PER_SIZE;
+            let ri = self.creatures.g_size[i] * BODY_RADIUS_PER_SIZE;
             let search = ri + SIZE_MAX * BODY_RADIUS_PER_SIZE;
             // std::mem::take releases the self.scratch_neighbors borrow so we can
             // simultaneously borrow self.grid and self.creatures inside the closure
@@ -524,7 +525,7 @@ impl World {
             for &j in &neighbors {
                 let xj = self.creatures.x[j];
                 let yj = self.creatures.y[j];
-                let rj = self.creatures.genomes[j].size * BODY_RADIUS_PER_SIZE;
+                let rj = self.creatures.g_size[j] * BODY_RADIUS_PER_SIZE;
                 let dx = xj - xi;
                 let dy = yj - yi;
                 let d2 = dx * dx + dy * dy;
@@ -560,7 +561,7 @@ impl World {
         for i in 0..n {
             let mut x = self.creatures.x[i] + self.scratch_fx[i];
             let mut y = self.creatures.y[i] + self.scratch_fy[i];
-            let r = self.creatures.genomes[i].size * BODY_RADIUS_PER_SIZE;
+            let r = self.creatures.g_size[i] * BODY_RADIUS_PER_SIZE;
             if x < r {
                 x = r;
                 if self.creatures.vx[i] < 0.0 {
@@ -592,13 +593,13 @@ impl World {
 
     fn photosynth_two_pass(&mut self) {
         // 5a. demand
+        // perf-5: hot reads use g_* mirrors; cold reads stay on &self.creatures.genomes[i].
         self.sun.demand.fill(0.0);
         for i in 0..self.creatures.len() {
             if self.creatures.action_this_tick[i] != Action::Photosynth {
                 continue;
             }
-            let g = &self.creatures.genomes[i];
-            let want = PHOTO_GAIN_COEFF * g.photosynth_efficiency * g.size;
+            let want = PHOTO_GAIN_COEFF * self.creatures.g_photo_eff[i] * self.creatures.g_size[i];
             if want <= 0.0 {
                 continue;
             }
@@ -610,8 +611,7 @@ impl World {
             if self.creatures.action_this_tick[i] != Action::Photosynth {
                 continue;
             }
-            let g = &self.creatures.genomes[i];
-            let want = PHOTO_GAIN_COEFF * g.photosynth_efficiency * g.size;
+            let want = PHOTO_GAIN_COEFF * self.creatures.g_photo_eff[i] * self.creatures.g_size[i];
             if want <= 0.0 {
                 continue;
             }
@@ -655,17 +655,20 @@ impl World {
 
         for i in 0..n {
             match self.creatures.action_this_tick[i] {
+                // perf-5: hot reads use g_* mirrors; cold reads (bite_reach, armor) stay on &self.creatures.genomes[i].
                 Action::Eat => {
                     self.scratch_attempted_eat[i] = true;
                     if self.creatures.digestion_cooldown[i] > 0 {
                         continue;
                     }
-                    let g_i = self.creatures.genomes[i].clone();
-                    if g_i.eat_efficiency <= 0.0 {
+                    let eat_eff_i = self.creatures.g_eat_eff[i];
+                    if eat_eff_i <= 0.0 {
                         continue;
                     }
-                    let radius_i = g_i.size * BODY_RADIUS_PER_SIZE;
-                    let reach = g_i.bite_reach * g_i.size;
+                    let size_i = self.creatures.g_size[i];
+                    let bite_reach_i = self.creatures.genomes[i].bite_reach; // COLD field; stays AoS
+                    let radius_i = size_i * BODY_RADIUS_PER_SIZE;
+                    let reach = bite_reach_i * size_i;
                     let max_range = radius_i + reach + SIZE_MAX * BODY_RADIUS_PER_SIZE;
                     let xi = self.creatures.x[i];
                     let yi = self.creatures.y[i];
@@ -680,7 +683,7 @@ impl World {
                         let dx = self.creatures.x[j] - xi;
                         let dy = self.creatures.y[j] - yi;
                         let d = (dx * dx + dy * dy).sqrt();
-                        let rj = self.creatures.genomes[j].size * BODY_RADIUS_PER_SIZE;
+                        let rj = self.creatures.g_size[j] * BODY_RADIUS_PER_SIZE;
                         let contact = (d - radius_i - rj).max(0.0);
                         if contact <= reach {
                             best = match best {
@@ -696,24 +699,24 @@ impl World {
                         }
                     }
                     if let Some((j, _)) = best {
-                        let dmg = EAT_DAMAGE_COEFF * g_i.size;
-                        let armor = self.creatures.genomes[j].armor.clamp(0.0, 1.0);
+                        let dmg = EAT_DAMAGE_COEFF * size_i;
+                        let armor = self.creatures.genomes[j].armor.clamp(0.0, 1.0); // COLD field; stays AoS
                         self.scratch_damage[j] += dmg * (1.0 - armor);
-                        self.scratch_gain[i] += EAT_GAIN_COEFF * g_i.eat_efficiency;
+                        self.scratch_gain[i] += EAT_GAIN_COEFF * eat_eff_i;
                         self.scratch_cooldown_set[i] = true;
                         self.scratch_got_a_bite[i] = true;
                     }
                 }
                 Action::Scavenge => {
                     self.scratch_attempted_scavenge[i] = true;
-                    let g_i = self.creatures.genomes[i].clone();
-                    if g_i.scavenge_efficiency <= 0.0 {
+                    let scav_eff_i = self.creatures.g_scav_eff[i];
+                    if scav_eff_i <= 0.0 {
                         continue;
                     }
-                    let r_i = g_i.size * BODY_RADIUS_PER_SIZE;
+                    let r_i = self.creatures.g_size[i] * BODY_RADIUS_PER_SIZE;
                     let xi = self.creatures.x[i];
                     let yi = self.creatures.y[i];
-                    let want = SCAVENGE_GAIN_COEFF * g_i.scavenge_efficiency;
+                    let want = SCAVENGE_GAIN_COEFF * scav_eff_i;
                     for c in &mut self.carrion {
                         let dx = c.x - xi;
                         let dy = c.y - yi;
@@ -757,23 +760,30 @@ impl World {
     }
 
     fn energy_bookkeeping(&mut self) {
+        // perf-5: hot reads use g_* mirrors; cold reads (armor, max_age) stay on &self.creatures.genomes[i].
         let mouth_tax = self.sliders.mouth_tax;
         for i in 0..self.creatures.len() {
-            let g = &self.creatures.genomes[i];
+            let size_i = self.creatures.g_size[i];
+            let move_speed_i = self.creatures.g_move_speed[i];
+            let eye_count_i = self.creatures.g_eye_count[i];
+            let vision_range_i = self.creatures.g_vision_range[i];
+            let eat_eff_i = self.creatures.g_eat_eff[i];
+            let scav_eff_i = self.creatures.g_scav_eff[i];
+            let g = &self.creatures.genomes[i]; // for g.armor, g.max_age, g.clone() (HoF)
             let mut up = UPKEEP_BASE;
-            if g.size > 1.0 {
-                up += UPKEEP_SIZE_PER_UNIT * (g.size - 1.0);
+            if size_i > 1.0 {
+                up += UPKEEP_SIZE_PER_UNIT * (size_i - 1.0);
             }
-            if g.move_speed > 0.0 {
+            if move_speed_i > 0.0 {
                 up += UPKEEP_MOBILITY_FLAG;
-                up += UPKEEP_MOVE_SPEED_PER_UNIT * g.move_speed;
+                up += UPKEEP_MOVE_SPEED_PER_UNIT * move_speed_i;
             }
-            up += UPKEEP_PER_EYE * g.eye_count as f32;
-            up += UPKEEP_VISION_COEFF * g.vision_range * g.vision_range;
-            if g.eat_efficiency > 0.0 {
+            up += UPKEEP_PER_EYE * eye_count_i as f32;
+            up += UPKEEP_VISION_COEFF * vision_range_i * vision_range_i;
+            if eat_eff_i > 0.0 {
                 up += mouth_tax;
             }
-            if g.scavenge_efficiency > 0.0 {
+            if scav_eff_i > 0.0 {
                 up += UPKEEP_GUT;
             }
             if g.armor > 0.0 {
@@ -789,22 +799,22 @@ impl World {
                 up *= mult.min(1e6);
             }
 
-            if g.size > self.creatures.max_size_reached[i] {
-                self.creatures.max_size_reached[i] = g.size;
+            if size_i > self.creatures.max_size_reached[i] {
+                self.creatures.max_size_reached[i] = size_i;
             }
             // E.25.d: biggest_ever hall-of-fame. v1 has no in-life growth, so
             // this fires per-tick against the global champion; any newborn
             // with a larger genome.size becomes the new biggest.
             {
                 let current_best = self.biggest_ever.as_ref().map_or(0.0, |h| h.captured_size);
-                if g.size > current_best {
+                if size_i > current_best {
                     let species_name = self.species.get(self.creatures.species_id[i]).name.clone();
                     self.biggest_ever = Some(HallOfFame {
                         creature_id: self.creatures.id[i],
                         genome: g.clone(),
                         species_name,
                         captured_tick: self.tick,
-                        captured_size: g.size,
+                        captured_size: size_i,
                         captured_age: self.creatures.age[i],
                     });
                 }
@@ -1164,7 +1174,7 @@ impl World {
     fn count_carrion_overlap(&self, i: usize) -> u32 {
         let xi = self.creatures.x[i];
         let yi = self.creatures.y[i];
-        let ri = self.creatures.genomes[i].size * BODY_RADIUS_PER_SIZE;
+        let ri = self.creatures.g_size[i] * BODY_RADIUS_PER_SIZE; // perf-5: mirror
         let r2 = ri * ri;
         let cx = (xi / HASH_CELL).floor() as i32;
         let cy = (yi / HASH_CELL).floor() as i32;
@@ -1198,7 +1208,7 @@ impl World {
     fn compute_is_at_wall(&self, i: usize) -> f32 {
         let x = self.creatures.x[i];
         let y = self.creatures.y[i];
-        let r = self.creatures.genomes[i].size * BODY_RADIUS_PER_SIZE;
+        let r = self.creatures.g_size[i] * BODY_RADIUS_PER_SIZE; // perf-5: mirror
         let near = x.min(y).min(WORLD_SIZE - x).min(WORLD_SIZE - y);
         if near < r + WALL_THRESHOLD_PAD {
             1.0
@@ -1258,8 +1268,10 @@ fn build_nn_input(
     carrion_overlap_count: u32,
     is_at_wall_flag: f32,
 ) -> [f32; NN_INPUTS] {
+    // perf-5: hot reads use g_* mirrors; cold reads (max_age) stay on &creatures.genomes[i].
     let mut buf = [0.0f32; NN_INPUTS];
-    let g = &creatures.genomes[i];
+    let size_i = creatures.g_size[i];
+    let g = &creatures.genomes[i]; // for g.max_age (cold)
     let energy = creatures.energy[i];
     let age = creatures.age[i];
     let cooldown = creatures.digestion_cooldown[i];
@@ -1271,7 +1283,7 @@ fn build_nn_input(
     } else {
         1.0
     }; // age_frac
-    buf[2] = g.size / SIZE_MAX; // size (normalized)
+    buf[2] = size_i / SIZE_MAX; // size (normalized)
     buf[3] = creatures.vx[i] / MOVE_SPEED_MAX; // vx (previous-tick post-clip)
     buf[4] = creatures.vy[i] / MOVE_SPEED_MAX; // vy
     buf[5] = is_at_wall_flag; // is_at_wall
@@ -1339,7 +1351,7 @@ fn pick_action_d(
     creatures.brains[i].forward(input_buf, output_buf, hidden_buf);
 
     // Velocity: tanh(out[0..2]) × move_speed (v6 §E).
-    let speed = creatures.genomes[i].move_speed;
+    let speed = creatures.g_move_speed[i]; // perf-5: mirror
     let vx = output_buf[0].tanh() * speed;
     let vy = output_buf[1].tanh() * speed;
 
@@ -1347,6 +1359,7 @@ fn pick_action_d(
     let logits: &[f32; 6] = output_buf[2..8].try_into().unwrap();
     let energy = creatures.energy[i];
     let cooldown = creatures.digestion_cooldown[i];
+    // decode_action takes &Genome (reads eat_eff/scav_eff). Hot, but kept on AoS to avoid API churn; one read/creature/tick.
     let action = decode_action(logits, &creatures.genomes[i], energy, cooldown);
 
     (vx, vy, action)
@@ -1434,6 +1447,7 @@ mod tests {
         w.creatures.genomes[0].move_speed = 1.0;
         w.creatures.genomes[0].vision_range = 30.0;
         w.creatures.genomes[0].eye_count = 4;
+        w.creatures.resync_hot_mirrors_at(0); // perf-5: keep mirrors in sync after genome patch
         w.creatures.recompute_eye_trig_at(0);
         for _ in 0..2000 {
             if !w.tick_once() {
@@ -1465,6 +1479,7 @@ mod tests {
         w.creatures.age[0] = 1000;
         w.creatures.genomes[0].max_age = 4000; // age_frac = 0.25
         w.creatures.genomes[0].size = 5.0; // size/10 = 0.5
+        w.creatures.resync_hot_mirrors_at(0); // perf-5: keep mirrors in sync after genome patch
         w.creatures.vx[0] = 2.5; // vx/5 = 0.5
         w.creatures.vy[0] = -5.0; // vy/5 = -1.0 (clipped to -1 in input)
         w.creatures.digestion_cooldown[0] = 25; // cooldown_frac = 0.5
@@ -1831,7 +1846,8 @@ mod tests {
         w.events_enabled = true; // enable logging so we can assert event contents
                                  // Give founder move_speed so movement cost applies.
         w.creatures.genomes[0].move_speed = 5.0;
-        // Set velocity directly so movement fires deterministically.
+        w.creatures.resync_hot_mirrors_at(0); // perf-5: keep mirrors in sync after genome patch
+                                              // Set velocity directly so movement fires deterministically.
         w.creatures.vx[0] = 5.0;
         w.creatures.vy[0] = 0.0;
         // Pre-condition: distance_travelled starts at 0, event not fired.
@@ -1873,6 +1889,7 @@ mod tests {
         let mut w = World::new("e25-biggest");
         // Set founder's size to 5.0.
         w.creatures.genomes[0].size = 5.0;
+        w.creatures.resync_hot_mirrors_at(0); // perf-5: keep mirrors in sync after genome patch
         w.energy_bookkeeping();
         assert!(
             w.biggest_ever.is_some(),
@@ -1886,6 +1903,7 @@ mod tests {
 
         // Update to larger size.
         w.creatures.genomes[0].size = 7.0;
+        w.creatures.resync_hot_mirrors_at(0); // perf-5: keep mirrors in sync after genome patch
         w.creatures.max_size_reached[0] = 5.0; // reset so next check fires
         w.energy_bookkeeping();
         assert_eq!(
