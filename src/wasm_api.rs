@@ -294,11 +294,12 @@ impl WorldHandle {
     // F.26 — persistence (snapshot_json + fromJson)
 
     /// Serialize the world to JSON for autosave / Download Save (F.26).
-    /// ~1–5 ms at v1 sizes (brains dominate). Infallible — expect() is correct.
+    /// ~1–5 ms at v1 sizes (brains dominate). Returns "{}" on the (unreachable)
+    /// serialization error path rather than panicking.
     #[wasm_bindgen]
     pub fn snapshot_json(&self) -> String {
         let save = self.inner.to_save_v1();
-        serde_json::to_string(&save).expect("save serialization is infallible")
+        serde_json::to_string(&save).unwrap_or_else(|_| "{}".into())
     }
 
     /// Construct a WorldHandle from a JSON save string (F.26).
