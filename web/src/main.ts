@@ -18,7 +18,8 @@ if (!ctx) throw new Error("2d context unavailable");
 let viewW = 0;
 let viewH = 0;
 function resize(): void {
-  const dpr = window.devicePixelRatio || 1;
+  // S22: cap DPR at 2 to avoid 3× pixel overdraw on 3× displays.
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
   viewW = window.innerWidth;
   viewH = window.innerHeight;
   canvas.width = Math.floor(viewW * dpr);
@@ -216,8 +217,12 @@ async function main(): Promise<void> {
     world = new WorldHandle(urlSeed ?? "");
   }
 
+  // S22: cache seed once per world lifetime (world.seed is a getter that
+  // allocates a new String each call; no need to call it per frame).
+  const cachedSeed = world.seed;
+
   // F.27: seed display.
-  installSeedDisplay(world.seed);
+  installSeedDisplay(cachedSeed);
 
   // F.26: flush a save when the user navigates away so we don't lose up to
   // 5 minutes of sim. The postMessage to the worker is fire-and-forget —
@@ -227,7 +232,7 @@ async function main(): Promise<void> {
   // event.preventDefault() / returnValue so we never block navigation.
   window.addEventListener("beforeunload", () => {
     if (world && !world.world_ended) {
-      persistence.save(world.snapshot_json(), world.seed, world.tick, {
+      persistence.save(world.snapshot_json(), cachedSeed, world.tick, {
         zoom: cam.zoom,
         cx: cam.cx,
         cy: cam.cy,
@@ -249,7 +254,7 @@ async function main(): Promise<void> {
     () => world!.world_size,
   );
 
-  status.textContent = `seed: ${world.seed}  ·  tick 0  ·  pop ${world.population}`;
+  status.textContent = `seed: ${cachedSeed}  ·  tick 0  ·  pop ${world.population}`;
 
   // Speed buttons in the top bar.
   installSpeedControls();
@@ -269,6 +274,8 @@ async function main(): Promise<void> {
 
   // Sim + render loop.
   let lastRender = performance.now();
+  // S22: throttle status DOM updates to 5 Hz (200 ms gate).
+  let lastStatusUpdate = 0;
   function frame(now: number): void {
     const frameSpan = span("frame");
     try {
@@ -277,17 +284,20 @@ async function main(): Promise<void> {
       const ticksThisFrame =
         speed === 0 ? 0 : Math.min(200, Math.max(1, Math.round((speed * delta) / 16.66)));
 
-      if (ticksThisFrame > 0 && !world!.world_ended) {
+      // S22: hoist world_ended once per RAF frame (was called 3× per frame).
+      const ended = world!.world_ended;
+
+      if (ticksThisFrame > 0 && !ended) {
         timed("step_n", () => world!.step_n(ticksThisFrame));
       }
 
       // F.26: autosave after each frame batch.
-      if (!world!.world_ended) {
+      if (!ended) {
         timed("maybeAutosave", () => maybeAutosave(world!, cam, now, persistence));
       }
 
       // F.28: eulogy — fire once when world ends.
-      if (world!.world_ended && !eulogyShown) {
+      if (ended && !eulogyShown) {
         eulogyShown = true;
         showEulogyCard(world!, persistence);
       }
@@ -302,8 +312,13 @@ async function main(): Promise<void> {
       timed("renderWorld", () =>
         renderWorld(ctx!, cam, viewW, viewH, world!, stride, ids, highlights, now));
 
-      const ended = world!.world_ended ? "  (world ended)" : "";
-      status.textContent = `seed: ${world!.seed}  ·  tick ${world!.tick}  ·  pop ${world!.population}  ·  species ${world!.species_count}${ended}`;
+      // S22: throttle status DOM updates to 5 Hz (200 ms gate).
+      if (now - lastStatusUpdate > 200) {
+        lastStatusUpdate = now;
+        const endedSuffix = ended ? "  (world ended)" : "";
+        status.textContent =
+          `seed: ${cachedSeed}  ·  tick ${world!.tick}  ·  pop ${world!.population}  ·  species ${world!.species_count}${endedSuffix}`;
+      }
     } finally {
       frameSpan.close();
     }
