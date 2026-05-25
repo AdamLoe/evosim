@@ -47,21 +47,6 @@ function renderSpeciesList(rows: SpeciesRow[]): void {
   }
 }
 
-// ---- Event shape (matches EventKind #[serde(tag = "type")]) ----
-
-export type EvKind =
-  | { type: "Speciation"; new_species_id: number; parent_species_id: number; new_species_name: string; creature_id: number }
-  | { type: "Extinction"; species_id: number; species_name: string }
-  | { type: "PopulationMilestone"; population: number }
-  | { type: "FirstToMove"; creature_id: number }
-  | { type: "FirstToEat"; creature_id: number }
-  | { type: "WorldEnded"; ticks_lived: number; peak_population: number; peak_species: number };
-
-export interface EvEvent {
-  tick: number;
-  kind: EvKind;
-}
-
 // ---- Rail state (opaque to main.ts) ----
 
 export interface RailState {

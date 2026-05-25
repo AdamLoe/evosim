@@ -246,19 +246,6 @@ impl WorldHandle {
         true
     }
 
-    /// JSON of recent events (UI ring buffer).
-    #[wasm_bindgen]
-    pub fn recent_events_json(&self) -> String {
-        serde_json::to_string(&self.inner.events.recent).unwrap_or_else(|_| "[]".into())
-    }
-
-    /// Total count of all-time events appended (monotone u32). Used by the TS
-    /// event-diff algorithm to detect new events since last poll (E.22 / PIN C).
-    #[wasm_bindgen(getter)]
-    pub fn events_total_count(&self) -> u32 {
-        self.inner.events.all.len() as u32
-    }
-
     /// JSON array of alive species (population > 0). Shape: SpeciesRow[].
     /// O(N+S). Called at 1Hz from the rail poll (E.21).
     #[wasm_bindgen]
