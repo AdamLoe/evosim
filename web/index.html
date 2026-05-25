@@ -70,10 +70,15 @@
 
     <!-- ui-perf: free-standing perf widget (bottom-left, always visible) -->
     <div id="perf-box" class="overlay-widget perf-widget">
-      <label class="profiler-toggle">
-        <input type="checkbox" id="profiler-enable" />
-        profiler
-      </label>
+      <div class="perf-header-row">
+        <label class="profiler-toggle">
+          <input type="checkbox" id="profiler-enable" />
+          profiler
+        </label>
+        <span id="perf-tps" class="perf-stat">— TPS</span>
+        <span id="perf-jank" class="perf-stat">0 jank</span>
+        <button id="jank-reset" class="jank-reset-btn" title="Reset jank counter">↺</button>
+      </div>
       <div id="profiler-stabilizing" class="profiler-stabilizing" style="display:none"></div>
       <table id="profiler-table" class="profiler-table">
         <thead>

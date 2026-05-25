@@ -37,6 +37,11 @@ export function installProfilerPanel(world: WorldHandle): void {
   checkbox.checked = false;
   // D5: initial paint of "enable to record" hint so tbody isn't visually blank.
   clearTable();
+  renderTpsJank(world);
+
+  // TPS + jank are always visible (independent of profiler enable).
+  // Poll at 1 Hz continuously so numbers stay fresh even when profiler is off.
+  window.setInterval(() => renderTpsJank(world), POLL_INTERVAL_MS);
 
   checkbox.addEventListener("change", () => {
     const on = checkbox.checked;
@@ -48,21 +53,45 @@ export function installProfilerPanel(world: WorldHandle): void {
       clearTable();
     }
   });
+
+  // Wire up the jank reset button if present.
+  const jankReset = document.getElementById("jank-reset") as HTMLButtonElement | null;
+  if (jankReset) {
+    jankReset.addEventListener("click", () => {
+      world.reset_jank();
+      renderTpsJank(world);
+    });
+  }
 }
 
 function startPolling(world: WorldHandle): void {
   if (profilerPollHandle !== 0) return; // already running
   profilerPollHandle = window.setInterval(() => {
     pollAndRender(world);
+    renderTpsJank(world);
   }, POLL_INTERVAL_MS);
   // Render once immediately so the table isn't blank for 1s.
   pollAndRender(world);
+  renderTpsJank(world);
 }
 
 function stopPolling(): void {
   if (profilerPollHandle !== 0) {
     clearInterval(profilerPollHandle);
     profilerPollHandle = 0;
+  }
+}
+
+/** Render TPS rolling average and jank counter into their DOM elements. */
+function renderTpsJank(world: WorldHandle): void {
+  const tpsEl = document.getElementById("perf-tps");
+  const jankEl = document.getElementById("perf-jank");
+  if (tpsEl) {
+    const tps = world.tps;
+    tpsEl.textContent = tps > 0 ? `${tps.toFixed(1)} TPS` : "— TPS";
+  }
+  if (jankEl) {
+    jankEl.textContent = `${world.jank_count} jank`;
   }
 }
 
