@@ -483,14 +483,25 @@ impl World {
     }
 
     pub fn finalize_extinctions(&mut self) {
-        let mut alive = std::collections::HashSet::<u32>::new();
+        // S28: replace HashSet<u32> with Vec<bool> indexed by species_id.
+        // Species IDs are assigned sequentially starting at 0, so species_id < species.list.len().
+        // Using a dense bool avoids HashMap/HashSet overhead (O(1) indexed lookup vs hash).
+        // Compatible with S9 lint (no .iter()/.into_iter() on HashMap/HashSet).
+        let max_id = self.species.list.len();
+        let mut alive = vec![false; max_id];
+        let mut live_count = 0u32;
         for i in 0..self.creatures.len() {
-            alive.insert(self.creatures.species_id[i]);
+            let sid = self.creatures.species_id[i] as usize;
+            if sid < max_id && !alive[sid] {
+                alive[sid] = true;
+                live_count += 1;
+            }
         }
         let candidates = std::mem::take(&mut self.pending_extinction_check);
         for cand in candidates {
-            if !alive.contains(&cand) {
-                let species = &mut self.species.list[cand as usize];
+            let cand_idx = cand as usize;
+            if cand_idx >= max_id || !alive[cand_idx] {
+                let species = &mut self.species.list[cand_idx];
                 if species.died_tick.is_none() {
                     species.died_tick = Some(self.tick);
                     if self.events_enabled {
@@ -506,7 +517,7 @@ impl World {
                 }
             }
         }
-        self.live_species_count = alive.len() as u32;
+        self.live_species_count = live_count;
     }
 
     pub fn tick_once(&mut self) -> bool {
