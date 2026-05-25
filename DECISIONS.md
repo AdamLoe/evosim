@@ -175,3 +175,41 @@ Format: `<topic>: <choice> — <one-line why>`.
   locally. Bootstrap path skips the perf check to always succeed.
 - **Plan ref.** `docs/plans/perf-4-threads.md`.
 
+## Audit v1.1 PR-1 review (2026-05-24)
+
+- 13 commits landed: 14783f1 (S1), a4589ba (S37), 65fcf72 (S38), e54a9f4 (S2a), 92e10e5 (S2b), d6236f2 (S13), d6c9a65 (S14), 955f141 (S15), f7bdff6 (S34), 09361ac (S36), cde7c62 (S3), c2d45bd (S33), 537179c (S35).
+- Both goldens unchanged at 0xb76e907c6221f7f5 (S37 confirmed byte-stable; threaded hash re-bootstrapped under EVOSIM_WRITE_GOLDEN_THREADED matches existing golden exactly).
+- Gates: cargo fmt clean; clippy default + threads clean with -D warnings; cargo test --lib 98/98 pass; cargo test --release --test acceptance 3/3 pass (sequential golden ✓); threaded acceptance hash ✓ (perf budget exceeded on WSL2 — expected, not blocking); pnpm typecheck + pnpm build green.
+- S1 split: src/world/{mod.rs 988, tick.rs 746, nn.rs 469, save_v1.rs 137}; src/world.rs gone.
+- S35 visibility: cargo check passes both feature sets; snapshot_hash remains pub for tests/acceptance.rs.
+- CSP header present in web/public/_headers; web/src/rail/events.ts deleted with no surviving references.
+- Notable findings: none. Scope discipline is clean on all 13 commits. No DECISIONS.md entries added by implementer for S37 byte-stability — recorded here instead.
+
+## Audit v1.1 PR-2 review (2026-05-24)
+
+- 5 commits landed: 3dec63d (S17), c66fef2 (S19), e78e0c3 (S18+S20), a681aeb (S21), fcac7f2 (S22).
+- Both goldens unchanged at 0xb76e907c6221f7f5 (sequential test green; threaded golden file byte-identical since pre-PR-2, no PR-2 commit in its `git log`; threaded hash assertion gated behind WSL2-failing perf check — not run, but no Rust simulation code was touched by PR-2).
+- Gates: cargo test --release --test acceptance 3/3 pass (sequential golden ✓); threaded acceptance perf budget exceeded on WSL2 (25.4 s vs 8 s budget — explicitly expected per task / DECISIONS WSL2 rayon entry); pnpm typecheck clean; pnpm build clean (pre-existing dynamic-import warning unrelated to PR-2).
+- S17: 5 typed setters at src/wasm_api.rs:209-237; set_slider now `Result<(), JsValue>` with private `try_set_slider` for native tests.
+- S19: recent_events_json + events_total_count removed from src/wasm_api.rs and EvKind/EvEvent stripped from web/src/rail/index.ts.
+- S18+S20: creature_at returns `Option<f64>` (stable id) via `grid.for_each_in_radius` bounded by `tolerance + SIZE_MAX*BODY_RADIUS_PER_SIZE`; new creature_idx_by_id O(N) reverse lookup; inspector now id-based.
+- S21: creature_stride 13→11; offsets shifted in Rust + TS; render.ts throws on `stride !== 11` (watchlist g satisfied); hot-field reads switched to perf-5 SoA mirrors.
+- S22: DPR capped at 2 in resize(); 200 ms status throttle; cached seed; hoisted world_ended.
+- Notable findings: minor — creature_at's `for_each_in_radius` closure early-outs via `if found.is_some() return` but doesn't short-circuit the grid traversal (still visits remaining cells, just skips work). Correct, negligible cost at v1 scale, not blocking. Stride guard uses literal `11` with descriptive throw rather than an `EXPECTED_CREATURE_STRIDE` named constant — functionally equivalent.
+
+## Audit v1.1 PR-3 (2026-05-24)
+
+audit v1.1 — snapshot_hash coverage extended (S7: 18 new fields: digestion_cooldown, cumulative_upkeep, species_id, parent_species_id, last_action, action_this_tick, max_size_reached, distance_travelled, birth_tick per creature; carrion.id, carrion.sun_cell; species parent_id, name, born_tick, died_tick, child_count, depth, anchor_brain_weights; registry next_id); RNG hash format changed from serde_json byte stream to direct u64×4 via SimRng::state() (S8); NaN canonicalization added to write_f32 (all NaN payloads map to 0x7fc0_0000); scavenge now uses 3×3 cell sweep (S24 — hash unchanged). New sequential hash 0xd56cd6881d2898fc, new threaded hash 0xd56cd6881d2898fc (both identical — arithmetic is bit-identical across sequential and parallel paths, same result as PR-1 bootstrap).
+
+- PR-3 commits: 772df68 (S9), e12c857 (S11), 343b980 (S4), 86afa99 (S5), b64acc3 (S6), 56a6898 (S10), 5d70301 (S12), 1d3c62f (S24), <S7+S8 commit>.
+- S4: place_hotspots fallback now uses `else if attempts > 2000` + resets attempts to 0 per branch; loop is bounded.
+- S5: decode_action returns Rest immediately on non-finite logits; pick_action_d zeros velocity on NaN path.
+- S6: mutate_f32/mutate_u32 guard against non-finite mutation results; keep original value on NaN.
+- S9: clippy.toml forbids HashMap/HashSet iter* in sim-critical files via disallowed-methods.
+- S10: debug_assert! invariants in chunk_ranges + coverage test for n ∈ {0,1,7,8,9,100,1500}.
+- S11: count_carrion_overlap + compute_is_at_wall extracted as free pub(crate) fns; used by both sequential and threaded NN paths.
+- S12: validate_save() centralises all loader hardening (9 checks) into src/save.rs; wired into from_save_v1.
+- S24: Action::Scavenge uses 3×3 HASH_DIM cell sweep via cell_to_carrion instead of O(all_carrion) linear scan. Golden unchanged (scavenge path finds same carrion via cell lookup in evosim-test-001 run).
+- S7+S8: see hash line above. SpeciesRegistry.next_id promoted to pub(crate). SimRng::state() added.
+
+

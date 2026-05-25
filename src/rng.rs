@@ -85,6 +85,36 @@ impl SimRng {
         debug_assert!(n > 0);
         (((self.next_u64() as u128) * (n as u128)) >> 64) as usize
     }
+
+    /// Return the four `u64`s of the xoshiro256++ internal state, in storage
+    /// order (`s[0]..s[3]`).
+    ///
+    /// Used by `snapshot_hash` to fold the RNG into the canonical hash
+    /// without going through `serde_json`'s byte stream (S8). The field
+    /// `Xoshiro256PlusPlus::s` is private upstream; this accessor extracts it
+    /// via `serde_json::to_value` as a one-shot field extractor, then parses
+    /// the four `u64` values. The hash byte stream is independent of
+    /// `serde_json`'s output format because we hash the parsed `u64` values,
+    /// not the JSON bytes.
+    ///
+    /// Stable: hinges on `rand_xoshiro 0.6`'s `Serialize` derive emitting
+    /// the four state words under the field key `"s"`. The version is pinned
+    /// to `0.6` in `Cargo.toml`. If `rand_xoshiro` ever bumps and renames the
+    /// field, the `rng_state_round_trip_matches_serde` unit test will catch it.
+    pub(crate) fn state(&self) -> [u64; 4] {
+        let v = serde_json::to_value(&self.0)
+            .expect("Xoshiro256PlusPlus serialization is infallible");
+        let arr = v["s"]
+            .as_array()
+            .expect("rand_xoshiro Serialize derive must emit field 's' as array");
+        debug_assert_eq!(arr.len(), 4, "xoshiro256++ has exactly 4 state words");
+        [
+            arr[0].as_u64().expect("state word 0 must be u64"),
+            arr[1].as_u64().expect("state word 1 must be u64"),
+            arr[2].as_u64().expect("state word 2 must be u64"),
+            arr[3].as_u64().expect("state word 3 must be u64"),
+        ]
+    }
 }
 
 #[cfg(test)]
@@ -133,5 +163,48 @@ mod tests {
         let mut r = SimRng::from_u64(1);
         assert_eq!(r.geom_skip(0.0), usize::MAX);
         assert_eq!(r.geom_skip(1.0), 0);
+    }
+
+    /// S8: state() returns four populated u64s (xoshiro256++ never has all-zero
+    /// state post-construction; the seed_from_u64 path uses a splitmix step).
+    #[test]
+    fn rng_state_is_4_u64() {
+        let r = SimRng::from_u64(7);
+        let s = r.state();
+        assert_eq!(s.len(), 4, "state must have exactly 4 words");
+        assert_ne!(s, [0u64; 4], "xoshiro256++ state must not be all-zero after seed");
+        // Calling state() twice without advancing must return identical arrays.
+        let s2 = r.state();
+        assert_eq!(s, s2, "state() must be idempotent (no RNG advance)");
+    }
+
+    /// S8: advancing the RNG via next_u64 must change the state.
+    #[test]
+    fn rng_state_changes_after_next_u64() {
+        let mut r = SimRng::from_u64(42);
+        let before = r.state();
+        r.next_u64();
+        let after = r.state();
+        assert_ne!(before, after, "state must change after advancing the RNG");
+    }
+
+    /// S8: state() round-trips against serde — the extractor returns the same
+    /// four words that the Serialize derive would emit under "s". Protects
+    /// against rand_xoshiro silently renaming the field.
+    #[test]
+    fn rng_state_round_trip_matches_serde() {
+        let r = SimRng::from_u64(99);
+        let state = r.state();
+        // Parse via a separate serde_json round-trip (same code path as accessor,
+        // but done explicitly so we verify the extractor logic is consistent).
+        let v = serde_json::to_value(&r.0).expect("serialize");
+        let arr = v["s"].as_array().expect("field 's' must exist");
+        let serde_words: [u64; 4] = [
+            arr[0].as_u64().unwrap(),
+            arr[1].as_u64().unwrap(),
+            arr[2].as_u64().unwrap(),
+            arr[3].as_u64().unwrap(),
+        ];
+        assert_eq!(state, serde_words, "state() must match serde-extracted words");
     }
 }
