@@ -26,7 +26,9 @@ export default defineConfig({
     target: "es2022",
     outDir: "dist",
     emptyOutDir: true,
-    sourcemap: true,
+    // "hidden" in CI: emits the map file but does not reference it from the JS
+    // bundle (safe for sentry-style upload; not served to end users).
+    sourcemap: process.env.CI ? "hidden" : true,
   },
   // wasm-bindgen-rayon spawns Web Workers via new URL('./workerHelpers.js',
   // import.meta.url). Vite must bundle those workers as ES modules (not the

@@ -1,0 +1,9 @@
+# Pin the stable toolchain for default (native + single-threaded wasm) builds.
+# The --features threads wasm build additionally requires a nightly toolchain
+# for the atomics/bulk-memory target features; that build is invoked via
+# .cargo/config.toml which overrides the channel to nightly with:
+#   RUSTUP_TOOLCHAIN=nightly wasm-pack build --target web --features threads ...
+# See DECISIONS.md Threads block for details.
+[toolchain]
+channel = "1.95.0"
+components = ["clippy", "rustfmt"]

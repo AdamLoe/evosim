@@ -52,3 +52,8 @@ panic = "abort"
 
 [profile.dev]
 opt-level = 1
+
+# wasm-pack release profile: run wasm-opt with bulk-memory + mutable-globals
+# (required for wasm-bindgen-rayon's SharedArrayBuffer threading).
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-O4", "--enable-bulk-memory", "--enable-mutable-globals"]
