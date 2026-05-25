@@ -7,7 +7,7 @@ use crate::grid::SpatialGrid;
 use crate::save::{rehydrate_event_log, validate_save, LoadError, SCHEMA_VERSION};
 use crate::species::SpeciesRegistry;
 use crate::sun::SunMap;
-use crate::vision::{VisionBuf, VISION_LEN};
+use crate::vision::{CarrionIndex, VisionBuf, VISION_LEN};
 
 impl World {
     /// Serialize the world to a `SaveV1` snapshot (F.26).
@@ -115,7 +115,7 @@ impl World {
             founder_genome_anchor: save.founder_genome_anchor,
             founder_brain_anchor: save.founder_brain_anchor,
             vision,
-            cell_to_carrion: Vec::new(),
+            cell_to_carrion: CarrionIndex::new(),
             pending_extinction_check: Vec::new(),
             force_sequential_nn: false, // S39: observation-only; never saved
             // Profiler is never saved/loaded — always start fresh (D9/D10).

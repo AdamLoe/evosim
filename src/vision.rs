@@ -27,6 +27,73 @@ pub const CARRION_R: f32 = 0.4;
 pub const CARRION_G: f32 = 0.4;
 pub const CARRION_B: f32 = 0.4;
 
+/// CSR-layout per-cell carrion index. Replaces `Vec<Vec<u32>>` (S26).
+///
+/// Layout: `starts[c]..starts[c+1]` indexes into `indices` for cell `c`.
+/// Rebuilt O(C + carrion_count) each tick before the vision pass via
+/// `rebuild()`. `cursors` is a reusable scratch buffer for the scatter
+/// pass; it is always the same length as `starts` and is never saved.
+pub struct CarrionIndex {
+    /// CSR row-start offsets, length = HASH_DIM * HASH_DIM + 1.
+    starts: Vec<u32>,
+    /// Flat carrion-index list, length = carrion.len() after each rebuild.
+    indices: Vec<u32>,
+    /// Scratch write-head cursors for the scatter pass. Reused across calls.
+    cursors: Vec<u32>,
+}
+
+impl Default for CarrionIndex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CarrionIndex {
+    pub fn new() -> Self {
+        let starts = vec![0u32; HASH_DIM * HASH_DIM + 1];
+        let cursors = vec![0u32; starts.len()];
+        Self {
+            starts,
+            indices: Vec::with_capacity(256),
+            cursors,
+        }
+    }
+
+    /// Rebuild the CSR index from a flat carrion list.
+    /// O(cells + carrion_count). Reuses allocations; no heap traffic per call.
+    pub fn rebuild(&mut self, carrion: &[Carrion]) {
+        // Count pass: tally carrion per cell.
+        self.starts.iter_mut().for_each(|s| *s = 0);
+        for c in carrion {
+            let cell = SpatialGrid::cell_of(c.x, c.y);
+            self.starts[cell + 1] += 1;
+        }
+        // Prefix sum → row-start offsets.
+        for k in 1..self.starts.len() {
+            self.starts[k] += self.starts[k - 1];
+        }
+        // Scatter pass: write carrion indices into flat array.
+        let n = carrion.len();
+        self.indices.clear();
+        self.indices.resize(n, 0);
+        self.cursors.copy_from_slice(&self.starts);
+        for (ci, c) in carrion.iter().enumerate() {
+            let cell = SpatialGrid::cell_of(c.x, c.y);
+            let pos = self.cursors[cell] as usize;
+            self.indices[pos] = ci as u32;
+            self.cursors[cell] += 1;
+        }
+    }
+
+    /// Return the slice of carrion indices in `cell` (0..HASH_DIM*HASH_DIM).
+    #[inline]
+    pub fn cell_slice(&self, cell: usize) -> &[u32] {
+        let s = self.starts[cell] as usize;
+        let e = self.starts[cell + 1] as usize;
+        &self.indices[s..e]
+    }
+}
+
 /// Ray hit from DDA traversal. Distance is the second field.
 enum RayHit {
     Creature(usize, f32),
@@ -38,8 +105,8 @@ pub struct VisionPass<'a> {
     pub carrion: &'a [Carrion],
     pub grid: &'a SpatialGrid,
     /// Per-cell carrion index (cell → list of carrion indices), rebuilt each pass.
-    /// Size = HASH_DIM * HASH_DIM. Passed in from World's cached field.
-    pub cell_to_carrion: &'a Vec<Vec<u32>>,
+    /// S26: CSR layout replaces Vec<Vec<u32>>.
+    pub cell_to_carrion: &'a CarrionIndex,
 }
 
 impl<'a> VisionPass<'a> {
@@ -233,7 +300,7 @@ impl<'a> VisionPass<'a> {
             }
 
             // Test carrion in this cell.
-            for &ci in &self.cell_to_carrion[cell_idx] {
+            for &ci in self.cell_to_carrion.cell_slice(cell_idx) {
                 let c = &self.carrion[ci as usize];
                 if let Some(t) = ray_circle_hit(ox, oy, dx, dy, c.x, c.y, CARRION_RADIUS_FOR_VISION)
                 {
@@ -319,24 +386,10 @@ pub(crate) fn sector_to_angle(s: usize, eye_offsets: &[f32; EYE_SLOTS], eye_coun
     theta_center + offset
 }
 
-/// Build a per-cell carrion lookup from a flat carrion list.
-/// Returns a Vec<Vec<u32>> of size HASH_DIM * HASH_DIM.
-/// Called once per tick by World before the vision pass.
-pub fn build_cell_to_carrion(carrion: &[Carrion], dst: &mut Vec<Vec<u32>>) {
-    // Ensure correct size and clear.
-    let total = HASH_DIM * HASH_DIM;
-    if dst.len() < total {
-        dst.resize_with(total, Vec::new);
-    }
-    for cell in dst.iter_mut() {
-        cell.clear();
-    }
-    for (ci, c) in carrion.iter().enumerate() {
-        let cell = SpatialGrid::cell_of(c.x, c.y);
-        if cell < total {
-            dst[cell].push(ci as u32);
-        }
-    }
+/// Rebuild a per-cell carrion lookup from a flat carrion list.
+/// Called once per tick by World before the vision pass (S26: CSR layout).
+pub fn build_cell_to_carrion(carrion: &[Carrion], dst: &mut CarrionIndex) {
+    dst.rebuild(carrion);
 }
 
 #[cfg(test)]
@@ -352,8 +405,8 @@ mod tests {
         g
     }
 
-    fn make_carrion_index(carrion: &[Carrion]) -> Vec<Vec<u32>> {
-        let mut dst = Vec::new();
+    fn make_carrion_index(carrion: &[Carrion]) -> CarrionIndex {
+        let mut dst = CarrionIndex::new();
         build_cell_to_carrion(carrion, &mut dst);
         dst
     }
@@ -549,5 +602,187 @@ mod tests {
             vision[0][slot], 0.0,
             "target out of range must yield zero distance"
         );
+    }
+
+    // ---- S26 CarrionIndex CSR tests ----
+
+    /// S26 test 1: CSR membership matches a brute-force reference. For every
+    /// cell in the grid, the set of carrion indices returned by `cell_slice`
+    /// must equal the set that a Vec<Vec<u32>> build would have produced.
+    #[test]
+    fn csr_carrion_membership_matches_old_layout() {
+        let carrion = vec![
+            Carrion {
+                id: 0,
+                x: 10.0,
+                y: 10.0,
+                pool: 1.0,
+                age: 0,
+                sun_cell: 0,
+            },
+            Carrion {
+                id: 1,
+                x: 10.0,
+                y: 10.0,
+                pool: 1.0,
+                age: 0,
+                sun_cell: 0,
+            }, // same cell as [0]
+            Carrion {
+                id: 2,
+                x: 590.0,
+                y: 590.0,
+                pool: 1.0,
+                age: 0,
+                sun_cell: 0,
+            },
+            Carrion {
+                id: 3,
+                x: 300.0,
+                y: 300.0,
+                pool: 1.0,
+                age: 0,
+                sun_cell: 0,
+            },
+        ];
+
+        // Build reference layout.
+        let total = HASH_DIM * HASH_DIM;
+        let mut ref_dst: Vec<Vec<u32>> = vec![Vec::new(); total];
+        for (ci, c) in carrion.iter().enumerate() {
+            let cell = SpatialGrid::cell_of(c.x, c.y);
+            ref_dst[cell].push(ci as u32);
+        }
+
+        // Build CSR layout.
+        let mut csr = CarrionIndex::new();
+        csr.rebuild(&carrion);
+
+        // Compare membership for every cell.
+        for cell in 0..total {
+            let mut csr_set: Vec<u32> = csr.cell_slice(cell).to_vec();
+            let mut ref_set: Vec<u32> = ref_dst[cell].clone();
+            csr_set.sort_unstable();
+            ref_set.sort_unstable();
+            assert_eq!(
+                csr_set, ref_set,
+                "cell {cell}: CSR membership {csr_set:?} != reference {ref_set:?}"
+            );
+        }
+    }
+
+    /// S26 test 2: Carrion indices within each cell are stored in insertion
+    /// (enumeration) order. Relies on the scatter pass walking `carrion` in
+    /// forward order, mirroring the old Vec<Vec<u32>>::push order.
+    #[test]
+    fn csr_iteration_order_is_insertion_order() {
+        // Place three carrion in the SAME cell so order matters.
+        let x = 100.0_f32;
+        let y = 100.0_f32;
+        let carrion = vec![
+            Carrion {
+                id: 10,
+                x,
+                y,
+                pool: 1.0,
+                age: 0,
+                sun_cell: 0,
+            },
+            Carrion {
+                id: 20,
+                x: x + 0.1,
+                y,
+                pool: 1.0,
+                age: 0,
+                sun_cell: 0,
+            },
+            Carrion {
+                id: 30,
+                x: x + 0.2,
+                y,
+                pool: 1.0,
+                age: 0,
+                sun_cell: 0,
+            },
+        ];
+        let cell = SpatialGrid::cell_of(x, y);
+        let mut csr = CarrionIndex::new();
+        csr.rebuild(&carrion);
+        let slice = csr.cell_slice(cell);
+        assert_eq!(
+            slice,
+            &[0u32, 1, 2],
+            "carrion indices must appear in insertion order; got {slice:?}"
+        );
+    }
+
+    /// S26 test 3: empty carrion list and carrion at world corners produce
+    /// valid (non-panicking), correct CSR state.
+    #[test]
+    fn csr_empty_and_full_corners() {
+        // Empty list: all cells must be empty slices.
+        let mut csr = CarrionIndex::new();
+        csr.rebuild(&[]);
+        for cell in 0..HASH_DIM * HASH_DIM {
+            assert!(
+                csr.cell_slice(cell).is_empty(),
+                "cell {cell} must be empty for zero carrion"
+            );
+        }
+
+        // Corner carrion: one blob at each corner of the world.
+        let corners = vec![
+            Carrion {
+                id: 0,
+                x: 0.5,
+                y: 0.5,
+                pool: 1.0,
+                age: 0,
+                sun_cell: 0,
+            },
+            Carrion {
+                id: 1,
+                x: WORLD_SIZE - 0.5,
+                y: 0.5,
+                pool: 1.0,
+                age: 0,
+                sun_cell: 0,
+            },
+            Carrion {
+                id: 2,
+                x: 0.5,
+                y: WORLD_SIZE - 0.5,
+                pool: 1.0,
+                age: 0,
+                sun_cell: 0,
+            },
+            Carrion {
+                id: 3,
+                x: WORLD_SIZE - 0.5,
+                y: WORLD_SIZE - 0.5,
+                pool: 1.0,
+                age: 0,
+                sun_cell: 0,
+            },
+        ];
+        csr.rebuild(&corners);
+        let total_in_csr: usize = (0..HASH_DIM * HASH_DIM)
+            .map(|c| csr.cell_slice(c).len())
+            .sum();
+        assert_eq!(
+            total_in_csr,
+            corners.len(),
+            "total carrion in CSR ({total_in_csr}) must equal input count ({})",
+            corners.len()
+        );
+        // Each corner must be reachable.
+        for (ci, c) in corners.iter().enumerate() {
+            let cell = SpatialGrid::cell_of(c.x, c.y);
+            let slice = csr.cell_slice(cell);
+            assert!(
+                slice.contains(&(ci as u32)),
+                "corner carrion {ci} not found in cell {cell}: slice={slice:?}"
+            );
+        }
     }
 }

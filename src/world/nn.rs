@@ -5,7 +5,7 @@ use crate::carrion::Carrion;
 use crate::constants::*;
 use crate::creature::{Action, CreatureSoA};
 use crate::genome::Genome;
-use crate::vision::VisionBuf;
+use crate::vision::{CarrionIndex, VisionBuf};
 #[cfg(feature = "threads")]
 use rayon::prelude::*;
 
@@ -15,7 +15,7 @@ use rayon::prelude::*;
 pub(crate) fn count_carrion_overlap(
     creatures: &CreatureSoA,
     carrion: &[Carrion],
-    cell_to_carrion: &[Vec<u32>],
+    cell_to_carrion: &CarrionIndex,
     i: usize,
 ) -> u32 {
     let xi = creatures.x[i];
@@ -34,7 +34,7 @@ pub(crate) fn count_carrion_overlap(
                 continue;
             }
             let cell_idx = ny as usize * HASH_DIM + nx as usize;
-            for &ci in &cell_to_carrion[cell_idx] {
+            for &ci in cell_to_carrion.cell_slice(cell_idx) {
                 let c = &carrion[ci as usize];
                 let ddx = c.x - xi;
                 let ddy = c.y - yi;

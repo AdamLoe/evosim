@@ -21,7 +21,7 @@ use crate::hof::HallOfFame;
 use crate::rng::SimRng;
 use crate::species::{species_distance, SpeciesRegistry};
 use crate::sun::SunMap;
-use crate::vision::{build_cell_to_carrion, VisionBuf, VisionPass, VISION_LEN};
+use crate::vision::{build_cell_to_carrion, CarrionIndex, VisionBuf, VisionPass, VISION_LEN};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -91,8 +91,8 @@ pub struct World {
     pub founder_brain_anchor: Vec<f32>,
     /// Per-creature vision cache (index-aligned with CreatureSoA). Milestone C.12.
     pub vision: Vec<VisionBuf>,
-    /// Per-cell carrion lookup, rebuilt each tick before vision pass. Size = HASH_DIM².
-    pub(crate) cell_to_carrion: Vec<Vec<u32>>,
+    /// Per-cell carrion lookup, rebuilt each tick before vision pass (S26: CSR layout).
+    pub(crate) cell_to_carrion: CarrionIndex,
     /// Species ids that lost a creature this tick; checked after removals to
     /// emit extinction events. Drained each `finalize_extinctions`.
     pub(crate) pending_extinction_check: Vec<u32>,
@@ -199,7 +199,7 @@ impl World {
             founder_genome_anchor,
             founder_brain_anchor,
             vision: vec![[0.0f32; VISION_LEN]], // 1 for the founder
-            cell_to_carrion: Vec::new(),
+            cell_to_carrion: CarrionIndex::new(),
             pending_extinction_check: Vec::new(),
             profile: crate::profiler::Profiler::new(),
             scratch_fx: Vec::new(),

@@ -318,7 +318,7 @@ impl World {
                                 continue;
                             }
                             let cell_idx = ny as usize * HASH_DIM + nx as usize;
-                            for &ci in &self.cell_to_carrion[cell_idx] {
+                            for &ci in self.cell_to_carrion.cell_slice(cell_idx) {
                                 let c = &self.carrion[ci as usize];
                                 let ddx = c.x - xi;
                                 let ddy = c.y - yi;
