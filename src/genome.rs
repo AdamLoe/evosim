@@ -340,22 +340,31 @@ mod tests {
         // Call with p=1.0 to ensure the mutation branch runs.
         mutate_f32(&mut v_nan, 1.0, 0.1, 0.0, 1.0, &mut rng);
         assert!(v_nan.is_finite() || v_nan.is_nan(), ""); // should still be the original NaN (not written)
-        // More precisely: original was NaN, so the guard fires and the original is kept.
-        // Since NaN + anything = NaN, clamp(NaN) = NaN, so is_finite() = false → value unchanged.
-        assert!(v_nan.is_nan(), "NaN value must not be overwritten with another NaN from clamp");
+                                                          // More precisely: original was NaN, so the guard fires and the original is kept.
+                                                          // Since NaN + anything = NaN, clamp(NaN) = NaN, so is_finite() = false → value unchanged.
+        assert!(
+            v_nan.is_nan(),
+            "NaN value must not be overwritten with another NaN from clamp"
+        );
 
         // ±inf value: mutation must not write inf.
         let mut v_inf = f32::INFINITY;
         mutate_f32(&mut v_inf, 1.0, 1.0, 0.0, 1.0, &mut rng);
         // inf + finite_delta = inf; clamp(inf, 0, 1) = 1.0 (finite) → actually writes 1.0.
         // That's correct behaviour: inf gets clamped to the hi bound.
-        assert!(v_inf.is_finite(), "inf value should be clamped to finite by clamp()");
+        assert!(
+            v_inf.is_finite(),
+            "inf value should be clamped to finite by clamp()"
+        );
 
         // Normal path still works.
         let mut v = 0.5f32;
         mutate_f32(&mut v, 1.0, 0.01, 0.0, 1.0, &mut rng);
         assert!(v.is_finite(), "normal mutation must stay finite");
-        assert!((0.0..=1.0).contains(&v), "normal mutation must respect bounds");
+        assert!(
+            (0.0..=1.0).contains(&v),
+            "normal mutation must respect bounds"
+        );
     }
 
     /// S6: mutate_u32 must not propagate NaN into genome fields.

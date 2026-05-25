@@ -49,15 +49,15 @@ pub fn snapshot_hash(w: &World) -> u64 {
         }
         write_f32(&mut h, w.creatures.brains[i].nn_mutation_rate);
         // S7: 9 additional SoA fields appended after nn_mutation_rate (#1–#9)
-        h.write_u32(w.creatures.digestion_cooldown[i]);                    // #1
-        write_f32(&mut h, w.creatures.cumulative_upkeep[i]);               // #2
-        h.write_u32(w.creatures.species_id[i]);                            // #3
-        h.write_u32(w.creatures.parent_species_id[i]);                     // #4
-        h.write_u8(w.creatures.last_action[i] as u8);                     // #5
-        h.write_u8(w.creatures.action_this_tick[i] as u8);                // #6
-        write_f32(&mut h, w.creatures.max_size_reached[i]);                // #7
-        write_f32(&mut h, w.creatures.distance_travelled[i]);              // #8
-        h.write_u32(w.creatures.birth_tick[i]);                            // #9
+        h.write_u32(w.creatures.digestion_cooldown[i]); // #1
+        write_f32(&mut h, w.creatures.cumulative_upkeep[i]); // #2
+        h.write_u32(w.creatures.species_id[i]); // #3
+        h.write_u32(w.creatures.parent_species_id[i]); // #4
+        h.write_u8(w.creatures.last_action[i] as u8); // #5
+        h.write_u8(w.creatures.action_this_tick[i] as u8); // #6
+        write_f32(&mut h, w.creatures.max_size_reached[i]); // #7
+        write_f32(&mut h, w.creatures.distance_travelled[i]); // #8
+        h.write_u32(w.creatures.birth_tick[i]); // #9
     }
 
     // (3) sun map — per-cell, row-major
@@ -76,10 +76,10 @@ pub fn snapshot_hash(w: &World) -> u64 {
         write_f32(&mut h, cc.y);
         write_f32(&mut h, cc.pool);
         h.write_u32(cc.age);
-        h.write_u64(cc.id);                          // #10
-        // sun_cell is usize; safe to cast: SUN_DIM × SUN_DIM = 400 << u32::MAX.
+        h.write_u64(cc.id); // #10
+                            // sun_cell is usize; safe to cast: SUN_DIM × SUN_DIM = 400 << u32::MAX.
         debug_assert!(cc.sun_cell < u32::MAX as usize, "sun_cell overflows u32");
-        h.write_u32(cc.sun_cell as u32);             // #11
+        h.write_u32(cc.sun_cell as u32); // #11
     }
 
     // (5) species list — id + anchor genome sub-hash + S7 fields (#12–#17) + next_id (#18)
@@ -94,29 +94,41 @@ pub fn snapshot_hash(w: &World) -> u64 {
         // S7: species fields appended after anchor sub-hash (#12–#17)
         // #12: parent_id — Option<u32> encoded as (presence u8, value u32)
         match sp.parent_id {
-            None    => { h.write_u8(0); h.write_u32(0); }
-            Some(v) => { h.write_u8(1); h.write_u32(v); }
+            None => {
+                h.write_u8(0);
+                h.write_u32(0);
+            }
+            Some(v) => {
+                h.write_u8(1);
+                h.write_u32(v);
+            }
         }
         // #13: name — length-prefixed UTF-8 bytes (prevents boundary collision)
         h.write_u32(sp.name.len() as u32);
         h.write(sp.name.as_bytes());
         // #13.5 / 14 ordering per plan: born_tick → died_tick → child_count → depth → anchor_brain_weights
-        h.write_u32(sp.born_tick);                                          // #13.5
-        // #14: died_tick — Option<u32> same encoding as parent_id
+        h.write_u32(sp.born_tick); // #13.5
+                                   // #14: died_tick — Option<u32> same encoding as parent_id
         match sp.died_tick {
-            None    => { h.write_u8(0); h.write_u32(0); }
-            Some(v) => { h.write_u8(1); h.write_u32(v); }
+            None => {
+                h.write_u8(0);
+                h.write_u32(0);
+            }
+            Some(v) => {
+                h.write_u8(1);
+                h.write_u32(v);
+            }
         }
-        h.write_u32(sp.child_count);                                        // #15
-        h.write_u32(sp.depth);                                              // #16
-        // #17: anchor_brain_weights — length is NN_WEIGHT_COUNT (invariant)
+        h.write_u32(sp.child_count); // #15
+        h.write_u32(sp.depth); // #16
+                               // #17: anchor_brain_weights — length is NN_WEIGHT_COUNT (invariant)
         debug_assert_eq!(
             sp.anchor_brain_weights.len(),
             NN_WEIGHT_COUNT,
             "anchor_brain_weights length must equal NN_WEIGHT_COUNT"
         );
         for &wf in &sp.anchor_brain_weights {
-            write_f32(&mut h, wf);                                          // #17
+            write_f32(&mut h, wf); // #17
         }
     }
     // #18: SpeciesRegistry.next_id — appended after the species loop
@@ -179,7 +191,11 @@ fn hash_genome(h: &mut XxHash64, g: &Genome) {
 /// Finite values (including ±0.0, ±Inf, denormals) pass through unchanged.
 #[inline]
 fn write_f32(h: &mut XxHash64, v: f32) {
-    let bits = if v.is_nan() { 0x7fc0_0000_u32 } else { v.to_bits() };
+    let bits = if v.is_nan() {
+        0x7fc0_0000_u32
+    } else {
+        v.to_bits()
+    };
     h.write_u32(bits);
 }
 
@@ -250,9 +266,13 @@ mod tests {
     #[test]
     fn write_f32_finite_values_pass_through() {
         let mut h_pi = XxHash64::with_seed(0);
-        let mut h_e  = XxHash64::with_seed(0);
+        let mut h_e = XxHash64::with_seed(0);
         write_f32(&mut h_pi, std::f32::consts::PI);
-        write_f32(&mut h_e,  std::f32::consts::E);
-        assert_ne!(h_pi.finish(), h_e.finish(), "distinct finite values must hash differently");
+        write_f32(&mut h_e, std::f32::consts::E);
+        assert_ne!(
+            h_pi.finish(),
+            h_e.finish(),
+            "distinct finite values must hash differently"
+        );
     }
 }

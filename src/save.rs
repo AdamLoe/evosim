@@ -652,12 +652,18 @@ mod tests {
             save.creatures.cumulative_upkeep.push(0.0);
             save.creatures.species_id.push(0);
             save.creatures.parent_species_id.push(0);
-            save.creatures.last_action.push(crate::creature::Action::Rest);
-            save.creatures.action_this_tick.push(crate::creature::Action::Rest);
+            save.creatures
+                .last_action
+                .push(crate::creature::Action::Rest);
+            save.creatures
+                .action_this_tick
+                .push(crate::creature::Action::Rest);
             save.creatures.max_size_reached.push(0.0);
             save.creatures.distance_travelled.push(0.0);
             save.creatures.birth_tick.push(0);
-            save.creatures.genomes.push(crate::genome::Genome::founder());
+            save.creatures
+                .genomes
+                .push(crate::genome::Genome::founder());
         }
         let result = validate_save(&save);
         assert!(

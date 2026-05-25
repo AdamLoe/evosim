@@ -102,8 +102,8 @@ impl SimRng {
     /// to `0.6` in `Cargo.toml`. If `rand_xoshiro` ever bumps and renames the
     /// field, the `rng_state_round_trip_matches_serde` unit test will catch it.
     pub(crate) fn state(&self) -> [u64; 4] {
-        let v = serde_json::to_value(&self.0)
-            .expect("Xoshiro256PlusPlus serialization is infallible");
+        let v =
+            serde_json::to_value(&self.0).expect("Xoshiro256PlusPlus serialization is infallible");
         let arr = v["s"]
             .as_array()
             .expect("rand_xoshiro Serialize derive must emit field 's' as array");
@@ -172,7 +172,10 @@ mod tests {
         let r = SimRng::from_u64(7);
         let s = r.state();
         assert_eq!(s.len(), 4, "state must have exactly 4 words");
-        assert_ne!(s, [0u64; 4], "xoshiro256++ state must not be all-zero after seed");
+        assert_ne!(
+            s, [0u64; 4],
+            "xoshiro256++ state must not be all-zero after seed"
+        );
         // Calling state() twice without advancing must return identical arrays.
         let s2 = r.state();
         assert_eq!(s, s2, "state() must be idempotent (no RNG advance)");
@@ -205,6 +208,9 @@ mod tests {
             arr[2].as_u64().unwrap(),
             arr[3].as_u64().unwrap(),
         ];
-        assert_eq!(state, serde_words, "state() must match serde-extracted words");
+        assert_eq!(
+            state, serde_words,
+            "state() must match serde-extracted words"
+        );
     }
 }
