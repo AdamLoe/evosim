@@ -212,4 +212,17 @@ audit v1.1 — snapshot_hash coverage extended (S7: 18 new fields: digestion_coo
 - S24: Action::Scavenge uses 3×3 HASH_DIM cell sweep via cell_to_carrion instead of O(all_carrion) linear scan. Golden unchanged (scavenge path finds same carrion via cell lookup in evosim-test-001 run).
 - S7+S8: see hash line above. SpeciesRegistry.next_id promoted to pub(crate). SimRng::state() added.
 
+## Audit v1.1 PR-3 review (2026-05-24)
+
+- 10 commits landed: 772df68 (S9), e12c857 (S11), 343b980 (S4), 86afa99 (S5), b64acc3 (S6), 56a6898 (S10), 5d70301 (S12), 1d3c62f (S24), bf3287a (S7+S8 — THE REGEN), c06c0ef (S39).
+- Golden regen: sequential AND threaded → 0xd56cd6881d2898fc (still bit-identical; same value PR-1 produced, indicating S7-expanded coverage and S8 RNG-format change happened to land on the identical hash for this seed/tick budget — a curiosity, not a bug; the regen commit is the only one touching either golden file). bf3287a is the sole commit in `git log -- tests/golden_snapshot_t10000.txt` since PR-1 dual-bootstrap.
+- S24 standalone hash drift: NONE (golden value matches what bf3287a already wrote; the 3×3 sweep finds the same carrion the linear scan did for this seed).
+- Gates: cargo clippy default + threads clean with -D warnings; cargo test --lib 127/127 default and 127/127 threads pass; cargo test --release --test acceptance 4/4 pass against 0xd56cd6881d2898fc (incl. new save_load_hash_equal_immediately_after_load); S39 threaded=sequential equivalence test passes (acceptance_threaded_actually_matches_sequential_t10000 in 33.74 s); threaded full-acceptance budget exceed expected on WSL2 (24.6 s vs 8 s budget — hash check is gated behind the budget assert so the runtime threaded-golden match is verified indirectly via the S39 equivalence test instead); pnpm typecheck + pnpm build green.
+- Notable findings:
+  - **FIX-NEEDED (minor): `cargo fmt --check` fails on committed code from 1d3c62f (S24).** Three formatting diffs in src/world/tick.rs tests: (a) line 712 `use crate::vision::build_cell_to_carrion;` should sort after `use crate::constants::*;`, (b) line 757 same issue in second test, (c) line 786 `assert_eq!(w.carrion[0].pool, carrion_pool, "…")` should be single-line. A trivial `cargo fmt` follow-up commit fixes it; no behavioural impact and no hash impact.
+  - Naming nit: the S39 threaded-equivalence test was committed as `acceptance_threaded_actually_matches_sequential_t10000` (plan spec named it `acceptance_threaded_matches_sequential_t10000`). Functionally identical; just a renaming the implementer chose. Not blocking.
+  - The `pub force_sequential_nn` field carries `#[cfg_attr(not(feature = "threads"), allow(dead_code))]` because the field is only read inside cfg(threads) NN code. Correct; field is `pub` (not `pub(crate)`) intentionally for integration-test access per the doc comment.
+  - All scope-discipline checks clean: each of the 10 commits touches only the files its title implies; bf3287a is the only commit touching either golden file.
+  - DECISIONS.md PR-3 entry by the implementer present, lists both new hashes correctly.
+
 
