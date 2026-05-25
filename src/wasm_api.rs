@@ -267,25 +267,62 @@ impl WorldHandle {
     /// Returns the SoA index of the topmost creature whose body circle (or
     /// tap-tolerance bubble) contains (world_x, world_y), or None.
     /// O(N); called only on click (≤ 1 Hz).
+    /// Returns the stable id of the topmost creature whose body circle (or
+    /// tap-tolerance bubble) contains (world_x, world_y), or None.
     ///
     /// `tolerance_world` is an additional world-space radius added on top of
     /// the creature's body radius so that small creatures remain clickable.
     /// Pass `6.0 / cam.zoom` from JS so the minimum tap target is 6 screen px.
     ///
-    /// Returns an index, not a stable id — see DECISIONS.
+    /// The id is returned as `Option<f64>` because wasm-bindgen does not
+    /// auto-bridge `u64`. f64 mantissa is exact up to 2^53 (DECISIONS E.21),
+    /// which is far above any v1-session id count.
+    ///
+    /// S18 + S20: returns stable creature id (not SoA index); uses SpatialGrid
+    /// `for_each_in_radius` to bound the scan.
     #[wasm_bindgen]
-    pub fn creature_at(&self, world_x: f32, world_y: f32, tolerance_world: f32) -> Option<u32> {
-        let n = self.inner.creatures.len();
-        for i in 0..n {
-            let dx = self.inner.creatures.x[i] - world_x;
-            let dy = self.inner.creatures.y[i] - world_y;
-            let body_r = self.inner.creatures.genomes[i].size * BODY_RADIUS_PER_SIZE;
-            let r = body_r + tolerance_world;
-            if dx * dx + dy * dy <= r * r {
-                return Some(i as u32);
-            }
-        }
-        None
+    pub fn creature_at(&self, world_x: f32, world_y: f32, tolerance_world: f32) -> Option<f64> {
+        // S20: grid-backed scan. Query radius = tolerance + max possible body radius
+        // (SIZE_MAX * BODY_RADIUS_PER_SIZE = 10.0) to ensure all candidates are
+        // visited; we then filter by the exact per-creature distance check.
+        let query_r = tolerance_world + SIZE_MAX * BODY_RADIUS_PER_SIZE;
+        let mut found: Option<f64> = None;
+        self.inner
+            .grid
+            .for_each_in_radius(world_x, world_y, query_r, |i| {
+                if found.is_some() {
+                    return;
+                }
+                let dx = self.inner.creatures.x[i] - world_x;
+                let dy = self.inner.creatures.y[i] - world_y;
+                let body_r = self.inner.creatures.g_size[i] * BODY_RADIUS_PER_SIZE;
+                let r = body_r + tolerance_world;
+                if dx * dx + dy * dy <= r * r {
+                    // S18: return stable id (f64) instead of SoA index.
+                    found = Some(self.inner.creatures.id[i] as f64);
+                }
+            });
+        found
+    }
+
+    /// Resolves a stable creature id back to its current SoA index, or
+    /// None if the creature is dead (was removed from the SoA).
+    ///
+    /// O(N) linear scan over `creatures.id`. Acceptable at v1 scale
+    /// (population <2k); a hashmap-backed lookup is deferred to v1.2.
+    /// Called by the inspector at most once per frame while open.
+    ///
+    /// `id` is `f64` for wasm-bindgen compatibility (DECISIONS E.21);
+    /// it must round-trip a `u64` exactly, guaranteed for any id below 2^53.
+    #[wasm_bindgen]
+    pub fn creature_idx_by_id(&self, id: f64) -> Option<u32> {
+        let needle = id as u64;
+        self.inner
+            .creatures
+            .id
+            .iter()
+            .position(|&x| x == needle)
+            .map(|i| i as u32)
     }
 
     /// JSON blob for the Inspector panel. Returns None if idx is out of range.
@@ -537,26 +574,50 @@ mod tests {
         assert!(result.is_none(), "out-of-range idx must return None");
     }
 
-    /// E.21: creature_at finds the founder at center.
+    /// S18 + S20: creature_at returns the founder's stable id (f64) at center.
     #[test]
-    fn creature_at_finds_founder() {
+    fn creature_at_returns_stable_id() {
         use crate::constants::WORLD_SIZE;
         let handle = WorldHandle::new("e21-creature-at");
         let cx = WORLD_SIZE * 0.5;
         let cy = WORLD_SIZE * 0.5;
+        // Read founder's stable id directly from SoA.
+        let founder_id = handle.inner.creatures.id[0] as f64;
         // Zero tolerance: hit exactly at the center.
         let result = handle.creature_at(cx, cy, 0.0);
-        assert_eq!(result, Some(0), "founder must be found at world center");
+        assert_eq!(
+            result,
+            Some(founder_id),
+            "founder id must be found at world center"
+        );
         // With tolerance: hit just outside the body radius should still hit.
         let result_tol = handle.creature_at(cx + 2.0, cy, 3.0);
         assert_eq!(
             result_tol,
-            Some(0),
+            Some(founder_id),
             "founder must be found within tolerance radius"
         );
         // Far outside any creature — should return None even with tolerance.
         let miss = handle.creature_at(0.0, 0.0, 1.5);
         assert!(miss.is_none(), "empty corner must return None");
+    }
+
+    /// S18: creature_idx_by_id resolves a live id back to its SoA index.
+    #[test]
+    fn creature_idx_by_id_finds_existing() {
+        let handle = WorldHandle::new("s18-idx-by-id");
+        let founder_id = handle.inner.creatures.id[0];
+        let idx = handle.creature_idx_by_id(founder_id as f64);
+        assert_eq!(idx, Some(0), "founder must be at index 0");
+    }
+
+    /// S18: creature_idx_by_id returns None for an unknown (never-assigned) id.
+    #[test]
+    fn creature_idx_by_id_returns_none_for_unknown() {
+        let handle = WorldHandle::new("s18-idx-unknown");
+        // u64::MAX is guaranteed never to be allocated in any v1 session.
+        let idx = handle.creature_idx_by_id(u64::MAX as f64);
+        assert!(idx.is_none(), "unknown id must return None");
     }
 
     // ─── S17: typed slider setter tests ─────────────────────────────────────

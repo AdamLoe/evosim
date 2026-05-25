@@ -110,7 +110,6 @@ export function installRail(world: WorldHandle): RailState {
 export function pollRail(
   rail: RailState,
   world: WorldHandle,
-  idsBuffer: Float64Array,
 ): void {
   const now = performance.now();
 
@@ -132,8 +131,8 @@ export function pollRail(
   // 3. Stats sample (E.23).
   maybeSampleStats(world);
 
-  // 4. Inspector refresh (E.24).
-  refreshInspector(world, idsBuffer, rail);
+  // 4. Inspector refresh (E.24). S18: no longer needs idsBuffer (uses creature_idx_by_id).
+  refreshInspector(world, rail);
 
   // 5. Toast tick + highlight prune.
   tickToasts(now);

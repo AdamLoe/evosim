@@ -296,7 +296,8 @@ async function main(): Promise<void> {
       const ids = world!.creature_ids_buffer() as unknown as Float64Array;
 
       // E.21/E.22/E.23/E.24: poll the rail (events, toasts, highlights, stats, inspector).
-      timed("pollRail", () => pollRail(rail, world!, ids));
+      // S18: ids no longer passed to pollRail (inspector uses creature_idx_by_id instead).
+      timed("pollRail", () => pollRail(rail, world!));
 
       timed("renderWorld", () =>
         renderWorld(ctx!, cam, viewW, viewH, world!, stride, ids, highlights, now));

@@ -128,11 +128,11 @@ function clearSelection(rail: RailState): void {
 
 /**
  * Refresh the inspector panel each frame. Resolves the selected creature
- * by id via the ids buffer; handles death with 2s placeholder then auto-close.
+ * by stable id via creature_idx_by_id; handles death with 2s placeholder
+ * then auto-close. S18: no longer scans the ids buffer per frame.
  */
 export function refreshInspector(
   world: WorldHandle,
-  idsBuffer: Float64Array,
   rail: RailState,
 ): void {
   const box = getInspectorBox();
@@ -146,17 +146,12 @@ export function refreshInspector(
   if (state.kind !== "selected") return;
   const { creatureId } = state;
 
-  // Build id → index map.
-  let foundIdx = -1;
-  for (let k = 0; k < idsBuffer.length; k++) {
-    if (idsBuffer[k] === creatureId) {
-      foundIdx = k;
-      break;
-    }
-  }
+  // S18: stable-id lookup. Returns Option<u32> via wasm-bindgen
+  // (`number | undefined`). None means the creature died.
+  const foundIdx = world.creature_idx_by_id(creatureId);
 
-  if (foundIdx < 0) {
-    // Creature died.
+  if (foundIdx === undefined) {
+    // Creature died. 2-second placeholder per DECISIONS E.24.
     if (!state.diedAt) {
       state.diedAt = performance.now();
       set("ins-species", "Creature died");
@@ -229,15 +224,23 @@ export function installCanvasClickHandler(
     const [wx, wy] = screenToWorld(cam, w, h, sx, sy);
     // Tolerance in world units so tap target is at least 6 screen pixels wide.
     const toleranceWorld = 6.0 / cam.zoom;
-    const idx = world.creature_at(wx, wy, toleranceWorld);
+    // S18: creature_at returns a stable id (Option<f64>, surfaced as
+    // `number | undefined`). We immediately resolve it to an idx for the
+    // first inspect call; per-frame refresh uses creature_idx_by_id.
+    const id = world.creature_at(wx, wy, toleranceWorld);
 
-    if (idx === undefined || idx === null) {
+    if (id === undefined || id === null) {
       clearSelection(rail);
     } else {
-      const jsonStr = world.creature_inspect_json(idx);
-      if (jsonStr) {
-        const data: CreatureInspectJson = JSON.parse(jsonStr);
-        openInspector(data, rail);
+      // resolve id → idx for creature_inspect_json (same call stack; no step()
+      // between creature_at and inspect, so idx is guaranteed valid here).
+      const idx = world.creature_idx_by_id(id);
+      if (idx !== undefined) {
+        const jsonStr = world.creature_inspect_json(idx);
+        if (jsonStr) {
+          const data: CreatureInspectJson = JSON.parse(jsonStr);
+          openInspector(data, rail);
+        }
       }
     }
   });
