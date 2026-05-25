@@ -302,9 +302,12 @@ impl World {
             crate::profile_span!(&self.profile, "bookkeeping_tail");
 
             // Promote this-tick action → next-tick last_action (v6 §1 / §E).
-            for i in 0..self.creatures.len() {
-                self.creatures.last_action[i] = self.creatures.action_this_tick[i];
-            }
+            // S30: copy the slice in one bulk memcpy instead of a per-element loop.
+            // Note: mem::swap cannot be used here because snapshot_hash reads both
+            // last_action AND action_this_tick; swapping would put the OLD last_action
+            // into action_this_tick at hash time, changing the golden hash.
+            let n = self.creatures.len();
+            self.creatures.last_action[..n].copy_from_slice(&self.creatures.action_this_tick[..n]);
 
             self.tick = self.tick.saturating_add(1);
             let pop = self.creatures.len() as u32;
