@@ -170,6 +170,17 @@ pub(crate) fn chunk_ranges(n: usize) -> [(usize, usize); N_CHUNKS] {
         let hi = ((k + 1) * base).min(n);
         out[k] = (lo, hi);
     }
+    // S10: invariant — ranges are contiguous, non-overlapping, and cover exactly 0..n.
+    debug_assert_eq!(out[0].0, 0, "chunk_ranges: first lo must be 0");
+    debug_assert_eq!(out[N_CHUNKS - 1].1, n, "chunk_ranges: last hi must equal n");
+    debug_assert!(
+        out.windows(2).all(|w| w[0].1 == w[1].0),
+        "chunk_ranges: ranges must be contiguous (no gaps or overlaps)"
+    );
+    debug_assert!(
+        out.iter().all(|(lo, hi)| lo <= hi),
+        "chunk_ranges: each range must satisfy lo <= hi"
+    );
     out
 }
 
@@ -498,6 +509,35 @@ mod tests {
             assert_eq!(ranges[0].0, 0);
             // Last hi = n.
             assert_eq!(ranges[N_CHUNKS - 1].1, n);
+        }
+    }
+
+    /// S10: chunk_ranges invariants hold for a broad set of n values including
+    /// edge cases (0, 1, n < N_CHUNKS, n == N_CHUNKS, n % N_CHUNKS != 0, large n).
+    #[test]
+    fn chunk_ranges_invariants() {
+        for &n in &[0usize, 1, 7, 8, 9, 100, 1500] {
+            let ranges = chunk_ranges(n);
+            // first lo = 0
+            assert_eq!(ranges[0].0, 0, "n={n}: first lo must be 0");
+            // last hi = n
+            assert_eq!(ranges[N_CHUNKS - 1].1, n, "n={n}: last hi must be n");
+            // all lo <= hi
+            for (k, &(lo, hi)) in ranges.iter().enumerate() {
+                assert!(lo <= hi, "n={n}: chunk {k}: lo={lo} > hi={hi}");
+            }
+            // contiguous
+            for k in 0..N_CHUNKS - 1 {
+                assert_eq!(
+                    ranges[k].1,
+                    ranges[k + 1].0,
+                    "n={n}: gap between chunks {k} and {}",
+                    k + 1
+                );
+            }
+            // total coverage
+            let total: usize = ranges.iter().map(|(lo, hi)| hi - lo).sum();
+            assert_eq!(total, n, "n={n}: total elements {total} != n");
         }
     }
 
