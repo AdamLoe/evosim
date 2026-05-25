@@ -278,19 +278,40 @@ impl World {
                         continue;
                     }
                     let r_i = self.creatures.g_size[i] * BODY_RADIUS_PER_SIZE;
+                    let r2 = r_i * r_i;
                     let xi = self.creatures.x[i];
                     let yi = self.creatures.y[i];
                     let want = SCAVENGE_GAIN_COEFF * scav_eff_i;
-                    for c in &mut self.carrion {
-                        let dx = c.x - xi;
-                        let dy = c.y - yi;
-                        let d2 = dx * dx + dy * dy;
-                        if d2 <= r_i * r_i {
-                            let take = c.pool.min(want);
-                            c.pool -= take;
-                            self.scratch_gain[i] += take;
-                            break;
+                    // S24: 3×3 cell sweep via cell_to_carrion (O(local) vs O(all carrion)).
+                    // Collect the first in-range carrion index before mutating it.
+                    let cx = (xi / HASH_CELL).floor() as i32;
+                    let cy = (yi / HASH_CELL).floor() as i32;
+                    let dim = HASH_DIM as i32;
+                    let mut found_ci: Option<usize> = None;
+                    'outer: for dy in -1i32..=1 {
+                        for dx in -1i32..=1 {
+                            let nx = cx + dx;
+                            let ny = cy + dy;
+                            if nx < 0 || ny < 0 || nx >= dim || ny >= dim {
+                                continue;
+                            }
+                            let cell_idx = ny as usize * HASH_DIM + nx as usize;
+                            for &ci in &self.cell_to_carrion[cell_idx] {
+                                let c = &self.carrion[ci as usize];
+                                let ddx = c.x - xi;
+                                let ddy = c.y - yi;
+                                if ddx * ddx + ddy * ddy <= r2 {
+                                    found_ci = Some(ci as usize);
+                                    break 'outer;
+                                }
+                            }
                         }
+                    }
+                    if let Some(ci) = found_ci {
+                        let c = &mut self.carrion[ci];
+                        let take = c.pool.min(want);
+                        c.pool -= take;
+                        self.scratch_gain[i] += take;
                     }
                 }
                 _ => {}
@@ -680,6 +701,100 @@ mod tests {
         assert_eq!(
             ls2.captured_tick, 10,
             "captured_tick must match the second death tick"
+        );
+    }
+
+    // ---- S24 tests ----
+
+    /// S24 test 1: Scavenge 3×3 sweep picks up a carrion blob that is within
+    /// the creature's body radius, using the cell_to_carrion index.
+    #[test]
+    fn s24_scavenge_3x3_sweep_finds_adjacent_carrion() {
+        use crate::vision::build_cell_to_carrion;
+        use crate::constants::*;
+
+        let mut w = World::new("s24-sweep");
+        // Give the founder scavenge ability and place carrion on top of it.
+        w.creatures.genomes[0].scavenge_efficiency = 1.0;
+        w.creatures.resync_hot_mirrors_at(0);
+        w.creatures.action_this_tick[0] = Action::Scavenge;
+
+        let cx = w.creatures.x[0];
+        let cy = w.creatures.y[0];
+        let cell = crate::sun::SunMap::cell_index_for(cx, cy);
+        let carrion_pool = 5.0_f32;
+        w.carrion.push(Carrion {
+            id: 777,
+            x: cx,
+            y: cy,
+            pool: carrion_pool,
+            age: 0,
+            sun_cell: cell,
+        });
+        // Rebuild the cell index so eat_and_scavenge can use it.
+        build_cell_to_carrion(&w.carrion, &mut w.cell_to_carrion);
+
+        let energy_before = w.creatures.energy[0];
+        w.eat_and_scavenge();
+        let energy_after = w.creatures.energy[0];
+
+        // The creature should have gained some energy (scavenged from the carrion).
+        assert!(
+            energy_after > energy_before - COST_SCAVENGE_ATTEMPT,
+            "Scavenge should gain energy from adjacent carrion: before={energy_before} after={energy_after}"
+        );
+        // The carrion pool should have decreased.
+        assert!(
+            w.carrion[0].pool < carrion_pool,
+            "carrion pool should decrease after scavenging: pool={}",
+            w.carrion[0].pool
+        );
+    }
+
+    /// S24 test 2: Scavenge does NOT pick up carrion that is outside the creature's
+    /// body radius, even if it is in the same 3×3 cell window.
+    #[test]
+    fn s24_scavenge_skips_out_of_radius_carrion() {
+        use crate::vision::build_cell_to_carrion;
+        use crate::constants::*;
+
+        let mut w = World::new("s24-oor");
+        w.creatures.genomes[0].scavenge_efficiency = 1.0;
+        w.creatures.resync_hot_mirrors_at(0);
+        w.creatures.action_this_tick[0] = Action::Scavenge;
+
+        let cx = w.creatures.x[0];
+        let cy = w.creatures.y[0];
+        // Place carrion far outside the body radius but still within the 3×3 cell window.
+        let r_i = w.creatures.g_size[0] * BODY_RADIUS_PER_SIZE;
+        let far = r_i * 10.0; // well outside body radius
+        let cell = crate::sun::SunMap::cell_index_for(cx, cy);
+        let carrion_pool = 5.0_f32;
+        w.carrion.push(Carrion {
+            id: 888,
+            x: cx + far.min(HASH_CELL * 0.9), // within 1-cell offset but outside body radius
+            y: cy,
+            pool: carrion_pool,
+            age: 0,
+            sun_cell: cell,
+        });
+        build_cell_to_carrion(&w.carrion, &mut w.cell_to_carrion);
+
+        let energy_before = w.creatures.energy[0];
+        w.eat_and_scavenge();
+        let energy_after = w.creatures.energy[0];
+
+        // The carrion pool should be unchanged (no scavenging took place).
+        assert_eq!(
+            w.carrion[0].pool,
+            carrion_pool,
+            "out-of-radius carrion must not be scavenged"
+        );
+        // Energy dropped by the attempt cost only.
+        let delta = energy_after - energy_before;
+        assert!(
+            (delta + COST_SCAVENGE_ATTEMPT).abs() < 1e-4,
+            "only scavenge attempt cost, delta={delta}"
         );
     }
 
