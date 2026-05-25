@@ -130,9 +130,11 @@ impl CreatureSoA {
         }
     }
 
+    #[inline]
     pub fn len(&self) -> usize {
         self.x.len()
     }
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }

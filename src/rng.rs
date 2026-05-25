@@ -21,11 +21,13 @@ impl SimRng {
         Self::from_u64(h.finish())
     }
 
+    #[inline]
     pub fn next_u64(&mut self) -> u64 {
         self.0.next_u64()
     }
 
     /// Uniform in [0, 1).
+    #[inline]
     pub fn unit(&mut self) -> f32 {
         // top 24 bits, scaled to [0,1)
         let bits = (self.0.next_u64() >> 40) as u32;
@@ -33,17 +35,20 @@ impl SimRng {
     }
 
     /// Uniform in [-1, 1).
+    #[inline]
     pub fn symm(&mut self) -> f32 {
         self.unit() * 2.0 - 1.0
     }
 
     /// Uniform in [lo, hi).
+    #[inline]
     pub fn uniform(&mut self, lo: f32, hi: f32) -> f32 {
         lo + (hi - lo) * self.unit()
     }
 
     /// Standard-normal via polar Box–Muller. Returns one sample; the second
     /// is discarded (callers wanting both samples can use [`normal_pair`]).
+    #[inline]
     pub fn normal(&mut self) -> f32 {
         self.normal_pair().0
     }
@@ -75,6 +80,7 @@ impl SimRng {
     }
 
     /// Pick one of `n` uniformly.
+    #[inline]
     pub fn index(&mut self, n: usize) -> usize {
         debug_assert!(n > 0);
         (((self.next_u64() as u128) * (n as u128)) >> 64) as usize

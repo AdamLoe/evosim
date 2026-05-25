@@ -81,6 +81,7 @@ pub fn snapshot_hash(w: &World) -> u64 {
 
 /// Hash all genome fields in struct-declaration order (v6 §M "struct order").
 /// Shared between the creature loop and the species anchor sub-hash.
+#[inline]
 fn hash_genome(h: &mut XxHash64, g: &Genome) {
     write_f32(h, g.size);
     h.write_u32(g.max_age);

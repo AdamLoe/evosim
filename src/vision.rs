@@ -85,6 +85,7 @@ impl<'a> VisionPass<'a> {
     }
 
     /// Fill `buf` for creature index `i`.
+    #[inline]
     fn fill_one(&self, i: usize, buf: &mut VisionBuf) {
         // perf-5: hot reads use g_* mirrors; cold reads (eye_offsets, pigment_*) stay on &self.creatures.genomes[i].
         debug_assert_eq!(

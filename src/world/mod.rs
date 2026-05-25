@@ -188,6 +188,7 @@ impl World {
         }
     }
 
+    #[inline]
     pub fn population(&self) -> u32 {
         self.creatures.len() as u32
     }
