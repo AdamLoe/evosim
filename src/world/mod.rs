@@ -113,6 +113,9 @@ pub struct World {
     pub(crate) scratch_attempted_eat: Vec<bool>,
     pub(crate) scratch_attempted_scavenge: Vec<bool>,
     pub(crate) scratch_got_a_bite: Vec<bool>,
+    /// S25: promoted eat-candidate buffer. Eliminates the per-Eat-per-tick
+    /// `Vec::with_capacity(8)` allocation in eat_and_scavenge.
+    pub(crate) scratch_eat_candidates: Vec<usize>,
     /// S39 test (a) observation-only knob: when true, `nn_forward_all_chunks`'s
     /// threaded branch short-circuits to the sequential branch so both paths can
     /// be exercised in a single test process. NEVER set by production code.
@@ -193,6 +196,7 @@ impl World {
             scratch_attempted_eat: Vec::new(),
             scratch_attempted_scavenge: Vec::new(),
             scratch_got_a_bite: Vec::new(),
+            scratch_eat_candidates: Vec::new(),
             force_sequential_nn: false,
         }
     }

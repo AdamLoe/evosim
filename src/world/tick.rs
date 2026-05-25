@@ -255,13 +255,15 @@ impl World {
                     let xi = self.creatures.x[i];
                     let yi = self.creatures.y[i];
                     let mut best: Option<(usize, f32)> = None;
-                    let mut candidates: Vec<usize> = Vec::with_capacity(8);
+                    // S25: use pooled scratch buffer instead of per-Eat Vec::with_capacity(8).
+                    let mut candidates = std::mem::take(&mut self.scratch_eat_candidates);
+                    candidates.clear();
                     self.grid.for_each_in_radius(xi, yi, max_range, |j| {
                         if j != i {
                             candidates.push(j);
                         }
                     });
-                    for j in candidates {
+                    for j in candidates.iter().copied() {
                         let dx = self.creatures.x[j] - xi;
                         let dy = self.creatures.y[j] - yi;
                         let d = (dx * dx + dy * dy).sqrt();
@@ -280,6 +282,8 @@ impl World {
                             };
                         }
                     }
+                    // S25: restore the pooled buffer (high-water-mark allocation preserved).
+                    self.scratch_eat_candidates = candidates;
                     if let Some((j, _)) = best {
                         let dmg = EAT_DAMAGE_COEFF * size_i;
                         let armor = self.creatures.genomes[j].armor.clamp(0.0, 1.0); // COLD field; stays AoS
