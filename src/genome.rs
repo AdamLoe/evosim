@@ -166,15 +166,19 @@ impl Genome {
                 .iter()
                 .position(|&v| v == self.eye_count)
                 .unwrap_or(0);
-            let mut candidates: heapless::Vec<u8, 2> = heapless::Vec::new();
+            // At most 2 neighbours; store in a fixed-size array + count.
+            let mut candidates = [0u8; 2];
+            let mut n_candidates = 0usize;
             if cur_idx > 0 {
-                let _ = candidates.push(EYE_VALID[cur_idx - 1]);
+                candidates[n_candidates] = EYE_VALID[cur_idx - 1];
+                n_candidates += 1;
             }
             if cur_idx + 1 < EYE_VALID.len() {
-                let _ = candidates.push(EYE_VALID[cur_idx + 1]);
+                candidates[n_candidates] = EYE_VALID[cur_idx + 1];
+                n_candidates += 1;
             }
-            if !candidates.is_empty() {
-                self.eye_count = candidates[rng.index(candidates.len())];
+            if n_candidates > 0 {
+                self.eye_count = candidates[rng.index(n_candidates)];
             }
         }
 
@@ -278,49 +282,6 @@ fn drift_rate(rate: &mut f32, rng: &mut SimRng) {
     if rng.unit() < MUT_RATE_OF_RATES {
         let jitter = 1.0 + rng.symm() * MUT_RATE_JITTER;
         *rate = (*rate * jitter).clamp(0.0, 1.0);
-    }
-}
-
-// Tiny stack-only Vec replacement so we don't pull `heapless` if we don't need to.
-// Use std Vec — heapless was overkill here.
-mod heapless {
-    pub struct Vec<T, const N: usize> {
-        buf: [Option<T>; N],
-        len: usize,
-    }
-
-    impl<T, const N: usize> Vec<T, N> {
-        pub fn new() -> Self
-        where
-            T: Copy,
-        {
-            Self {
-                buf: [None; N],
-                len: 0,
-            }
-        }
-        pub fn push(&mut self, v: T) -> Result<(), T> {
-            if self.len < N {
-                self.buf[self.len] = Some(v);
-                self.len += 1;
-                Ok(())
-            } else {
-                Err(v)
-            }
-        }
-        pub fn is_empty(&self) -> bool {
-            self.len == 0
-        }
-        pub fn len(&self) -> usize {
-            self.len
-        }
-    }
-
-    impl<T: Copy, const N: usize> std::ops::Index<usize> for Vec<T, N> {
-        type Output = T;
-        fn index(&self, i: usize) -> &T {
-            self.buf[i].as_ref().unwrap()
-        }
     }
 }
 
