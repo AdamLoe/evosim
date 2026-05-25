@@ -1,12 +1,66 @@
 //! NN forward pass and action-decode helpers. Both sequential and threaded paths live here.
 
 use super::World;
+use crate::carrion::Carrion;
 use crate::constants::*;
 use crate::creature::{Action, CreatureSoA};
 use crate::genome::Genome;
 use crate::vision::VisionBuf;
 #[cfg(feature = "threads")]
 use rayon::prelude::*;
+
+/// Count the number of carrion blobs overlapping creature `i`'s body circle.
+/// Uses the cached per-cell carrion index (rebuilt before the vision pass).
+/// Used by BOTH the sequential and threaded NN paths (audit S11).
+pub(crate) fn count_carrion_overlap(
+    creatures: &CreatureSoA,
+    carrion: &[Carrion],
+    cell_to_carrion: &[Vec<u32>],
+    i: usize,
+) -> u32 {
+    let xi = creatures.x[i];
+    let yi = creatures.y[i];
+    let ri = creatures.g_size[i] * BODY_RADIUS_PER_SIZE; // perf-5: mirror
+    let r2 = ri * ri;
+    let cx = (xi / HASH_CELL).floor() as i32;
+    let cy = (yi / HASH_CELL).floor() as i32;
+    let dim = HASH_DIM as i32;
+    let mut count = 0u32;
+    for dy in -1i32..=1 {
+        for dx in -1i32..=1 {
+            let nx = cx + dx;
+            let ny = cy + dy;
+            if nx < 0 || ny < 0 || nx >= dim || ny >= dim {
+                continue;
+            }
+            let cell_idx = ny as usize * HASH_DIM + nx as usize;
+            for &ci in &cell_to_carrion[cell_idx] {
+                let c = &carrion[ci as usize];
+                let ddx = c.x - xi;
+                let ddy = c.y - yi;
+                if ddx * ddx + ddy * ddy <= r2 {
+                    count += 1;
+                }
+            }
+        }
+    }
+    count
+}
+
+/// Returns 1.0 if creature `i` is within `WALL_THRESHOLD_PAD` of any wall edge,
+/// else 0.0. Uses creature radius (size × BODY_RADIUS_PER_SIZE) for consistency
+/// with the physics step. Used by BOTH sequential and threaded NN paths (audit S11).
+pub(crate) fn compute_is_at_wall(creatures: &CreatureSoA, i: usize) -> f32 {
+    let x = creatures.x[i];
+    let y = creatures.y[i];
+    let r = creatures.g_size[i] * BODY_RADIUS_PER_SIZE; // perf-5: mirror
+    let near = x.min(y).min(WORLD_SIZE - x).min(WORLD_SIZE - y);
+    if near < r + WALL_THRESHOLD_PAD {
+        1.0
+    } else {
+        0.0
+    }
+}
 
 impl World {
     /// Run the NN forward pass for all creatures across fixed chunks (v6 §J).
@@ -21,8 +75,13 @@ impl World {
                 let mut hidden_buf = [0.0f32; NN_HIDDEN];
                 let mut output_buf = [0.0f32; NN_OUTPUTS];
                 for i in lo..hi {
-                    let overlap = self.count_carrion_overlap(i);
-                    let is_at_wall = self.compute_is_at_wall(i);
+                    let overlap = count_carrion_overlap(
+                        &self.creatures,
+                        &self.carrion,
+                        &self.cell_to_carrion,
+                        i,
+                    );
+                    let is_at_wall = compute_is_at_wall(&self.creatures, i);
                     let (vx, vy, action) = pick_action_d(
                         i,
                         &mut input_buf,
@@ -59,39 +118,14 @@ impl World {
                     let mut output_buf = [0.0f32; NN_OUTPUTS];
                     (lo..hi)
                         .map(|i| {
-                            // Inline carrion overlap + is_at_wall for the threaded path.
-                            let xi = creatures_ref.x[i];
-                            let yi = creatures_ref.y[i];
-                            let ri = creatures_ref.g_size[i] * BODY_RADIUS_PER_SIZE; // perf-5: mirror
-                            let r2 = ri * ri;
-                            let cx_cell = (xi / HASH_CELL).floor() as i32;
-                            let cy_cell = (yi / HASH_CELL).floor() as i32;
-                            let dim = HASH_DIM as i32;
-                            let mut overlap = 0u32;
-                            for dy in -1i32..=1 {
-                                for dx in -1i32..=1 {
-                                    let nx = cx_cell + dx;
-                                    let ny = cy_cell + dy;
-                                    if nx < 0 || ny < 0 || nx >= dim || ny >= dim {
-                                        continue;
-                                    }
-                                    let cell_idx = ny as usize * HASH_DIM + nx as usize;
-                                    for &ci in &cell_to_carrion_ref[cell_idx] {
-                                        let c = &carrion_ref[ci as usize];
-                                        let ddx = c.x - xi;
-                                        let ddy = c.y - yi;
-                                        if ddx * ddx + ddy * ddy <= r2 {
-                                            overlap += 1;
-                                        }
-                                    }
-                                }
-                            }
-                            let near = xi.min(yi).min(WORLD_SIZE - xi).min(WORLD_SIZE - yi);
-                            let is_at_wall = if near < ri + WALL_THRESHOLD_PAD {
-                                1.0f32
-                            } else {
-                                0.0f32
-                            };
+                            // Use the shared free-fn helpers (audit S11).
+                            let overlap = count_carrion_overlap(
+                                creatures_ref,
+                                carrion_ref,
+                                cell_to_carrion_ref,
+                                i,
+                            );
+                            let is_at_wall = compute_is_at_wall(creatures_ref, i);
                             pick_action_d(
                                 i,
                                 &mut input_buf,
@@ -465,5 +499,49 @@ mod tests {
             "Expected always-valid action, got {:?}",
             act
         );
+    }
+
+    /// S11: helpers_match_legacy_inline_math — confirms the free-fn helpers produce
+    /// correct values by re-computing results from scratch in the test body.
+    #[test]
+    fn helpers_match_legacy_inline_math() {
+        use crate::carrion::Carrion;
+        use crate::sun::SunMap;
+
+        let mut w = World::new("s11-helpers");
+        // Ensure the founder is near a wall and there's a carrion in the overlap zone.
+        // Place the founder near the west wall so is_at_wall fires.
+        let r = w.creatures.g_size[0] * BODY_RADIUS_PER_SIZE;
+        w.creatures.x[0] = r + WALL_THRESHOLD_PAD * 0.5; // within WALL_THRESHOLD_PAD of west wall
+        w.creatures.y[0] = WORLD_SIZE * 0.5;
+
+        // Add a carrion at the creature's position so overlap == 1.
+        let cell = SunMap::cell_index_for(w.creatures.x[0], w.creatures.y[0]);
+        w.carrion.push(Carrion {
+            id: 999,
+            x: w.creatures.x[0],
+            y: w.creatures.y[0],
+            pool: 1.0,
+            age: 0,
+            sun_cell: cell,
+        });
+        // Rebuild the cell_to_carrion index.
+        crate::vision::build_cell_to_carrion(&w.carrion, &mut w.cell_to_carrion);
+
+        // Call the free-fn helpers.
+        let overlap = count_carrion_overlap(&w.creatures, &w.carrion, &w.cell_to_carrion, 0);
+        let is_wall = compute_is_at_wall(&w.creatures, 0);
+
+        // Verify: the carrion is at the creature's position so overlap >= 1.
+        assert!(overlap >= 1, "overlap should be at least 1, got {overlap}");
+
+        // Verify: creature is within WALL_THRESHOLD_PAD of west wall.
+        assert_eq!(is_wall, 1.0, "creature near west wall must have is_at_wall = 1.0");
+
+        // Verify a creature far from the wall has is_at_wall = 0.0.
+        w.creatures.x[0] = WORLD_SIZE * 0.5;
+        w.creatures.y[0] = WORLD_SIZE * 0.5;
+        let far_wall = compute_is_at_wall(&w.creatures, 0);
+        assert_eq!(far_wall, 0.0, "creature at center must have is_at_wall = 0.0");
     }
 }

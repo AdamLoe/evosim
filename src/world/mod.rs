@@ -455,56 +455,6 @@ impl World {
         alive
     }
 
-    /// Count the number of carrion blobs overlapping creature `i`'s body circle.
-    /// Uses the cached `cell_to_carrion` index (rebuilt before vision pass).
-    /// Used in the sequential (non-threads) path; threads path inlines equivalent logic.
-    #[cfg_attr(feature = "threads", allow(dead_code))]
-    pub(crate) fn count_carrion_overlap(&self, i: usize) -> u32 {
-        let xi = self.creatures.x[i];
-        let yi = self.creatures.y[i];
-        let ri = self.creatures.g_size[i] * BODY_RADIUS_PER_SIZE; // perf-5: mirror
-        let r2 = ri * ri;
-        let cx = (xi / HASH_CELL).floor() as i32;
-        let cy = (yi / HASH_CELL).floor() as i32;
-        let dim = HASH_DIM as i32;
-        let mut count = 0u32;
-        for dy in -1i32..=1 {
-            for dx in -1i32..=1 {
-                let nx = cx + dx;
-                let ny = cy + dy;
-                if nx < 0 || ny < 0 || nx >= dim || ny >= dim {
-                    continue;
-                }
-                let cell_idx = ny as usize * HASH_DIM + nx as usize;
-                for &ci in &self.cell_to_carrion[cell_idx] {
-                    let c = &self.carrion[ci as usize];
-                    let ddx = c.x - xi;
-                    let ddy = c.y - yi;
-                    if ddx * ddx + ddy * ddy <= r2 {
-                        count += 1;
-                    }
-                }
-            }
-        }
-        count
-    }
-
-    /// Returns 1.0 if creature `i` is within `WALL_THRESHOLD_PAD` of any wall edge.
-    /// Uses creature radius (size × BODY_RADIUS_PER_SIZE) for consistency with physics step.
-    /// Used in the sequential (non-threads) path; threads path inlines equivalent logic.
-    #[cfg_attr(feature = "threads", allow(dead_code))]
-    pub(crate) fn compute_is_at_wall(&self, i: usize) -> f32 {
-        let x = self.creatures.x[i];
-        let y = self.creatures.y[i];
-        let r = self.creatures.g_size[i] * BODY_RADIUS_PER_SIZE; // perf-5: mirror
-        let near = x.min(y).min(WORLD_SIZE - x).min(WORLD_SIZE - y);
-        if near < r + WALL_THRESHOLD_PAD {
-            1.0
-        } else {
-            0.0
-        }
-    }
-
     /// Rebuild the per-cell carrion index and run the vision pass.
     /// Ensures self.vision is index-aligned with self.creatures.
     pub(crate) fn run_vision_pass(&mut self) {
