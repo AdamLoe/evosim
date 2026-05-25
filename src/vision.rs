@@ -302,7 +302,8 @@ fn ray_circle_hit(ox: f32, oy: f32, dx: f32, dy: f32, cx: f32, cy: f32, r: f32) 
 
 /// Compute the angle a creature at index `i` is facing in sector `s`,
 /// accounting for eye_offsets. Used by the hardcoded picker.
-pub fn sector_to_angle(s: usize, eye_offsets: &[f32; EYE_SLOTS], eye_count: u8) -> f32 {
+#[allow(dead_code)]
+pub(crate) fn sector_to_angle(s: usize, eye_offsets: &[f32; EYE_SLOTS], eye_count: u8) -> f32 {
     let k = eye_count as usize;
     if k == 0 {
         return 0.0;

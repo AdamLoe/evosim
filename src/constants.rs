@@ -39,6 +39,7 @@ pub const UPKEEP_NN_FIXED: f32 = 0.05;
 pub const COST_EAT_ATTEMPT: f32 = 0.3;
 pub const COST_SCAVENGE_ATTEMPT: f32 = 0.1;
 pub const COST_MOVE_PER_DIST: f32 = 0.02;
+#[allow(dead_code)]
 pub const COST_SPLIT: f32 = 50.0;
 pub const SPLIT_GIFT_MAX: f32 = 30.0;
 pub const SPLIT_THRESHOLD: f32 = 50.0;
@@ -158,7 +159,9 @@ pub const SECTORS: usize = 24;
 pub const EYE_STRIDE: [u8; 8] = [0, 12, 8, 6, 4, 3, 2, 1];
 
 // ---- Acceptance test (v5 §16) ----
+#[allow(dead_code)]
 pub const ACCEPTANCE_TICKS: u32 = 10_000;
+#[allow(dead_code)]
 pub const ACCEPTANCE_SEED: &str = "evosim-test-001";
 
 // ---- Persistence (v5 §13, F.26/F.28) ----

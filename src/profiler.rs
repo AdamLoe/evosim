@@ -24,7 +24,8 @@ pub const SAMPLES_PER_NODE: usize = 4096;
 // profiler: hard cap on node count to bound memory + bugs
 pub const MAX_NODES: usize = 256;
 // profiler: stabilizing threshold: show banner if effective_window_ms < 90% of WINDOW_MS
-pub const STABILIZING_THRESHOLD_PCT: u32 = 90;
+#[allow(dead_code)]
+pub(crate) const STABILIZING_THRESHOLD_PCT: u32 = 90;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -521,7 +522,8 @@ macro_rules! profile_span {
     };
 }
 
-pub use profile_span as span;
+#[allow(unused_imports)]
+pub(crate) use profile_span as span;
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 

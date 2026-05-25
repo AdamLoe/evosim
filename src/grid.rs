@@ -8,8 +8,8 @@ pub struct SpatialGrid {
     /// Flattened cell index → contiguous slice of creature indices.
     /// `starts[k]` is the index of the first creature in cell `k`,
     /// `starts[k+1]` is past-the-end. `indices` holds them in cell order.
-    pub starts: Vec<u32>,
-    pub indices: Vec<u32>,
+    pub(crate) starts: Vec<u32>,
+    pub(crate) indices: Vec<u32>,
     /// Scratch cursors for the scatter pass of `rebuild`.
     /// Length matches `starts` (HASH_DIM * HASH_DIM + 1 = 14 401).
     /// Reused across rebuilds via `copy_from_slice(&starts)` to

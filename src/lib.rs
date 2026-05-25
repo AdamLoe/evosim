@@ -2,22 +2,22 @@
 
 #![allow(clippy::needless_range_loop)]
 
-pub mod brain;
-pub mod carrion;
-pub mod constants;
-pub mod creature;
-pub mod events;
-pub mod genome;
-pub mod grid;
-pub mod hof;
-pub mod profiler;
-pub mod rng;
-pub mod save;
-pub mod snapshot_hash;
-pub mod species;
-pub mod sun;
-pub mod vision;
-pub mod world;
+pub(crate) mod brain;
+pub(crate) mod carrion;
+pub(crate) mod constants;
+pub(crate) mod creature;
+pub(crate) mod events;
+pub(crate) mod genome;
+pub(crate) mod grid;
+pub(crate) mod hof;
+pub(crate) mod profiler;
+pub(crate) mod rng;
+pub mod save; // used by tests/acceptance.rs
+pub mod snapshot_hash; // used by tests/acceptance.rs
+pub(crate) mod species;
+pub(crate) mod sun;
+pub(crate) mod vision;
+pub mod world; // used by tests/acceptance.rs
 
 mod wasm_api;
 
