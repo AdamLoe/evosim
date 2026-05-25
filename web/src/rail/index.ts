@@ -5,14 +5,47 @@
 // E.24: Inspector refresh.
 
 import type { WorldHandle } from "../../wasm/evosim";
-import {
-  renderSpeciesList,
-  type SpeciesRow,
-} from "./events";
 import { maybeSampleStats } from "./stats";
 import { refreshInspector } from "./inspector";
 import { tickToasts } from "./toast";
 import { addHighlight, pruneHighlights, highlights } from "./highlight";
+
+// ---- Species list (inlined from former events.ts, S14) ----
+
+export interface SpeciesRow {
+  id: number;
+  name: string;
+  population: number;
+  parent_id: number | null;
+}
+
+let speciesContainer: HTMLDivElement | null = null;
+
+function renderSpeciesList(rows: SpeciesRow[]): void {
+  if (!speciesContainer) {
+    const panel = document.getElementById("rail-events");
+    if (!panel) return;
+    const wrapper = document.createElement("div");
+    wrapper.className = "events-species-list";
+    const label = document.createElement("div");
+    label.style.cssText = "opacity:0.4;margin-bottom:4px;font-size:10px;text-transform:uppercase;letter-spacing:0.05em";
+    label.textContent = "Live species";
+    wrapper.appendChild(label);
+    speciesContainer = document.createElement("div");
+    wrapper.appendChild(speciesContainer);
+    panel.insertBefore(wrapper, panel.firstChild);
+  }
+  const sorted = [...rows].sort((a, b) => b.population - a.population);
+  speciesContainer.innerHTML = "";
+  for (const sp of sorted) {
+    const div = document.createElement("div");
+    div.className = "species-row";
+    div.dataset.speciesId = String(sp.id);
+    div.textContent = `${sp.name} (${sp.population})`;
+    div.title = sp.parent_id !== null ? `Parent: #${sp.parent_id}` : "Founder";
+    speciesContainer.appendChild(div);
+  }
+}
 
 // ---- Event shape (matches EventKind #[serde(tag = "type")]) ----
 
