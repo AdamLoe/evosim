@@ -34,7 +34,8 @@ use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(start)]
 pub fn _start() {
-    #[cfg(debug_assertions)]
+    // Always install the panic hook so release builds surface panics in the
+    // browser console instead of silently aborting (see S2 audit item).
     std::panic::set_hook(Box::new(|info| {
         web_sys::console::error_1(&JsValue::from_str(&format!("{info}")));
     }));
