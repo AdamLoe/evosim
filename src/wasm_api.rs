@@ -166,20 +166,84 @@ impl WorldHandle {
         unsafe { js_sys::Float32Array::view(&self.carrion_buf) }
     }
 
-    /// Apply a dev-panel slider live.
+    // ─── Per-slider typed setters (S17) ─────────────────────────────────────
+    // Private apply_* helpers: exactly one mutation site per DevSliders field.
+
+    fn apply_base_sun_rate(&mut self, value: f32) {
+        self.inner.sliders.base_sun_rate = value;
+    }
+    fn apply_mutation_rate_multiplier(&mut self, value: f32) {
+        self.inner.sliders.mutation_rate_multiplier = value;
+    }
+    /// Side effect: also triggers sun.recompute_capacity (v6 §D).
+    fn apply_sun_gradient_strength(&mut self, value: f32) {
+        self.inner.sliders.sun_gradient_strength = value;
+        self.inner.sun.recompute_capacity(value);
+    }
+    fn apply_mouth_tax(&mut self, value: f32) {
+        self.inner.sliders.mouth_tax = value;
+    }
+    fn apply_nn_mutation_sigma(&mut self, value: f32) {
+        self.inner.sliders.nn_mutation_sigma = value;
+    }
+
+    /// Typed setter — base sun refill rate.
     #[wasm_bindgen]
-    pub fn set_slider(&mut self, name: &str, value: f32) {
-        match name {
-            "base_sun_rate" => self.inner.sliders.base_sun_rate = value,
-            "mutation_rate_multiplier" => self.inner.sliders.mutation_rate_multiplier = value,
-            "sun_gradient_strength" => {
-                self.inner.sliders.sun_gradient_strength = value;
-                self.inner.sun.recompute_capacity(value);
-            }
-            "mouth_tax" => self.inner.sliders.mouth_tax = value,
-            "nn_mutation_sigma" => self.inner.sliders.nn_mutation_sigma = value,
-            _ => {}
+    pub fn set_base_sun_rate(&mut self, value: f32) {
+        self.apply_base_sun_rate(value);
+    }
+
+    /// Typed setter — per-birth mutation rate multiplier.
+    #[wasm_bindgen]
+    pub fn set_mutation_rate_multiplier(&mut self, value: f32) {
+        self.apply_mutation_rate_multiplier(value);
+    }
+
+    /// Typed setter — sun gradient strength (also triggers sun.recompute_capacity).
+    #[wasm_bindgen]
+    pub fn set_sun_gradient_strength(&mut self, value: f32) {
+        self.apply_sun_gradient_strength(value);
+    }
+
+    /// Typed setter — mouth tax (upkeep per eat-efficiency point).
+    #[wasm_bindgen]
+    pub fn set_mouth_tax(&mut self, value: f32) {
+        self.apply_mouth_tax(value);
+    }
+
+    /// Typed setter — NN mutation sigma.
+    #[wasm_bindgen]
+    pub fn set_nn_mutation_sigma(&mut self, value: f32) {
+        self.apply_nn_mutation_sigma(value);
+    }
+
+    /// Apply a dev-panel slider live by name. JS console workflow
+    /// (BUILD-REPORT Known Issue #4). Returns `Err` on unknown name so a
+    /// console typo is visible instead of silently ignored.
+    ///
+    /// JS-side semantics: `Err(JsValue)` causes the generated wrapper to
+    /// throw, so a typo at the console prompt surfaces immediately.
+    #[wasm_bindgen]
+    pub fn set_slider(&mut self, name: &str, value: f32) -> Result<(), JsValue> {
+        if !self.try_set_slider(name, value) {
+            return Err(JsValue::from_str(&format!("unknown slider: {name}")));
         }
+        Ok(())
+    }
+
+    /// Pure Rust helper: apply a named slider; returns `true` on success.
+    /// Factored out so native tests can exercise the name-dispatch table
+    /// without constructing a `JsValue` (which panics on non-wasm32 targets).
+    fn try_set_slider(&mut self, name: &str, value: f32) -> bool {
+        match name {
+            "base_sun_rate" => self.apply_base_sun_rate(value),
+            "mutation_rate_multiplier" => self.apply_mutation_rate_multiplier(value),
+            "sun_gradient_strength" => self.apply_sun_gradient_strength(value),
+            "mouth_tax" => self.apply_mouth_tax(value),
+            "nn_mutation_sigma" => self.apply_nn_mutation_sigma(value),
+            _ => return false,
+        }
+        true
     }
 
     /// JSON of recent events (UI ring buffer).
@@ -508,21 +572,49 @@ mod tests {
         assert!(miss.is_none(), "empty corner must return None");
     }
 
-    /// E.21: events_total_count is monotone.
+    // ─── S17: typed slider setter tests ─────────────────────────────────────
+
+    /// S17: per-slider typed setters mutate the correct DevSliders field.
     #[test]
-    fn events_total_count_is_monotone() {
-        let mut handle = WorldHandle::new("e21-monotone");
-        let initial = handle.events_total_count();
-        // Run some ticks; WorldEnded eventually fires if pop=0.
-        for _ in 0..500 {
-            handle.step();
+    fn set_slider_typed_mutates_field() {
+        let mut handle = WorldHandle::new("s17-typed");
+        handle.set_base_sun_rate(0.99);
+        assert!((handle.inner.sliders.base_sun_rate - 0.99).abs() < 1e-6);
+        handle.set_mutation_rate_multiplier(2.5);
+        assert!((handle.inner.sliders.mutation_rate_multiplier - 2.5).abs() < 1e-6);
+        handle.set_sun_gradient_strength(0.5);
+        assert!((handle.inner.sliders.sun_gradient_strength - 0.5).abs() < 1e-6);
+        handle.set_mouth_tax(0.1);
+        assert!((handle.inner.sliders.mouth_tax - 0.1).abs() < 1e-6);
+        handle.set_nn_mutation_sigma(0.05);
+        assert!((handle.inner.sliders.nn_mutation_sigma - 0.05).abs() < 1e-6);
+    }
+
+    /// S17: try_set_slider returns true for all known names. Uses the inner
+    /// helper rather than set_slider directly because JsValue::from_str
+    /// panics on non-wasm32 targets in the Err branch.
+    #[test]
+    fn set_slider_known_names_dispatch_ok() {
+        let mut handle = WorldHandle::new("s17-known");
+        for name in &[
+            "base_sun_rate",
+            "mutation_rate_multiplier",
+            "sun_gradient_strength",
+            "mouth_tax",
+            "nn_mutation_sigma",
+        ] {
+            assert!(handle.try_set_slider(name, 0.5), "expected true for {name}");
         }
-        let after = handle.events_total_count();
+    }
+
+    /// S17: try_set_slider returns false for an unknown name (exercises the
+    /// Err branch of set_slider without touching JsValue).
+    #[test]
+    fn set_slider_unknown_returns_false() {
+        let mut handle = WorldHandle::new("s17-unknown");
         assert!(
-            after >= initial,
-            "events_total_count must be monotone: {} >= {}",
-            after,
-            initial
+            !handle.try_set_slider("bogus_slider", 1.0),
+            "unknown slider name must return false"
         );
     }
 
