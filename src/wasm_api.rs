@@ -6,6 +6,12 @@ use crate::save::{LoadError, SaveV1};
 use crate::world::World;
 use wasm_bindgen::prelude::*;
 
+/// Budget for "jank" detection: ticks that take longer than this are counted.
+pub const JANK_BUDGET_MS: f64 = 16.0;
+
+/// Rolling window size (in ticks) for the TPS average.
+const TPS_WINDOW: usize = 60;
+
 #[wasm_bindgen]
 pub struct WorldHandle {
     inner: World,
@@ -16,6 +22,11 @@ pub struct WorldHandle {
     carrion_buf: Vec<f32>,
     /// Reusable f64 buffer for `creature_ids_buffer` — index-aligned with creatures_buffer.
     id_buf: Vec<f64>,
+    /// Rolling window of per-tick wall-clock durations in milliseconds (last TPS_WINDOW ticks).
+    /// Used to compute TPS rolling average.
+    tick_durations_ms: std::collections::VecDeque<f64>,
+    /// Count of ticks whose wall-clock duration exceeded JANK_BUDGET_MS.
+    jank_count: u32,
 }
 
 #[wasm_bindgen]
@@ -39,6 +50,8 @@ impl WorldHandle {
             sun_buf: Vec::new(),
             carrion_buf: Vec::new(),
             id_buf: Vec::new(),
+            tick_durations_ms: std::collections::VecDeque::new(),
+            jank_count: 0,
         }
     }
 
@@ -49,14 +62,53 @@ impl WorldHandle {
     }
 
     /// Run multiple ticks; stops early on game-over.
+    /// Tracks per-tick wall-clock duration for TPS and jank accounting.
     #[wasm_bindgen]
     pub fn step_n(&mut self, n: u32) -> bool {
         for _ in 0..n {
-            if !self.inner.tick_once() {
+            let t0 = wasm_now_ms();
+            let alive = self.inner.tick_once();
+            let dur_ms = wasm_now_ms() - t0;
+            // Record in rolling window.
+            if self.tick_durations_ms.len() >= TPS_WINDOW {
+                self.tick_durations_ms.pop_front();
+            }
+            self.tick_durations_ms.push_back(dur_ms);
+            if dur_ms > JANK_BUDGET_MS {
+                self.jank_count = self.jank_count.saturating_add(1);
+            }
+            if !alive {
                 return false;
             }
         }
         true
+    }
+
+    /// Rolling average ticks-per-second over the last 60 ticks.
+    /// Returns 0.0 if fewer than 2 samples are available.
+    #[wasm_bindgen(getter)]
+    pub fn tps(&self) -> f32 {
+        let n = self.tick_durations_ms.len();
+        if n < 2 {
+            return 0.0;
+        }
+        let total_ms: f64 = self.tick_durations_ms.iter().sum();
+        if total_ms <= 0.0 {
+            return 0.0;
+        }
+        (n as f64 / (total_ms / 1000.0)) as f32
+    }
+
+    /// Cumulative count of ticks that exceeded JANK_BUDGET_MS.
+    #[wasm_bindgen(getter)]
+    pub fn jank_count(&self) -> u32 {
+        self.jank_count
+    }
+
+    /// Reset the jank counter to zero.
+    #[wasm_bindgen]
+    pub fn reset_jank(&mut self) {
+        self.jank_count = 0;
     }
 
     #[wasm_bindgen(getter)]
@@ -432,6 +484,8 @@ impl WorldHandle {
             sun_buf: Vec::new(),
             carrion_buf: Vec::new(),
             id_buf: Vec::new(),
+            tick_durations_ms: std::collections::VecDeque::new(),
+            jank_count: 0,
         })
     }
 
@@ -496,6 +550,30 @@ impl WorldHandle {
         serde_json::to_string(&payload).unwrap_or_else(|_| "{}".into())
     }
 }
+
+// ─── Clock helper ─────────────────────────────────────────────────────────────
+
+/// Current wall-clock time in milliseconds. On wasm32 uses `Performance::now()`;
+/// on native (tests) uses a monotonic `Instant` against a per-process epoch.
+#[cfg(target_arch = "wasm32")]
+fn wasm_now_ms() -> f64 {
+    web_sys::window()
+        .expect("no window")
+        .performance()
+        .expect("no performance")
+        .now()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn wasm_now_ms() -> f64 {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    let epoch = EPOCH.get_or_init(Instant::now);
+    epoch.elapsed().as_secs_f64() * 1000.0
+}
+
+// ─── Non-wasm helpers ─────────────────────────────────────────────────────────
 
 /// Non-wasm helper extracted for native tests. Returns species_list JSON string.
 /// Filters out species with zero population (extinct or never populated).

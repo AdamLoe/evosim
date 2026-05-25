@@ -237,20 +237,20 @@ impl World {
 
         // 1. Rebuild spatial hash grid from start-of-tick positions.
         {
-            crate::profile_span!(&self.profile, "grid_rebuild_1");
+            crate::profile_span!(&self.profile, "tick.grid.rebuild");
             self.grid.rebuild(&self.creatures.x, &self.creatures.y);
         }
 
         // 2. Vision pass (Milestone C.12).
         {
-            crate::profile_span!(&self.profile, "vision_pass");
+            crate::profile_span!(&self.profile, "tick.vision");
             self.run_vision_pass();
         }
 
         // 3. NN forward pass + action decode (Milestone D).
         // Chunked per v6 §J; sequential by default, parallel behind `threads` feature.
         {
-            crate::profile_span!(&self.profile, "nn_forward");
+            crate::profile_span!(&self.profile, "tick.nn");
             let n = self.creatures.len();
             let ranges = chunk_ranges(n);
             self.nn_forward_all_chunks(&ranges, n);
@@ -258,38 +258,38 @@ impl World {
 
         // 4. Apply velocities + soft repulsion + wall clamp; rebuild grid.
         {
-            crate::profile_span!(&self.profile, "movement_and_repulsion");
+            crate::profile_span!(&self.profile, "tick.movement");
             self.apply_movement_and_repulsion();
         }
 
         // 5. Photosynth two-pass.
         {
-            crate::profile_span!(&self.profile, "photosynth_two_pass");
+            crate::profile_span!(&self.profile, "tick.photosynth");
             self.photosynth_two_pass();
         }
 
         // 6. Eat / scavenge resolution.
         {
-            crate::profile_span!(&self.profile, "eat_and_scavenge");
+            crate::profile_span!(&self.profile, "tick.eat_scavenge");
             self.eat_and_scavenge();
         }
 
         // 7. Sun refill.
         {
-            crate::profile_span!(&self.profile, "sun_refill");
+            crate::profile_span!(&self.profile, "tick.sun_refill");
             self.sun.refill();
         }
 
         // 8. Energy bookkeeping.
         {
-            crate::profile_span!(&self.profile, "energy_bookkeeping");
+            crate::profile_span!(&self.profile, "tick.energy_bookkeeping");
             self.energy_bookkeeping();
         }
 
         // 9. Deaths → carrion. Span widened (R9) to cover the dead-removal
         //    swap_remove loop and creatures.remove_indices (step 9, scales with die-off).
         {
-            crate::profile_span!(&self.profile, "collect_deaths");
+            crate::profile_span!(&self.profile, "tick.collect_deaths");
             // S27: collect_deaths writes into self.scratch_dead (promoted pool).
             self.collect_deaths();
             if !self.scratch_dead.is_empty() {
@@ -311,13 +311,13 @@ impl World {
 
         // 10. Carrion decay.
         {
-            crate::profile_span!(&self.profile, "decay_carrion");
+            crate::profile_span!(&self.profile, "tick.decay_carrion");
             self.decay_carrion();
         }
 
         // 11. Births.
         {
-            crate::profile_span!(&self.profile, "handle_births");
+            crate::profile_span!(&self.profile, "tick.handle_births");
             self.handle_births();
         }
 
@@ -325,7 +325,7 @@ impl World {
         //     world-end check. Cheap today; future-proofs for Milestone E species
         //     detection (R9: bookkeeping_tail span).
         {
-            crate::profile_span!(&self.profile, "bookkeeping_tail");
+            crate::profile_span!(&self.profile, "tick.bookkeeping_tail");
 
             // Promote this-tick action → next-tick last_action (v6 §1 / §E).
             // S30: copy the slice in one bulk memcpy instead of a per-element loop.
