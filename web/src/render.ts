@@ -131,14 +131,13 @@ export function drawCreatures(
     const r = data[i + 3];
     const g = data[i + 4];
     const b = data[i + 5];
-    // const energyFrac = data[i + 6]; // reserved for future visual cue
-    // const ageFrac = data[i + 7];
     // Feature ring flags (v6 §B, Milestone C.11): eye→move→scav→mouth→armor
-    const flagEye   = data[i + 8] > 0.5;
-    const flagMove  = data[i + 9] > 0.5;
-    const flagScav  = data[i + 10] > 0.5;
-    const flagMouth = data[i + 11] > 0.5;
-    const flagArmor = data[i + 12] > 0.5;
+    // S21: offsets shifted from 8-12 → 6-10 (dropped energy_frac + age_frac).
+    const flagEye   = data[i + 6] > 0.5;
+    const flagMove  = data[i + 7] > 0.5;
+    const flagScav  = data[i + 8] > 0.5;
+    const flagMouth = data[i + 9] > 0.5;
+    const flagArmor = data[i + 10] > 0.5;
 
     const idx = i / stride;
     const [sx, sy] = worldToScreen(cam, viewW, viewH, x, y);
@@ -216,6 +215,14 @@ export function renderWorld(
   highlightMap: Map<number, number>,
   nowMs: number,
 ): void {
+  // S21 mandatory guard: stride mismatch silently corrupts the renderer.
+  // Rust wasm_api.rs::creature_stride() and web/src/render.ts must agree.
+  if (stride !== 11) {
+    throw new Error(
+      `creature_stride mismatch: expected 11, got ${stride} ` +
+      `(Rust wasm_api.rs::creature_stride and web/src/render.ts must agree)`,
+    );
+  }
   ctx.fillStyle = "#04070b";
   ctx.fillRect(0, 0, viewW, viewH);
   drawSunMap(ctx, cam, viewW, viewH, world.world_size, world.sun_dim, world.sun_buffer(), world.sun_capacity_buffer());

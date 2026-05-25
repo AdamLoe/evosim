@@ -95,10 +95,13 @@ impl WorldHandle {
     }
 
     /// Repack creature SoA into a contiguous Float32Array. Layout per creature
-    /// (13 floats, stride = [`creature_stride`]):
-    /// `[x, y, radius_world, r, g, b, energy_frac, age_frac,
+    /// (11 floats, stride = [`creature_stride`]):
+    /// `[x, y, radius_world, r, g, b,
     ///   flag_eye, flag_move, flag_scav, flag_mouth, flag_armor]`.
     /// Ring flags: 1.0 if trait > 0, else 0.0. See v6 §B for ring order.
+    /// S21: dropped energy_frac (was off+6) and age_frac (was off+7) —
+    /// both were read-commented in render.ts. Switched hot-field reads from
+    /// AoS genomes[i] to perf-5 SoA mirror where mirrors exist.
     #[wasm_bindgen]
     pub fn creatures_buffer(&mut self) -> js_sys::Float32Array {
         let n = self.inner.creatures.len();
@@ -106,28 +109,42 @@ impl WorldHandle {
         self.creature_buf.clear();
         self.creature_buf.resize(n * stride, 0.0);
         for i in 0..n {
+            // AoS binding kept only for the four unmirrored fields:
+            // pigment_r/g/b and armor.
             let g = &self.inner.creatures.genomes[i];
             let off = i * stride;
             self.creature_buf[off] = self.inner.creatures.x[i];
             self.creature_buf[off + 1] = self.inner.creatures.y[i];
-            self.creature_buf[off + 2] = g.size * BODY_RADIUS_PER_SIZE;
+            // S21: use SoA mirror g_size instead of AoS g.size.
+            self.creature_buf[off + 2] = self.inner.creatures.g_size[i] * BODY_RADIUS_PER_SIZE;
+            // pigment_r/g/b have no SoA mirror — stay AoS.
             self.creature_buf[off + 3] = g.pigment_r;
             self.creature_buf[off + 4] = g.pigment_g;
             self.creature_buf[off + 5] = g.pigment_b;
-            // energy_frac: rough — use 100 as nominal max for UI scaling.
-            self.creature_buf[off + 6] = (self.inner.creatures.energy[i] / 100.0).clamp(0.0, 1.0);
-            self.creature_buf[off + 7] =
-                (self.inner.creatures.age[i] as f32 / g.max_age.max(1) as f32).clamp(0.0, 1.0);
             // Feature ring flags (v6 §B, ring order: eye→move→scav→mouth→armor).
-            self.creature_buf[off + 8] = if g.eye_count > 0 { 1.0 } else { 0.0 };
-            self.creature_buf[off + 9] = if g.move_speed > 0.0 { 1.0 } else { 0.0 };
-            self.creature_buf[off + 10] = if g.scavenge_efficiency > 0.0 {
+            // S21: use perf-5 SoA mirror fields; offsets shifted from 8-12 → 6-10.
+            self.creature_buf[off + 6] = if self.inner.creatures.g_eye_count[i] > 0 {
                 1.0
             } else {
                 0.0
             };
-            self.creature_buf[off + 11] = if g.eat_efficiency > 0.0 { 1.0 } else { 0.0 };
-            self.creature_buf[off + 12] = if g.armor > 0.0 { 1.0 } else { 0.0 };
+            self.creature_buf[off + 7] = if self.inner.creatures.g_move_speed[i] > 0.0 {
+                1.0
+            } else {
+                0.0
+            };
+            self.creature_buf[off + 8] = if self.inner.creatures.g_scav_eff[i] > 0.0 {
+                1.0
+            } else {
+                0.0
+            };
+            self.creature_buf[off + 9] = if self.inner.creatures.g_eat_eff[i] > 0.0 {
+                1.0
+            } else {
+                0.0
+            };
+            // armor has no SoA mirror — stay AoS.
+            self.creature_buf[off + 10] = if g.armor > 0.0 { 1.0 } else { 0.0 };
         }
         unsafe { js_sys::Float32Array::view(&self.creature_buf) }
     }
@@ -511,29 +528,42 @@ impl WorldHandle {
 }
 
 /// Per-creature float count in [`WorldHandle::creatures_buffer`].
-/// v1.0 layout (Milestone C.11): 13 floats.
-/// Offset 0..8: x,y,radius,r,g,b,energy_frac,age_frac.
-/// Offset 8..13: flag_eye, flag_move, flag_scav, flag_mouth, flag_armor.
+/// v1.1 layout (audit S21): 11 floats.
+/// Offset 0..6: x, y, radius_world, pigment_r, pigment_g, pigment_b.
+/// Offset 6..11: flag_eye, flag_move, flag_scav, flag_mouth, flag_armor.
 #[wasm_bindgen]
 pub fn creature_stride() -> u32 {
-    13
+    11
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Smoke-test that creature_stride() == 13 and the fill loop writes that
-    /// many floats per creature. We can't call creatures_buffer() in native
-    /// tests (js_sys::Float32Array requires wasm32), so we test the stride
-    /// constant and the fill-loop math directly.
+    /// S21: creature_stride() == 11 (dropped energy_frac + age_frac).
+    /// We can't call creatures_buffer() in native tests (js_sys::Float32Array
+    /// requires wasm32), so we test the stride constant and fill-math directly.
     #[test]
-    fn creature_stride_is_13() {
-        assert_eq!(creature_stride(), 13);
+    fn creature_stride_is_11() {
+        assert_eq!(creature_stride(), 11);
         // verify that n creatures × stride == expected buffer size
         let n: usize = 3;
         let expected = n * creature_stride() as usize;
-        assert_eq!(expected, 39);
+        assert_eq!(expected, 33);
+    }
+
+    /// S21: fill-math test. Manually resize the creature_buf as the wasm
+    /// path would and assert the length matches population * stride.
+    #[test]
+    fn creature_buf_length_matches_population_times_stride() {
+        let mut handle = WorldHandle::new("s21-stride");
+        // Founder population = 1 at boot.
+        let n = handle.inner.creatures.len();
+        let stride = creature_stride() as usize;
+        handle.creature_buf.clear();
+        handle.creature_buf.resize(n * stride, 0.0);
+        assert_eq!(handle.creature_buf.len(), n * stride);
+        assert_eq!(handle.creature_buf.len(), 11); // 1 creature × 11 floats
     }
 
     /// E.21: species_list_json_inner filters out extinct (zero-population) species.
