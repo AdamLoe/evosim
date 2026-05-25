@@ -17,6 +17,11 @@ pub struct SpatialGrid {
     /// otherwise cost (~57 kB × 3 rebuilds/tick = ~173 kB/tick).
     /// Must always be the same length as `starts`; resize both in lockstep.
     cursors: Vec<u32>,
+    /// Per-creature cached cell index, computed once in `rebuild`.
+    /// S32: avoids re-calling `cell_of(x, y)` twice per creature (count pass
+    /// and write pass). Length == creature count after each rebuild.
+    /// Downstream consumers may read `grid.cells[i]` instead of re-calling `cell_of`.
+    pub(crate) cells: Vec<u32>,
 }
 
 impl Default for SpatialGrid {
@@ -33,6 +38,7 @@ impl SpatialGrid {
             starts,
             indices: Vec::with_capacity(2048),
             cursors,
+            cells: Vec::with_capacity(2048),
         }
     }
 
@@ -44,11 +50,16 @@ impl SpatialGrid {
     }
 
     /// Rebuild the index from positions. O(N + cells).
+    /// S32: computes `cell_of(x, y)` once per creature and caches it in
+    /// `self.cells[k]`, avoiding a redundant second call in the write pass.
     pub fn rebuild(&mut self, xs: &[f32], ys: &[f32]) {
         let n = xs.len();
+        // S32: cache cell_of per creature (count pass + write pass share the cache).
+        self.cells.resize(n, 0);
         self.starts.iter_mut().for_each(|s| *s = 0);
         for k in 0..n {
             let c = Self::cell_of(xs[k], ys[k]);
+            self.cells[k] = c as u32;
             self.starts[c + 1] += 1;
         }
         // prefix sum → offsets
@@ -60,7 +71,7 @@ impl SpatialGrid {
         // Reset cursors to the prefix-sum boundaries without allocating.
         self.cursors.copy_from_slice(&self.starts);
         for k in 0..n {
-            let c = Self::cell_of(xs[k], ys[k]);
+            let c = self.cells[k] as usize; // S32: read from cache, no recompute
             let pos = self.cursors[c] as usize;
             self.indices[pos] = k as u32;
             self.cursors[c] += 1;
@@ -92,6 +103,29 @@ impl SpatialGrid {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// S32: the cached cells[] array matches a direct recompute of cell_of for
+    /// every creature after rebuild.
+    #[test]
+    fn cell_of_cache_matches_recompute() {
+        let xs = vec![0.0, 4.9, 5.1, 100.0, 299.9, 595.0];
+        let ys = vec![0.0, 4.9, 5.1, 200.0, 300.0, 595.0];
+        let mut g = SpatialGrid::new();
+        g.rebuild(&xs, &ys);
+        assert_eq!(
+            g.cells.len(),
+            xs.len(),
+            "cells length must equal creature count"
+        );
+        for k in 0..xs.len() {
+            let expected = SpatialGrid::cell_of(xs[k], ys[k]);
+            assert_eq!(
+                g.cells[k] as usize, expected,
+                "cells[{k}] = {} != recomputed {} for ({}, {})",
+                g.cells[k], expected, xs[k], ys[k]
+            );
+        }
+    }
 
     #[test]
     fn rebuild_indexes_correctly() {
