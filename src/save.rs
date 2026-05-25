@@ -131,6 +131,8 @@ impl std::fmt::Display for LoadError {
     }
 }
 
+impl std::error::Error for LoadError {}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Snapshot construction from World
 
@@ -444,5 +446,11 @@ mod tests {
             assert_eq!(w2.sun.current[k], w.sun.current[k], "sun.current[{k}]");
             assert_eq!(w2.sun.capacity[k], w.sun.capacity[k], "sun.capacity[{k}]");
         }
+    }
+
+    /// S34: LoadError implements std::error::Error so it can be boxed.
+    #[test]
+    fn load_error_implements_std_error() {
+        let _: Box<dyn std::error::Error> = Box::new(LoadError::StructuralError("x".into()));
     }
 }
