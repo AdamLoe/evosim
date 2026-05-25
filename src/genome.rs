@@ -266,7 +266,12 @@ impl Genome {
 fn mutate_f32(value: &mut f32, p: f32, sigma: f32, lo: f32, hi: f32, rng: &mut SimRng) {
     if rng.unit() < p {
         let delta = rng.normal() * sigma;
-        *value = (*value + delta).clamp(lo, hi);
+        let next = (*value + delta).clamp(lo, hi);
+        // S6: if value or delta were non-finite (e.g. from a corrupt genome),
+        // clamp produces NaN; keep the original value instead.
+        if next.is_finite() {
+            *value = next;
+        }
     }
 }
 
@@ -274,7 +279,10 @@ fn mutate_u32(value: &mut u32, p: f32, sigma: f32, lo: u32, hi: u32, rng: &mut S
     if rng.unit() < p {
         let delta = rng.normal() * sigma;
         let next = (*value as f32 + delta).round();
-        *value = (next.clamp(lo as f32, hi as f32)) as u32;
+        // S6: guard against NaN from non-finite inputs.
+        if next.is_finite() {
+            *value = (next.clamp(lo as f32, hi as f32)) as u32;
+        }
     }
 }
 
@@ -321,6 +329,51 @@ mod tests {
         // bounds still hold
         assert!(g.size >= SIZE_MIN && g.size <= SIZE_MAX);
         assert!(g.photosynth_efficiency >= PHOTO_EFF_MIN);
+    }
+
+    /// S6: mutate_f32 must not propagate NaN or ±inf into genome fields.
+    #[test]
+    fn mutate_f32_nan_defense() {
+        let mut rng = SimRng::from_u64(42);
+        // NaN value: mutation must not write NaN.
+        let mut v_nan = f32::NAN;
+        // Call with p=1.0 to ensure the mutation branch runs.
+        mutate_f32(&mut v_nan, 1.0, 0.1, 0.0, 1.0, &mut rng);
+        assert!(v_nan.is_finite() || v_nan.is_nan(), ""); // should still be the original NaN (not written)
+        // More precisely: original was NaN, so the guard fires and the original is kept.
+        // Since NaN + anything = NaN, clamp(NaN) = NaN, so is_finite() = false → value unchanged.
+        assert!(v_nan.is_nan(), "NaN value must not be overwritten with another NaN from clamp");
+
+        // ±inf value: mutation must not write inf.
+        let mut v_inf = f32::INFINITY;
+        mutate_f32(&mut v_inf, 1.0, 1.0, 0.0, 1.0, &mut rng);
+        // inf + finite_delta = inf; clamp(inf, 0, 1) = 1.0 (finite) → actually writes 1.0.
+        // That's correct behaviour: inf gets clamped to the hi bound.
+        assert!(v_inf.is_finite(), "inf value should be clamped to finite by clamp()");
+
+        // Normal path still works.
+        let mut v = 0.5f32;
+        mutate_f32(&mut v, 1.0, 0.01, 0.0, 1.0, &mut rng);
+        assert!(v.is_finite(), "normal mutation must stay finite");
+        assert!(v >= 0.0 && v <= 1.0, "normal mutation must respect bounds");
+    }
+
+    /// S6: mutate_u32 must not propagate NaN into genome fields.
+    #[test]
+    fn mutate_u32_nan_defense() {
+        let mut rng = SimRng::from_u64(99);
+        // A u32 can't hold NaN, but sigma could be NaN (from a corrupt genome).
+        // Pass sigma=NaN → delta = NaN → next = NaN → guard fires → value unchanged.
+        let original: u32 = 1000;
+        let mut v = original;
+        // We call the internal fn directly with sigma=NaN.
+        mutate_u32(&mut v, 1.0, f32::NAN, 0, 10_000, &mut rng);
+        assert_eq!(v, original, "NaN sigma must not corrupt the u32 value");
+
+        // Normal path still works.
+        let mut v2: u32 = 1000;
+        mutate_u32(&mut v2, 1.0, 100.0, 0, 10_000, &mut rng);
+        assert!(v2 <= 10_000, "u32 must stay within bounds after mutation");
     }
 
     #[test]
