@@ -122,28 +122,43 @@ impl World {
             self.scratch_neighbors = neighbors;
         }
 
+        // S31: track whether any position changed so we can skip the final grid
+        // rebuild when positions are unchanged. Two sources of position change:
+        //   1. Wall clamp (any_wall) — clamps x/y beyond what repulsion provided.
+        //   2. Nonzero repulsion force (any_repulsion) — moves at least one creature.
+        // If neither fired, the pre-repulsion grid rebuild above is still valid.
+        // eat_and_scavenge (step 6) uses the grid, so we must not skip when stale.
+        let mut any_wall = false;
+        let mut any_repulsion = false;
         for i in 0..n {
+            if self.scratch_fx[i] != 0.0 || self.scratch_fy[i] != 0.0 {
+                any_repulsion = true;
+            }
             let mut x = self.creatures.x[i] + self.scratch_fx[i];
             let mut y = self.creatures.y[i] + self.scratch_fy[i];
             let r = self.creatures.g_size[i] * BODY_RADIUS_PER_SIZE;
             if x < r {
                 x = r;
+                any_wall = true;
                 if self.creatures.vx[i] < 0.0 {
                     self.creatures.vx[i] = 0.0;
                 }
             } else if x > WORLD_SIZE - r {
                 x = WORLD_SIZE - r;
+                any_wall = true;
                 if self.creatures.vx[i] > 0.0 {
                     self.creatures.vx[i] = 0.0;
                 }
             }
             if y < r {
                 y = r;
+                any_wall = true;
                 if self.creatures.vy[i] < 0.0 {
                     self.creatures.vy[i] = 0.0;
                 }
             } else if y > WORLD_SIZE - r {
                 y = WORLD_SIZE - r;
+                any_wall = true;
                 if self.creatures.vy[i] > 0.0 {
                     self.creatures.vy[i] = 0.0;
                 }
@@ -152,7 +167,10 @@ impl World {
             self.creatures.y[i] = y;
         }
 
-        self.grid.rebuild(&self.creatures.x, &self.creatures.y);
+        // S31: skip rebuild when no wall fired AND no repulsion force moved anyone.
+        if any_wall || any_repulsion {
+            self.grid.rebuild(&self.creatures.x, &self.creatures.y);
+        }
     }
 
     pub(crate) fn photosynth_two_pass(&mut self) {
@@ -710,8 +728,8 @@ mod tests {
     /// the creature's body radius, using the cell_to_carrion index.
     #[test]
     fn s24_scavenge_3x3_sweep_finds_adjacent_carrion() {
-        use crate::vision::build_cell_to_carrion;
         use crate::constants::*;
+        use crate::vision::build_cell_to_carrion;
 
         let mut w = World::new("s24-sweep");
         // Give the founder scavenge ability and place carrion on top of it.
@@ -755,8 +773,8 @@ mod tests {
     /// body radius, even if it is in the same 3×3 cell window.
     #[test]
     fn s24_scavenge_skips_out_of_radius_carrion() {
-        use crate::vision::build_cell_to_carrion;
         use crate::constants::*;
+        use crate::vision::build_cell_to_carrion;
 
         let mut w = World::new("s24-oor");
         w.creatures.genomes[0].scavenge_efficiency = 1.0;
@@ -786,8 +804,7 @@ mod tests {
 
         // The carrion pool should be unchanged (no scavenging took place).
         assert_eq!(
-            w.carrion[0].pool,
-            carrion_pool,
+            w.carrion[0].pool, carrion_pool,
             "out-of-radius carrion must not be scavenged"
         );
         // Energy dropped by the attempt cost only.
@@ -857,5 +874,37 @@ mod tests {
         assert!(w.scratch_attempted_scavenge.len() >= n1);
         assert!(w.scratch_got_a_bite.len() >= n1);
         // No panic across 500 ticks of growth confirms resize handles growth.
+    }
+
+    /// S31: a creature far from walls with no overlapping neighbors should NOT
+    /// trigger a grid rebuild (any_wall = false AND any_repulsion = false).
+    /// We verify correctness by running a tick and confirming the grid is still
+    /// valid (correct creature positions) even when the rebuild was skipped.
+    #[test]
+    fn s31_no_wall_no_repulsion_grid_still_valid() {
+        let mut w = World::new("s31-wall-skip");
+        // Place the founder at the center with zero velocity so it doesn't move.
+        w.creatures.x[0] = WORLD_SIZE * 0.5;
+        w.creatures.y[0] = WORLD_SIZE * 0.5;
+        w.creatures.vx[0] = 0.0;
+        w.creatures.vy[0] = 0.0;
+        // Rebuild grid to match the centered position.
+        w.grid.rebuild(&w.creatures.x, &w.creatures.y);
+        // Run the movement pass directly. With no velocity and no neighbors,
+        // scratch_fx/fy should be zero and no wall should fire.
+        w.apply_movement_and_repulsion();
+        // After the call, the creature must still be findable in the grid.
+        let mut found = false;
+        w.grid
+            .for_each_in_radius(WORLD_SIZE * 0.5, WORLD_SIZE * 0.5, 10.0, |_i| {
+                found = true;
+            });
+        assert!(found, "creature must be found in grid after movement pass");
+        // Position must still be at center (no movement).
+        assert!(
+            (w.creatures.x[0] - WORLD_SIZE * 0.5).abs() < 1.0,
+            "creature must remain near center: x={}",
+            w.creatures.x[0]
+        );
     }
 }
