@@ -160,7 +160,8 @@ async function main(): Promise<void> {
   });
 
   const params = new URLSearchParams(window.location.search);
-  const urlSeed = params.get("seed");
+  // Cap seed param length to prevent oversized inputs (S15).
+  const urlSeed = (params.get("seed") ?? "").slice(0, 128) || null;
 
   let world: WorldHandle | null = null;
   let restoredCamera: { zoom: number; cx: number; cy: number } | null = null;
