@@ -154,6 +154,18 @@ impl World {
         );
         let mut grid = SpatialGrid::new();
         grid.rebuild(&creatures.x, &creatures.y);
+        // S29: initialize biggest_ever for the founder (founder never goes through
+        // handle_births, so we seed it here). Size = FOUNDER_SIZE from genome.
+        let founder_size = creatures.g_size[0];
+        let founder_species_name = species.get(founder_species).name.clone();
+        let initial_biggest_ever = Some(crate::hof::HallOfFame {
+            creature_id: 0,
+            genome: creatures.genomes[0].clone(),
+            species_name: founder_species_name,
+            captured_tick: 0,
+            captured_size: founder_size,
+            captured_age: 0,
+        });
         Self {
             tick: 0,
             seed: seed_string,
@@ -174,7 +186,7 @@ impl World {
             first_move_fired: false,
             first_eat_fired: false,
             population_milestones_fired: 0,
-            biggest_ever: None,
+            biggest_ever: initial_biggest_ever,
             last_survivor: None,
             weirdest: None,
             weirdest_distance: 0.0,
@@ -435,6 +447,28 @@ impl World {
                 child_genome,
                 child_brain,
             );
+            // S29: update biggest_ever immediately after each birth. Size is
+            // genome-determined and never changes after birth, so checking only
+            // here (and at World::new for the founder) replaces the old O(N)
+            // per-tick scan in energy_bookkeeping.
+            let newborn_idx = self.creatures.len() - 1;
+            let newborn_size = self.creatures.g_size[newborn_idx];
+            let current_best = self.biggest_ever.as_ref().map_or(0.0, |h| h.captured_size);
+            if newborn_size > current_best {
+                let species_name = self
+                    .species
+                    .get(self.creatures.species_id[newborn_idx])
+                    .name
+                    .clone();
+                self.biggest_ever = Some(crate::hof::HallOfFame {
+                    creature_id: self.creatures.id[newborn_idx],
+                    genome: self.creatures.genomes[newborn_idx].clone(),
+                    species_name,
+                    captured_tick: self.tick,
+                    captured_size: newborn_size,
+                    captured_age: self.creatures.age[newborn_idx],
+                });
+            }
         }
     }
 
