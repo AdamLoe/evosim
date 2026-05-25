@@ -1,0 +1,17 @@
+
+# S9 (audit v1.1): Forbid HashMap/HashSet iter* methods in sim-critical files.
+# Per-tick paths must not iterate HashMap or HashSet (non-deterministic order);
+# use sorted Vec, BTreeMap/BTreeSet, or set-membership only (contains).
+# See docs/plans/audit-master.md §5 PR-3 inlined item S9.
+#
+# The `into_iter` entries use allow-invalid=true because the method is not
+# directly reachable from clippy's path lookup (it's impl'd via IntoIterator
+# trait). The iter/iter_mut paths are directly reachable.
+
+disallowed-methods = [
+    "std::collections::HashMap::iter",
+    "std::collections::HashMap::iter_mut",
+    { path = "std::collections::HashMap::into_iter", allow-invalid = true },
+    "std::collections::HashSet::iter",
+    { path = "std::collections::HashSet::into_iter", allow-invalid = true },
+]
