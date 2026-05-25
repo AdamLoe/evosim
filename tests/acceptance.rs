@@ -4,7 +4,6 @@
 //! Bootstrap: `EVOSIM_WRITE_GOLDEN=1 cargo test --release --test acceptance`
 //! writes `tests/golden_snapshot_t10000.txt`. Subsequent runs assert against it.
 
-#[cfg(not(feature = "threads"))]
 use evosim::save::SaveV1;
 use evosim::snapshot_hash::snapshot_hash;
 use evosim::world::World;
@@ -152,6 +151,36 @@ fn save_load_step_preserves_determinism() {
     );
 }
 
+/// S39 test (b): snapshot_hash immediately after load equals snapshot_hash
+/// before save. Runs in BOTH feature builds (no cfg gate) so threaded-only
+/// load divergences are caught. For each n, steps n ticks, saves, loads, then
+/// asserts hash equality BEFORE any further tick_once.
+#[test]
+fn save_load_hash_equal_immediately_after_load() {
+    for &n in &[0u32, 1, 200, 2000] {
+        let mut w = World::new(SEED);
+        for tick in 0..n {
+            assert!(
+                w.tick_once(),
+                "world died before n={n} ticks (at tick {tick}); pinned seed should survive"
+            );
+        }
+        let h_orig = snapshot_hash(&w);
+
+        let json = serde_json::to_string(&SaveV1::from_world(&w)).expect("serialize");
+        let save: SaveV1 = serde_json::from_str(&json).expect("deserialize");
+        let loaded = World::from_save_v1(save).expect("from_save_v1 at n={n}");
+        let h_loaded = snapshot_hash(&loaded);
+
+        assert_eq!(
+            h_orig, h_loaded,
+            "save→load at n={n} diverged before any further step; \
+             orig={h_orig:#018x}, loaded={h_loaded:#018x}. \
+             A field silently zeroed on load will surface here."
+        );
+    }
+}
+
 /// Threaded acceptance test (perf-4 dual-golden protocol).
 ///
 /// Runs the same 10k-tick scenario as `acceptance_t10000` but with the
@@ -228,5 +257,50 @@ fn acceptance_t10000_threaded() {
     assert_eq!(
         hash, golden,
         "(d) threaded snapshot hash mismatch: got {hash:#018x}, golden {golden:#018x}",
+    );
+}
+
+/// S39 test (a): threaded NN forward produces a bit-identical hash to the
+/// sequential NN forward at t=TICKS under the pinned seed.
+///
+/// In one test process: world A runs the normal threaded NN path; world B sets
+/// `force_sequential_nn = true` so the threaded branch short-circuits to the
+/// sequential body. A divergence in the threaded NN code causes hash_a ≠ hash_b.
+/// NO golden file is read — the assertion is between two live runs, so the
+/// regen ceremony cannot make this test tautological.
+///
+/// Only compiled under --features threads (comparing threaded vs sequential is
+/// meaningless when the threaded code path is not compiled in).
+#[cfg(feature = "threads")]
+#[test]
+fn acceptance_threaded_actually_matches_sequential_t10000() {
+    // World A — threaded NN forward (production path under --features threads).
+    let mut wa = World::new(SEED);
+    debug_assert!(!wa.force_sequential_nn, "default toggle must be false");
+    for _ in 0..TICKS {
+        if !wa.tick_once() {
+            break;
+        }
+    }
+    let hash_a = snapshot_hash(&wa);
+
+    // World B — same seed, but the threaded NN branch short-circuits to the
+    // sequential body via the S39 observation-only knob.
+    let mut wb = World::new(SEED);
+    wb.force_sequential_nn = true;
+    for _ in 0..TICKS {
+        if !wb.tick_once() {
+            break;
+        }
+    }
+    let hash_b = snapshot_hash(&wb);
+
+    assert_eq!(
+        hash_a, hash_b,
+        "threaded NN forward must produce a bit-identical hash to the \
+         sequential NN forward at t={TICKS} under the pinned seed; \
+         got threaded={hash_a:#018x}, sequential={hash_b:#018x}. \
+         A divergence here means nn_forward_all_chunks's threaded branch \
+         has drifted from the sequential branch; bisect src/world/nn.rs.",
     );
 }

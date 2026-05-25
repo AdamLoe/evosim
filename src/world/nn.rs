@@ -67,40 +67,11 @@ impl World {
     /// Sequential by default; rayon-parallel behind `cfg(feature = "threads")`.
     /// Results are bit-identical because the forward pass contains no RNG.
     pub(crate) fn nn_forward_all_chunks(&mut self, ranges: &[(usize, usize); N_CHUNKS], n: usize) {
-        let _ = n; // used in threads path; suppress unused-variable in default build
-        #[cfg(not(feature = "threads"))]
-        {
-            for &(lo, hi) in ranges {
-                let mut input_buf = [0.0f32; NN_INPUTS];
-                let mut hidden_buf = [0.0f32; NN_HIDDEN];
-                let mut output_buf = [0.0f32; NN_OUTPUTS];
-                for i in lo..hi {
-                    let overlap = count_carrion_overlap(
-                        &self.creatures,
-                        &self.carrion,
-                        &self.cell_to_carrion,
-                        i,
-                    );
-                    let is_at_wall = compute_is_at_wall(&self.creatures, i);
-                    let (vx, vy, action) = pick_action_d(
-                        i,
-                        &mut input_buf,
-                        &mut hidden_buf,
-                        &mut output_buf,
-                        &self.creatures,
-                        &self.vision[i],
-                        overlap,
-                        is_at_wall,
-                    );
-                    self.creatures.vx[i] = vx;
-                    self.creatures.vy[i] = vy;
-                    self.creatures.action_this_tick[i] = action;
-                }
-            }
-        }
-
+        // Threaded path: runs when compiled with --features threads AND the
+        // S39 observation-only toggle is not set. Returns early so the sequential
+        // fallthrough below does not run.
         #[cfg(feature = "threads")]
-        {
+        if !self.force_sequential_nn {
             // Collect (vx, vy, action) per creature into a flat Vec,
             // then drain back into SoA. Avoids shared-mutable-SoA hazards.
             // Read-only refs are Sync; write happens after join.
@@ -146,6 +117,38 @@ impl World {
                 self.creatures.vy[i] = vy;
                 self.creatures.action_this_tick[i] = action;
             }
+            return;
+        }
+
+        // Sequential fallthrough: runs in default builds always, and in
+        // threaded builds when force_sequential_nn is true (S39 test (a) knob).
+        let _ = n; // unused in the sequential path
+        for &(lo, hi) in ranges {
+            let mut input_buf = [0.0f32; NN_INPUTS];
+            let mut hidden_buf = [0.0f32; NN_HIDDEN];
+            let mut output_buf = [0.0f32; NN_OUTPUTS];
+            for i in lo..hi {
+                let overlap = count_carrion_overlap(
+                    &self.creatures,
+                    &self.carrion,
+                    &self.cell_to_carrion,
+                    i,
+                );
+                let is_at_wall = compute_is_at_wall(&self.creatures, i);
+                let (vx, vy, action) = pick_action_d(
+                    i,
+                    &mut input_buf,
+                    &mut hidden_buf,
+                    &mut output_buf,
+                    &self.creatures,
+                    &self.vision[i],
+                    overlap,
+                    is_at_wall,
+                );
+                self.creatures.vx[i] = vx;
+                self.creatures.vy[i] = vy;
+                self.creatures.action_this_tick[i] = action;
+            }
         }
     }
 }
@@ -162,8 +165,20 @@ impl World {
 /// change one without updating the other, or vision and NN will partition
 /// creatures differently within a single tick and the threaded golden will
 /// silently drift.
+/// Single source of truth for the chunk stride used by every `par_chunks_mut`
+/// call in the simulation (vision.rs and nn_forward_all_chunks). Returns the
+/// stride such that `slice.par_chunks_mut(chunk_base_size(n))` yields the
+/// same partition as `chunk_ranges(n)`. The `.max(1)` guard keeps the stride
+/// well-defined when `n == 0` (rayon's `par_chunks_mut(0)` panics).
+///
+/// New `par_chunks_mut` call sites MUST use this function rather than inlining
+/// the formula; S39 test (c) pins the invariant via `chunk_partition_invariants_and_vision_agreement`.
+pub(crate) fn chunk_base_size(n: usize) -> usize {
+    n.div_ceil(N_CHUNKS).max(1)
+}
+
 pub(crate) fn chunk_ranges(n: usize) -> [(usize, usize); N_CHUNKS] {
-    let base = n.div_ceil(N_CHUNKS);
+    let base = chunk_base_size(n);
     let mut out = [(0usize, 0usize); N_CHUNKS];
     for k in 0..N_CHUNKS {
         let lo = (k * base).min(n);
@@ -561,6 +576,76 @@ mod tests {
             "Expected always-valid action, got {:?}",
             act
         );
+    }
+
+    /// S39 test (c): chunk_ranges partitions [0,n) cleanly AND agrees with the
+    /// chunk_base_size stride that vision.rs calls. Asserts cross-partition
+    /// equivalence by calling the real shared chunk_base_size function, not by
+    /// re-inlining the formula. Any future desync between the two is caught here.
+    #[test]
+    fn chunk_partition_invariants_and_vision_agreement() {
+        let cases = [0usize, 1, 7, 8, 9, 100, 1500, N_CHUNKS, N_CHUNKS + 1];
+        for &n in &cases {
+            let ranges = chunk_ranges(n);
+
+            // (i) non-empty range count <= N_CHUNKS
+            let non_empty = ranges.iter().filter(|(lo, hi)| lo < hi).count();
+            assert!(
+                non_empty <= N_CHUNKS,
+                "n={n}: non-empty chunks {non_empty} exceed N_CHUNKS {N_CHUNKS}"
+            );
+
+            // (ii) first range starts at 0
+            assert_eq!(ranges[0].0, 0, "n={n}: first range must start at 0");
+
+            // (iii) last range ends at n
+            assert_eq!(ranges[N_CHUNKS - 1].1, n, "n={n}: last range must end at n");
+
+            // (iv) contiguous and non-overlapping
+            for k in 0..N_CHUNKS - 1 {
+                assert_eq!(
+                    ranges[k].1,
+                    ranges[k + 1].0,
+                    "n={n}: gap or overlap between chunk {k} and {}",
+                    k + 1
+                );
+            }
+
+            // (v) total coverage
+            let total: usize = ranges.iter().map(|(lo, hi)| hi - lo).sum();
+            assert_eq!(total, n, "n={n}: ranges do not cover [0,n)");
+
+            // (vi) cross-partition equivalence — reconstruct the partition that
+            // par_chunks_mut(chunk_base_size(n)) would produce and assert it
+            // matches chunk_ranges. This is the property vision.rs:74 relies on
+            // post-S39: vision calls chunk_base_size(n), and that stride must
+            // yield the same boundaries as chunk_ranges.
+            let base = chunk_base_size(n);
+            let mut reconstructed = [(0usize, 0usize); N_CHUNKS];
+            for k in 0..N_CHUNKS {
+                let lo = (k * base).min(n);
+                let hi = ((k + 1) * base).min(n);
+                reconstructed[k] = (lo, hi);
+            }
+            assert_eq!(
+                ranges,
+                reconstructed,
+                "n={n}: chunk_ranges disagrees with par_chunks_mut(chunk_base_size(n)) partition"
+            );
+
+            // (vii) n=0 special-case: chunk_base_size returns 1 (not 0) to
+            // avoid par_chunks_mut(0) panic; all ranges are (0, 0).
+            if n == 0 {
+                assert_eq!(
+                    base, 1,
+                    "n=0: chunk_base_size must return 1 to keep par_chunks_mut well-defined on []"
+                );
+                for &(lo, hi) in &ranges {
+                    assert_eq!(lo, 0, "n=0: all ranges must be (0, 0)");
+                    assert_eq!(hi, 0, "n=0: all ranges must be (0, 0)");
+                }
+            }
+        }
     }
 
     /// S5: decode_action returns Rest and pick_action_d zeros velocity when any

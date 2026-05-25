@@ -355,7 +355,7 @@ mod tests {
         let mut v = 0.5f32;
         mutate_f32(&mut v, 1.0, 0.01, 0.0, 1.0, &mut rng);
         assert!(v.is_finite(), "normal mutation must stay finite");
-        assert!(v >= 0.0 && v <= 1.0, "normal mutation must respect bounds");
+        assert!((0.0..=1.0).contains(&v), "normal mutation must respect bounds");
     }
 
     /// S6: mutate_u32 must not propagate NaN into genome fields.

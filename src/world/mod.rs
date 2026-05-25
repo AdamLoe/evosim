@@ -113,6 +113,14 @@ pub struct World {
     pub(crate) scratch_attempted_eat: Vec<bool>,
     pub(crate) scratch_attempted_scavenge: Vec<bool>,
     pub(crate) scratch_got_a_bite: Vec<bool>,
+    /// S39 test (a) observation-only knob: when true, `nn_forward_all_chunks`'s
+    /// threaded branch short-circuits to the sequential branch so both paths can
+    /// be exercised in a single test process. NEVER set by production code.
+    /// Excluded from snapshot_hash, to_save_v1, and from_save_v1 by omission.
+    /// Exposed `pub` (not `pub(crate)`) so integration tests in `tests/` can
+    /// set it; the field is a test-only knob with zero effect on correctness.
+    #[cfg_attr(not(feature = "threads"), allow(dead_code))]
+    pub force_sequential_nn: bool,
 }
 
 impl World {
@@ -185,6 +193,7 @@ impl World {
             scratch_attempted_eat: Vec::new(),
             scratch_attempted_scavenge: Vec::new(),
             scratch_got_a_bite: Vec::new(),
+            force_sequential_nn: false,
         }
     }
 

@@ -71,7 +71,7 @@ impl<'a> VisionPass<'a> {
             // SAB-less browsers reach this code but rayon runs the work on the
             // calling thread (silent fallback per wasm-bindgen-rayon docs when
             // initThreadPool was never awaited).
-            let chunk_size = n.div_ceil(crate::constants::N_CHUNKS).max(1);
+            let chunk_size = crate::world::nn::chunk_base_size(n);
             out[..n]
                 .par_chunks_mut(chunk_size)
                 .enumerate()

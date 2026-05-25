@@ -117,6 +117,7 @@ impl World {
             vision,
             cell_to_carrion: Vec::new(),
             pending_extinction_check: Vec::new(),
+            force_sequential_nn: false, // S39: observation-only; never saved
             // Profiler is never saved/loaded — always start fresh (D9/D10).
             profile: crate::profiler::Profiler::new(),
             scratch_fx: Vec::new(),
