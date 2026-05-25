@@ -72,24 +72,52 @@ impl World {
         // fallthrough below does not run.
         #[cfg(feature = "threads")]
         if !self.force_sequential_nn {
-            // Collect (vx, vy, action) per creature into a flat Vec,
-            // then drain back into SoA. Avoids shared-mutable-SoA hazards.
-            // Read-only refs are Sync; write happens after join.
-            let creatures_ref = &self.creatures;
-            let vision_ref = &self.vision[..n];
-            let carrion_ref = &self.carrion;
-            let cell_to_carrion_ref = &self.cell_to_carrion;
+            // S23: write NN outputs directly into the SoA columns via par_chunks_mut.
+            // Strategy: mem::take the three output columns off self.creatures so the
+            // borrow checker sees them as independent locals. The remaining SoA fields
+            // (x, y, energy, vision, etc.) are read-only during the parallel block.
+            // After the parallel work, restore the three columns. The heap buffers
+            // are never reallocated — only the Vec metadata (ptr/len/cap, 24 bytes
+            // each) moves to the stack. Pattern mirrors perf-2 §5 scratch_neighbors.
+            let mut vx_local = std::mem::take(&mut self.creatures.vx);
+            let mut vy_local = std::mem::take(&mut self.creatures.vy);
+            let mut act_local = std::mem::take(&mut self.creatures.action_this_tick);
 
-            // Produce results in chunk order (deterministic).
-            let results: Vec<(f32, f32, Action)> = ranges
-                .par_iter()
-                .flat_map(|&(lo, hi)| {
-                    let mut input_buf = [0.0f32; NN_INPUTS];
-                    let mut hidden_buf = [0.0f32; NN_HIDDEN];
-                    let mut output_buf = [0.0f32; NN_OUTPUTS];
-                    (lo..hi)
-                        .map(|i| {
-                            // Use the shared free-fn helpers (audit S11).
+            {
+                // All &self borrows are now valid because the three detached columns
+                // no longer conflict — they live on the stack, not inside self.creatures.
+                let creatures_ref = &self.creatures;
+                let vision_ref = &self.vision[..n];
+                let carrion_ref = &self.carrion;
+                let cell_to_carrion_ref = &self.cell_to_carrion;
+
+                // Compute chunk_size identically to chunk_ranges (N_CHUNKS = 8).
+                let chunk_size = chunk_base_size(n);
+
+                // Tandem disjoint-mut chunks over the three output columns.
+                // zip_eq panics on length mismatch (defensive); all three vecs have
+                // len >= n (invariant on CreatureSoA) so the slices are same-length.
+                vx_local[..n]
+                    .par_chunks_mut(chunk_size)
+                    .zip(vy_local[..n].par_chunks_mut(chunk_size))
+                    .zip(act_local[..n].par_chunks_mut(chunk_size))
+                    .enumerate()
+                    .for_each(|(chunk_idx, ((vx_sub, vy_sub), act_sub))| {
+                        debug_assert_eq!(vx_sub.len(), vy_sub.len());
+                        debug_assert_eq!(vx_sub.len(), act_sub.len());
+
+                        let mut input_buf = [0.0f32; NN_INPUTS];
+                        let mut hidden_buf = [0.0f32; NN_HIDDEN];
+                        let mut output_buf = [0.0f32; NN_OUTPUTS];
+                        let lo = chunk_idx * chunk_size;
+
+                        for k in 0..vx_sub.len() {
+                            let i = lo + k;
+                            // Read prev-tick vx/vy from the taken slice BEFORE
+                            // overwriting them. vx_sub[k] / vy_sub[k] still hold
+                            // the end-of-last-tick velocity at this point (S23).
+                            let prev_vx = vx_sub[k];
+                            let prev_vy = vy_sub[k];
                             let overlap = count_carrion_overlap(
                                 creatures_ref,
                                 carrion_ref,
@@ -97,7 +125,7 @@ impl World {
                                 i,
                             );
                             let is_at_wall = compute_is_at_wall(creatures_ref, i);
-                            pick_action_d(
+                            let (vx, vy, action) = pick_action_d(
                                 i,
                                 &mut input_buf,
                                 &mut hidden_buf,
@@ -106,17 +134,24 @@ impl World {
                                 &vision_ref[i],
                                 overlap,
                                 is_at_wall,
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .collect();
+                                prev_vx,
+                                prev_vy,
+                            );
+                            vx_sub[k] = vx;
+                            vy_sub[k] = vy;
+                            act_sub[k] = action;
+                        }
+                    });
+            } // read-only borrows of &self.creatures etc. dropped here
 
-            for (i, (vx, vy, action)) in results.into_iter().enumerate() {
-                self.creatures.vx[i] = vx;
-                self.creatures.vy[i] = vy;
-                self.creatures.action_this_tick[i] = action;
-            }
+            // Restore the three output columns. The heap buffers were never
+            // freed — only the Vec metadata traveled to the stack. If the
+            // parallel for_each panics, the columns are left as Vec::new()
+            // (the World is poisoned; no further ticks run). No drop-guard added
+            // — consistent with the scratch_neighbors pattern (perf-2 §5).
+            self.creatures.vx = vx_local;
+            self.creatures.vy = vy_local;
+            self.creatures.action_this_tick = act_local;
             return;
         }
 
@@ -128,13 +163,11 @@ impl World {
             let mut hidden_buf = [0.0f32; NN_HIDDEN];
             let mut output_buf = [0.0f32; NN_OUTPUTS];
             for i in lo..hi {
-                let overlap = count_carrion_overlap(
-                    &self.creatures,
-                    &self.carrion,
-                    &self.cell_to_carrion,
-                    i,
-                );
+                let overlap =
+                    count_carrion_overlap(&self.creatures, &self.carrion, &self.cell_to_carrion, i);
                 let is_at_wall = compute_is_at_wall(&self.creatures, i);
+                let prev_vx = self.creatures.vx[i];
+                let prev_vy = self.creatures.vy[i];
                 let (vx, vy, action) = pick_action_d(
                     i,
                     &mut input_buf,
@@ -144,6 +177,8 @@ impl World {
                     &self.vision[i],
                     overlap,
                     is_at_wall,
+                    prev_vx,
+                    prev_vy,
                 );
                 self.creatures.vx[i] = vx;
                 self.creatures.vy[i] = vy;
@@ -201,17 +236,20 @@ pub(crate) fn chunk_ranges(n: usize) -> [(usize, usize); N_CHUNKS] {
 
 /// Build the 136-float NN input vector for creature `i` (v6 §E, Milestone D.16).
 ///
-/// Layout:
-/// - `[0..10]` self-state (energy_frac, age_frac, size, vx, vy, is_at_wall,
-///   cooldown_frac, carrion_overlap_norm, reserved×2)
-/// - `[10..130]` vision passthrough (raw, C.12 VisionBuf)
-/// - `[130..136]` last_action one-hot
+/// `prev_vx` and `prev_vy` are the creature's velocity from the END of the
+/// previous tick. Passed explicitly so that callers can supply the correct
+/// values even when the vx/vy SoA columns have been temporarily detached via
+/// `mem::take` for the parallel NN path (S23).
+///
+/// Layout: `[0..10]` self-state, `[10..130]` vision passthrough, `[130..136]` last_action one-hot.
 pub(crate) fn build_nn_input(
     i: usize,
     creatures: &CreatureSoA,
     vision: &VisionBuf,
     carrion_overlap_count: u32,
     is_at_wall_flag: f32,
+    prev_vx: f32,
+    prev_vy: f32,
 ) -> [f32; NN_INPUTS] {
     // perf-5: hot reads use g_* mirrors; cold reads (max_age) stay on &creatures.genomes[i].
     let mut buf = [0.0f32; NN_INPUTS];
@@ -229,8 +267,8 @@ pub(crate) fn build_nn_input(
         1.0
     }; // age_frac
     buf[2] = size_i / SIZE_MAX; // size (normalized)
-    buf[3] = creatures.vx[i] / MOVE_SPEED_MAX; // vx (previous-tick post-clip)
-    buf[4] = creatures.vy[i] / MOVE_SPEED_MAX; // vy
+    buf[3] = prev_vx / MOVE_SPEED_MAX; // vx (previous-tick post-clip)
+    buf[4] = prev_vy / MOVE_SPEED_MAX; // vy
     buf[5] = is_at_wall_flag; // is_at_wall
     buf[6] = cooldown as f32 / DIGESTION_COOLDOWN_TICKS as f32; // cooldown_frac
     buf[7] = (carrion_overlap_count as f32 / CARRION_OVERLAP_NORM_BASE).min(1.0); // carrion_overlap_norm
@@ -304,8 +342,18 @@ pub(crate) fn pick_action_d(
     vision: &VisionBuf,
     carrion_overlap_count: u32,
     is_at_wall_flag: f32,
+    prev_vx: f32,
+    prev_vy: f32,
 ) -> (f32, f32, Action) {
-    *input_buf = build_nn_input(i, creatures, vision, carrion_overlap_count, is_at_wall_flag);
+    *input_buf = build_nn_input(
+        i,
+        creatures,
+        vision,
+        carrion_overlap_count,
+        is_at_wall_flag,
+        prev_vx,
+        prev_vy,
+    );
     creatures.brains[i].forward(input_buf, output_buf, hidden_buf);
 
     // Velocity: tanh(out[0..2]) × move_speed (v6 §E).
@@ -369,7 +417,9 @@ mod tests {
         w.creatures.digestion_cooldown[0] = 25; // cooldown_frac = 0.5
         w.creatures.last_action[0] = Action::Rest;
         let vision = [0.0f32; VISION_LEN];
-        let inp = build_nn_input(0, &w.creatures, &vision, 2, 0.0);
+        let prev_vx = w.creatures.vx[0];
+        let prev_vy = w.creatures.vy[0];
+        let inp = build_nn_input(0, &w.creatures, &vision, 2, 0.0, prev_vx, prev_vy);
         // energy_frac
         assert!((inp[0] - 0.5).abs() < 1e-5, "energy_frac = {}", inp[0]);
         // age_frac
@@ -401,7 +451,9 @@ mod tests {
         for (k, v) in vis.iter_mut().enumerate() {
             *v = k as f32 * 0.01;
         }
-        let inp = build_nn_input(0, &w.creatures, &vis, 0, 0.0);
+        let prev_vx = w.creatures.vx[0];
+        let prev_vy = w.creatures.vy[0];
+        let inp = build_nn_input(0, &w.creatures, &vis, 0, 0.0, prev_vx, prev_vy);
         assert_eq!(
             &inp[10..130],
             &vis[..],
@@ -416,7 +468,9 @@ mod tests {
         let mut w = World::new("d16-onehot");
         w.creatures.last_action[0] = Action::Eat;
         let vision = [0.0f32; VISION_LEN];
-        let inp = build_nn_input(0, &w.creatures, &vision, 0, 0.0);
+        let prev_vx = w.creatures.vx[0];
+        let prev_vy = w.creatures.vy[0];
+        let inp = build_nn_input(0, &w.creatures, &vision, 0, 0.0, prev_vx, prev_vy);
         let eat_idx = Action::Eat.one_hot_index(); // should be 2
         for k in 0..6 {
             let expected = if k == eat_idx { 1.0 } else { 0.0 };
@@ -628,8 +682,7 @@ mod tests {
                 reconstructed[k] = (lo, hi);
             }
             assert_eq!(
-                ranges,
-                reconstructed,
+                ranges, reconstructed,
                 "n={n}: chunk_ranges disagrees with par_chunks_mut(chunk_base_size(n)) partition"
             );
 
@@ -743,5 +796,74 @@ mod tests {
             far_wall, 0.0,
             "creature at center must have is_at_wall = 0.0"
         );
+    }
+
+    /// S23: threaded NN par_chunks_mut path produces the same vx/vy/action_this_tick
+    /// as the sequential path for the same world state. Gated on `threads` feature
+    /// so it only runs when rayon is available.
+    ///
+    /// Strategy: advance a single world (sequential) to a non-trivial state, then
+    /// deserialize two independent copies from the same snapshot and run each
+    /// copy's nn_forward_all_chunks under sequential vs threaded paths. Both
+    /// copies start from identical SoA state, so the outputs must be bit-identical.
+    #[cfg(feature = "threads")]
+    #[test]
+    fn threaded_nn_in_place_writes_match_sequential() {
+        use crate::world::nn::chunk_ranges;
+
+        // Advance a single sequential world to get a multi-creature state.
+        let mut w_base = World::new("s23-base");
+        w_base.force_sequential_nn = true;
+        for _ in 0..50 {
+            w_base.step();
+        }
+        let n = w_base.creatures.len();
+        assert!(
+            n >= 2,
+            "need >= 2 creatures for a meaningful parallel test; got {n}"
+        );
+
+        // Clone identical state via save/load round-trip.
+        let snap = w_base.to_save_v1();
+        let mut w_seq = World::from_save_v1(snap.clone()).expect("seq load");
+        let mut w_par = World::from_save_v1(snap).expect("par load");
+
+        // Both worlds must have the same creature count.
+        assert_eq!(w_seq.creatures.len(), n, "seq world population mismatch");
+        assert_eq!(w_par.creatures.len(), n, "par world population mismatch");
+
+        // Rebuild the carrion spatial index (normally done in run_vision_pass;
+        // from_save_v1 leaves cell_to_carrion empty).
+        crate::vision::build_cell_to_carrion(&w_seq.carrion, &mut w_seq.cell_to_carrion);
+        crate::vision::build_cell_to_carrion(&w_par.carrion, &mut w_par.cell_to_carrion);
+
+        let ranges = chunk_ranges(n);
+
+        // Sequential run.
+        w_seq.force_sequential_nn = true;
+        w_seq.nn_forward_all_chunks(&ranges, n);
+
+        // Threaded run.
+        w_par.force_sequential_nn = false;
+        w_par.nn_forward_all_chunks(&ranges, n);
+
+        // Outputs must be bit-identical.
+        for i in 0..n {
+            assert_eq!(
+                w_seq.creatures.vx[i], w_par.creatures.vx[i],
+                "vx[{i}] mismatch: seq={} par={}",
+                w_seq.creatures.vx[i], w_par.creatures.vx[i]
+            );
+            assert_eq!(
+                w_seq.creatures.vy[i], w_par.creatures.vy[i],
+                "vy[{i}] mismatch: seq={} par={}",
+                w_seq.creatures.vy[i], w_par.creatures.vy[i]
+            );
+            assert_eq!(
+                w_seq.creatures.action_this_tick[i], w_par.creatures.action_this_tick[i],
+                "action_this_tick[{i}] mismatch: seq={:?} par={:?}",
+                w_seq.creatures.action_this_tick[i], w_par.creatures.action_this_tick[i]
+            );
+        }
     }
 }
