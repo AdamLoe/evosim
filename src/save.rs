@@ -240,6 +240,124 @@ pub fn validate_soa_lengths(s: &CreatureSoASnapshot) -> Result<usize, LoadError>
     Ok(n)
 }
 
+/// Comprehensive structural validation of a `SaveV1` before reconstruction.
+///
+/// S12: Centralises all loader hardening checks (previously scattered inline
+/// in `from_save_v1`). Returns `LoadError::StructuralError` on any violation.
+///
+/// Checks performed:
+/// 1. SoA column length parity (delegates to `validate_soa_lengths`).
+/// 2. Sun cell count == SUN_DIM * SUN_DIM.
+/// 3. Hotspot count == HOTSPOT_COUNT.
+/// 4. Brain weight count == NN_WEIGHT_COUNT per creature.
+/// 5. Brain `nn_mutation_rate` is finite per creature.
+/// 6. Creature positions (x, y) are finite per creature.
+/// 7. Creature energies are finite per creature.
+/// 8. No `parent_species_id` is `u32::MAX` (old sentinel value).
+/// 9. All `DevSliders` fields are finite.
+pub fn validate_save(save: &SaveV1) -> Result<usize, LoadError> {
+    use crate::constants::{HOTSPOT_COUNT, NN_WEIGHT_COUNT, SUN_DIM};
+
+    // 1. SoA column parity.
+    let n = validate_soa_lengths(&save.creatures)?;
+
+    // 2. Sun cell count.
+    let expected_sun = SUN_DIM * SUN_DIM;
+    if save.sun.capacity.len() != expected_sun {
+        return Err(LoadError::StructuralError(format!(
+            "sun.capacity len {} != expected {}",
+            save.sun.capacity.len(),
+            expected_sun
+        )));
+    }
+    if save.sun.current.len() != expected_sun {
+        return Err(LoadError::StructuralError(format!(
+            "sun.current len {} != expected {}",
+            save.sun.current.len(),
+            expected_sun
+        )));
+    }
+
+    // 3. Hotspot count.
+    if save.sun.hotspots.len() != HOTSPOT_COUNT {
+        return Err(LoadError::StructuralError(format!(
+            "sun.hotspots len {} != expected {}",
+            save.sun.hotspots.len(),
+            HOTSPOT_COUNT
+        )));
+    }
+
+    // 4-5. Per-creature brain checks.
+    for i in 0..n {
+        let b = &save.creatures.brains[i];
+        if b.weights.len() != NN_WEIGHT_COUNT {
+            return Err(LoadError::StructuralError(format!(
+                "creature {i} brain weight count {} != {NN_WEIGHT_COUNT}",
+                b.weights.len()
+            )));
+        }
+        if !b.nn_mutation_rate.is_finite() {
+            return Err(LoadError::StructuralError(format!(
+                "creature {i} brain.nn_mutation_rate is non-finite: {}",
+                b.nn_mutation_rate
+            )));
+        }
+    }
+
+    // 6. Positions finite.
+    for i in 0..n {
+        if !save.creatures.x[i].is_finite() {
+            return Err(LoadError::StructuralError(format!(
+                "creature {i} x is non-finite: {}",
+                save.creatures.x[i]
+            )));
+        }
+        if !save.creatures.y[i].is_finite() {
+            return Err(LoadError::StructuralError(format!(
+                "creature {i} y is non-finite: {}",
+                save.creatures.y[i]
+            )));
+        }
+    }
+
+    // 7. Energy finite.
+    for i in 0..n {
+        if !save.creatures.energy[i].is_finite() {
+            return Err(LoadError::StructuralError(format!(
+                "creature {i} energy is non-finite: {}",
+                save.creatures.energy[i]
+            )));
+        }
+    }
+
+    // 8. parent_species_id sentinel check (u32::MAX was an old placeholder).
+    for i in 0..n {
+        if save.creatures.parent_species_id[i] == u32::MAX {
+            return Err(LoadError::StructuralError(format!(
+                "creature {i} parent_species_id is u32::MAX (invalid sentinel)"
+            )));
+        }
+    }
+
+    // 9. Slider fields finite.
+    let s = &save.sliders;
+    for (name, val) in [
+        ("base_sun_rate", s.base_sun_rate),
+        ("mutation_rate_multiplier", s.mutation_rate_multiplier),
+        ("sun_gradient_strength", s.sun_gradient_strength),
+        ("mouth_tax", s.mouth_tax),
+        ("nn_mutation_sigma", s.nn_mutation_sigma),
+    ] {
+        if !val.is_finite() {
+            return Err(LoadError::StructuralError(format!(
+                "slider '{name}' is non-finite: {val}"
+            )));
+        }
+    }
+
+    Ok(n)
+}
+
 /// Rebuild an EventLog from a snapshot: full `all` history preserved; `recent`
 /// ring recomputed from the tail (last `ring_cap` entries).
 pub fn rehydrate_event_log(snap: EventLogSnapshot) -> EventLog {
@@ -452,5 +570,153 @@ mod tests {
     #[test]
     fn load_error_implements_std_error() {
         let _: Box<dyn std::error::Error> = Box::new(LoadError::StructuralError("x".into()));
+    }
+
+    // ─────────── S12: validate_save tests ───────────
+
+    fn make_valid_save() -> crate::save::SaveV1 {
+        let mut w = World::new("s12-valid");
+        w.tick_once();
+        SaveV1::from_world(&w)
+    }
+
+    /// S12 positive: a freshly serialised world passes validate_save.
+    #[test]
+    fn s12_valid_save_passes() {
+        let save = make_valid_save();
+        assert!(
+            validate_save(&save).is_ok(),
+            "freshly serialised world must pass validate_save"
+        );
+    }
+
+    /// S12 negative 1: mismatched SoA column lengths.
+    #[test]
+    fn s12_soa_length_mismatch_fails() {
+        let mut save = make_valid_save();
+        // Drop one entry from x so len != id.len().
+        save.creatures.x.pop();
+        let result = validate_save(&save);
+        assert!(
+            matches!(result, Err(LoadError::StructuralError(_))),
+            "SoA length mismatch must yield StructuralError, got: {result:?}"
+        );
+    }
+
+    /// S12 negative 2: wrong sun cell count.
+    #[test]
+    fn s12_sun_cell_count_mismatch_fails() {
+        let mut save = make_valid_save();
+        save.sun.capacity.pop(); // one short
+        let result = validate_save(&save);
+        assert!(
+            matches!(result, Err(LoadError::StructuralError(_))),
+            "wrong sun capacity len must yield StructuralError"
+        );
+    }
+
+    /// S12 negative 3: wrong hotspot count.
+    #[test]
+    fn s12_hotspot_count_mismatch_fails() {
+        let mut save = make_valid_save();
+        save.sun.hotspots.pop();
+        let result = validate_save(&save);
+        assert!(
+            matches!(result, Err(LoadError::StructuralError(_))),
+            "wrong hotspot count must yield StructuralError"
+        );
+    }
+
+    /// S12 negative 4: non-finite nn_mutation_rate.
+    #[test]
+    fn s12_nan_nn_mutation_rate_fails() {
+        let mut save = make_valid_save();
+        if !save.creatures.brains.is_empty() {
+            save.creatures.brains[0].nn_mutation_rate = f32::NAN;
+        } else {
+            // No creatures: inject a dummy brain with NaN rate.
+            save.creatures.brains.push({
+                let mut b = crate::brain::Brain::founder(&mut crate::rng::SimRng::from_u64(0));
+                b.nn_mutation_rate = f32::NAN;
+                b
+            });
+            // keep ids in sync so soa check passes
+            save.creatures.id.push(999);
+            save.creatures.x.push(0.0);
+            save.creatures.y.push(0.0);
+            save.creatures.vx.push(0.0);
+            save.creatures.vy.push(0.0);
+            save.creatures.energy.push(1.0);
+            save.creatures.age.push(0);
+            save.creatures.digestion_cooldown.push(0);
+            save.creatures.cumulative_upkeep.push(0.0);
+            save.creatures.species_id.push(0);
+            save.creatures.parent_species_id.push(0);
+            save.creatures.last_action.push(crate::creature::Action::Rest);
+            save.creatures.action_this_tick.push(crate::creature::Action::Rest);
+            save.creatures.max_size_reached.push(0.0);
+            save.creatures.distance_travelled.push(0.0);
+            save.creatures.birth_tick.push(0);
+            save.creatures.genomes.push(crate::genome::Genome::founder());
+        }
+        let result = validate_save(&save);
+        assert!(
+            matches!(result, Err(LoadError::StructuralError(_))),
+            "NaN nn_mutation_rate must yield StructuralError"
+        );
+    }
+
+    /// S12 negative 5: non-finite creature position.
+    #[test]
+    fn s12_nan_position_fails() {
+        let mut save = make_valid_save();
+        if !save.creatures.x.is_empty() {
+            save.creatures.x[0] = f32::NAN;
+        }
+        let result = validate_save(&save);
+        assert!(
+            matches!(result, Err(LoadError::StructuralError(_))),
+            "NaN position must yield StructuralError"
+        );
+    }
+
+    /// S12 negative 6: non-finite creature energy.
+    #[test]
+    fn s12_nan_energy_fails() {
+        let mut save = make_valid_save();
+        if !save.creatures.energy.is_empty() {
+            save.creatures.energy[0] = f32::INFINITY;
+        }
+        let result = validate_save(&save);
+        assert!(
+            matches!(result, Err(LoadError::StructuralError(_))),
+            "Inf energy must yield StructuralError"
+        );
+    }
+
+    /// S12 negative 7: parent_species_id == u32::MAX sentinel.
+    #[test]
+    fn s12_parent_species_id_sentinel_fails() {
+        let mut save = make_valid_save();
+        if !save.creatures.parent_species_id.is_empty() {
+            save.creatures.parent_species_id[0] = u32::MAX;
+        }
+        let result = validate_save(&save);
+        assert!(
+            matches!(result, Err(LoadError::StructuralError(_))),
+            "u32::MAX parent_species_id must yield StructuralError"
+        );
+    }
+
+    /// S12 negative 8: non-finite slider value.
+    #[test]
+    fn s12_nan_slider_fails() {
+        let mut save = make_valid_save();
+        save.sliders.mutation_rate_multiplier = f32::NAN;
+        let result = validate_save(&save);
+        assert!(
+            matches!(result, Err(LoadError::StructuralError(_))),
+            "NaN slider must yield StructuralError"
+        );
     }
 }

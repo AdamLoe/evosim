@@ -4,7 +4,7 @@ use super::World;
 use crate::constants::*;
 use crate::creature::CreatureSoA;
 use crate::grid::SpatialGrid;
-use crate::save::{rehydrate_event_log, validate_soa_lengths, LoadError, SCHEMA_VERSION};
+use crate::save::{rehydrate_event_log, validate_save, LoadError, SCHEMA_VERSION};
 use crate::species::SpeciesRegistry;
 use crate::sun::SunMap;
 use crate::vision::{VisionBuf, VISION_LEN};
@@ -26,19 +26,15 @@ impl World {
             });
         }
 
-        let n = validate_soa_lengths(&save.creatures)?;
+        // S12: comprehensive structural validation (position/energy/brain/slider checks).
+        let n = validate_save(&save)?;
 
         // Rebuild SoA.
         let mut creatures = CreatureSoA::with_capacity(n.max(16));
         for i in 0..n {
             let g = &save.creatures.genomes[i];
             let b = &save.creatures.brains[i];
-            if b.weights.len() != NN_WEIGHT_COUNT {
-                return Err(LoadError::StructuralError(format!(
-                    "creature {i} brain weight count {} != {NN_WEIGHT_COUNT}",
-                    b.weights.len()
-                )));
-            }
+            // Brain weight count already validated by validate_save; this indexing is safe.
             creatures.push(
                 save.creatures.id[i],
                 save.creatures.x[i],
