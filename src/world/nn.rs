@@ -1,8 +1,6 @@
 //! NN forward pass and action-decode helpers. Both sequential and threaded paths live here.
 
 use super::World;
-#[cfg(feature = "threads")]
-use super::BODY_RADIUS_PER_SIZE;
 use crate::constants::*;
 use crate::creature::{Action, CreatureSoA};
 use crate::genome::Genome;

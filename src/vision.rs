@@ -337,8 +337,6 @@ pub fn build_cell_to_carrion(carrion: &[Carrion], dst: &mut Vec<Vec<u32>>) {
     }
 }
 
-pub const BODY_RADIUS_PER_SIZE: f32 = crate::world::BODY_RADIUS_PER_SIZE;
-
 #[cfg(test)]
 mod tests {
     use super::*;

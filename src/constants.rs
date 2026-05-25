@@ -3,6 +3,8 @@
 
 // ---- World shape (v5 §3.3, v6 §D) ----
 pub const WORLD_SIZE: f32 = 600.0;
+/// Creature body radius in world-units per genome.size unit. (S3 — moved from world/mod.rs)
+pub const BODY_RADIUS_PER_SIZE: f32 = 1.0;
 
 // ---- Spatial hash (v5 §3.3) ----
 pub const HASH_CELL: f32 = 5.0;

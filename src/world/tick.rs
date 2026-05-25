@@ -1,6 +1,6 @@
 //! Per-tick step bodies that mutate `World`. All as `impl World` blocks; private to the `crate::world` parent.
 
-use super::{World, BODY_RADIUS_PER_SIZE};
+use super::World;
 use crate::carrion::Carrion;
 use crate::constants::*;
 use crate::creature::Action;

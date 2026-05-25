@@ -24,10 +24,6 @@ use crate::sun::SunMap;
 use crate::vision::{build_cell_to_carrion, VisionBuf, VisionPass, VISION_LEN};
 use serde::{Deserialize, Serialize};
 
-/// Internal body radius (world units) per genome `size` unit. Render layer
-/// scales this further (`size × 2.5` pixels per v6 §B at base zoom).
-pub const BODY_RADIUS_PER_SIZE: f32 = 1.0;
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DevSliders {
     pub base_sun_rate: f32,

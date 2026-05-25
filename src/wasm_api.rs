@@ -3,7 +3,7 @@
 
 use crate::constants::*;
 use crate::save::{LoadError, SaveV1};
-use crate::world::{World, BODY_RADIUS_PER_SIZE};
+use crate::world::World;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
