@@ -130,6 +130,7 @@ impl World {
             scratch_attempted_scavenge: Vec::new(),
             scratch_got_a_bite: Vec::new(),
             scratch_eat_candidates: Vec::new(), // S25: pool, not saved
+            scratch_dead: Vec::new(),           // S27: pool, not saved
         })
     }
 }

@@ -116,6 +116,9 @@ pub struct World {
     /// S25: promoted eat-candidate buffer. Eliminates the per-Eat-per-tick
     /// `Vec::with_capacity(8)` allocation in eat_and_scavenge.
     pub(crate) scratch_eat_candidates: Vec<usize>,
+    /// S27: promoted dead-indices buffer from collect_deaths.
+    /// Cleared and refilled each call; caller reads it via &self.scratch_dead.
+    pub(crate) scratch_dead: Vec<usize>,
     /// S39 test (a) observation-only knob: when true, `nn_forward_all_chunks`'s
     /// threaded branch short-circuits to the sequential branch so both paths can
     /// be exercised in a single test process. NEVER set by production code.
@@ -209,6 +212,7 @@ impl World {
             scratch_attempted_scavenge: Vec::new(),
             scratch_got_a_bite: Vec::new(),
             scratch_eat_candidates: Vec::new(),
+            scratch_dead: Vec::new(),
             force_sequential_nn: false,
         }
     }
@@ -286,16 +290,22 @@ impl World {
         //    swap_remove loop and creatures.remove_indices (step 9, scales with die-off).
         {
             crate::profile_span!(&self.profile, "collect_deaths");
-            let died = self.collect_deaths();
-            if !died.is_empty() {
+            // S27: collect_deaths writes into self.scratch_dead (promoted pool).
+            self.collect_deaths();
+            if !self.scratch_dead.is_empty() {
                 // Mirror swap_remove on vision vec to keep it index-aligned.
                 // Walk from back just like remove_indices does.
-                for &k in died.iter().rev() {
+                for &k in self.scratch_dead.iter().rev() {
                     if k < self.vision.len() {
                         self.vision.swap_remove(k);
                     }
                 }
-                self.creatures.remove_indices(&died);
+                // Use mem::take to avoid borrow conflict: remove_indices takes
+                // &[usize] which would re-borrow self.scratch_dead while
+                // self.creatures is also borrowed mutably via remove_indices.
+                let dead = std::mem::take(&mut self.scratch_dead);
+                self.creatures.remove_indices(&dead);
+                self.scratch_dead = dead; // restore the buffer (high-water-mark kept)
             }
         }
 

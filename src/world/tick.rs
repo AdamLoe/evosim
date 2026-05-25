@@ -422,10 +422,11 @@ impl World {
         }
     }
 
-    pub(crate) fn collect_deaths(&mut self) -> Vec<usize> {
-        let mut dead: Vec<usize> = Vec::new();
+    pub(crate) fn collect_deaths(&mut self) {
+        // S27: use promoted scratch_dead buffer instead of a per-call Vec.
+        // Clear it before each use; high-water-mark allocation is reused.
+        self.scratch_dead.clear();
         let n = self.creatures.len();
-        let mut species_lost: Vec<u32> = Vec::new();
         for i in 0..n {
             if self.creatures.energy[i] <= 0.0 {
                 let pool = (CARRION_POOL_COEFF * self.creatures.cumulative_upkeep[i])
@@ -439,8 +440,10 @@ impl World {
                     age: 0,
                     sun_cell: cell,
                 });
-                species_lost.push(self.creatures.species_id[i]);
-                dead.push(i);
+                // S27: push directly to pending_extinction_check (no species_lost intermediate Vec).
+                self.pending_extinction_check
+                    .push(self.creatures.species_id[i]);
+                self.scratch_dead.push(i);
 
                 // E.25.d: hall-of-fame tracking on death.
                 let age = self.creatures.age[i];
@@ -493,11 +496,8 @@ impl World {
                 }
             }
         }
-        if !dead.is_empty() {
-            self.pending_extinction_check
-                .extend_from_slice(&species_lost);
-        }
-        dead
+        // S27: dead indices are in self.scratch_dead; pending_extinction_check was
+        // already written directly above (no intermediate species_lost Vec drain).
     }
 
     pub(crate) fn decay_carrion(&mut self) {
@@ -661,8 +661,8 @@ mod tests {
         // Age 400 — below threshold, should NOT become weirdest.
         w.creatures.age[0] = 400;
         w.creatures.energy[0] = -1.0; // trigger death
-        let dead = w.collect_deaths();
-        assert_eq!(dead.len(), 1);
+        w.collect_deaths(); // S27: results in self.scratch_dead
+        assert_eq!(w.scratch_dead.len(), 1);
         assert!(
             w.weirdest.is_none(),
             "age 400 must not qualify for weirdest"
@@ -678,8 +678,8 @@ mod tests {
         w2.creatures.genomes[0].pigment_r = 1.0 - w2.founder_genome_anchor.pigment_r;
         w2.creatures.age[0] = 500;
         w2.creatures.energy[0] = -1.0;
-        let dead2 = w2.collect_deaths();
-        assert_eq!(dead2.len(), 1);
+        w2.collect_deaths(); // S27: results in self.scratch_dead
+        assert_eq!(w2.scratch_dead.len(), 1);
         assert!(w2.weirdest.is_some(), "age 500 must qualify for weirdest");
         assert_eq!(w2.weirdest.as_ref().unwrap().captured_age, 500);
     }
@@ -703,7 +703,7 @@ mod tests {
         // Kill creature 0 this tick.
         w.creatures.energy[0] = -1.0;
         let id0 = w.creatures.id[0];
-        let _dead = w.collect_deaths();
+        w.collect_deaths(); // S27: results in self.scratch_dead
 
         // last_survivor should be creature 0 (only one dead so far).
         assert!(w.last_survivor.is_some());
@@ -714,7 +714,7 @@ mod tests {
         w.tick = 10;
         let id1 = w.creatures.id[0]; // after swap_remove, index 0 is now creature 1
         w.creatures.energy[0] = -1.0;
-        let _dead2 = w.collect_deaths();
+        w.collect_deaths(); // S27: results in self.scratch_dead
 
         // last_survivor must be updated to creature 1 (later tick).
         let ls2 = w.last_survivor.as_ref().unwrap();
