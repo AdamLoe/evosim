@@ -28,6 +28,8 @@
     <div id="inspector-box" class="overlay-widget" style="display:none">
       <button id="inspector-close" type="button" aria-label="Close">×</button>
       <dl>
+        <dt>ID</dt><dd id="ins-id"></dd>
+        <dt>Pos</dt><dd id="ins-pos"></dd>
         <dt>Action</dt><dd id="ins-action"></dd>
         <dt>Age</dt><dd id="ins-age"></dd>
         <dt>Energy</dt><dd id="ins-energy"></dd>
@@ -40,7 +42,10 @@
         <dt>Vision</dt><dd id="ins-vision"></dd>
         <dt>Armor</dt><dd id="ins-armor"></dd>
         <dt>Bite reach</dt><dd id="ins-bite"></dd>
-        <dt>Pigment</dt><dd id="ins-pigment"></dd>
+        <dt>Color</dt><dd id="ins-color">—</dd>
+        <dt>Weight hash</dt><dd id="ins-hash">—</dd>
+        <dt>NN mut rate</dt><dd id="ins-nn-rate">—</dd>
+        <dt>NN weights</dt><dd id="ins-nn-count">—</dd>
       </dl>
     </div>
 
@@ -81,8 +86,6 @@
       <div class="perf-obs-row">
         <span id="perf-grass-cells" class="perf-stat perf-obs">grass cells: —</span>
         <span id="perf-grass-total" class="perf-stat perf-obs">grass total: —</span>
-        <span id="perf-mean-nose" class="perf-stat perf-obs">mean nose: —</span>
-        <span id="perf-mean-eye" class="perf-stat perf-obs">mean eye: —</span>
       </div>
       <div id="profiler-stabilizing" class="profiler-stabilizing" style="display:none"></div>
       <table id="profiler-table" class="profiler-table">
