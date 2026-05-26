@@ -4,7 +4,6 @@ use super::World;
 use crate::carrion::Carrion;
 use crate::constants::*;
 use crate::creature::{Action, CreatureSoA};
-use crate::genome::Genome;
 use crate::grass::GrassGrid;
 use crate::vision::{CarrionIndex, VisionBuf};
 #[cfg(feature = "threads")]
@@ -21,7 +20,8 @@ pub(crate) fn count_carrion_overlap(
 ) -> u32 {
     let xi = creatures.x[i];
     let yi = creatures.y[i];
-    let ri = creatures.g_size[i] * BODY_RADIUS_PER_SIZE; // perf-5: mirror
+    // D3: body radius is constant — FOUNDER_SIZE * BODY_RADIUS_PER_SIZE.
+    let ri = FOUNDER_SIZE * BODY_RADIUS_PER_SIZE;
     let r2 = ri * ri;
     let cx = (xi / HASH_CELL).floor() as i32;
     let cy = (yi / HASH_CELL).floor() as i32;
@@ -234,7 +234,7 @@ pub(crate) fn chunk_ranges(n: usize) -> [(usize, usize); N_CHUNKS] {
 /// - `[9..129]` vision passthrough (120 floats, raw world units)
 /// - `[129..135]` last_action one-hot (6 actions)
 /// - `[135..160]` grass-patch 5×5 bilinear samples (dy outer, dx inner;
-///   center dx=dy=0 → slot 147; P2d fills; P2e gates on nose_count)
+///   center dx=dy=0 → slot 147; P2d fills; D3: always filled — nose_count gate removed)
 pub(crate) fn build_nn_input(
     i: usize,
     creatures: &CreatureSoA,
@@ -244,22 +244,17 @@ pub(crate) fn build_nn_input(
     prev_vx: f32,
     prev_vy: f32,
 ) -> [f32; NN_INPUTS] {
-    // perf-5: hot reads use g_* mirrors; cold reads (max_age) stay on &creatures.genomes[i].
+    // D3: body traits are constants; no genome reads needed.
     let mut buf = [0.0f32; NN_INPUTS];
-    let size_i = creatures.g_size[i];
-    let g = &creatures.genomes[i]; // for g.max_age (cold)
     let energy = creatures.energy[i];
     let age = creatures.age[i];
     let cooldown = creatures.digestion_cooldown[i];
 
     // 0..9: self-state (v6 §E "Self-state layout (9)"; is_at_wall removed in P2b).
     buf[0] = (energy / 100.0).clamp(0.0, 1.0); // energy_frac
-    buf[1] = if g.max_age > 0 {
-        (age as f32 / g.max_age as f32).clamp(0.0, 1.0)
-    } else {
-        1.0
-    }; // age_frac
-    buf[2] = size_i / SIZE_MAX; // size (normalized)
+    buf[1] = (age as f32 / FOUNDER_MAX_AGE as f32).clamp(0.0, 1.0); // age_frac
+                                                                    // D3: size slot (buf[2]) stays zero — all creatures have the same constant
+                                                                    // size; no per-creature variation to signal. D9 owns shrinking NN_INPUTS.
     buf[3] = prev_vx / MOVE_SPEED_MAX; // vx (previous-tick post-clip)
     buf[4] = prev_vy / MOVE_SPEED_MAX; // vy
     buf[5] = cooldown as f32 / DIGESTION_COOLDOWN_TICKS as f32; // cooldown_frac
@@ -275,11 +270,9 @@ pub(crate) fn build_nn_input(
 
     // 135..160: 25 grass-patch inputs (5x5 bilinear, dy outer, dx inner; v1.2 P2d).
     // Slot offset within block: (dy+2)*5 + (dx+2). Center (dx=dy=0) -> global slot 147.
-    // P2e gate: only creatures with nose_count >= 1 see grass. Founders default
-    // nose_count=0 → grass-blind; slots 135..160 stay at the [0.0; 160] init value.
-    // Skipping the bilinear math entirely for nose_count=0 is a micro-perf win for
-    // the founder lineage which dominates early ticks.
-    if creatures.g_nose_count[i] >= 1 {
+    // D3: nose_count gate removed — all creatures always see grass (nose_count was
+    // a genome trait; D3 deletes all body-trait variation). Slots 135..160 always filled.
+    {
         let cx = creatures.x[i];
         let cy = creatures.y[i];
         debug_assert!(
@@ -295,17 +288,17 @@ pub(crate) fn build_nn_input(
             }
         }
     }
-    // else: buf[135..160] remain at their [0.0; NN_INPUTS] initialized values.
 
     buf
 }
 
 /// Check whether an action is currently valid for creature `i` (v6 §1 + §G).
-pub(crate) fn is_valid_action(act: Action, genome: &Genome, energy: f32, cooldown: u32) -> bool {
+/// D3: genome removed. Eat gated on cooldown only (eat/scav efficiency = 1.0 constant).
+pub(crate) fn is_valid_action(act: Action, energy: f32, cooldown: u32) -> bool {
     match act {
         Action::Rest | Action::Graze | Action::Signal => true,
-        Action::Eat => genome.eat_efficiency > 0.0 && cooldown == 0,
-        Action::Scavenge => genome.scavenge_efficiency > 0.0,
+        Action::Eat => cooldown == 0,
+        Action::Scavenge => true, // D3: scav_eff = 1.0 constant — always valid
         Action::Split => energy >= SPLIT_THRESHOLD,
     }
 }
@@ -316,12 +309,7 @@ pub(crate) fn is_valid_action(act: Action, genome: &Genome, energy: f32, cooldow
 /// S5: If any logit is non-finite (NaN or ±inf), returns `Action::Rest`
 /// immediately — the caller (`pick_action_d`) is responsible for zeroing
 /// velocity in that case.
-pub(crate) fn decode_action(
-    logits: &[f32; 6],
-    genome: &Genome,
-    energy: f32,
-    cooldown: u32,
-) -> Action {
+pub(crate) fn decode_action(logits: &[f32; 6], energy: f32, cooldown: u32) -> Action {
     // S5: NaN / ±inf guard — non-finite logits make the sort undefined.
     if logits.iter().any(|v| !v.is_finite()) {
         return Action::Rest;
@@ -337,7 +325,7 @@ pub(crate) fn decode_action(
     });
     for &k in &order {
         let act = Action::ALL[k as usize];
-        if is_valid_action(act, genome, energy, cooldown) {
+        if is_valid_action(act, energy, cooldown) {
             return act;
         }
     }
@@ -372,10 +360,10 @@ pub(crate) fn pick_action_d(
     );
     creatures.brains[i].forward(input_buf, output_buf, hidden_buf);
 
-    // Velocity: tanh(out[0..2]) × move_speed (v6 §E).
-    let speed = creatures.g_move_speed[i]; // perf-5: mirror
-    let vx = output_buf[0].tanh() * speed;
-    let vy = output_buf[1].tanh() * speed;
+    // Velocity: tanh(out[0..2]) × MOVE_SPEED_MAX (v6 §E).
+    // D3: move speed is a constant — no per-creature g_move_speed mirror.
+    let vx = output_buf[0].tanh() * MOVE_SPEED_MAX;
+    let vy = output_buf[1].tanh() * MOVE_SPEED_MAX;
 
     // Action: valid-fallthrough argmax over logits out[2..8] (v6 §1).
     let logits: &[f32; 6] = output_buf[2..8].try_into().unwrap();
@@ -388,8 +376,7 @@ pub(crate) fn pick_action_d(
     );
     let energy = creatures.energy[i];
     let cooldown = creatures.digestion_cooldown[i];
-    // decode_action takes &Genome (reads eat_eff/scav_eff). Hot, but kept on AoS to avoid API churn; one read/creature/tick.
-    let action = decode_action(logits, &creatures.genomes[i], energy, cooldown);
+    let action = decode_action(logits, energy, cooldown);
 
     // S5: if decode_action saw non-finite logits it returns Rest; also zero
     // velocity so the creature does not coast on stale movement data.
@@ -417,17 +404,14 @@ mod tests {
 
     // ---- D.16 tests ----
 
-    /// D.16 test 8: build_nn_input produces correct self-state at offsets 0..10.
+    /// D.16 test 8: build_nn_input produces correct self-state at offsets 0..9.
     #[test]
     fn nn_input_layout_self_state_correct() {
         use crate::vision::VISION_LEN;
         let mut w = World::new("d16-self-state");
         // Set known state on the founder.
         w.creatures.energy[0] = 50.0; // energy_frac = 0.5
-        w.creatures.age[0] = 1000;
-        w.creatures.genomes[0].max_age = 4000; // age_frac = 0.25
-        w.creatures.genomes[0].size = 5.0; // size/10 = 0.5
-        w.creatures.resync_hot_mirrors_at(0); // perf-5: keep mirrors in sync after genome patch
+        w.creatures.age[0] = 1250; // age_frac = 1250 / 5000 = 0.25
         w.creatures.vx[0] = 2.5; // vx/5 = 0.5
         w.creatures.vy[0] = -5.0; // vy/5 = -1.0 (clipped to -1 in input)
         w.creatures.digestion_cooldown[0] = 25; // cooldown_frac = 0.5
@@ -439,10 +423,10 @@ mod tests {
         let inp = build_nn_input(0, &w.creatures, &vision, &grass, 2, prev_vx, prev_vy);
         // energy_frac
         assert!((inp[0] - 0.5).abs() < 1e-5, "energy_frac = {}", inp[0]);
-        // age_frac
+        // age_frac (1250 / FOUNDER_MAX_AGE=5000 = 0.25)
         assert!((inp[1] - 0.25).abs() < 1e-5, "age_frac = {}", inp[1]);
-        // size
-        assert!((inp[2] - 0.5).abs() < 1e-5, "size_norm = {}", inp[2]);
+        // size (buf[2] is zero-filled — D3 no per-creature size variation)
+        assert_eq!(inp[2], 0.0, "size slot must be zero-filled in D3");
         // vx
         assert!((inp[3] - 0.5).abs() < 1e-5, "vx_norm = {}", inp[3]);
         // vy: -5.0/5.0 = -1.0
@@ -456,7 +440,7 @@ mod tests {
         assert_eq!(inp[8], 0.0);
     }
 
-    /// D.16 test 9: vision passthrough — input[10..130] == vision[0] byte-exact.
+    /// D.16 test 9: vision passthrough — input[9..129] == vision[0] byte-exact.
     #[test]
     fn nn_input_layout_vision_passthrough() {
         use crate::vision::VISION_LEN;
@@ -477,7 +461,7 @@ mod tests {
         );
     }
 
-    /// D.16 test 10: last_action one-hot at offsets 130..136.
+    /// D.16 test 10: last_action one-hot at offsets 129..135.
     #[test]
     fn nn_input_layout_last_action_onehot() {
         use crate::vision::VISION_LEN;
@@ -503,12 +487,10 @@ mod tests {
     /// D.16 test 11: valid-fallthrough — Split highest logit but energy too low.
     #[test]
     fn decode_action_valid_fallthrough_split_invalid() {
-        use crate::genome::Genome;
-        let g = Genome::founder();
         // Split is Action::ALL[4], logit index 4. Make it highest.
         let logits = [0.0f32, 0.0, 0.0, 0.0, 10.0, 0.0];
         // energy = 10 < SPLIT_THRESHOLD (50) → Split invalid.
-        let act = decode_action(&logits, &g, 10.0, 0);
+        let act = decode_action(&logits, 10.0, 0);
         assert_ne!(act, Action::Split, "Split must be invalid when energy < 50");
         // Should fall through to a valid action.
         assert!(
@@ -524,37 +506,33 @@ mod tests {
     /// D.16 test 12: first-index tiebreak — lower index wins on equal logits.
     #[test]
     fn decode_action_first_index_tiebreak() {
-        use crate::genome::Genome;
-        let g = Genome::founder();
         // All logits equal → Action::ALL[0] = Rest wins.
         let logits = [5.0f32; 6];
-        let act = decode_action(&logits, &g, 100.0, 0);
+        let act = decode_action(&logits, 100.0, 0);
         assert_eq!(act, Action::Rest, "lower index (Rest=0) must win on ties");
     }
 
     /// D.16 test 13: Eat invalid when in digestion cooldown.
     #[test]
     fn decode_action_eat_invalid_in_cooldown() {
-        use crate::genome::Genome;
-        let mut g = Genome::founder();
-        g.eat_efficiency = 1.0;
         // Eat is index 2, give it highest logit.
         let logits = [0.0f32, 0.0, 10.0, 0.0, 0.0, 0.0];
         // cooldown > 0 → Eat invalid.
-        let act = decode_action(&logits, &g, 100.0, 5);
+        let act = decode_action(&logits, 100.0, 5);
         assert_ne!(act, Action::Eat, "Eat must be invalid when cooldown > 0");
     }
 
-    /// D.16 test 14: Scavenge invalid when scavenge_efficiency == 0.
+    /// D3: Scavenge is always valid (scav_eff = 1.0 constant).
     #[test]
-    fn decode_action_scavenge_invalid_when_zero_eff() {
-        use crate::genome::Genome;
-        let mut g = Genome::founder();
-        g.scavenge_efficiency = 0.0;
-        // Scavenge is index 3.
+    fn decode_action_scavenge_always_valid() {
+        // Scavenge is index 3. Give it highest logit.
         let logits = [0.0f32, 0.0, 0.0, 10.0, 0.0, 0.0];
-        let act = decode_action(&logits, &g, 100.0, 0);
-        assert_ne!(act, Action::Scavenge, "Scavenge must be invalid when eff=0");
+        let act = decode_action(&logits, 100.0, 0);
+        assert_eq!(
+            act,
+            Action::Scavenge,
+            "Scavenge must be valid when it has highest logit (D3: scav_eff = 1.0)"
+        );
     }
 
     // ---- D.18 chunking tests ----
@@ -630,20 +608,16 @@ mod tests {
     /// D.16 test 15: Rest is always valid as the final fallback.
     #[test]
     fn decode_action_rest_always_valid_as_fallback() {
-        use crate::genome::Genome;
-        let mut g = Genome::founder();
-        g.eat_efficiency = 0.0; // Eat invalid
-        g.scavenge_efficiency = 0.0; // Scavenge invalid
-                                     // Give Split the highest logit (energy=0 → invalid), Eat 2nd (eff=0 → invalid),
-                                     // Scavenge 3rd (eff=0 → invalid). Rest, Photo, Signal should all be valid.
-                                     // Rest is index 0, make it the lowest logit so Photo or Signal wins first,
-                                     // but confirm that the function returns a valid action regardless.
+        // Give Split the highest logit (energy=0 → invalid), Eat 2nd (cooldown>0 → invalid).
+        // Rest, Graze, Signal, Scavenge should all be valid.
         let logits = [-5.0f32, 2.0, -3.0, -3.0, 10.0, 3.0]; // Split>Signal>Graze>...
-        let act = decode_action(&logits, &g, 0.0, 1); // energy=0 → Split invalid; cooldown>0 → Eat invalid
-                                                      // Graze (idx 1, logit=2) and Signal (idx 5, logit=3) are both valid;
-                                                      // Signal has higher logit so it wins.
+        let act = decode_action(&logits, 0.0, 1); // energy=0 → Split invalid; cooldown>0 → Eat invalid
+                                                  // Signal (idx 5, logit=3) has highest valid logit and is valid; it wins.
         assert!(
-            matches!(act, Action::Graze | Action::Signal | Action::Rest),
+            matches!(
+                act,
+                Action::Graze | Action::Signal | Action::Rest | Action::Scavenge
+            ),
             "Expected always-valid action, got {:?}",
             act
         );
@@ -722,15 +696,13 @@ mod tests {
     /// logit is non-finite (NaN or ±inf).
     #[test]
     fn nan_logits_return_rest_zero_velocity() {
-        use crate::genome::Genome;
         // decode_action with a NaN logit must return Rest.
-        let g = Genome::founder();
         let nan_logits = [f32::NAN, 0.0, 0.0, 0.0, 0.0, 0.0];
-        let act = decode_action(&nan_logits, &g, 100.0, 0);
+        let act = decode_action(&nan_logits, 100.0, 0);
         assert_eq!(act, Action::Rest, "NaN logit must produce Rest");
 
         let inf_logits = [f32::INFINITY, 0.0, 0.0, 0.0, 0.0, 0.0];
-        let act2 = decode_action(&inf_logits, &g, 100.0, 0);
+        let act2 = decode_action(&inf_logits, 100.0, 0);
         assert_eq!(act2, Action::Rest, "+Inf logit must produce Rest");
 
         // pick_action_d: when output_buf[2..8] has NaN the returned velocity must be 0.
@@ -751,10 +723,9 @@ mod tests {
         let (vx, vy, action) = if had_nan {
             (0.0_f32, 0.0_f32, Action::Rest)
         } else {
-            let speed = w.creatures.g_move_speed[0];
-            let vx = output_buf[0].tanh() * speed;
-            let vy = output_buf[1].tanh() * speed;
-            let act = decode_action(logits, &w.creatures.genomes[0], w.creatures.energy[0], 0);
+            let vx = output_buf[0].tanh() * MOVE_SPEED_MAX;
+            let vy = output_buf[1].tanh() * MOVE_SPEED_MAX;
+            let act = decode_action(logits, w.creatures.energy[0], 0);
             (vx, vy, act)
         };
         assert_eq!(action, Action::Rest, "had_nan path must return Rest");
@@ -853,13 +824,11 @@ mod tests {
     // ---- P2d grass-patch NN input tests ----
 
     /// P2d test 1: all-density-1.0 grass → inp[135..160] all ≈ 1.0.
+    /// D3: nose_count gate removed — all creatures always see grass.
     #[test]
     fn nn_input_patch_layout_basic() {
         use crate::vision::VISION_LEN;
-        let mut w = World::new("p2d-basic");
-        // P2e: nose_count must be >= 1 for the creature to see grass.
-        w.creatures.genomes[0].nose_count = 1;
-        w.creatures.resync_hot_mirrors_at(0);
+        let w = World::new("p2d-basic");
         // Seed all cells at GRASS_MAX (1.0); bilinear sample anywhere returns 1.0.
         let mut grass = GrassGrid::new(&mut crate::rng::SimRng::from_u64(0), 0);
         for d in grass.density.iter_mut() {
@@ -900,9 +869,6 @@ mod tests {
         let cy = (cell_iy as f32 + 0.5) * GRASS_CELL_SIZE;
         w.creatures.x[0] = cx;
         w.creatures.y[0] = cy;
-        // P2e: nose_count must be >= 1 for the creature to see grass.
-        w.creatures.genomes[0].nose_count = 1;
-        w.creatures.resync_hot_mirrors_at(0);
         // Seed ONLY this cell. The 24 offset sample points (dx/dy ∈ {-2,-1,+1,+2})
         // land on adjacent cells which remain zero, so all non-center slots stay 0.0.
         let center_cell = cell_iy * crate::constants::GRASS_GRID_DIM + cell_ix;
@@ -953,9 +919,6 @@ mod tests {
         // Move founder to (1.0, 1.0) — close to the west/north seam.
         w.creatures.x[0] = 1.0;
         w.creatures.y[0] = 1.0;
-        // P2e: nose_count must be >= 1 for the creature to see grass.
-        w.creatures.genomes[0].nose_count = 1;
-        w.creatures.resync_hot_mirrors_at(0);
 
         // The dx=-2, dy=-2 sample point is at:
         //   sx = 1.0 + (-2) * GRASS_CELL_SIZE = 1.0 - 5.0 = -4.0 → wraps to ~596.0
@@ -1013,14 +976,7 @@ mod tests {
         let mut w_seq = World::from_save_v1(snap.clone()).expect("seq load");
         let mut w_par = World::from_save_v1(snap).expect("par load");
 
-        // P2e: set nose_count=1 for all creatures in both worlds so the bilinear
-        // sampling path is exercised (not short-circuited by the nose_count=0 gate).
-        for i in 0..n {
-            w_seq.creatures.genomes[i].nose_count = 1;
-            w_seq.creatures.resync_hot_mirrors_at(i);
-            w_par.creatures.genomes[i].nose_count = 1;
-            w_par.creatures.resync_hot_mirrors_at(i);
-        }
+        // D3: no nose_count setting needed — all creatures see grass.
         // Seed grass so grass-patch slots are non-trivially non-zero.
         w_seq.grass.density.fill(1.0);
         w_par.grass.density.fill(1.0);
@@ -1072,51 +1028,26 @@ mod tests {
         }
     }
 
-    /// P2e test: nose_count=0 gate — grass-blind creatures see all-zero patch slots.
-    /// Founder defaults nose_count=0; patch slots 135..160 must stay 0.0 even when
-    /// grass density > 0. After mutating nose_count to 1 and resyncing, the same
-    /// slots must become ~1.0 (since grass is seeded to max density everywhere).
+    /// D3 regression: grass-patch slots 135..160 are always filled (nose_count gate removed).
+    /// Founder used to have nose_count=0 which gated the fill; D3 removes this — slots
+    /// must be non-zero when grass density > 0 at the founder's position.
     #[test]
-    fn nn_input_patch_gated_by_nose_count() {
+    fn nn_input_patch_always_filled_d3() {
         use crate::vision::VISION_LEN;
 
-        // --- Part 1: nose_count = 0 → grass-blind ---
-        let w = World::new("p2e-gate");
-        assert_eq!(
-            w.creatures.g_nose_count[0], 0,
-            "founder default nose_count must be 0"
-        );
-        let mut grass = GrassGrid::new(&mut crate::rng::SimRng::from_u64(0), 0);
+        let w = World::new("d3-patch-gate");
         // Seed grass at max density everywhere.
+        let mut grass = GrassGrid::new(&mut crate::rng::SimRng::from_u64(0), 0);
         grass.density.fill(1.0);
         let vision = [0.0f32; VISION_LEN];
         let prev_vx = w.creatures.vx[0];
         let prev_vy = w.creatures.vy[0];
         let inp = build_nn_input(0, &w.creatures, &vision, &grass, 0, prev_vx, prev_vy);
         for slot in NN_GRASS_PATCH_OFFSET..(NN_GRASS_PATCH_OFFSET + 25) {
-            assert_eq!(
-                inp[slot], 0.0,
-                "slot {slot} must be 0.0 when nose_count=0 (grass-blind)"
-            );
-        }
-
-        // --- Part 2: nose_count = 1 → grass-sighted, slots become ~1.0 ---
-        let mut w2 = World::new("p2e-gate-sighted");
-        w2.creatures.genomes[0].nose_count = 1;
-        w2.creatures.resync_hot_mirrors_at(0);
-        assert_eq!(
-            w2.creatures.g_nose_count[0], 1,
-            "mirror must reflect nose_count=1"
-        );
-        let prev_vx2 = w2.creatures.vx[0];
-        let prev_vy2 = w2.creatures.vy[0];
-        // Reuse the same all-density-1.0 grass grid.
-        let inp2 = build_nn_input(0, &w2.creatures, &vision, &grass, 0, prev_vx2, prev_vy2);
-        for slot in NN_GRASS_PATCH_OFFSET..(NN_GRASS_PATCH_OFFSET + 25) {
             assert!(
-                inp2[slot] > 0.99,
-                "slot {slot} = {} (expected ~1.0 when nose_count=1 and grass=max)",
-                inp2[slot]
+                inp[slot] > 0.99,
+                "slot {slot} = {} (expected ~1.0 — D3: no nose_count gate)",
+                inp[slot]
             );
         }
     }

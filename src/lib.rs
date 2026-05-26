@@ -7,7 +7,6 @@ pub(crate) mod carrion;
 pub(crate) mod constants;
 pub(crate) mod creature;
 pub(crate) mod events;
-pub(crate) mod genome;
 pub(crate) mod grass;
 pub(crate) mod grid;
 pub(crate) mod hof;

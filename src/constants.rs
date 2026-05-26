@@ -12,15 +12,8 @@ pub const HASH_DIM: usize = (WORLD_SIZE / HASH_CELL) as usize; // 120
 
 // ---- Energy economy upkeep (v5 §7) ----
 pub const UPKEEP_BASE: f32 = 0.05;
-pub const UPKEEP_SIZE_PER_UNIT: f32 = 0.04;
-pub const UPKEEP_MOBILITY_FLAG: f32 = 0.10;
-pub const UPKEEP_MOVE_SPEED_PER_UNIT: f32 = 0.02;
-pub const UPKEEP_PER_EYE: f32 = 0.02;
-pub const UPKEEP_VISION_COEFF: f32 = 0.001;
 pub const UPKEEP_MOUTH_DEFAULT: f32 = 0.05; // slider in v6 §K
 pub const UPKEEP_GUT: f32 = 0.02;
-pub const UPKEEP_ARMOR_PER_UNIT: f32 = 0.03;
-pub const UPKEEP_LIFESPAN_PER_1K: f32 = 0.01;
 pub const UPKEEP_NN_FIXED: f32 = 0.05;
 
 // ---- One-time costs (v5 §7) ----
@@ -46,79 +39,65 @@ pub const CARRION_POOL_CAP: f32 = 60.0;
 pub const CARRION_MAX_AGE: u32 = 100;
 
 // ---- Past-lifespan penalty (v5 §7) ----
-pub const PAST_LIFESPAN_MULT: f32 = 4.0; // per 1000 ticks past max_age
+/// D3: max_age is now the fixed constant FOUNDER_MAX_AGE; past-lifespan penalty still applies.
+pub const PAST_LIFESPAN_MULT: f32 = 4.0; // per 1000 ticks past FOUNDER_MAX_AGE
 
 // ---- Brain (v5 §5, v6 §E) ----
-pub const NN_INPUTS: usize = 160; // v1.2: 9 self-state + 120 vision + 6 last_action + 25 grass-patch (P2b shifts; P2d fills patch)
+pub const NN_INPUTS: usize = 160; // D3: genome-derived self-state slots zero-filled; D9 owns shrinking
 pub const NN_HIDDEN: usize = 24;
 pub const NN_OUTPUTS: usize = 8;
 pub const NN_WEIGHT_COUNT: usize = NN_INPUTS * NN_HIDDEN + NN_HIDDEN * NN_OUTPUTS;
 pub const NN_MUT_RATE_DEFAULT: f32 = 0.02;
 pub const NN_MUT_SIGMA_DEFAULT: f32 = 0.02;
 pub const NN_INIT_RANGE: f32 = 0.3; // uniform random weight initialisation range
-                                    // ---- F.30 founder NN hardwiring (v1.2 rewrite — see DECISIONS) ----
-/// Hidden[0] = on-grass detector: large positive weight from NN_GRASS_PATCH_CENTER_SLOT.
+
+// ---- F.30 founder brain hardwiring (v1.2) ----
+/// Grass-detector hidden unit: weight from NN_GRASS_PATCH_CENTER_SLOT to hidden[0].
 pub const NN_FOUNDER_GRAZE_DETECTOR_WEIGHT: f32 = 5.0;
-/// Output Graze += large positive from hidden[0]: founder-lineage hardwired graze response.
+/// Graze output weight from hidden[0]: makes founders prefer Graze when on grass.
 pub const NN_FOUNDER_GRAZE_OUTPUT_WEIGHT: f32 = 5.0;
-/// Hidden[1] = Move baseline; w_ih[1][energy_frac] + w_ho[vx/vy][1] all baseline.
+/// Move baseline weight: small bias so founders random-walk when off grass.
 pub const NN_FOUNDER_MOVE_BASELINE: f32 = 1.0;
-/// Hidden[2] = energy_frac reader → Split logit positive.
+/// Split energy weight: founders split when energy is high.
 pub const NN_FOUNDER_SPLIT_FROM_ENERGY: f32 = 1.0;
+
+// ---- Brain mutation rate drift (v5 §5.3) ----
+/// Probability per birth that nn_mutation_rate drifts (0.5%/birth).
+pub const MUT_RATE_OF_RATES: f32 = 0.005;
+/// Jitter magnitude for mutation-rate drift (±20%).
+pub const MUT_RATE_JITTER: f32 = 0.20;
 
 // ---- move_bias direction-persistence (v1.2 — per amendments §A.5 ADD semantics) ----
 /// Re-roll move_bias_x/y every N ticks for per-creature direction persistence.
 /// 20 ticks @ 30 tick/s ≈ 0.66s of persistent heading.
 pub const MOVE_BIAS_REROLL_INTERVAL: u32 = 20;
 
-// ---- Body mutation (v5 §6) ----
-pub const BODY_MUT_RATE_DEFAULT: f32 = 0.03;
-pub const MUT_RATE_OF_RATES: f32 = 0.005;
-pub const MUT_RATE_JITTER: f32 = 0.20;
-
-// ---- Genome bounds (v5 §4) ----
-pub const SIZE_MIN: f32 = 1.0;
-pub const SIZE_MAX: f32 = 10.0;
-pub const MAX_AGE_MIN: u32 = 100;
-pub const MAX_AGE_MAX: u32 = 50_000;
-pub const GRAZE_EFF_MIN: f32 = 0.0;
-pub const GRAZE_EFF_MAX: f32 = 2.0;
-pub const EAT_EFF_MIN: f32 = 0.0;
-pub const EAT_EFF_MAX: f32 = 2.0;
-pub const SCAVENGE_EFF_MIN: f32 = 0.0;
-pub const SCAVENGE_EFF_MAX: f32 = 2.0;
-pub const MOVE_SPEED_MIN: f32 = 0.0;
+// ---- Body trait constants (D3: all creatures are phenotypically identical) ----
+/// Fixed move speed cap for all creatures (was genome.move_speed max).
 pub const MOVE_SPEED_MAX: f32 = 5.0;
-pub const VISION_RANGE_MIN: f32 = 0.0;
+/// Fixed vision range for all creatures (was genome.vision_range max).
 pub const VISION_RANGE_MAX: f32 = 80.0;
-pub const ARMOR_MIN: f32 = 0.0;
-pub const ARMOR_MAX: f32 = 1.0;
-pub const BITE_REACH_MIN: f32 = 1.0;
-pub const BITE_REACH_MAX: f32 = 3.0;
+/// Fixed bite reach for all creatures (was genome.bite_reach = FOUNDER_BITE_REACH = 1.0).
+pub const BITE_REACH_CONSTANT: f32 = 1.0;
+/// Fixed body size for all creatures (was genome.size / Genome::founder().size).
+// FOUNDER_SIZE is kept in the Founder section below.
 pub const EYE_SLOTS: usize = 24;
-pub const EYE_VALID: [u8; 8] = [0, 2, 3, 4, 6, 8, 12, 24];
-pub const NOSE_VALID: [u8; 6] = [0, 1, 2, 3, 4, 5];
 
 // ---- Physics (v6 §D) ----
 pub const REPULSION_K: f32 = 2.0;
 pub const REPULSION_MAX: f32 = 5.0;
 
-// ---- Founder (Milestone B default; mutation kicks in C) ----
+// ---- Founder (D3: genome deleted; all creatures are phenotypically identical) ----
 pub const FOUNDER_ENERGY: f32 = 200.0;
+/// Fixed body size for all creatures. Body radius = FOUNDER_SIZE * BODY_RADIUS_PER_SIZE.
 pub const FOUNDER_SIZE: f32 = 1.0;
+/// Fixed max age for all creatures. No per-creature variation.
 pub const FOUNDER_MAX_AGE: u32 = 5000;
-pub const FOUNDER_GRAZE_EFF: f32 = 1.0;
-pub const FOUNDER_BITE_REACH: f32 = 1.0;
-pub const FOUNDER_PIGMENT_R: f32 = 0.30;
-pub const FOUNDER_PIGMENT_G: f32 = 0.75;
-pub const FOUNDER_PIGMENT_B: f32 = 0.35;
 pub const FOUNDER_SPLIT_JITTER: f32 = 50.0;
 
 // ---- Species detection (v6 §H) ----
-pub const SPECIES_W_BODY: f32 = 3.0;
 pub const SPECIES_W_BRAIN: f32 = 1.0;
 pub const SPECIES_THRESHOLD: f32 = 4.0; // v6 §H default; v1.1 raised to 6.0 for sun-driven fast drift, v1.2 reverts (slower grass-driven drift won't trigger 6.0 in 10k ticks). See DECISIONS v1.2 PR-1 regen.
-pub const SPECIES_EYE_JUMP_COST: f32 = 1.5;
 
 // ---- NN input normalization (v6 §E, §3; see DECISIONS for unspecified bases) ----
 /// Normalization base for carrion_overlap_norm NN input (v6 §3; no canonical base in spec).
@@ -146,9 +125,12 @@ pub const POPULATION_MILESTONES: [u32; 6] = [10, 50, 100, 500, 1000, 2000];
 // ---- Vision geometry (v5 §3.5, v6 §E; perf-1 sector sin/cos cache) ----
 /// Number of vision sectors per creature. Matches EYE_SLOTS; kept in both
 /// vision.rs (re-export) and constants.rs (source of truth for creature.rs).
+/// D3: all creatures have a fixed 24-sector layout (no eye_count variation).
 pub const SECTORS: usize = 24;
 /// Lookup: index = position of eye_count in EYE_VALID; value = sector stride.
 /// EYE_VALID = [0, 2, 3, 4, 6, 8, 12, 24] → strides [-, 12, 8, 6, 4, 3, 2, 1].
+/// D3: kept for vision.rs recompute_eye_trig_at (still used with fixed eye_count=24).
+pub const EYE_VALID: [u8; 8] = [0, 2, 3, 4, 6, 8, 12, 24];
 pub const EYE_STRIDE: [u8; 8] = [0, 12, 8, 6, 4, 3, 2, 1];
 
 // ---- Acceptance test (v5 §16) ----

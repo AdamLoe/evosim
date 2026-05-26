@@ -1,4 +1,5 @@
 //! SaveV1 ↔ World conversion. Hardening lands in S12; S1 only moves the existing bodies.
+//! D3: Genome removed from push() call; max_size_reached column dropped.
 
 use super::World;
 use crate::constants::*;
@@ -29,10 +30,9 @@ impl World {
         // S12: comprehensive structural validation (position/energy/brain/slider checks).
         let n = validate_save(&save)?;
 
-        // Rebuild SoA.
+        // Rebuild SoA. D3: push() no longer takes genome.
         let mut creatures = CreatureSoA::with_capacity(n.max(16));
         for i in 0..n {
-            let g = &save.creatures.genomes[i];
             let b = &save.creatures.brains[i];
             // Brain weight count already validated by validate_save; this indexing is safe.
             creatures.push(
@@ -43,7 +43,6 @@ impl World {
                 save.creatures.species_id[i],
                 save.creatures.parent_species_id[i],
                 save.creatures.birth_tick[i],
-                g.clone(),
                 b.clone(),
             );
             creatures.vx[i] = save.creatures.vx[i];
@@ -53,9 +52,9 @@ impl World {
             creatures.cumulative_upkeep[i] = save.creatures.cumulative_upkeep[i];
             creatures.last_action[i] = save.creatures.last_action[i];
             creatures.action_this_tick[i] = save.creatures.action_this_tick[i];
-            creatures.max_size_reached[i] = save.creatures.max_size_reached[i];
+            // D3: max_size_reached removed from snapshot.
             creatures.distance_travelled[i] = save.creatures.distance_travelled[i];
-            // P2g: restore move_bias fields from snapshot (replaces P2f zero-init placeholder).
+            // P2g: restore move_bias fields from snapshot.
             creatures.move_bias_x[i] = save.creatures.move_bias_x[i];
             creatures.move_bias_y[i] = save.creatures.move_bias_y[i];
             creatures.move_bias_reroll_at[i] = save.creatures.move_bias_reroll_at[i];
@@ -108,7 +107,7 @@ impl World {
             longest_lived: save.longest_lived,
             longest_lived_age: save.longest_lived_age,
             first_mover_snapshot: save.first_mover_snapshot,
-            founder_genome_anchor: save.founder_genome_anchor,
+            // D3: founder_genome_anchor removed.
             founder_brain_anchor: save.founder_brain_anchor,
             vision,
             cell_to_carrion: CarrionIndex::new(),

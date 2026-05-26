@@ -1,13 +1,15 @@
-//! Save/load support for v1. Schema version: 4. JSON via serde_json.
+//! Save/load support for v1. Schema version: 5. JSON via serde_json.
 //! v5 §13, v6 §I. Snapshot structs are explicit so future versions can add
 //! SaveV2 alongside without disturbing SaveV1. From<&World> conversions kept
 //! in this module; World re-exports via to_save_v1 / from_save_v1 helpers.
+//!
+//! D3: Genome removed. CreatureSoASnapshot drops genomes, nose_count, max_size_reached.
+//! SaveV1 drops founder_genome_anchor. Schema version bumped 4 → 5.
 
 use crate::brain::Brain;
 use crate::carrion::Carrion;
 use crate::creature::Action;
 use crate::events::{Event, EventLog};
-use crate::genome::Genome;
 use crate::hof::HallOfFame;
 use crate::rng::SimRng;
 use crate::species::Species;
@@ -18,7 +20,8 @@ use serde::{Deserialize, Serialize};
 /// v1 → v2 (P1b+P1f): dropped SunMapSnapshot; added GrassGridSnapshot; dropped Carrion.sun_cell.
 /// v2 → v3 (P2g): added nose_count + move_bias_x/y/reroll_at columns; NN weight count now 4032.
 /// v3 → v4 (P3a): added eat_bite_fraction to DevSliders.
-pub const SCHEMA_VERSION: u32 = 4;
+/// v4 → v5 (D3): deleted Genome, founder_genome_anchor, nose_count, max_size_reached.
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// Wire shape on disk. Camera / UI state lives on the JS side.
 /// All fields are owned Vecs so we can serialize without referencing &World.
@@ -60,11 +63,12 @@ pub struct SaveV1 {
     pub longest_lived: Option<HallOfFame>,
     pub longest_lived_age: u32,
     pub first_mover_snapshot: Option<HallOfFame>,
-    pub founder_genome_anchor: Genome,
+    // D3: founder_genome_anchor removed.
     pub founder_brain_anchor: Vec<f32>,
 }
 
 /// Per-creature SoA snapshot — one Vec per column, index-aligned.
+/// D3: genomes, nose_count, max_size_reached removed.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CreatureSoASnapshot {
     pub id: Vec<u64>,
@@ -80,13 +84,10 @@ pub struct CreatureSoASnapshot {
     pub parent_species_id: Vec<u32>,
     pub last_action: Vec<Action>,
     pub action_this_tick: Vec<Action>,
-    pub max_size_reached: Vec<f32>,
     pub distance_travelled: Vec<f32>,
     pub birth_tick: Vec<u32>,
-    pub genomes: Vec<Genome>,
     pub brains: Vec<Brain>,
-    // v3 fields (P2g): genome nose_count mirror + move-bias state.
-    pub nose_count: Vec<u8>,
+    // v3 fields (P2g): move-bias state. nose_count removed in D3.
     pub move_bias_x: Vec<f32>,
     pub move_bias_y: Vec<f32>,
     pub move_bias_reroll_at: Vec<u32>,
@@ -160,13 +161,10 @@ impl SaveV1 {
                 parent_species_id: w.creatures.parent_species_id.clone(),
                 last_action: w.creatures.last_action.clone(),
                 action_this_tick: w.creatures.action_this_tick.clone(),
-                max_size_reached: w.creatures.max_size_reached.clone(),
                 distance_travelled: w.creatures.distance_travelled.clone(),
                 birth_tick: w.creatures.birth_tick.clone(),
-                genomes: w.creatures.genomes.clone(),
                 brains: w.creatures.brains.clone(),
-                // v3 fields (P2g).
-                nose_count: w.creatures.g_nose_count.clone(),
+                // v3 fields (P2g). D3: nose_count removed.
                 move_bias_x: w.creatures.move_bias_x.clone(),
                 move_bias_y: w.creatures.move_bias_y.clone(),
                 move_bias_reroll_at: w.creatures.move_bias_reroll_at.clone(),
@@ -198,7 +196,7 @@ impl SaveV1 {
             longest_lived: w.longest_lived.clone(),
             longest_lived_age: w.longest_lived_age,
             first_mover_snapshot: w.first_mover_snapshot.clone(),
-            founder_genome_anchor: w.founder_genome_anchor.clone(),
+            // D3: founder_genome_anchor removed.
             founder_brain_anchor: w.founder_brain_anchor.clone(),
         }
     }
@@ -234,13 +232,10 @@ pub fn validate_soa_lengths(s: &CreatureSoASnapshot) -> Result<usize, LoadError>
     check!(parent_species_id);
     check!(last_action);
     check!(action_this_tick);
-    check!(max_size_reached);
     check!(distance_travelled);
     check!(birth_tick);
-    check!(genomes);
     check!(brains);
-    // v3 columns (P2g).
-    check!(nose_count);
+    // v3 columns (P2g). D3: nose_count removed.
     check!(move_bias_x);
     check!(move_bias_y);
     check!(move_bias_reroll_at);
@@ -307,16 +302,8 @@ pub fn validate_save(save: &SaveV1) -> Result<usize, LoadError> {
         }
     }
 
-    // 5. Per-creature v3 field range checks (P2g).
-    use crate::constants::NOSE_VALID;
-    let nose_max = *NOSE_VALID.iter().max().unwrap_or(&5);
+    // 5. Per-creature move_bias field range checks (P2g, D3: nose_count removed).
     for i in 0..n {
-        if save.creatures.nose_count[i] > nose_max {
-            return Err(LoadError::StructuralError(format!(
-                "creature {i} nose_count {} exceeds max {nose_max}",
-                save.creatures.nose_count[i]
-            )));
-        }
         if !save.creatures.move_bias_x[i].is_finite() {
             return Err(LoadError::StructuralError(format!(
                 "creature {i} move_bias_x is non-finite: {}",
@@ -366,7 +353,7 @@ pub fn validate_save(save: &SaveV1) -> Result<usize, LoadError> {
         }
     }
 
-    // 8. Slider fields finite.
+    // 9. Slider fields finite.
     let s = &save.sliders;
     for (name, val) in [
         ("mutation_rate_multiplier", s.mutation_rate_multiplier),
@@ -499,10 +486,6 @@ mod tests {
                 "action_this_tick[{i}]"
             );
             assert_eq!(
-                w2.creatures.max_size_reached[i], w.creatures.max_size_reached[i],
-                "max_size_reached[{i}]"
-            );
-            assert_eq!(
                 w2.creatures.distance_travelled[i], w.creatures.distance_travelled[i],
                 "distance_travelled[{i}]"
             );
@@ -511,18 +494,10 @@ mod tests {
                 "birth_tick[{i}]"
             );
             assert_eq!(
-                w2.creatures.genomes[i].size, w.creatures.genomes[i].size,
-                "genome.size[{i}]"
-            );
-            assert_eq!(
                 w2.creatures.brains[i].weights[0], w.creatures.brains[i].weights[0],
                 "brain.weights[0][{i}]"
             );
-            // v3 fields (P2g).
-            assert_eq!(
-                w2.creatures.genomes[i].nose_count, w.creatures.genomes[i].nose_count,
-                "nose_count[{i}]"
-            );
+            // v3 fields (P2g). D3: nose_count removed.
             assert_eq!(
                 w2.creatures.move_bias_x[i], w.creatures.move_bias_x[i],
                 "move_bias_x[{i}]"
@@ -571,7 +546,7 @@ mod tests {
         match result {
             Err(LoadError::SchemaVersionMismatch {
                 found: 999,
-                expected: 4,
+                expected: 5,
             }) => {}
             Err(e) => panic!("expected SchemaVersionMismatch, got: {e}"),
             Ok(_) => panic!("expected Err, got Ok"),
@@ -705,21 +680,21 @@ mod tests {
         );
     }
 
-    /// P3a: old-schema version 3 returns SchemaVersionMismatch { found: 3, expected: 4 }.
+    /// D3: old-schema version 4 returns SchemaVersionMismatch { found: 4, expected: 5 }.
     #[test]
     fn load_old_schema_returns_version_mismatch_error() {
-        let mut w = World::new("p2g-old-schema");
+        let mut w = World::new("d3-old-schema");
         w.tick_once();
         let mut save = SaveV1::from_world(&w);
-        save.schema_version = 3;
+        save.schema_version = 4;
         match World::from_save_v1(save) {
             Err(LoadError::SchemaVersionMismatch {
-                found: 3,
-                expected: 4,
+                found: 4,
+                expected: 5,
             }) => {}
             Ok(_) => panic!("expected SchemaVersionMismatch but got Ok"),
             Err(e) => {
-                panic!("expected SchemaVersionMismatch {{ found: 3, expected: 4 }} but got {e:?}")
+                panic!("expected SchemaVersionMismatch {{ found: 4, expected: 5 }} but got {e:?}")
             }
         }
     }
@@ -755,14 +730,10 @@ mod tests {
             save.creatures
                 .action_this_tick
                 .push(crate::creature::Action::Rest);
-            save.creatures.max_size_reached.push(0.0);
             save.creatures.distance_travelled.push(0.0);
             save.creatures.birth_tick.push(0);
-            save.creatures
-                .genomes
-                .push(crate::genome::Genome::founder());
-            // v3 columns (P2g).
-            save.creatures.nose_count.push(0);
+            // D3: no genomes to push.
+            // v3 columns (P2g). D3: no nose_count.
             save.creatures.move_bias_x.push(0.0);
             save.creatures.move_bias_y.push(0.0);
             save.creatures.move_bias_reroll_at.push(0);
@@ -828,23 +799,6 @@ mod tests {
         );
     }
 
-    // ─────────── P2g: v3 column validation tests ───────────
-
-    /// P2g: nose_count exceeding NOSE_VALID max is rejected.
-    #[test]
-    fn p2g_invalid_nose_count_fails() {
-        let mut save = make_valid_save();
-        if !save.creatures.nose_count.is_empty() {
-            save.creatures.nose_count[0] = 6; // > NOSE_VALID max (5)
-        } else {
-            return; // no creatures in world — skip
-        }
-        assert!(
-            matches!(validate_save(&save), Err(LoadError::StructuralError(_))),
-            "nose_count > 5 must yield StructuralError"
-        );
-    }
-
     /// P2g: non-finite move_bias_x is rejected.
     #[test]
     fn p2g_nan_move_bias_x_fails() {
@@ -886,7 +840,7 @@ mod tests {
         );
     }
 
-    /// P2g: nose_count and move_bias_* round-trip through save/load.
+    /// P2g: move_bias_* round-trip through save/load.
     #[test]
     fn p2g_v3_fields_round_trip() {
         let w = make_world_500();
@@ -896,10 +850,6 @@ mod tests {
         let n = w.creatures.len();
         assert_eq!(w2.creatures.len(), n);
         for i in 0..n {
-            assert_eq!(
-                w2.creatures.genomes[i].nose_count, w.creatures.genomes[i].nose_count,
-                "nose_count[{i}]"
-            );
             assert_eq!(
                 w2.creatures.move_bias_x[i], w.creatures.move_bias_x[i],
                 "move_bias_x[{i}]"

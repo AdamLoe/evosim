@@ -4,6 +4,9 @@
 //! and NN forward (no inputs needed yet) and uses a hardcoded action
 //! selector ("split if energy ≥ SPLIT_PLACEHOLDER, else photosynth").
 //! Milestone D swaps in the real NN forward pass.
+//!
+//! D3: Genome removed. All body traits are constants. founder_genome_anchor deleted.
+//! species_distance now uses brain weights only.
 
 pub(crate) mod nn;
 pub(crate) mod save_v1;
@@ -15,7 +18,6 @@ use crate::carrion::Carrion;
 use crate::constants::*;
 use crate::creature::{Action, CreatureSoA};
 use crate::events::{Event, EventKind, EventLog};
-use crate::genome::Genome;
 use crate::grass::GrassGrid;
 use crate::grid::SpatialGrid;
 use crate::hof::HallOfFame;
@@ -84,6 +86,8 @@ pub struct World {
     pub population_milestones_fired: u32,
     // ---- Hall-of-fame snapshots (E.25.d, consumed by F.28) ----
     /// Creature with the highest size ever seen during this run (v6 §L).
+    /// D3: all creatures have the same constant size (FOUNDER_SIZE); field kept for
+    /// compatibility but size is always FOUNDER_SIZE.
     pub biggest_ever: Option<HallOfFame>,
     /// Last creature to die (highest death tick); updated on every death.
     pub last_survivor: Option<HallOfFame>,
@@ -97,8 +101,7 @@ pub struct World {
     pub longest_lived_age: u32,
     /// Snapshot of the first creature to travel ≥ 5u (captured at FirstToMove fire-site).
     pub first_mover_snapshot: Option<HallOfFame>,
-    /// Day-0 founder genome anchor for weirdness distance (captured in World::new).
-    pub founder_genome_anchor: Genome,
+    // D3: founder_genome_anchor removed. Only brain-based weirdness distance remains.
     /// Day-0 founder brain weights anchor for weirdness distance (captured in World::new).
     pub founder_brain_anchor: Vec<f32>,
     /// Per-creature vision cache (index-aligned with CreatureSoA). Milestone C.12.
@@ -152,11 +155,10 @@ impl World {
         let grass = GrassGrid::new(&mut rng, sliders.grass_initial_seed_count);
         let mut creatures = CreatureSoA::with_capacity(2048);
         let mut species = SpeciesRegistry::new();
-        let founder_genome = Genome::founder();
+        // D3: no Genome::founder(). Species registry takes only brain for anchor.
         let founder_brain = Brain::founder(&mut rng);
-        let founder_species = species.founder(&founder_genome, &founder_brain, 0);
-        // Capture day-0 anchors for weirdness distance (E.25.d).
-        let founder_genome_anchor = founder_genome.clone();
+        let founder_species = species.founder(&founder_brain, 0);
+        // Capture day-0 brain anchor for weirdness distance (E.25.d).
         let founder_brain_anchor = founder_brain.weights.clone();
         let cx = WORLD_SIZE * 0.5;
         let cy = WORLD_SIZE * 0.5;
@@ -168,7 +170,6 @@ impl World {
             founder_species,
             founder_species,
             0,
-            founder_genome,
             founder_brain,
         );
         // P2f: initialize founder's move_bias fields after push.
@@ -177,16 +178,12 @@ impl World {
         creatures.move_bias_reroll_at[0] = MOVE_BIAS_REROLL_INTERVAL; // tick=0, so tick + interval
         let mut grid = SpatialGrid::new();
         grid.rebuild(&creatures.x, &creatures.y);
-        // S29: initialize biggest_ever for the founder (founder never goes through
-        // handle_births, so we seed it here). Size = FOUNDER_SIZE from genome.
-        let founder_size = creatures.g_size[0];
+        // S29: initialize biggest_ever for the founder. D3: size is constant FOUNDER_SIZE.
         let founder_species_name = species.get(founder_species).name.clone();
         let initial_biggest_ever = Some(crate::hof::HallOfFame {
             creature_id: 0,
-            genome: creatures.genomes[0].clone(),
             species_name: founder_species_name,
             captured_tick: 0,
-            captured_size: founder_size,
             captured_age: 0,
         });
         Self {
@@ -216,7 +213,7 @@ impl World {
             longest_lived: None,
             longest_lived_age: 0,
             first_mover_snapshot: None,
-            founder_genome_anchor,
+            // D3: founder_genome_anchor removed.
             founder_brain_anchor,
             vision: vec![[0.0f32; VISION_LEN]], // 1 for the founder
             cell_to_carrion: CarrionIndex::new(),
@@ -423,8 +420,7 @@ impl World {
             self.creatures.energy[i] = parent_energy_after_cost - gift;
             let child_energy = gift;
 
-            let mut child_genome = self.creatures.genomes[i].clone();
-            child_genome.mutate_in_place(&mut self.rng, self.sliders.mutation_rate_multiplier);
+            // D3: no child_genome mutation. Brain mutation only.
             let child_brain = Brain::child_from(
                 &self.creatures.brains[i],
                 &mut self.rng,
@@ -441,20 +437,13 @@ impl World {
             self.next_creature_id += 1;
             let parent_species = self.creatures.species_id[i];
             let anchor = self.species.get(parent_species);
-            let dist = species_distance(
-                &child_genome,
-                &anchor.anchor_genome,
-                &child_brain.weights,
-                &anchor.anchor_brain_weights,
-            );
+            // D3: species_distance uses brain weights only.
+            let dist = species_distance(&child_brain.weights, &anchor.anchor_brain_weights);
 
             let (child_species_id, parent_species_id) = if dist > SPECIES_THRESHOLD {
-                let new_species_id = self.species.speciate(
-                    parent_species,
-                    child_genome.clone(),
-                    child_brain.weights.clone(),
-                    self.tick,
-                );
+                let new_species_id =
+                    self.species
+                        .speciate(parent_species, child_brain.weights.clone(), self.tick);
                 if self.events_enabled {
                     let new_name = self.species.get(new_species_id).name.clone();
                     self.events.push(Event {
@@ -480,7 +469,6 @@ impl World {
                 child_species_id,
                 parent_species_id,
                 self.tick,
-                child_genome,
                 child_brain,
             );
             // P2f: initialize child's move_bias fields (per amendments §A.5 ADD semantics).
@@ -489,14 +477,10 @@ impl World {
             self.creatures.move_bias_y[new_idx] = self.rng.symm();
             self.creatures.move_bias_reroll_at[new_idx] =
                 self.tick.saturating_add(MOVE_BIAS_REROLL_INTERVAL);
-            // S29: update biggest_ever immediately after each birth. Size is
-            // genome-determined and never changes after birth, so checking only
-            // here (and at World::new for the founder) replaces the old O(N)
-            // per-tick scan in energy_bookkeeping.
+            // S29: update biggest_ever immediately after each birth.
+            // D3: size is constant FOUNDER_SIZE for all creatures.
             let newborn_idx = self.creatures.len() - 1;
-            let newborn_size = self.creatures.g_size[newborn_idx];
-            let current_best = self.biggest_ever.as_ref().map_or(0.0, |h| h.captured_size);
-            if newborn_size > current_best {
+            if self.biggest_ever.is_none() {
                 let species_name = self
                     .species
                     .get(self.creatures.species_id[newborn_idx])
@@ -504,10 +488,8 @@ impl World {
                     .clone();
                 self.biggest_ever = Some(crate::hof::HallOfFame {
                     creature_id: self.creatures.id[newborn_idx],
-                    genome: self.creatures.genomes[newborn_idx].clone(),
                     species_name,
                     captured_tick: self.tick,
-                    captured_size: newborn_size,
                     captured_age: self.creatures.age[newborn_idx],
                 });
             }
@@ -614,18 +596,12 @@ mod tests {
         assert!(w.tick > 0);
     }
 
-    /// C.12 test 6: vision + movement loop under real-ish conditions.
-    /// Force the founder to have move_speed + eyes so that the vision loop
-    /// and movement cost accounting both exercise the hot paths.
+    /// D3: world runs without genome fields. Replaces old movement test
+    /// that patched genome.move_speed / genome.eye_count.
     #[test]
     fn world_runs_2000_ticks_with_movement() {
         let mut w = World::new("movement-smoke");
-        // Patch the founder's genome to have eyes and move_speed.
-        w.creatures.genomes[0].move_speed = 1.0;
-        w.creatures.genomes[0].vision_range = 30.0;
-        w.creatures.genomes[0].eye_count = 4;
-        w.creatures.resync_hot_mirrors_at(0); // perf-5: keep mirrors in sync after genome patch
-        w.creatures.recompute_eye_trig_at(0);
+        // D3: no genome patch needed — all creatures have MOVE_SPEED_MAX, 24 eyes, VISION_RANGE_MAX.
         for _ in 0..2000 {
             if !w.tick_once() {
                 break;
@@ -675,27 +651,22 @@ mod tests {
     // ---- D.19 smoke test ----
 
     /// D.19: 1000 creatures × 1000 ticks — no panic, energy bounded, varied actions.
+    /// D3: genome diversity removed; all creatures have constant traits.
     #[test]
     fn d19_thousand_creatures_thousand_ticks_no_explode() {
         use crate::brain::Brain;
-        use crate::genome::Genome;
         use crate::vision::VISION_LEN;
 
         let mut w = World::new("d19-smoke");
         let mut seeder = SimRng::from_string("d19-seed");
 
-        // Seed in 999 extra creatures with diverse genomes (founder is already there).
+        // Seed in 999 extra creatures (founder is already there).
+        // D3: no genome diversity — just varied brain initializations.
         for k in 0..999u64 {
-            let mut g = Genome::founder();
-            g.move_speed = seeder.uniform(0.0, MOVE_SPEED_MAX);
-            g.eye_count = EYE_VALID[seeder.index(EYE_VALID.len())];
-            g.vision_range = seeder.uniform(0.0, VISION_RANGE_MAX);
-            g.eat_efficiency = seeder.uniform(0.0, EAT_EFF_MAX);
-            g.scavenge_efficiency = seeder.uniform(0.0, SCAVENGE_EFF_MAX);
             let b = Brain::founder(&mut seeder);
             let x = seeder.uniform(10.0, WORLD_SIZE - 10.0);
             let y = seeder.uniform(10.0, WORLD_SIZE - 10.0);
-            w.creatures.push(k + 1, x, y, FOUNDER_ENERGY, 0, 0, 0, g, b);
+            w.creatures.push(k + 1, x, y, FOUNDER_ENERGY, 0, 0, 0, b);
             w.vision.push([0.0f32; VISION_LEN]);
         }
 
@@ -769,10 +740,9 @@ mod tests {
 
         // Manually push 9 extra creatures to hit threshold 10.
         for k in 1u64..10 {
-            let g = Genome::founder();
             let b = Brain::founder(&mut seeder);
             w.creatures
-                .push(k, 100.0 + k as f32, 100.0, FOUNDER_ENERGY, 0, 0, 0, g, b);
+                .push(k, 100.0 + k as f32, 100.0, FOUNDER_ENERGY, 0, 0, 0, b);
             w.vision.push([0.0f32; VISION_LEN]);
         }
         assert_eq!(w.population(), 10);
@@ -836,34 +806,26 @@ mod tests {
     }
 
     /// E.20 test 2: synthetic large-drift mutation creates a new species.
+    /// D3: species_distance uses brain weights only.
     #[test]
     fn e20_synthetic_large_drift_creates_new_species() {
         use crate::species::species_distance;
         let mut w = World::new("e20-big");
-        let parent_genome = w.creatures.genomes[0].clone();
         let parent_brain = w.creatures.brains[0].clone();
         let parent_species = w.creatures.species_id[0];
 
-        // Construct a child genome with a HUGE body drift (delta size +7).
-        let mut child_genome = parent_genome.clone();
-        child_genome.size = 8.0; // delta 7.0 / sigma=1.0 -> contribution ~49 to body_sq
-        child_genome.pigment_r = 1.0 - parent_genome.pigment_r;
-        let child_brain = parent_brain.clone();
+        // Construct a child brain with HUGE weight drift (set all weights to max).
+        let mut child_weights = parent_brain.weights.clone();
+        for wt in child_weights.iter_mut() {
+            *wt = 10.0;
+        }
 
-        let d = species_distance(
-            &child_genome,
-            &parent_genome,
-            &child_brain.weights,
-            &parent_brain.weights,
-        );
+        let d = species_distance(&child_weights, &parent_brain.weights);
         assert!(d > SPECIES_THRESHOLD, "synthetic d = {d}");
 
-        let new_species_id = w.species.speciate(
-            parent_species,
-            child_genome.clone(),
-            child_brain.weights.clone(),
-            w.tick,
-        );
+        let new_species_id = w
+            .species
+            .speciate(parent_species, child_weights.clone(), w.tick);
         assert_ne!(new_species_id, parent_species);
         assert_eq!(
             w.species.get(new_species_id).parent_id,
@@ -879,45 +841,36 @@ mod tests {
     /// E.20 test 3: end-to-end — with max mutation, a Speciation event eventually fires.
     /// Uses synthetic approach: run until speciation fires (checking events.all after each tick),
     /// restarting a fresh world if the first world goes extinct too quickly.
+    /// D3: species_distance uses brain weights only.
     #[test]
     fn e20_speciation_event_lands_in_log_when_threshold_crossed() {
         use crate::species::species_distance;
-        // Directly exercise the registry wiring with a synthetic big-drift genome
+        // Directly exercise the registry wiring with a synthetic big-drift brain
         // inserted via handle_births-style logic to confirm the event fires.
         // This is more reliable than depending on a live sim to accumulate drift.
         let mut w = World::new("e20-direct");
         w.events_enabled = true; // enable logging so we can assert event contents
 
-        // Confirm the speciate path fires: manufacture a child with huge drift
+        // Confirm the speciate path fires: manufacture a child with huge brain drift
         // and push it through the species check directly (mirrors handle_births).
         let parent_species = w.creatures.species_id[0];
         let anchor = w.species.get(parent_species);
-        let mut child_genome = anchor.anchor_genome.clone();
-        // Force huge drift: max size, flipped pigments.
-        child_genome.size = SIZE_MAX;
-        child_genome.pigment_r = 1.0 - child_genome.pigment_r;
-        child_genome.pigment_g = 1.0 - child_genome.pigment_g;
-        child_genome.pigment_b = 1.0 - child_genome.pigment_b;
-        let child_brain = w.creatures.brains[0].clone();
+        // Force huge drift: set all weights to large values.
+        let mut child_weights = anchor.anchor_brain_weights.clone();
+        for wt in child_weights.iter_mut() {
+            *wt = 10.0;
+        }
 
-        let dist = species_distance(
-            &child_genome,
-            &anchor.anchor_genome,
-            &child_brain.weights,
-            &anchor.anchor_brain_weights,
-        );
+        let dist = species_distance(&child_weights, &anchor.anchor_brain_weights);
         assert!(
             dist > SPECIES_THRESHOLD,
             "synthetic dist = {dist} should exceed {SPECIES_THRESHOLD}"
         );
 
         // Simulate what handle_births does:
-        let new_species_id = w.species.speciate(
-            parent_species,
-            child_genome.clone(),
-            child_brain.weights.clone(),
-            w.tick,
-        );
+        let new_species_id = w
+            .species
+            .speciate(parent_species, child_weights.clone(), w.tick);
         let new_name = w.species.get(new_species_id).name.clone();
         w.events.push(Event {
             tick: w.tick,
@@ -996,6 +949,7 @@ mod tests {
     }
 
     /// perf-1 T2: child's trig cache is populated on birth; parent's is unchanged.
+    /// D3: no genome fields needed.
     #[test]
     fn eye_trig_recomputed_on_birth() {
         use crate::brain::Brain;
@@ -1010,13 +964,12 @@ mod tests {
         let parent_trig_before: Vec<f32> = w.creatures.eye_trig[..SECTORS * 2].to_vec();
         w.handle_births();
         assert!(w.creatures.len() >= 2, "birth must have produced a child");
-        // Parent's cache unchanged (cache is genome-derived, parent genome
-        // didn't change).
+        // Parent's cache unchanged.
         assert_eq!(
             &w.creatures.eye_trig[..SECTORS * 2],
             parent_trig_before.as_slice()
         );
-        // Child's cache matches a fresh recompute from its genome.
+        // Child's cache matches a fresh recompute (D3: no genome needed for push).
         let child_idx = w.creatures.len() - 1;
         let mut expected = CreatureSoA::with_capacity(1);
         expected.push(
@@ -1027,8 +980,7 @@ mod tests {
             0,
             0,
             0,
-            w.creatures.genomes[child_idx].clone(),
-            Brain::founder(&mut SimRng::from_u64(0)), // brain irrelevant for cache
+            Brain::founder(&mut SimRng::from_u64(0)), // brain irrelevant for trig cache
         );
         let off = child_idx * SECTORS * 2;
         assert_eq!(

@@ -1,12 +1,15 @@
 //! Per-creature vision: 24 sector slots × 5 features.
 //! Filled in tick step 2 (v5 §3.5). Reused by D as NN inputs (v6 §E).
 //!
+//! D3: all creatures have a fixed 24-sector layout at VISION_RANGE_MAX.
+//! Eye count variation removed — every creature uses all 24 sectors (stride=1).
+//! Size slot uses constant FOUNDER_SIZE. Pigment slots use placeholder 0.5 gray
+//! (M5 owns NN-hash color hot-mirror).
+//!
 //! Design decisions pinned here for Milestone D inheritance:
-//! - Sector layout: for eye_count k > 0, active sectors are s ∈ {0, 24/k,
-//!   2·24/k, ...}. Slot-center angle = 2π × s / 24. Effective ray angle =
-//!   slot_center + eye_offsets[active_index] (per-slot additive offset).
-//! - Inactive sectors write zeros, never skipped — 120-float buffer is always
-//!   dense so D's NN sees a fixed layout.
+//! - Sector layout: all 24 sectors active (stride=1). Slot-center angle = 2π × s / 24.
+//!   Eye_trig values are computed once at push time and recomputed on vision_range change.
+//! - Inactive sectors write zeros — not applicable post-D3 (all sectors always active).
 //! - Carrion is seen as fixed gray (0.4, 0.4, 0.4) regardless of dead
 //!   creature's original pigment (v6 §4 "What changed vs v5").
 
@@ -16,7 +19,7 @@ use crate::creature::CreatureSoA;
 use crate::grid::SpatialGrid;
 use crate::torus::torus_delta;
 
-pub use crate::constants::{EYE_STRIDE, SECTORS};
+pub use crate::constants::SECTORS;
 pub const FEATURES_PER_SECTOR: usize = 5; // dist, size, r, g, b
 pub const VISION_LEN: usize = SECTORS * FEATURES_PER_SECTOR; // 120
 
@@ -27,6 +30,9 @@ pub type VisionBuf = [f32; VISION_LEN];
 pub const CARRION_R: f32 = 0.4;
 pub const CARRION_G: f32 = 0.4;
 pub const CARRION_B: f32 = 0.4;
+
+/// D3: placeholder pigment for live creatures. M5 owns NN-hash color hot-mirror.
+const CREATURE_PIGMENT: f32 = 0.5;
 
 /// CSR-layout per-cell carrion index. Replaces `Vec<Vec<u32>>` (S26).
 ///
@@ -153,40 +159,25 @@ impl<'a> VisionPass<'a> {
     }
 
     /// Fill `buf` for creature index `i`.
+    /// D3: all 24 sectors always active (eye_count = 24 constant, stride = 1).
+    /// Size uses FOUNDER_SIZE constant. Pigment uses placeholder gray.
     #[inline]
     fn fill_one(&self, i: usize, buf: &mut VisionBuf) {
-        // perf-5: hot reads use g_* mirrors; cold reads (eye_offsets, pigment_*) stay on &self.creatures.genomes[i].
         debug_assert_eq!(
             self.creatures.eye_trig.len(),
             self.creatures.x.len() * SECTORS * 2
         );
-        let eye_count_i = self.creatures.g_eye_count[i];
-        let vision_range_i = self.creatures.g_vision_range[i];
-        // Short-circuit: blind or zero-range creature → all zeros.
-        if eye_count_i == 0 || vision_range_i <= 0.0 {
-            *buf = [0.0; VISION_LEN];
-            return;
-        }
-
-        // Find eye_count position in EYE_VALID to get stride.
-        let k = eye_count_i as usize;
-        let k_idx = EYE_VALID.iter().position(|&v| v as usize == k).unwrap_or(0);
-        if k_idx == 0 {
-            // eye_count not in valid set → treat as blind
-            *buf = [0.0; VISION_LEN];
-            return;
-        }
-        let stride = EYE_STRIDE[k_idx] as usize; // 24 / k
+        // D3: all 24 sectors active at VISION_RANGE_MAX. No eye_count/vision_range gating.
+        let max_dist = VISION_RANGE_MAX;
         let ox = self.creatures.x[i];
         let oy = self.creatures.y[i];
-        let max_dist = vision_range_i;
 
-        // Zero the buffer first; inactive sectors stay zero.
+        // Zero the buffer first.
         *buf = [0.0; VISION_LEN];
 
         let trig_base = i * SECTORS * 2;
-        // Walk only active sectors using step_by(stride); read (dx, dy) from cache.
-        for s in (0..SECTORS).step_by(stride) {
+        // D3: stride = 1, all 24 sectors active.
+        for s in 0..SECTORS {
             let dx = self.creatures.eye_trig[trig_base + s * 2];
             let dy = self.creatures.eye_trig[trig_base + s * 2 + 1];
 
@@ -194,14 +185,15 @@ impl<'a> VisionPass<'a> {
                 let slot = s * FEATURES_PER_SECTOR;
                 match hit {
                     RayHit::Creature(j, dist) => {
-                        let pigment = &self.creatures.genomes[j]; // for pigment_r/g/b only (cold)
-                                                                  // Ensure dist is never near-zero (disambiguate from empty sector).
+                        // D3: size = FOUNDER_SIZE constant; pigment = 0.5 placeholder gray.
                         let d = dist.max(1e-4);
                         buf[slot] = d;
-                        buf[slot + 1] = self.creatures.g_size[j]; // perf-5: mirror
-                        buf[slot + 2] = pigment.pigment_r;
-                        buf[slot + 3] = pigment.pigment_g;
-                        buf[slot + 4] = pigment.pigment_b;
+                        buf[slot + 1] = FOUNDER_SIZE; // constant body size
+                        buf[slot + 2] = CREATURE_PIGMENT; // M5: placeholder gray
+                        buf[slot + 3] = CREATURE_PIGMENT;
+                        buf[slot + 4] = CREATURE_PIGMENT;
+                        // Suppress unused variable warning.
+                        let _ = j;
                     }
                     RayHit::Carrion(_, dist) => {
                         let d = dist.max(1e-4);
@@ -302,8 +294,9 @@ impl<'a> VisionPass<'a> {
                     if j == self_idx {
                         continue;
                     }
-                    let rj = self.creatures.g_size[j] * BODY_RADIUS_PER_SIZE; // perf-5: mirror
-                                                                              // Re-anchor target to the shortest-path position relative to the ray origin.
+                    // D3: body radius is constant — FOUNDER_SIZE * BODY_RADIUS_PER_SIZE.
+                    let rj = FOUNDER_SIZE * BODY_RADIUS_PER_SIZE;
+                    // Re-anchor target to the shortest-path position relative to the ray origin.
                     let tx_raw = self.creatures.x[j];
                     let ty_raw = self.creatures.y[j];
                     let (ddx, ddy) = torus_delta(tx_raw - ox, ty_raw - oy);
@@ -414,7 +407,6 @@ pub fn build_cell_to_carrion(carrion: &[Carrion], dst: &mut CarrionIndex) {
 mod tests {
     use super::*;
     use crate::brain::Brain;
-    use crate::genome::Genome;
     use crate::rng::SimRng;
 
     fn make_grid(creatures: &CreatureSoA) -> SpatialGrid {
@@ -429,54 +421,18 @@ mod tests {
         dst
     }
 
-    fn simple_creature(soa: &mut CreatureSoA, id: u64, x: f32, y: f32, genome: Genome) -> usize {
+    /// D3: push a creature without genome — uses only Brain.
+    fn simple_creature(soa: &mut CreatureSoA, id: u64, x: f32, y: f32) -> usize {
         let mut rng = SimRng::from_u64(42);
         let brain = Brain::founder(&mut rng);
-        soa.push(id, x, y, 100.0, 0, 0, 0, genome, brain)
-    }
-
-    fn genome_with_eyes(eye_count: u8, vision_range: f32) -> Genome {
-        let mut g = Genome::founder();
-        g.eye_count = eye_count;
-        g.vision_range = vision_range;
-        g.eye_offsets = [0.0; EYE_SLOTS];
-        g
-    }
-
-    #[test]
-    fn eye_count_zero_yields_all_zero_vision() {
-        let mut creatures = CreatureSoA::with_capacity(4);
-        // Creature A: blind
-        let mut ga = genome_with_eyes(0, 80.0);
-        ga.eye_count = 0;
-        simple_creature(&mut creatures, 0, 100.0, 100.0, ga);
-        // Creature B: in front of A
-        let gb = genome_with_eyes(4, 0.0); // irrelevant
-        simple_creature(&mut creatures, 1, 110.0, 100.0, gb);
-
-        let grid = make_grid(&creatures);
-        let carrion = vec![];
-        let cell_to_carrion = make_carrion_index(&carrion);
-        let pass = VisionPass {
-            creatures: &creatures,
-            carrion: &carrion,
-            grid: &grid,
-            cell_to_carrion: &cell_to_carrion,
-        };
-        let mut vision = vec![[0.0f32; VISION_LEN]; 2];
-        pass.run(&mut vision);
-        assert_eq!(
-            vision[0], [0.0f32; VISION_LEN],
-            "blind creature must see nothing"
-        );
+        soa.push(id, x, y, 100.0, 0, 0, 0, brain)
     }
 
     #[test]
     fn ray_hits_self_ignored() {
         // Single creature with full vision — should see nothing (self-hit excluded).
         let mut creatures = CreatureSoA::with_capacity(4);
-        let g = genome_with_eyes(24, 80.0);
-        simple_creature(&mut creatures, 0, 300.0, 300.0, g);
+        simple_creature(&mut creatures, 0, 300.0, 300.0);
 
         let grid = make_grid(&creatures);
         let carrion = vec![];
@@ -493,21 +449,13 @@ mod tests {
     }
 
     #[test]
-    fn ray_hits_creature_returns_color_and_distance() {
+    fn ray_hits_creature_returns_distance_and_constant_size() {
         // Creature A at (100,100) with eye_count=24, vision_range=80.
-        // Creature B at (110,100): 10 world units east. A's radius=1, B's radius=1.
+        // Creature B at (110,100): 10 world units east. Both radius=FOUNDER_SIZE*BODY_RADIUS_PER_SIZE=1.
         // Expected dist = 10 - 1 (A radius) - 1 (B radius) = 8 (to surface).
         let mut creatures = CreatureSoA::with_capacity(4);
-        let ga = genome_with_eyes(24, 80.0);
-        simple_creature(&mut creatures, 0, 100.0, 100.0, ga);
-
-        let mut gb = genome_with_eyes(0, 0.0);
-        gb.pigment_r = 0.9;
-        gb.pigment_g = 0.1;
-        gb.pigment_b = 0.2;
-        gb.size = 1.0;
-        gb.eye_count = 0;
-        simple_creature(&mut creatures, 1, 110.0, 100.0, gb);
+        simple_creature(&mut creatures, 0, 100.0, 100.0);
+        simple_creature(&mut creatures, 1, 110.0, 100.0);
 
         let grid = make_grid(&creatures);
         let carrion = vec![];
@@ -521,21 +469,31 @@ mod tests {
         let mut vision = vec![[0.0f32; VISION_LEN]; 2];
         pass.run(&mut vision);
 
-        // Sector 0 points east (theta = 0). With eye_count=24, stride=1,
-        // every sector is active, so sector 0 is active.
+        // Sector 0 points east (theta = 0). D3: stride=1, all sectors active.
         let slot = 0; // sector 0 × FEATURES_PER_SECTOR
         let dist = vision[0][slot];
         // ray_circle_hit: mx = 100 - 110 = -10, my = 0; dx=1, dy=0.
         // b = -10, c = 100 - 1 = 99. disc = 100 - 99 = 1. t = 10 - 1 = 9.
         assert!(dist > 0.0, "sector 0 should have a hit");
         assert!((dist - 9.0).abs() < 0.1, "expected dist ~9, got {dist}");
+        // D3: size slot uses FOUNDER_SIZE constant.
         assert!(
-            (vision[0][slot + 1] - 1.0).abs() < 1e-5,
-            "size should be 1.0"
+            (vision[0][slot + 1] - FOUNDER_SIZE).abs() < 1e-5,
+            "size should be FOUNDER_SIZE={FOUNDER_SIZE}"
         );
-        assert!((vision[0][slot + 2] - 0.9).abs() < 1e-5, "r should be 0.9");
-        assert!((vision[0][slot + 3] - 0.1).abs() < 1e-5, "g should be 0.1");
-        assert!((vision[0][slot + 4] - 0.2).abs() < 1e-5, "b should be 0.2");
+        // D3: pigment slots use placeholder gray (0.5).
+        assert!(
+            (vision[0][slot + 2] - CREATURE_PIGMENT).abs() < 1e-5,
+            "r should be 0.5"
+        );
+        assert!(
+            (vision[0][slot + 3] - CREATURE_PIGMENT).abs() < 1e-5,
+            "g should be 0.5"
+        );
+        assert!(
+            (vision[0][slot + 4] - CREATURE_PIGMENT).abs() < 1e-5,
+            "b should be 0.5"
+        );
 
         // Other sectors (1..23) should all be zero (nothing else to see).
         for s in 1..SECTORS {
@@ -547,9 +505,8 @@ mod tests {
     #[test]
     fn carrion_returns_gray() {
         let mut creatures = CreatureSoA::with_capacity(2);
-        // Creature A facing east with 4 eyes.
-        let ga = genome_with_eyes(4, 80.0);
-        simple_creature(&mut creatures, 0, 100.0, 100.0, ga);
+        // Creature A at (100, 100) with 24 active sectors.
+        simple_creature(&mut creatures, 0, 100.0, 100.0);
 
         // Carrion directly east at (115, 100).
         let carrion = vec![Carrion {
@@ -571,8 +528,7 @@ mod tests {
         let mut vision = vec![[0.0f32; VISION_LEN]];
         pass.run(&mut vision);
 
-        // eye_count=4 → stride=6, active sectors: 0, 6, 12, 18.
-        // Sector 0 points east → should see carrion.
+        // D3: stride=1, all sectors active. Sector 0 points east → should see carrion.
         let slot = 0; // sector 0 × FEATURES_PER_SECTOR
         let dist = vision[0][slot];
         assert!(dist > 0.0, "sector 0 should see carrion");
@@ -592,14 +548,10 @@ mod tests {
 
     #[test]
     fn out_of_range_returns_zero() {
-        // Target placed at distance 90 > vision_range 80 → sector should be zero.
+        // Target placed at distance 90 > VISION_RANGE_MAX (80) → sector should be zero.
         let mut creatures = CreatureSoA::with_capacity(4);
-        let ga = genome_with_eyes(24, 80.0); // range 80
-        simple_creature(&mut creatures, 0, 100.0, 100.0, ga);
-
-        let mut gb = Genome::founder();
-        gb.size = 1.0;
-        simple_creature(&mut creatures, 1, 191.0, 100.0, gb); // 91 units east
+        simple_creature(&mut creatures, 0, 100.0, 100.0);
+        simple_creature(&mut creatures, 1, 191.0, 100.0); // 91 units east
 
         let grid = make_grid(&creatures);
         let carrion = vec![];
@@ -628,14 +580,10 @@ mod tests {
     #[test]
     fn raycast_sees_across_seam() {
         let mut creatures = CreatureSoA::with_capacity(4);
-        // Creature A at (595, 300): facing east (sector 0, eye_count=24 so all sectors active).
-        let ga = genome_with_eyes(24, 80.0);
-        simple_creature(&mut creatures, 0, 595.0, 300.0, ga);
+        // Creature A at (595, 300): facing east (sector 0, all sectors active in D3).
+        simple_creature(&mut creatures, 0, 595.0, 300.0);
         // Creature B at (5, 300): 10 world units east via torus seam.
-        let mut gb = Genome::founder();
-        gb.size = 1.0;
-        gb.eye_count = 0;
-        simple_creature(&mut creatures, 1, 5.0, 300.0, gb);
+        simple_creature(&mut creatures, 1, 5.0, 300.0);
 
         let grid = make_grid(&creatures);
         let carrion = vec![];
