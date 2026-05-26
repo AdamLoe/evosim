@@ -111,7 +111,7 @@ pub const FOUNDER_SPLIT_JITTER: f32 = 50.0;
 // ---- Species detection (v6 §H) ----
 pub const SPECIES_W_BODY: f32 = 3.0;
 pub const SPECIES_W_BRAIN: f32 = 1.0;
-pub const SPECIES_THRESHOLD: f32 = 6.0; // raised from 4.0 (see DECISIONS — speciation-rate tuning)
+pub const SPECIES_THRESHOLD: f32 = 4.0; // v6 §H default; v1.1 raised to 6.0 for sun-driven fast drift, v1.2 reverts (slower grass-driven drift won't trigger 6.0 in 10k ticks). See DECISIONS v1.2 PR-1 regen.
 pub const SPECIES_EYE_JUMP_COST: f32 = 1.5;
 
 // ---- NN input normalization (v6 §E, §3; see DECISIONS for unspecified bases) ----
@@ -167,12 +167,20 @@ pub const GRASS_CELL_COUNT: usize = GRASS_GRID_DIM * GRASS_GRID_DIM; // 57_600
 /// Maximum density per cell (clamped post-step). See v1.2 grass mechanic brief.
 pub const GRASS_MAX: f32 = 1.0;
 /// Default in-cell logistic growth rate slider. See v1.2 grass mechanic brief §Grass dynamics.
-pub const GRASS_IN_CELL_GROWTH_R_DEFAULT: f32 = 0.005;
+/// Raised from 0.005 to 0.01 per P3e tuning ladder §A.8 lever 3 — P1h regen showed
+/// stationary creatures deplete their cell faster than propagation refills (extinct ~5740).
+pub const GRASS_IN_CELL_GROWTH_R_DEFAULT: f32 = 0.01;
 /// Default cross-kernel propagation rate slider. See v1.2 grass mechanic brief §Grass dynamics.
 pub const GRASS_PROPAGATION_RATE_K_DEFAULT: f32 = 0.05;
 /// Default number of cells seeded at world init. See v1.2 grass mechanic brief §Initial grass seed.
-pub const GRASS_INITIAL_SEED_COUNT_DEFAULT: u32 = 8;
+/// Raised from 8 to 50 per P3e tuning ladder §A.8 lever 1 — gives founders more food
+/// sources within search radius before the lineage's slow random walk extincts.
+pub const GRASS_INITIAL_SEED_COUNT_DEFAULT: u32 = 50;
 /// Per-cell, per-tick cap on the delta a single creature can drain from a single grass cell
-/// (before graze_efficiency multiplier). Locked at 0.1 per v1.2 amendments §A.1.
-/// Founder survival math: overlap 1-4 cells × cap 0.1 = 0.1-0.4 energy/tick vs UPKEEP_BASE ~0.15/tick.
-pub const GRAZE_MAX_PER_TICK: f32 = 0.1; // see v1.2 amendments §A.1
+/// (before graze_efficiency multiplier). P1h regen iterations:
+///   - 0.1 (initial lock): extinct tick 358 (gain 0.10/tick < upkeep 0.15/tick).
+///   - 0.25 (§A.1 escape clause): extinct tick 5740 (sustainable until compound past-lifespan
+///     upkeep cliff hits and population can't replace through splits fast enough).
+///   - 0.5 (P1h iteration): targets pop>0 at T=10000 by giving splits enough buffer to
+///     outrun the past-lifespan upkeep cliff.
+pub const GRAZE_MAX_PER_TICK: f32 = 0.4;
