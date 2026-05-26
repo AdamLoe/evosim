@@ -1,9 +1,7 @@
 //! World — owns SoA + grass + RNG + tick orchestration.
 //!
-//! Within-tick ordering follows v5 §3.5 exactly. Milestone B stubs vision
-//! and NN forward (no inputs needed yet) and uses a hardcoded action
-//! selector ("split if energy ≥ SPLIT_PLACEHOLDER, else photosynth").
-//! Milestone D swaps in the real NN forward pass.
+//! Within-tick ordering follows v5 §3.5. NN forward pass is live (Milestone D).
+//! D3: genome removed; D9: Action enum collapsed to {Graze, Eat, Split}.
 
 pub(crate) mod nn;
 pub(crate) mod tick;
@@ -83,7 +81,6 @@ pub struct World {
     pub(crate) scratch_gain: Vec<f32>,
     pub(crate) scratch_cooldown_set: Vec<bool>,
     pub(crate) scratch_attempted_eat: Vec<bool>,
-    pub(crate) scratch_attempted_scavenge: Vec<bool>,
     pub(crate) scratch_got_a_bite: Vec<bool>,
     /// S25: promoted eat-candidate buffer. Eliminates the per-Eat-per-tick
     /// `Vec::with_capacity(8)` allocation in eat_and_scavenge.
@@ -132,7 +129,6 @@ impl World {
             scratch_gain: Vec::new(),
             scratch_cooldown_set: Vec::new(),
             scratch_attempted_eat: Vec::new(),
-            scratch_attempted_scavenge: Vec::new(),
             scratch_got_a_bite: Vec::new(),
             scratch_eat_candidates: Vec::new(),
             scratch_dead: Vec::new(),
@@ -191,10 +187,10 @@ impl World {
             self.graze();
         }
 
-        // 6. Eat / scavenge resolution.
+        // 6. Eat resolution (scavenge action removed in D9).
         {
             crate::profile_span!(&self.profile, "tick.eat_scavenge");
-            self.eat_and_scavenge();
+            self.eat();
         }
 
         // 7. Grass propagation step (v1.2 grass mechanic).
@@ -215,7 +211,7 @@ impl World {
             self.energy_bookkeeping();
         }
 
-        // 9. Deaths → carrion. Span widened (R9) to cover the dead-removal
+        // 9. Deaths. Span widened (R9) to cover the dead-removal
         //    swap_remove loop and creatures.remove_indices (step 11, scales with die-off).
         {
             crate::profile_span!(&self.profile, "tick.collect_deaths");
@@ -245,8 +241,7 @@ impl World {
         }
 
         // 12. Step-12 tail: last_action promotion, tick bump, milestone events,
-        //     world-end check. Cheap today; future-proofs for Milestone E species
-        //     detection (R9: bookkeeping_tail span).
+        //     world-end check. Cheap today (R9: bookkeeping_tail span).
         {
             crate::profile_span!(&self.profile, "tick.bookkeeping_tail");
 
@@ -387,7 +382,6 @@ impl World {
             scratch_gain: Vec::new(),
             scratch_cooldown_set: Vec::new(),
             scratch_attempted_eat: Vec::new(),
-            scratch_attempted_scavenge: Vec::new(),
             scratch_got_a_bite: Vec::new(),
             scratch_eat_candidates: Vec::new(),
             scratch_dead: Vec::new(),

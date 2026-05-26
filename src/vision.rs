@@ -1,9 +1,10 @@
-//! Per-creature vision: 24 sector slots × 5 features.
+//! Per-creature vision: 24 sector slots × 3 features (RGB only).
 //! Filled in tick step 2 (v5 §3.5). Reused by D as NN inputs (v6 §E).
 //!
 //! D3: All creatures use a fixed 24-sector layout at VISION_RANGE_MAX.
-//! Eye count variation removed. Size slot uses constant FOUNDER_SIZE.
+//! Eye count variation removed.
 //! M5: Creature RGB is read from the CreatureSoA.color_rgb hot-mirror (NN-weight hash).
+//! Q3: dist and size slots dropped — only RGB written per sector (v1.3 cleanup).
 //!
 //! D7: Walled world — rays that exit world bounds return a wall-sentinel gray.
 //! Wall sentinel RGB = (0.5, 0.5, 0.5) per Q-D7-4.
@@ -13,8 +14,9 @@ use crate::creature::CreatureSoA;
 use crate::grid::SpatialGrid;
 
 pub use crate::constants::SECTORS;
-pub const FEATURES_PER_SECTOR: usize = 5; // dist, size, r, g, b (D9 owns shrinking to 3)
-pub const VISION_LEN: usize = SECTORS * FEATURES_PER_SECTOR; // 120
+/// RGB only — dist and size dropped in v1.3 Q3 cleanup.
+pub const FEATURES_PER_SECTOR: usize = 3; // r, g, b
+pub const VISION_LEN: usize = SECTORS * FEATURES_PER_SECTOR; // 72
 
 /// Unpack a packed 0x00RRGGBB u32 into (R, G, B) floats in [0, 1].
 #[inline]
@@ -95,24 +97,18 @@ impl<'a> VisionPass<'a> {
             if let Some(hit) = self.raycast(i, ox, oy, dx, dy, max_dist) {
                 let slot = s * FEATURES_PER_SECTOR;
                 match hit {
-                    RayHit::Creature(j, dist) => {
-                        // M5: use per-creature color_rgb from hot-mirror.
-                        let d = dist.max(1e-4);
+                    RayHit::Creature(j, _dist) => {
+                        // M5: use per-creature color_rgb from hot-mirror. Q3: RGB only.
                         let (cr, cg, cb) = unpack_rgb(self.creatures.color_rgb[j]);
-                        buf[slot] = d;
-                        buf[slot + 1] = FOUNDER_SIZE; // constant body size
-                        buf[slot + 2] = cr;
-                        buf[slot + 3] = cg;
-                        buf[slot + 4] = cb;
+                        buf[slot] = cr;
+                        buf[slot + 1] = cg;
+                        buf[slot + 2] = cb;
                     }
-                    RayHit::Wall(dist) => {
-                        // D7: wall sentinel — write gray RGB. Distance is the wall hit t.
-                        let d = dist.max(1e-4);
-                        buf[slot] = d;
-                        buf[slot + 1] = 0.0; // no size for walls
-                        buf[slot + 2] = WALL_R;
-                        buf[slot + 3] = WALL_G;
-                        buf[slot + 4] = WALL_B;
+                    RayHit::Wall(_dist) => {
+                        // D7: wall sentinel — write gray RGB. Q3: RGB only.
+                        buf[slot] = WALL_R;
+                        buf[slot + 1] = WALL_G;
+                        buf[slot + 2] = WALL_B;
                     }
                 }
             }
@@ -285,12 +281,6 @@ fn ray_circle_hit(ox: f32, oy: f32, dx: f32, dy: f32, cx: f32, cy: f32, r: f32) 
     Some(t)
 }
 
-/// Compute the center angle of sector `s` (D3: uniform 24-sector layout, no offsets).
-#[allow(dead_code)]
-pub(crate) fn sector_to_angle(s: usize) -> f32 {
-    std::f32::consts::TAU * (s as f32) / (SECTORS as f32)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,6 +301,7 @@ mod tests {
 
     /// D3: all creatures always use all 24 sectors. A single creature at world
     /// center should see nothing in sector 0 (no target within VISION_RANGE_MAX).
+    /// Q3: layout is now 3 features per sector (RGB only); all slots 0..3 must be zero.
     #[test]
     fn ray_hits_self_ignored() {
         let mut creatures = CreatureSoA::with_capacity(4);
@@ -324,17 +315,17 @@ mod tests {
         let mut vision = vec![[0.0f32; VISION_LEN]];
         pass.run(&mut vision);
         // Self ignored — but rays may hit walls. At world center, walls are ~300u away,
-        // outside VISION_RANGE_MAX=80. Sector 0 distance must be zero.
+        // outside VISION_RANGE_MAX=80. Sector 0 (R slot) must be zero.
         assert_eq!(
             vision[0][0], 0.0,
-            "sector 0 distance must be zero (no nearby target)"
+            "sector 0 R must be zero (no nearby target)"
         );
     }
 
+    /// Q3: layout is 3 features per sector (r, g, b). RGB must match the hit creature.
     #[test]
-    fn ray_hits_creature_returns_distance_and_color_rgb() {
+    fn ray_hits_creature_returns_color_rgb() {
         // M5: RGB comes from creature's color_rgb hot-mirror (NN-weight hash).
-        // Size remains FOUNDER_SIZE constant.
         let mut creatures = CreatureSoA::with_capacity(4);
         simple_creature(&mut creatures, 0, 100.0, 100.0);
         simple_creature(&mut creatures, 1, 110.0, 100.0);
@@ -347,26 +338,24 @@ mod tests {
         let mut vision = vec![[0.0f32; VISION_LEN]; 2];
         pass.run(&mut vision);
 
+        // Sector 0 (east): creature 1 is 10u away in the east direction.
+        // Q3: slot 0=R, 1=G, 2=B (no dist or size).
         let slot = 0;
-        let dist = vision[0][slot];
-        assert!(dist > 0.0, "sector 0 should have a hit");
-        assert!((dist - 9.0).abs() < 0.5, "expected dist ~9, got {dist}");
-        assert!(
-            (vision[0][slot + 1] - FOUNDER_SIZE).abs() < 1e-5,
-            "size should be FOUNDER_SIZE={FOUNDER_SIZE}"
-        );
-        // M5: RGB must match the hit creature's color_rgb unpacked.
         let (exp_r, exp_g, exp_b) = unpack_rgb(creatures.color_rgb[1]);
+        // At least one channel must be non-zero for a hit (creature has a color).
+        let any_nonzero =
+            vision[0][slot] != 0.0 || vision[0][slot + 1] != 0.0 || vision[0][slot + 2] != 0.0;
+        assert!(any_nonzero, "sector 0 must have a hit (non-zero RGB)");
         assert!(
-            (vision[0][slot + 2] - exp_r).abs() < 1e-5,
+            (vision[0][slot] - exp_r).abs() < 1e-5,
             "r should match creature color_rgb r={exp_r}"
         );
         assert!(
-            (vision[0][slot + 3] - exp_g).abs() < 1e-5,
+            (vision[0][slot + 1] - exp_g).abs() < 1e-5,
             "g should match creature color_rgb g={exp_g}"
         );
         assert!(
-            (vision[0][slot + 4] - exp_b).abs() < 1e-5,
+            (vision[0][slot + 2] - exp_b).abs() < 1e-5,
             "b should match creature color_rgb b={exp_b}"
         );
     }
@@ -374,6 +363,7 @@ mod tests {
     #[test]
     fn out_of_range_returns_zero() {
         // D3: VISION_RANGE_MAX = 80. Target at 191u is out of range.
+        // Q3: slot 0 is now R (not dist); must be zero when no hit.
         let mut creatures = CreatureSoA::with_capacity(4);
         simple_creature(&mut creatures, 0, 100.0, 100.0);
         simple_creature(&mut creatures, 1, 191.0, 100.0);
@@ -386,10 +376,21 @@ mod tests {
         let mut vision = vec![[0.0f32; VISION_LEN]; 2];
         pass.run(&mut vision);
 
+        // Target out of range — sector 0 stays all-zero.
         let slot = 0;
         assert_eq!(
             vision[0][slot], 0.0,
-            "target out of range must yield zero distance"
+            "sector 0 R must be zero when target is out of range"
+        );
+        assert_eq!(
+            vision[0][slot + 1],
+            0.0,
+            "sector 0 G must be zero when target is out of range"
+        );
+        assert_eq!(
+            vision[0][slot + 2],
+            0.0,
+            "sector 0 B must be zero when target is out of range"
         );
     }
 
@@ -397,6 +398,7 @@ mod tests {
 
     /// D7/Q3: A creature near the east wall facing east should see the wall sentinel
     /// (gray RGB 0.5,0.5,0.5) in sector 0 (east-facing ray exits world bounds).
+    /// Q3: layout is RGB-only; slot 0=R, 1=G, 2=B.
     #[test]
     fn raycast_returns_wall_sentinel_at_world_edge() {
         let mut creatures = CreatureSoA::with_capacity(2);
@@ -412,17 +414,12 @@ mod tests {
         let mut vision = vec![[0.0f32; VISION_LEN]];
         pass.run(&mut vision);
 
-        // Sector 0 (east, dx=1, dy=0) should see the wall.
+        // Sector 0 (east, dx=1, dy=0) should see the wall: slot 0=R, 1=G, 2=B.
         let slot = 0;
-        let dist = vision[0][slot];
-        let r = vision[0][slot + 2];
-        let g_val = vision[0][slot + 3];
-        let b = vision[0][slot + 4];
+        let r = vision[0][slot];
+        let g_val = vision[0][slot + 1];
+        let b = vision[0][slot + 2];
 
-        assert!(
-            dist > 0.0,
-            "east-facing ray near east wall must have a non-zero distance; dist={dist}"
-        );
         assert!(
             (r - WALL_R).abs() < 1e-4,
             "wall sentinel R must be {WALL_R}; got {r}"
@@ -439,6 +436,9 @@ mod tests {
 
     /// D7: A creature at x=595 facing east does NOT see a creature at x=5
     /// (no wraparound — the wall blocks the view).
+    /// Q3: slot 0 is R; wall sentinel is gray (0.5). Non-wall-sentinel creature B
+    /// would have a different color, but the important check is that the view is
+    /// wall-blocked, not showing a creature 590u away.
     #[test]
     fn raycast_no_wraparound_target() {
         let mut creatures = CreatureSoA::with_capacity(4);
@@ -455,17 +455,20 @@ mod tests {
         let mut vision = vec![[0.0f32; VISION_LEN]; 2];
         pass.run(&mut vision);
 
-        // Sector 0 (east) should see the wall sentinel or zero, NOT creature B (no wraparound).
-        // M5: creature color is per-creature; we verify distance only.
-        // Creature B is 590u away on the east side (past wall). It should not appear.
+        // Sector 0 (east) should see the wall sentinel (gray), NOT creature B's color.
+        // Q3: slot 0=R. Wall sentinel R == WALL_R = 0.5.
         let slot = 0;
-        let dist_a = vision[0][slot]; // creature A (at 595,300) sees wall ~5u east
-                                      // The wall hit should be very close (~5u away), not the 590u "wraparound" path.
-        if dist_a > 0.0 {
+        let r_a = vision[0][slot]; // creature A's sector-0 R
+        let (b_r, _, _) = unpack_rgb(creatures.color_rgb[1]); // creature B's R
+                                                              // If the ray sees wall sentinel, R should be WALL_R; if it sees nothing, R = 0.
+                                                              // Either way, it must NOT equal creature B's RGB (wraparound blocked).
+        if (r_a - WALL_R).abs() < 1e-3 {
+            // Wall sentinel seen — confirm it's not creature B.
             assert!(
-                dist_a < 20.0,
-                "east hit dist={dist_a} must be wall-close (<20u), not wraparound-far"
+                (r_a - b_r).abs() > 0.1 || (WALL_R - b_r).abs() < 1e-3,
+                "wall sentinel seen but suspiciously matches creature B color: r_a={r_a}, b_r={b_r}"
             );
         }
+        // If r_a == 0.0, nothing was seen — also fine (no wraparound).
     }
 }

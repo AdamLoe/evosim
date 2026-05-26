@@ -1,10 +1,10 @@
 //! Per-tick step bodies that mutate `World`. All as `impl World` blocks; private to the `crate::world` parent.
 //!
 //! D3: Genome removed. All body trait reads replaced with constants:
-//!   g_graze_eff → 1.0 (GRAZE_EFF_CONSTANT), g_size → FOUNDER_SIZE,
+//!   g_graze_eff → 1.0, g_size → FOUNDER_SIZE,
 //!   g_move_speed → MOVE_SPEED_MAX, g_eye_count/g_vision_range → constant 24/VISION_RANGE_MAX,
-//!   g_eat_eff/g_scav_eff → 1.0 (always enabled), armor/bite_reach → 0.0/BITE_REACH_CONSTANT.
-//!   HallOfFame snapshots no longer include genome or captured_size.
+//!   g_eat_eff → 1.0 (always enabled), armor/bite_reach → 0.0/FOUNDER_BITE_REACH.
+//! D9: Scavenge action removed; eat_and_scavenge renamed to eat.
 
 use super::World;
 use crate::constants::*;
@@ -173,7 +173,8 @@ impl World {
         }
     }
 
-    pub(crate) fn eat_and_scavenge(&mut self) {
+    /// Eat resolution. Scavenge action removed in D9; function renamed from eat_and_scavenge.
+    pub(crate) fn eat(&mut self) {
         let n = self.creatures.len();
         if n == 0 {
             return;
@@ -182,19 +183,16 @@ impl World {
         self.scratch_gain.resize(n, 0.0);
         self.scratch_cooldown_set.resize(n, false);
         self.scratch_attempted_eat.resize(n, false);
-        self.scratch_attempted_scavenge.resize(n, false);
         self.scratch_got_a_bite.resize(n, false);
         self.scratch_damage.fill(0.0);
         self.scratch_gain.fill(0.0);
         self.scratch_cooldown_set.fill(false);
         self.scratch_attempted_eat.fill(false);
-        self.scratch_attempted_scavenge.fill(false);
         self.scratch_got_a_bite.fill(false);
 
-        // D3: all creatures have eat_eff = 1.0, scav_eff = 1.0, armor = 0.0,
-        //     bite_reach = BITE_REACH_CONSTANT, size = FOUNDER_SIZE (all constant).
+        // D3: all creatures have eat_eff = 1.0, armor = 0.0,
+        //     bite_reach = FOUNDER_BITE_REACH, size = FOUNDER_SIZE (all constant).
         let eat_eff = 1.0_f32;
-        let _scav_eff = 1.0_f32; // D2: carrion deleted; scav_eff kept as dead constant
         let size = FOUNDER_SIZE;
         let bite_reach = FOUNDER_BITE_REACH;
         let armor = 0.0_f32;
@@ -271,7 +269,7 @@ impl World {
     pub(crate) fn energy_bookkeeping(&mut self) {
         // D3: all variable body-trait upkeep terms removed. Flat formula:
         //   up = UPKEEP_BASE + UPKEEP_NN_FIXED + UPKEEP_GUT + mouth_tax
-        // (UPKEEP_GUT for scav_eff always > 0, mouth_tax for eat_eff always > 0)
+        // (UPKEEP_GUT for gut always present, mouth_tax for eat_eff always > 0)
         let mouth_tax = self.sliders.mouth_tax;
         let up_base = UPKEEP_BASE + UPKEEP_NN_FIXED + UPKEEP_GUT + mouth_tax;
         for i in 0..self.creatures.len() {
@@ -340,8 +338,8 @@ mod tests {
     }
 
     // ---- E.25.d tests ----
-    // NOTE: biggest_ever, weirdest, longest_lived, last_survivor were HallOfFame fields
-    // deleted by D5. These tests are replaced by simplified death-tracking tests.
+    // NOTE: HallOfFame fields (biggest_ever, weirdest, longest_lived, last_survivor)
+    // were deleted in D5. These tests cover simplified death-tracking.
 
     /// D3/D5: collect_deaths correctly identifies dead creatures.
     #[test]
@@ -426,7 +424,6 @@ mod tests {
             assert!(w.scratch_gain.len() >= floor);
             assert!(w.scratch_cooldown_set.len() >= floor);
             assert!(w.scratch_attempted_eat.len() >= floor);
-            assert!(w.scratch_attempted_scavenge.len() >= floor);
             assert!(w.scratch_got_a_bite.len() >= floor);
         }
     }
@@ -784,7 +781,7 @@ mod tests {
     }
 
     /// P3a test: basic bite transfer — adjacent predator/prey, armor=0, eff=1.0, bite_frac=0.5.
-    /// D3: all creatures have eat_eff=1.0, armor=0.0 as constants. D2: no carrion.
+    /// D3: all creatures have eat_eff=1.0, armor=0.0 as constants.
     #[test]
     fn p3a_eat_bite_basic_transfer() {
         use crate::brain::Brain;
@@ -801,7 +798,7 @@ mod tests {
         let prey_brain = Brain::founder(&mut rng);
         let pred_x = w.creatures.x[0];
         let pred_y = w.creatures.y[0];
-        // Place prey within bite reach (BITE_REACH_CONSTANT * FOUNDER_SIZE).
+        // Place prey within bite reach (FOUNDER_BITE_REACH * FOUNDER_SIZE).
         w.creatures
             .push(1, pred_x + 1.5, pred_y, 100.0, 0, prey_brain);
         w.vision.push([0.0f32; VISION_LEN]);
@@ -811,7 +808,7 @@ mod tests {
         let pred_energy_before = w.creatures.energy[0];
         let prey_energy_before = w.creatures.energy[1];
 
-        w.eat_and_scavenge();
+        w.eat();
 
         let pred_energy_after = w.creatures.energy[0];
         let prey_energy_after = w.creatures.energy[1];
@@ -858,7 +855,7 @@ mod tests {
         let prey_energy_before = w.creatures.energy[1];
         let pred_energy_before = w.creatures.energy[0];
 
-        w.eat_and_scavenge();
+        w.eat();
 
         let prey_change = (w.creatures.energy[1] - prey_energy_before).abs();
         let pred_change = pred_energy_before - w.creatures.energy[0];
