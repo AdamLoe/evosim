@@ -495,8 +495,7 @@ impl World {
     }
 
     /// Test-only deep clone of the World. Clones all SoA data and resets
-    /// transient state (vision, scratch bufs, spatial grid) identically to
-    /// what `from_save_v1` used to do. Only available under `#[cfg(test)]`.
+    /// transient state (vision, scratch bufs, spatial grid). Only available under `#[cfg(test)]`.
     #[cfg(test)]
     pub fn clone_for_test(&self) -> World {
         let n = self.creatures.len();

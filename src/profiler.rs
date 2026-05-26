@@ -6,7 +6,7 @@
 //! Determinism: this module performs no RNG calls and only reads
 //! `web_sys::Performance::now()` (or a native Instant clock in tests).
 //! Mutation is confined to its own state. Profiler state is excluded from
-//! the v6 §M snapshot hash and from SaveV1.
+//! the v6 §M snapshot hash.
 //!
 //! Design decisions (see docs/plans/perf-timing.md §D1–D10):
 //! - D2: AtomicBool runtime toggle, not cfg(feature).
@@ -15,7 +15,7 @@
 //! - D5: JSON shape stable contract; total_us and call_count RECOMPUTED per report.
 //! - D8: RAII SpanGuard (RAII), not closure wrap.
 //! - D9: Default OFF; toggle state is never persisted.
-//! - D10: Zero RNG, excluded from hash and save.
+//! - D10: Zero RNG, excluded from hash.
 
 // profiler: rolling window duration in milliseconds
 pub const WINDOW_MS: u32 = 60_000;
