@@ -2,7 +2,6 @@
 //! shapes so the web shell can iterate independently.
 
 use crate::constants::*;
-use crate::torus::torus_dist_sq;
 use crate::world::World;
 use wasm_bindgen::prelude::*;
 
@@ -151,11 +150,6 @@ impl WorldHandle {
     #[wasm_bindgen(getter)]
     pub fn population(&self) -> u32 {
         self.inner.population()
-    }
-
-    #[wasm_bindgen(getter)]
-    pub fn species_count(&self) -> u32 {
-        self.inner.live_species_count
     }
 
     #[wasm_bindgen(getter)]
@@ -338,13 +332,6 @@ impl WorldHandle {
         true
     }
 
-    /// JSON array of alive species (population > 0). Shape: SpeciesRow[].
-    /// O(N+S). Called at 1Hz from the rail poll (E.21).
-    #[wasm_bindgen]
-    pub fn species_list_json(&self) -> String {
-        self.species_list_json_inner()
-    }
-
     /// Index-aligned Float64Array of creature stable IDs (u64 as f64).
     /// Safe: u64 IDs stay below 2^53 in any v1 session.
     #[wasm_bindgen]
@@ -428,18 +415,10 @@ impl WorldHandle {
             return None;
         }
         let g = &self.inner.creatures.genomes[i];
-        let sp = self.inner.species.get(self.inner.creatures.species_id[i]);
-        let parent_name: Option<String> = sp
-            .parent_id
-            .map(|pid| self.inner.species.get(pid).name.clone());
         let action_name = format!("{:?}", self.inner.creatures.action_this_tick[i]);
         let json = serde_json::json!({
             "index": idx,
             "id": self.inner.creatures.id[i],
-            "species_id": sp.id,
-            "species_name": sp.name,
-            "parent_species_id": self.inner.creatures.parent_species_id[i],
-            "parent_species_name": parent_name,
             "x": self.inner.creatures.x[i],
             "y": self.inner.creatures.y[i],
             "age": self.inner.creatures.age[i],
@@ -515,15 +494,11 @@ impl WorldHandle {
         sum as f32 / n as f32
     }
 
-    /// Stats sample: [tick, population, live_species_count] as f32.
+    /// Stats sample: [tick, population] as f32.
     /// O(1). Called every 10 sim-ticks from the Stats panel (E.23).
     #[wasm_bindgen]
     pub fn stats_sample(&self) -> Box<[f32]> {
-        Box::new([
-            self.inner.tick as f32,
-            self.inner.population() as f32,
-            self.inner.live_species_count as f32,
-        ])
+        Box::new([self.inner.tick as f32, self.inner.population() as f32])
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -571,38 +546,6 @@ fn wasm_now_ms() -> f64 {
     epoch.elapsed().as_secs_f64() * 1000.0
 }
 
-// ─── Non-wasm helpers ─────────────────────────────────────────────────────────
-
-/// Non-wasm helper extracted for native tests. Returns species_list JSON string.
-/// Filters out species with zero population (extinct or never populated).
-impl WorldHandle {
-    pub fn species_list_json_inner(&self) -> String {
-        let mut counts: std::collections::HashMap<u32, u32> = Default::default();
-        for &sid in &self.inner.creatures.species_id {
-            *counts.entry(sid).or_default() += 1;
-        }
-        let rows: Vec<_> = self
-            .inner
-            .species
-            .list
-            .iter()
-            .filter_map(|sp| {
-                let pop = counts.get(&sp.id).copied().unwrap_or(0);
-                if pop == 0 {
-                    return None;
-                }
-                Some(serde_json::json!({
-                    "id": sp.id,
-                    "name": sp.name,
-                    "population": pop,
-                    "parent_id": sp.parent_id,
-                }))
-            })
-            .collect();
-        serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into())
-    }
-}
-
 /// Per-creature float count in [`WorldHandle::creatures_buffer`].
 /// v1.1 layout (audit S21): 11 floats.
 /// Offset 0..6: x, y, radius_world, pigment_r, pigment_g, pigment_b.
@@ -640,35 +583,6 @@ mod tests {
         handle.creature_buf.resize(n * stride, 0.0);
         assert_eq!(handle.creature_buf.len(), n * stride);
         assert_eq!(handle.creature_buf.len(), 11); // 1 creature × 11 floats
-    }
-
-    /// E.21: species_list_json_inner filters out extinct (zero-population) species.
-    #[test]
-    fn species_list_json_filters_extinct() {
-        let mut handle = WorldHandle::new("e21-species");
-        // Initially 1 creature, 1 live species. species_list should return 1 row.
-        let json = handle.species_list_json_inner();
-        let rows: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
-        assert_eq!(rows.len(), 1, "should have 1 live species at start");
-        assert_eq!(rows[0]["name"], "Lineage A");
-        assert_eq!(rows[0]["population"], 1);
-
-        // Create a second species via speciate but don't put any creature in it.
-        // It should NOT appear in species_list_json.
-        use crate::brain::Brain;
-        use crate::genome::Genome;
-        use crate::rng::SimRng;
-        let mut rng = SimRng::from_u64(42);
-        let g = Genome::founder();
-        let b = Brain::founder(&mut rng);
-        let _phantom_id = handle.inner.species.speciate(0, g, b.weights, 0);
-        let json2 = handle.species_list_json_inner();
-        let rows2: Vec<serde_json::Value> = serde_json::from_str(&json2).unwrap();
-        assert_eq!(
-            rows2.len(),
-            1,
-            "phantom species (no creatures) must be filtered out"
-        );
     }
 
     /// E.21: creature_inspect_json returns None for out-of-range idx.

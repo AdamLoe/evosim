@@ -41,8 +41,6 @@ pub struct CreatureSoA {
     pub age: Vec<u32>,
     pub digestion_cooldown: Vec<u32>,
     pub cumulative_upkeep: Vec<f32>,
-    pub species_id: Vec<u32>,
-    pub parent_species_id: Vec<u32>,
     pub last_action: Vec<Action>,
     pub action_this_tick: Vec<Action>,
     pub max_size_reached: Vec<f32>,
@@ -103,8 +101,6 @@ impl CreatureSoA {
             age: Vec::with_capacity(cap),
             digestion_cooldown: Vec::with_capacity(cap),
             cumulative_upkeep: Vec::with_capacity(cap),
-            species_id: Vec::with_capacity(cap),
-            parent_species_id: Vec::with_capacity(cap),
             last_action: Vec::with_capacity(cap),
             action_this_tick: Vec::with_capacity(cap),
             max_size_reached: Vec::with_capacity(cap),
@@ -141,8 +137,6 @@ impl CreatureSoA {
         x: f32,
         y: f32,
         energy: f32,
-        species_id: u32,
-        parent_species_id: u32,
         birth_tick: u32,
         genome: Genome,
         brain: Brain,
@@ -156,8 +150,6 @@ impl CreatureSoA {
         self.age.push(0);
         self.digestion_cooldown.push(0);
         self.cumulative_upkeep.push(0.0);
-        self.species_id.push(species_id);
-        self.parent_species_id.push(parent_species_id);
         self.last_action.push(Action::Graze);
         self.action_this_tick.push(Action::Graze);
         self.max_size_reached.push(genome.size);
@@ -192,8 +184,6 @@ impl CreatureSoA {
             self.age.swap_remove(k);
             self.digestion_cooldown.swap_remove(k);
             self.cumulative_upkeep.swap_remove(k);
-            self.species_id.swap_remove(k);
-            self.parent_species_id.swap_remove(k);
             self.last_action.swap_remove(k);
             self.action_this_tick.swap_remove(k);
             self.max_size_reached.swap_remove(k);
@@ -316,7 +306,7 @@ mod tests {
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         ];
         let brain = Brain::founder(&mut SimRng::from_u64(0));
-        soa.push(1, 0.0, 0.0, 1.0, 0, 0, 0, g.clone(), brain);
+        soa.push(1, 0.0, 0.0, 1.0, 0, g.clone(), brain);
 
         // eye_count=4 → stride=6, active sectors 0, 6, 12, 18.
         for (active_index, &s) in [0usize, 6, 12, 18].iter().enumerate() {
@@ -342,7 +332,7 @@ mod tests {
         for i in 0..4u64 {
             let g = Genome::founder();
             let b = Brain::founder(&mut rng);
-            soa.push(i, i as f32 * 10.0, 0.0, 100.0, 0, 0, 0, g, b);
+            soa.push(i, i as f32 * 10.0, 0.0, 100.0, 0, g, b);
         }
         assert_eq!(soa.eye_trig.len(), 4 * SECTORS * 2);
         soa.remove_indices(&[1]);
@@ -365,7 +355,7 @@ mod tests {
                 g.mutate_in_place(&mut rng, 1.0);
             }
             let brain = Brain::founder(&mut rng);
-            soa.push(k as u64, 0.0, 0.0, 1.0, 0, 0, 0, g, brain);
+            soa.push(k as u64, 0.0, 0.0, 1.0, 0, g, brain);
         }
         // Invariant check.
         for i in 0..soa.len() {
@@ -390,17 +380,7 @@ mod tests {
             let mut g = Genome::founder();
             g.size = (k as f32) + 1.0;
             g.eye_count = if k % 2 == 0 { 4 } else { 6 };
-            soa.push(
-                k as u64,
-                0.0,
-                0.0,
-                1.0,
-                0,
-                0,
-                0,
-                g,
-                Brain::founder(&mut rng),
-            );
+            soa.push(k as u64, 0.0, 0.0, 1.0, 0, g, Brain::founder(&mut rng));
         }
         soa.remove_indices(&[1, 3, 5, 7]);
         assert_eq!(soa.len(), 6);

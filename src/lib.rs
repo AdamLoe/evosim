@@ -10,7 +10,6 @@ pub(crate) mod grass;
 pub(crate) mod grid;
 pub(crate) mod profiler;
 pub(crate) mod rng;
-pub(crate) mod species;
 pub(crate) mod vision;
 pub mod world; // used by tests/acceptance.rs
 

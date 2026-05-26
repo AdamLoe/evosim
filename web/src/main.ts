@@ -1,4 +1,10 @@
-import init, { WorldHandle, creature_stride, initThreadPool } from "../wasm/evosim";
+import init, { WorldHandle, creature_stride } from "../wasm/evosim";
+// initThreadPool is only exported when wasm is built with --features threads.
+// Cast via unknown to avoid TS2614 on non-threaded builds.
+import * as _wasmMod from "../wasm/evosim";
+const initThreadPool = (_wasmMod as unknown as Record<string, unknown>)["initThreadPool"] as
+  | ((n: number) => Promise<void>)
+  | undefined;
 import { makeCamera, renderWorld } from "./render";
 import { attachCameraControls } from "./camera";
 import { installRail, pollRail, highlights } from "./rail/index";
@@ -58,7 +64,7 @@ async function main(): Promise<void> {
   // browsers without SharedArrayBuffer skip initThreadPool — the wasm
   // still works, just sequentially (rayon falls back to the calling
   // thread when no workers are registered). See docs/plans/perf-4-threads.md.
-  if (typeof SharedArrayBuffer !== "undefined") {
+  if (typeof SharedArrayBuffer !== "undefined" && initThreadPool) {
     try {
       await initThreadPool(navigator.hardwareConcurrency);
     } catch (e) {
@@ -145,7 +151,7 @@ async function main(): Promise<void> {
         lastStatusUpdate = now;
         const endedSuffix = ended ? "  (world ended)" : "";
         status.textContent =
-          `seed: ${cachedSeed}  ·  tick ${world.tick}  ·  pop ${world.population}  ·  species ${world.species_count}${endedSuffix}`;
+          `seed: ${cachedSeed}  ·  tick ${world.tick}  ·  pop ${world.population}${endedSuffix}`;
       }
     } finally {
       frameSpan.close();

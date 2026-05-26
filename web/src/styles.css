@@ -139,22 +139,6 @@ body {
   display: block;
 }
 
-/* E.21: Events panel rows */
-.events-species-list {
-  margin-bottom: 8px;
-}
-.species-row {
-  padding: 2px 4px;
-  cursor: pointer;
-  border-radius: 2px;
-}
-.species-row:hover {
-  background: rgba(255, 255, 255, 0.06);
-}
-.species-row.is-extinct {
-  opacity: 0.4;
-  text-decoration: line-through;
-}
 .event-row {
   padding: 2px 0;
   opacity: 0.9;

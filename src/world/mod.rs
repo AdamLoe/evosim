@@ -1,4 +1,4 @@
-//! World — owns SoA + grass + species + RNG + tick orchestration.
+//! World — owns SoA + grass + RNG + tick orchestration.
 //!
 //! Within-tick ordering follows v5 §3.5 exactly. Milestone B stubs vision
 //! and NN forward (no inputs needed yet) and uses a hardcoded action
@@ -16,8 +16,6 @@ use crate::genome::Genome;
 use crate::grass::GrassGrid;
 use crate::grid::SpatialGrid;
 use crate::rng::SimRng;
-use crate::species::{species_distance, SpeciesRegistry};
-use crate::torus::wrap_pos;
 use crate::vision::{VisionBuf, VisionPass, VISION_LEN};
 use serde::{Deserialize, Serialize};
 
@@ -60,24 +58,17 @@ pub struct World {
     pub grass: GrassGrid,
     pub grid: SpatialGrid,
     pub creatures: CreatureSoA,
-    pub species: SpeciesRegistry,
     pub sliders: DevSliders,
     pub next_creature_id: u64,
     pub peak_population: u32,
-    pub peak_species_count: u32,
     pub world_ended: bool,
-    pub live_species_count: u32,
     pub first_move_fired: bool,
     pub first_eat_fired: bool,
     /// Bitset of population milestone thresholds that have fired (v5 §11, E.25.a).
     /// Bit k = POPULATION_MILESTONES[k] was crossed. One-shot: never cleared.
-    /// Kept for potential D5 HoF use; events no longer emitted (D4).
     pub population_milestones_fired: u32,
     /// Per-creature vision cache (index-aligned with CreatureSoA). Milestone C.12.
     pub vision: Vec<VisionBuf>,
-    /// Species ids that lost a creature this tick; checked after removals to
-    /// emit extinction events. Drained each `finalize_extinctions`.
-    pub(crate) pending_extinction_check: Vec<u32>,
     /// In-app hierarchical profiler. Runtime-toggleable, default OFF.
     /// Excluded from SaveV1 and from the §16 snapshot hash (D10).
     /// See docs/plans/perf-timing.md for the full design.
@@ -85,7 +76,7 @@ pub struct World {
     // Per-tick scratch buffers, promoted from in-function `vec!` to long-lived
     // fields to eliminate ~300 KB/tick allocator pressure (perf-final-report
     // §3 item 2). Excluded from SaveV1 by omission —
-    // mirrors the `vision` / `cell_to_carrion` / `profile` pattern.
+    // mirrors the `vision` / `profile` pattern.
     pub(crate) scratch_fx: Vec<f32>,
     pub(crate) scratch_fy: Vec<f32>,
     pub(crate) scratch_neighbors: Vec<usize>,
@@ -113,24 +104,11 @@ impl World {
         let mut rng = SimRng::from_string(&seed_string);
         let grass = GrassGrid::new(&mut rng, sliders.grass_initial_seed_count);
         let mut creatures = CreatureSoA::with_capacity(2048);
-        let mut species = SpeciesRegistry::new();
         let founder_genome = Genome::founder();
         let founder_brain = Brain::founder(&mut rng);
-        let founder_species = species.founder(&founder_genome, &founder_brain, 0);
         let cx = WORLD_SIZE * 0.5;
         let cy = WORLD_SIZE * 0.5;
-        creatures.push(
-            0,
-            cx,
-            cy,
-            FOUNDER_ENERGY,
-            founder_species,
-            founder_species,
-            0,
-            founder_genome,
-            founder_brain,
-        );
-        // D6 stub: move_bias deleted.
+        creatures.push(0, cx, cy, FOUNDER_ENERGY, 0, founder_genome, founder_brain);
         let mut grid = SpatialGrid::new();
         grid.rebuild(&creatures.x, &creatures.y);
         Self {
@@ -140,18 +118,14 @@ impl World {
             grass,
             grid,
             creatures,
-            species,
             sliders,
             next_creature_id: 1,
             peak_population: 1,
-            peak_species_count: 1,
             world_ended: false,
-            live_species_count: 1,
             first_move_fired: false,
             first_eat_fired: false,
             population_milestones_fired: 0,
             vision: vec![[0.0f32; VISION_LEN]], // 1 for the founder
-            pending_extinction_check: Vec::new(),
             profile: crate::profiler::Profiler::new(),
             scratch_fx: Vec::new(),
             scratch_fy: Vec::new(),
@@ -288,9 +262,6 @@ impl World {
             if pop > self.peak_population {
                 self.peak_population = pop;
             }
-            if self.live_species_count > self.peak_species_count {
-                self.peak_species_count = self.live_species_count;
-            }
 
             // E.25.a: PopulationMilestone threshold tracking (once per threshold ever).
             // Events no longer emitted (D4); bitset kept for potential D5 HoF use.
@@ -348,34 +319,11 @@ impl World {
             let cy = (self.creatures.y[i] + jitter_y).clamp(clamp_lo, clamp_hi);
             let new_id = self.next_creature_id;
             self.next_creature_id += 1;
-            let parent_species = self.creatures.species_id[i];
-            let anchor = self.species.get(parent_species);
-            let dist = species_distance(
-                &child_genome,
-                &anchor.anchor_genome,
-                &child_brain.weights,
-                &anchor.anchor_brain_weights,
-            );
-
-            let (child_species_id, parent_species_id) = if dist > SPECIES_THRESHOLD {
-                let new_species_id = self.species.speciate(
-                    parent_species,
-                    child_genome.clone(),
-                    child_brain.weights.clone(),
-                    self.tick,
-                );
-                (new_species_id, parent_species)
-            } else {
-                (parent_species, parent_species)
-            };
-
             self.creatures.push(
                 new_id,
                 cx,
                 cy,
                 child_energy,
-                child_species_id,
-                parent_species_id,
                 self.tick,
                 child_genome,
                 child_brain,
@@ -384,38 +332,8 @@ impl World {
         }
     }
 
-    pub fn finalize_extinctions(&mut self) {
-        // S28: replace HashSet<u32> with Vec<bool> indexed by species_id.
-        // Species IDs are assigned sequentially starting at 0, so species_id < species.list.len().
-        // Using a dense bool avoids HashMap/HashSet overhead (O(1) indexed lookup vs hash).
-        // Compatible with S9 lint (no .iter()/.into_iter() on HashMap/HashSet).
-        let max_id = self.species.list.len();
-        let mut alive = vec![false; max_id];
-        let mut live_count = 0u32;
-        for i in 0..self.creatures.len() {
-            let sid = self.creatures.species_id[i] as usize;
-            if sid < max_id && !alive[sid] {
-                alive[sid] = true;
-                live_count += 1;
-            }
-        }
-        let candidates = std::mem::take(&mut self.pending_extinction_check);
-        for cand in candidates {
-            let cand_idx = cand as usize;
-            if cand_idx >= max_id || !alive[cand_idx] {
-                let species = &mut self.species.list[cand_idx];
-                if species.died_tick.is_none() {
-                    species.died_tick = Some(self.tick);
-                }
-            }
-        }
-        self.live_species_count = live_count;
-    }
-
     pub fn tick_once(&mut self) -> bool {
-        let alive = self.step();
-        self.finalize_extinctions();
-        alive
+        self.step()
     }
 
     /// Run the vision pass.
@@ -445,8 +363,6 @@ impl World {
                 self.creatures.x[i],
                 self.creatures.y[i],
                 self.creatures.energy[i],
-                self.creatures.species_id[i],
-                self.creatures.parent_species_id[i],
                 self.creatures.birth_tick[i],
                 self.creatures.genomes[i].clone(),
                 self.creatures.brains[i].clone(),
@@ -471,22 +387,14 @@ impl World {
             grass: self.grass.clone(),
             grid,
             creatures,
-            carrion: self.carrion.clone(),
-            species: self.species.clone(),
-            events: self.events.clone(),
-            events_enabled: self.events_enabled,
             sliders: self.sliders.clone(),
             next_creature_id: self.next_creature_id,
             peak_population: self.peak_population,
-            peak_species_count: self.peak_species_count,
             world_ended: self.world_ended,
-            live_species_count: self.live_species_count,
             first_move_fired: self.first_move_fired,
             first_eat_fired: self.first_eat_fired,
             population_milestones_fired: self.population_milestones_fired,
             vision: vec![[0.0f32; VISION_LEN]; n],
-            cell_to_carrion: CarrionIndex::new(),
-            pending_extinction_check: Vec::new(),
             profile: crate::profiler::Profiler::new(),
             scratch_fx: Vec::new(),
             scratch_fy: Vec::new(),
@@ -499,7 +407,6 @@ impl World {
             scratch_got_a_bite: Vec::new(),
             scratch_eat_candidates: Vec::new(),
             scratch_dead: Vec::new(),
-            force_sequential_nn: false,
         }
     }
 }
@@ -512,7 +419,6 @@ mod tests {
     fn world_initializes_with_one_creature() {
         let w = World::new("test-seed");
         assert_eq!(w.population(), 1);
-        assert_eq!(w.species.list.len(), 1);
     }
 
     #[test]
@@ -623,7 +529,7 @@ mod tests {
             let b = Brain::founder(&mut seeder);
             let x = seeder.uniform(10.0, WORLD_SIZE - 10.0);
             let y = seeder.uniform(10.0, WORLD_SIZE - 10.0);
-            w.creatures.push(k + 1, x, y, FOUNDER_ENERGY, 0, 0, 0, g, b);
+            w.creatures.push(k + 1, x, y, FOUNDER_ENERGY, 0, g, b);
             w.vision.push([0.0f32; VISION_LEN]);
         }
 
@@ -681,73 +587,6 @@ mod tests {
         }
     }
 
-    // ---- E.20 tests ----
-
-    /// E.20 test 1: tick until first split; verify the path executed (lenient on which side
-    /// of the threshold the first split lands on — first split rarely crosses SPECIES_THRESHOLD).
-    #[test]
-    fn e20_tiny_mutation_keeps_species() {
-        // D8: F.30 hardwiring deleted. With pure random NN weights and mostly-zero
-        // inputs, the NN may not organically produce a Split. Trigger split directly
-        // via handle_births to confirm the species-wiring in handle_births is intact.
-        let mut w = World::new("split-test");
-        w.creatures.energy[0] = 10_000.0;
-        let parent_species_before = w.creatures.species_id[0];
-        w.creatures.action_this_tick[0] = Action::Split;
-        w.handle_births();
-        // The test exercised the wiring in handle_births.
-        assert!(
-            w.population() > 1,
-            "expected a split from high energy + Split action"
-        );
-        let n = w.creatures.len();
-        let child_species = w.creatures.species_id[n - 1];
-        // Both outcomes are valid — either same species or speciation.
-        // The wiring is load-bearing regardless.
-        let _ = (parent_species_before, child_species);
-    }
-
-    /// E.20 test 2: synthetic large-drift mutation creates a new species.
-    #[test]
-    fn e20_synthetic_large_drift_creates_new_species() {
-        use crate::species::species_distance;
-        let mut w = World::new("e20-big");
-        let parent_genome = w.creatures.genomes[0].clone();
-        let parent_brain = w.creatures.brains[0].clone();
-        let parent_species = w.creatures.species_id[0];
-
-        // Construct a child genome with a HUGE body drift (delta size +7).
-        let mut child_genome = parent_genome.clone();
-        child_genome.size = 8.0; // delta 7.0 / sigma=1.0 -> contribution ~49 to body_sq
-        child_genome.pigment_r = 1.0 - parent_genome.pigment_r;
-        let child_brain = parent_brain.clone();
-
-        let d = species_distance(
-            &child_genome,
-            &parent_genome,
-            &child_brain.weights,
-            &parent_brain.weights,
-        );
-        assert!(d > SPECIES_THRESHOLD, "synthetic d = {d}");
-
-        let new_species_id = w.species.speciate(
-            parent_species,
-            child_genome.clone(),
-            child_brain.weights.clone(),
-            w.tick,
-        );
-        assert_ne!(new_species_id, parent_species);
-        assert_eq!(
-            w.species.get(new_species_id).parent_id,
-            Some(parent_species)
-        );
-        assert!(
-            w.species.get(new_species_id).name.starts_with("Lineage A"),
-            "name = {}",
-            w.species.get(new_species_id).name
-        );
-    }
-
     /// perf-1 T2: child's trig cache is populated on birth; parent's is unchanged.
     #[test]
     fn eye_trig_recomputed_on_birth() {
@@ -777,8 +616,6 @@ mod tests {
             0.0,
             0.0,
             0.0,
-            0,
-            0,
             0,
             w.creatures.genomes[child_idx].clone(),
             Brain::founder(&mut SimRng::from_u64(0)), // brain irrelevant for cache

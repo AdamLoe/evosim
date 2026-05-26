@@ -316,7 +316,7 @@ mod tests {
     fn simple_creature(soa: &mut CreatureSoA, id: u64, x: f32, y: f32, genome: Genome) -> usize {
         let mut rng = SimRng::from_u64(42);
         let brain = Brain::founder(&mut rng);
-        soa.push(id, x, y, 100.0, 0, 0, 0, genome, brain)
+        soa.push(id, x, y, 100.0, 0, genome, brain)
     }
 
     fn genome_with_eyes(eye_count: u8, vision_range: f32) -> Genome {

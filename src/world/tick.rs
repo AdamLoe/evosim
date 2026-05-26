@@ -3,7 +3,6 @@
 use super::World;
 use crate::constants::*;
 use crate::creature::Action;
-use crate::torus::{torus_delta, wrap_pos};
 
 impl World {
     /// Multi-cell graze: for every creature that chose `Action::Graze` this tick,
@@ -356,14 +355,9 @@ impl World {
         let n = self.creatures.len();
         for i in 0..n {
             if self.creatures.energy[i] <= 0.0 {
-                // S27: push directly to pending_extinction_check (no species_lost intermediate Vec).
-                self.pending_extinction_check
-                    .push(self.creatures.species_id[i]);
                 self.scratch_dead.push(i);
             }
         }
-        // S27: dead indices are in self.scratch_dead; pending_extinction_check was
-        // already written directly above (no intermediate species_lost Vec drain).
     }
 }
 
@@ -513,10 +507,6 @@ mod tests {
         w.creatures.vy[0] = 0.0;
         w.creatures.genomes[0].move_speed = 5.0;
         w.creatures.resync_hot_mirrors_at(0);
-        // Zero move bias so it doesn't interfere.
-        w.creatures.move_bias_x[0] = 0.0;
-        w.creatures.move_bias_y[0] = 0.0;
-        w.creatures.move_bias_reroll_at[0] = u32::MAX;
         w.grid.rebuild(&w.creatures.x, &w.creatures.y);
 
         w.apply_movement_and_repulsion();
@@ -546,9 +536,6 @@ mod tests {
         w.creatures.vy[0] = 0.0;
         w.creatures.genomes[0].move_speed = 5.0;
         w.creatures.resync_hot_mirrors_at(0);
-        w.creatures.move_bias_x[0] = 0.0;
-        w.creatures.move_bias_y[0] = 0.0;
-        w.creatures.move_bias_reroll_at[0] = u32::MAX;
         w.grid.rebuild(&w.creatures.x, &w.creatures.y);
 
         w.apply_movement_and_repulsion();
@@ -612,16 +599,10 @@ mod tests {
         let n_before = w.creatures.len();
         use crate::vision::VISION_LEN;
         w.creatures
-            .push(1, 598.0, WORLD_SIZE * 0.5, FOUNDER_ENERGY, 0, 0, 0, g2, b2);
+            .push(1, 598.0, WORLD_SIZE * 0.5, FOUNDER_ENERGY, 0, g2, b2);
         w.vision.push([0.0f32; VISION_LEN]);
         w.creatures.vx[n_before] = 0.0;
         w.creatures.vy[n_before] = 0.0;
-        w.creatures.move_bias_x[0] = 0.0;
-        w.creatures.move_bias_y[0] = 0.0;
-        w.creatures.move_bias_reroll_at[0] = u32::MAX;
-        w.creatures.move_bias_x[n_before] = 0.0;
-        w.creatures.move_bias_y[n_before] = 0.0;
-        w.creatures.move_bias_reroll_at[n_before] = u32::MAX;
 
         let x0_before = w.creatures.x[0];
         let x1_before = w.creatures.x[n_before];
@@ -845,88 +826,6 @@ mod tests {
         );
     }
 
-    // ---- P2f move_bias tests ----
-
-    /// P2f test 1: move_bias_reroll fires after exactly MOVE_BIAS_REROLL_INTERVAL ticks.
-    /// Pins the re-roll cadence: bias stays constant until tick == reroll_at, then fires.
-    /// Uses apply_movement_and_repulsion directly to isolate the mechanism.
-    #[test]
-    fn move_bias_reroll_fires_every_20_ticks() {
-        let mut w = World::new("p2f-rerolls");
-        // Start with tick = 100 to avoid zero-tick edge cases.
-        w.tick = 100;
-        // Fix a known bias value; set reroll_at to tick + interval = 120.
-        w.creatures.move_bias_x[0] = 0.123;
-        w.creatures.move_bias_reroll_at[0] = w.tick + MOVE_BIAS_REROLL_INTERVAL; // 120
-        let before_x = w.creatures.move_bias_x[0];
-
-        // Run (interval - 1) ticks (ticks 100..119): tick < reroll_at each time, no re-roll.
-        for _ in 0..(MOVE_BIAS_REROLL_INTERVAL - 1) {
-            w.apply_movement_and_repulsion(); // tick=100..118 each call
-            w.tick += 1; // advance tick AFTER movement (mirrors World::step ordering)
-        }
-        // Now tick = 119. reroll_at = 120. Condition: 119 >= 120 → false. No re-roll yet.
-        assert_eq!(
-            w.creatures.move_bias_x[0], before_x,
-            "bias must not re-roll before reroll_at is reached (tick={} reroll_at={})",
-            w.tick, w.creatures.move_bias_reroll_at[0]
-        );
-
-        // Advance tick to 120 (= reroll_at), then call movement: re-roll fires.
-        w.tick += 1; // tick = 120
-        w.apply_movement_and_repulsion(); // tick=120 >= reroll_at=120 → fires
-        assert_ne!(
-            w.creatures.move_bias_x[0], before_x,
-            "bias must re-roll when tick reaches reroll_at (tick={})",
-            w.tick
-        );
-    }
-
-    /// P2f test 2: move_bias adds to velocity (ADD semantics per amendments §A.5).
-    /// With all-zero NN weights, the NN contributes nothing; only move_bias drives motion.
-    /// Pins that SET is NOT implemented (a pure SET would also pass, but the ADD
-    /// semantics are confirmed by the NN-output being zero before the bias ADD).
-    #[test]
-    fn move_bias_adds_to_velocity() {
-        let mut w = World::new("p2f-add");
-        // Zero all NN weights so NN output is zero for both vx and vy.
-        w.creatures.brains[0].weights = vec![0.0; NN_WEIGHT_COUNT];
-        // Set a known bias; prevent re-roll during the test.
-        w.creatures.move_bias_x[0] = 0.5;
-        w.creatures.move_bias_y[0] = -0.5;
-        w.creatures.move_bias_reroll_at[0] = u32::MAX;
-        // Give the creature move_speed > 0 so bias contributes.
-        w.creatures.genomes[0].move_speed = MOVE_SPEED_MAX;
-        w.creatures.resync_hot_mirrors_at(0);
-
-        w.step();
-
-        // NN output is zero → only move_bias contributes.
-        // Expected: vx > 0 (bias_x=0.5), vy < 0 (bias_y=-0.5).
-        // (vx/vy may have been clamped by speed cap or zeroed by Action::Rest,
-        //  but the bias was added before the clamp — track the step result.)
-        // The movement pass adds bias then clamps; with speed_cap = MOVE_SPEED_MAX
-        // and combined input = 0 + 0.5 * MOVE_SPEED_MAX = 2.5 (< cap=5), no clamping.
-        // After movement, vx is reset by the NN in the next tick's forward pass.
-        // We check the creature moved in the expected direction.
-        // NOTE: step() runs the full tick (NN → movement → ...), so by the END of the
-        // tick the NN has already been run for tick+1 and overwritten vx/vy.
-        // Instead, we verify by checking x/y moved relative to start.
-        // x increased (bias_x > 0 → moved right) and y decreased (bias_y < 0 → moved up).
-        // The exact position shift should be ≈ 0.5 * MOVE_SPEED_MAX = 2.5 world units.
-        // We assert direction only (sign), not magnitude.
-        let dx = w.creatures.x[0] - WORLD_SIZE * 0.5;
-        let dy = w.creatures.y[0] - WORLD_SIZE * 0.5;
-        assert!(
-            dx > 0.0,
-            "x must increase (bias_x > 0 → rightward motion); dx = {dx}"
-        );
-        assert!(
-            dy < 0.0,
-            "y must decrease (bias_y < 0 → upward motion); dy = {dy}"
-        );
-    }
-
     // ---- P3a tests ----
 
     /// P3a test: default eat_bite_fraction is 0.5.
@@ -970,17 +869,8 @@ mod tests {
         let pred_x = w.creatures.x[0];
         let pred_y = w.creatures.y[0];
         // Place prey within bite reach.
-        w.creatures.push(
-            1,
-            pred_x + 1.5,
-            pred_y,
-            100.0,
-            0,
-            0,
-            0,
-            prey_genome,
-            prey_brain,
-        );
+        w.creatures
+            .push(1, pred_x + 1.5, pred_y, 100.0, 0, prey_genome, prey_brain);
         w.vision.push([0.0f32; VISION_LEN]);
 
         w.grid.rebuild(&w.creatures.x, &w.creatures.y);
@@ -1035,17 +925,8 @@ mod tests {
         let prey_brain = Brain::founder(&mut rng);
         let pred_x = w.creatures.x[0];
         let pred_y = w.creatures.y[0];
-        w.creatures.push(
-            1,
-            pred_x + 1.5,
-            pred_y,
-            100.0,
-            0,
-            0,
-            0,
-            prey_genome,
-            prey_brain,
-        );
+        w.creatures
+            .push(1, pred_x + 1.5, pred_y, 100.0, 0, prey_genome, prey_brain);
         w.vision.push([0.0f32; VISION_LEN]);
 
         w.grid.rebuild(&w.creatures.x, &w.creatures.y);
@@ -1094,17 +975,8 @@ mod tests {
         let prey_brain = Brain::founder(&mut rng);
         let pred_x = w.creatures.x[0];
         let pred_y = w.creatures.y[0];
-        w.creatures.push(
-            1,
-            pred_x + 1.5,
-            pred_y,
-            100.0,
-            0,
-            0,
-            0,
-            prey_genome,
-            prey_brain,
-        );
+        w.creatures
+            .push(1, pred_x + 1.5, pred_y, 100.0, 0, prey_genome, prey_brain);
         w.vision.push([0.0f32; VISION_LEN]);
 
         w.grid.rebuild(&w.creatures.x, &w.creatures.y);
