@@ -54,19 +54,20 @@ pub const NN_WEIGHT_COUNT: usize = NN_INPUTS * NN_HIDDEN + NN_HIDDEN * NN_OUTPUT
 pub const NN_MUT_RATE_DEFAULT: f32 = 0.02;
 pub const NN_MUT_SIGMA_DEFAULT: f32 = 0.02;
 pub const NN_INIT_RANGE: f32 = 0.3; // uniform random weight initialisation range
-/// Graze-bias wiring constants applied to Brain::founder() after random init.
-/// We hardwire hidden unit 0 as an "energy sensor": the energy_frac input (index 0)
-/// drives it strongly positive. Then the Split output reads it positively (high energy
-/// → split) while Graze gets a large base prior that is independent of energy.
-/// This gives every founder the survival-critical energy → split/graze switch without
-/// changing the NN architecture or weight count. Offspring mutate independently.
-/// See F.30 DECISIONS for rationale.
-#[allow(dead_code)] // P2f deletes
-pub const NN_FOUNDER_ENERGY_SENSOR_STRENGTH: f32 = 10.0; // w_ih[0][energy_frac_input]
-#[allow(dead_code)] // P2f deletes
-pub const NN_FOUNDER_SPLIT_ENERGY_WEIGHT: f32 = 10.0; // w_ho[Split][energy_sensor_hidden]
-#[allow(dead_code)] // P2f deletes
-pub const NN_FOUNDER_PHOTO_BIAS: f32 = 5.0; // added to all Graze output weights (base prior)
+                                    // ---- F.30 founder NN hardwiring (v1.2 rewrite — see DECISIONS) ----
+/// Hidden[0] = on-grass detector: large positive weight from NN_GRASS_PATCH_CENTER_SLOT.
+pub const NN_FOUNDER_GRAZE_DETECTOR_WEIGHT: f32 = 5.0;
+/// Output Graze += large positive from hidden[0]: founder-lineage hardwired graze response.
+pub const NN_FOUNDER_GRAZE_OUTPUT_WEIGHT: f32 = 5.0;
+/// Hidden[1] = Move baseline; w_ih[1][energy_frac] + w_ho[vx/vy][1] all baseline.
+pub const NN_FOUNDER_MOVE_BASELINE: f32 = 1.0;
+/// Hidden[2] = energy_frac reader → Split logit positive.
+pub const NN_FOUNDER_SPLIT_FROM_ENERGY: f32 = 1.0;
+
+// ---- move_bias direction-persistence (v1.2 — per amendments §A.5 ADD semantics) ----
+/// Re-roll move_bias_x/y every N ticks for per-creature direction persistence.
+/// 20 ticks @ 30 tick/s ≈ 0.66s of persistent heading.
+pub const MOVE_BIAS_REROLL_INTERVAL: u32 = 20;
 
 // ---- Body mutation (v5 §6) ----
 pub const BODY_MUT_RATE_DEFAULT: f32 = 0.03;
@@ -198,5 +199,4 @@ pub const NN_GRASS_PATCH_OFFSET: usize = 135;
 /// Grass-patch center sample (dx=dy=0); 5x5 iteration is dy outer, dx inner,
 /// offset = (dy+2)*5 + (dx+2). Center: dy=0,dx=0 → 12; global slot 135+12 = 147.
 /// P2f reads this to hardwire the grass-sensor hidden unit.
-#[allow(dead_code)] // P2f reads in non-test code; tests pin the value
 pub const NN_GRASS_PATCH_CENTER_SLOT: usize = 147;

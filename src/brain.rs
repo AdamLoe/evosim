@@ -38,10 +38,53 @@ pub struct Brain {
 
 impl Brain {
     pub fn founder(rng: &mut SimRng) -> Self {
+        // Uniform-random init.
         let mut weights = vec![0.0_f32; NN_WEIGHT_COUNT];
         for w in &mut weights {
             *w = rng.uniform(-NN_INIT_RANGE, NN_INIT_RANGE);
         }
+
+        // F.30 hardwiring (v1.2): minimal honest founder.
+        // Weight layout (row-major, v6 §E / D.15):
+        //   w_ih[h][i] = weights[h * NN_INPUTS + i]
+        //   w_ho[o][h] = weights[NN_INPUTS * NN_HIDDEN + o * NN_HIDDEN + h]
+        //
+        // Output buffer indices (pick_action_d):
+        //   out[0] = vx, out[1] = vy
+        //   out[2..8] = logits for Action::ALL[0..6]
+        //   Action::ALL = [Rest=0, Graze=1, Eat=2, Scavenge=3, Split=4, Signal=5]
+        //   → Graze logit = out[3], Split logit = out[6]
+        //
+        // NN_GRASS_PATCH_CENTER_SLOT = 147 (locked by P2d — see constants.rs).
+        const ON_GRASS_HIDDEN: usize = 0;
+        const MOVE_BIAS_HIDDEN: usize = 1;
+        const SPLIT_ENERGY_HIDDEN: usize = 2;
+        const ENERGY_FRAC_INPUT: usize = 0;
+        const GRAZE_OUT: usize = 3; // output buffer index for Graze logit
+        const VX_OUT: usize = 0;
+        const VY_OUT: usize = 1;
+        const SPLIT_OUT: usize = 6; // output buffer index for Split logit
+
+        let w_ho_offset = NN_INPUTS * NN_HIDDEN;
+
+        // Hidden[0] = "on-grass" detector: reads grass-patch center input.
+        weights[ON_GRASS_HIDDEN * NN_INPUTS + NN_GRASS_PATCH_CENTER_SLOT] +=
+            NN_FOUNDER_GRAZE_DETECTOR_WEIGHT;
+        // Output Graze += large positive from hidden[0].
+        weights[w_ho_offset + GRAZE_OUT * NN_HIDDEN + ON_GRASS_HIDDEN] +=
+            NN_FOUNDER_GRAZE_OUTPUT_WEIGHT;
+
+        // Hidden[1] = Move baseline; vx/vy output baselines.
+        weights[MOVE_BIAS_HIDDEN * NN_INPUTS + ENERGY_FRAC_INPUT] += NN_FOUNDER_MOVE_BASELINE;
+        weights[w_ho_offset + VX_OUT * NN_HIDDEN + MOVE_BIAS_HIDDEN] += NN_FOUNDER_MOVE_BASELINE;
+        weights[w_ho_offset + VY_OUT * NN_HIDDEN + MOVE_BIAS_HIDDEN] += NN_FOUNDER_MOVE_BASELINE;
+
+        // Hidden[2] = energy_frac reader → Split.
+        weights[SPLIT_ENERGY_HIDDEN * NN_INPUTS + ENERGY_FRAC_INPUT] +=
+            NN_FOUNDER_SPLIT_FROM_ENERGY;
+        weights[w_ho_offset + SPLIT_OUT * NN_HIDDEN + SPLIT_ENERGY_HIDDEN] +=
+            NN_FOUNDER_SPLIT_FROM_ENERGY;
+
         Self {
             weights,
             nn_mutation_rate: NN_MUT_RATE_DEFAULT,
@@ -165,6 +208,46 @@ mod tests {
         assert_eq!(b.weights.len(), NN_WEIGHT_COUNT);
         assert!(b.weights.iter().all(|w| w.is_finite()));
         assert!(b.weights.iter().any(|w| *w != 0.0));
+    }
+
+    /// P2f: confirm hardwired F.30 slots have the expected additive bumps.
+    /// Each assertion checks that the weight at the target slot is at least
+    /// (hardwired_constant - NN_INIT_RANGE), i.e. the random-init baseline
+    /// cannot swamp the hardwired addition downward past that floor.
+    #[test]
+    fn founder_hardwiring_at_locked_slots() {
+        // Output-buffer indices (must match Brain::founder's local consts).
+        const GRAZE_OUT_IDX: usize = 3;
+        const SPLIT_OUT_IDX: usize = 6;
+
+        let mut rng = SimRng::from_u64(1);
+        let b = Brain::founder(&mut rng);
+        let w_ho = NN_INPUTS * NN_HIDDEN;
+
+        // hidden[0] reads NN_GRASS_PATCH_CENTER_SLOT with detector weight.
+        // Index: ON_GRASS_HIDDEN=0, so w_ih offset = 0 * NN_INPUTS + center_slot.
+        let det = b.weights[NN_GRASS_PATCH_CENTER_SLOT]; // == 0 * NN_INPUTS + slot
+        assert!(
+            det >= NN_FOUNDER_GRAZE_DETECTOR_WEIGHT - NN_INIT_RANGE,
+            "detector weight {det} < floor ({})",
+            NN_FOUNDER_GRAZE_DETECTOR_WEIGHT - NN_INIT_RANGE
+        );
+
+        // w_ho[Graze][hidden_0] += weight. hidden_0 is the first hidden unit.
+        let go = b.weights[w_ho + GRAZE_OUT_IDX * NN_HIDDEN]; // + 0 suppressed (clippy)
+        assert!(
+            go >= NN_FOUNDER_GRAZE_OUTPUT_WEIGHT - NN_INIT_RANGE,
+            "graze output weight {go} < floor ({})",
+            NN_FOUNDER_GRAZE_OUTPUT_WEIGHT - NN_INIT_RANGE
+        );
+
+        // w_ho[Split][hidden_2] += weight.
+        let so = b.weights[w_ho + SPLIT_OUT_IDX * NN_HIDDEN + 2];
+        assert!(
+            so >= NN_FOUNDER_SPLIT_FROM_ENERGY - NN_INIT_RANGE,
+            "split output weight {so} < floor ({})",
+            NN_FOUNDER_SPLIT_FROM_ENERGY - NN_INIT_RANGE
+        );
     }
 
     #[test]

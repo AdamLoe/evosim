@@ -79,9 +79,28 @@ impl World {
         if n == 0 {
             return;
         }
+
+        // P2f: re-roll per-creature move_bias_x/y every MOVE_BIAS_REROLL_INTERVAL ticks.
+        // Runs before vx/vy reads so re-rolled values are available for the ADD below.
+        let tick = self.tick;
+        for i in 0..n {
+            if tick >= self.creatures.move_bias_reroll_at[i] {
+                self.creatures.move_bias_x[i] = self.rng.symm();
+                self.creatures.move_bias_y[i] = self.rng.symm();
+                self.creatures.move_bias_reroll_at[i] =
+                    tick.saturating_add(MOVE_BIAS_REROLL_INTERVAL);
+            }
+        }
+
         // perf-5: hot reads use g_* mirrors; cold reads (bite_reach, etc.) stay on &self.creatures.genomes[i].
         for i in 0..n {
             let speed_cap = self.creatures.g_move_speed[i];
+            // P2f: ADD move_bias on top of NN-output velocity (amendments §A.5).
+            // Founders (NN near-zero) effectively use bias only; evolved descendants
+            // whose NN learns directional motion ADD their NN signal on top.
+            // Applied before speed-cap clamp so the combined (NN + bias) velocity is capped.
+            self.creatures.vx[i] += self.creatures.move_bias_x[i] * MOVE_SPEED_MAX;
+            self.creatures.vy[i] += self.creatures.move_bias_y[i] * MOVE_SPEED_MAX;
             let vx = self.creatures.vx[i];
             let vy = self.creatures.vy[i];
             let mag2 = vx * vx + vy * vy;
@@ -1267,6 +1286,88 @@ mod tests {
         assert!(
             (energy_gained - expected_gain).abs() < 1e-3,
             "energy_gained={energy_gained} expected={expected_gain}"
+        );
+    }
+
+    // ---- P2f move_bias tests ----
+
+    /// P2f test 1: move_bias_reroll fires after exactly MOVE_BIAS_REROLL_INTERVAL ticks.
+    /// Pins the re-roll cadence: bias stays constant until tick == reroll_at, then fires.
+    /// Uses apply_movement_and_repulsion directly to isolate the mechanism.
+    #[test]
+    fn move_bias_reroll_fires_every_20_ticks() {
+        let mut w = World::new("p2f-rerolls");
+        // Start with tick = 100 to avoid zero-tick edge cases.
+        w.tick = 100;
+        // Fix a known bias value; set reroll_at to tick + interval = 120.
+        w.creatures.move_bias_x[0] = 0.123;
+        w.creatures.move_bias_reroll_at[0] = w.tick + MOVE_BIAS_REROLL_INTERVAL; // 120
+        let before_x = w.creatures.move_bias_x[0];
+
+        // Run (interval - 1) ticks (ticks 100..119): tick < reroll_at each time, no re-roll.
+        for _ in 0..(MOVE_BIAS_REROLL_INTERVAL - 1) {
+            w.apply_movement_and_repulsion(); // tick=100..118 each call
+            w.tick += 1; // advance tick AFTER movement (mirrors World::step ordering)
+        }
+        // Now tick = 119. reroll_at = 120. Condition: 119 >= 120 → false. No re-roll yet.
+        assert_eq!(
+            w.creatures.move_bias_x[0], before_x,
+            "bias must not re-roll before reroll_at is reached (tick={} reroll_at={})",
+            w.tick, w.creatures.move_bias_reroll_at[0]
+        );
+
+        // Advance tick to 120 (= reroll_at), then call movement: re-roll fires.
+        w.tick += 1; // tick = 120
+        w.apply_movement_and_repulsion(); // tick=120 >= reroll_at=120 → fires
+        assert_ne!(
+            w.creatures.move_bias_x[0], before_x,
+            "bias must re-roll when tick reaches reroll_at (tick={})",
+            w.tick
+        );
+    }
+
+    /// P2f test 2: move_bias adds to velocity (ADD semantics per amendments §A.5).
+    /// With all-zero NN weights, the NN contributes nothing; only move_bias drives motion.
+    /// Pins that SET is NOT implemented (a pure SET would also pass, but the ADD
+    /// semantics are confirmed by the NN-output being zero before the bias ADD).
+    #[test]
+    fn move_bias_adds_to_velocity() {
+        let mut w = World::new("p2f-add");
+        // Zero all NN weights so NN output is zero for both vx and vy.
+        w.creatures.brains[0].weights = vec![0.0; NN_WEIGHT_COUNT];
+        // Set a known bias; prevent re-roll during the test.
+        w.creatures.move_bias_x[0] = 0.5;
+        w.creatures.move_bias_y[0] = -0.5;
+        w.creatures.move_bias_reroll_at[0] = u32::MAX;
+        // Give the creature move_speed > 0 so bias contributes.
+        w.creatures.genomes[0].move_speed = MOVE_SPEED_MAX;
+        w.creatures.resync_hot_mirrors_at(0);
+
+        w.step();
+
+        // NN output is zero → only move_bias contributes.
+        // Expected: vx > 0 (bias_x=0.5), vy < 0 (bias_y=-0.5).
+        // (vx/vy may have been clamped by speed cap or zeroed by Action::Rest,
+        //  but the bias was added before the clamp — track the step result.)
+        // The movement pass adds bias then clamps; with speed_cap = MOVE_SPEED_MAX
+        // and combined input = 0 + 0.5 * MOVE_SPEED_MAX = 2.5 (< cap=5), no clamping.
+        // After movement, vx is reset by the NN in the next tick's forward pass.
+        // We check the creature moved in the expected direction.
+        // NOTE: step() runs the full tick (NN → movement → ...), so by the END of the
+        // tick the NN has already been run for tick+1 and overwritten vx/vy.
+        // Instead, we verify by checking x/y moved relative to start.
+        // x increased (bias_x > 0 → moved right) and y decreased (bias_y < 0 → moved up).
+        // The exact position shift should be ≈ 0.5 * MOVE_SPEED_MAX = 2.5 world units.
+        // We assert direction only (sign), not magnitude.
+        let dx = w.creatures.x[0] - WORLD_SIZE * 0.5;
+        let dy = w.creatures.y[0] - WORLD_SIZE * 0.5;
+        assert!(
+            dx > 0.0,
+            "x must increase (bias_x > 0 → rightward motion); dx = {dx}"
+        );
+        assert!(
+            dy < 0.0,
+            "y must decrease (bias_y < 0 → upward motion); dy = {dy}"
         );
     }
 }

@@ -163,6 +163,10 @@ impl World {
             founder_genome,
             founder_brain,
         );
+        // P2f: initialize founder's move_bias fields after push.
+        creatures.move_bias_x[0] = rng.symm();
+        creatures.move_bias_y[0] = rng.symm();
+        creatures.move_bias_reroll_at[0] = MOVE_BIAS_REROLL_INTERVAL; // tick=0, so tick + interval
         let mut grid = SpatialGrid::new();
         grid.rebuild(&creatures.x, &creatures.y);
         // S29: initialize biggest_ever for the founder (founder never goes through
@@ -471,6 +475,12 @@ impl World {
                 child_genome,
                 child_brain,
             );
+            // P2f: initialize child's move_bias fields (per amendments §A.5 ADD semantics).
+            let new_idx = self.creatures.len() - 1;
+            self.creatures.move_bias_x[new_idx] = self.rng.symm();
+            self.creatures.move_bias_y[new_idx] = self.rng.symm();
+            self.creatures.move_bias_reroll_at[new_idx] =
+                self.tick.saturating_add(MOVE_BIAS_REROLL_INTERVAL);
             // S29: update biggest_ever immediately after each birth. Size is
             // genome-determined and never changes after birth, so checking only
             // here (and at World::new for the founder) replaces the old O(N)

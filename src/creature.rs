@@ -99,6 +99,17 @@ pub struct CreatureSoA {
     /// Mirror of genomes[i].nose_count. Written ONLY by CreatureSoA::push,
     /// remove_indices, and resync_hot_mirrors_at. Read by hot tick paths.
     pub(crate) g_nose_count: Vec<u8>,
+
+    // ---- Per-creature move-bias direction persistence (v1.2 P2f — amendments §A.5 ADD) ----
+    /// External move-bias X component, in [-1, +1]. Applied additively to NN vx output
+    /// before speed-cap clamp (amendments §A.5). Re-rolled every MOVE_BIAS_REROLL_INTERVAL ticks.
+    pub(crate) move_bias_x: Vec<f32>,
+    /// External move-bias Y component, in [-1, +1]. Applied additively to NN vy output
+    /// before speed-cap clamp (amendments §A.5). Re-rolled every MOVE_BIAS_REROLL_INTERVAL ticks.
+    pub(crate) move_bias_y: Vec<f32>,
+    /// Tick at which move_bias_x/y are next re-rolled. Set to tick + MOVE_BIAS_REROLL_INTERVAL
+    /// at push time and updated by apply_movement_and_repulsion.
+    pub(crate) move_bias_reroll_at: Vec<u32>,
 }
 
 impl CreatureSoA {
@@ -131,6 +142,9 @@ impl CreatureSoA {
             g_vision_range: Vec::with_capacity(cap),
             g_eye_count: Vec::with_capacity(cap),
             g_nose_count: Vec::with_capacity(cap),
+            move_bias_x: Vec::with_capacity(cap),
+            move_bias_y: Vec::with_capacity(cap),
+            move_bias_reroll_at: Vec::with_capacity(cap),
         }
     }
 
@@ -176,6 +190,10 @@ impl CreatureSoA {
         self.push_hot_mirrors(&genome); // perf-5: BEFORE genome move
         self.genomes.push(genome);
         self.brains.push(brain);
+        // move_bias fields: initialized to zero here; caller patches after push.
+        self.move_bias_x.push(0.0);
+        self.move_bias_y.push(0.0);
+        self.move_bias_reroll_at.push(0);
         // Extend trig buffer by one chunk of zeros, then populate.
         debug_assert_eq!(
             self.eye_trig.len(),
@@ -220,6 +238,9 @@ impl CreatureSoA {
             self.g_vision_range.swap_remove(k);
             self.g_eye_count.swap_remove(k);
             self.g_nose_count.swap_remove(k);
+            self.move_bias_x.swap_remove(k);
+            self.move_bias_y.swap_remove(k);
+            self.move_bias_reroll_at.swap_remove(k);
         }
     }
 
