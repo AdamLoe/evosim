@@ -484,6 +484,59 @@ impl WorldHandle {
         Some(serde_json::to_string(&json).unwrap_or_else(|_| "{}".into()))
     }
 
+    // ─── P3d observability counters ──────────────────────────────────────────
+
+    /// Count of grass cells where density > 0. O(57_600) — negligible at v1 scale.
+    #[wasm_bindgen]
+    pub fn live_grass_cell_count(&self) -> u32 {
+        self.inner
+            .grass
+            .density
+            .iter()
+            .filter(|&&d| d > 0.0)
+            .count() as u32
+    }
+
+    /// Sum of all grass cell densities. O(57_600) — negligible at v1 scale.
+    #[wasm_bindgen]
+    pub fn total_grass_density(&self) -> f32 {
+        self.inner.grass.density.iter().sum()
+    }
+
+    /// Mean nose_count across all live creatures. Returns 0.0 when population is 0.
+    #[wasm_bindgen]
+    pub fn mean_nose_count(&self) -> f32 {
+        let n = self.inner.creatures.len();
+        if n == 0 {
+            return 0.0;
+        }
+        let sum: u32 = self
+            .inner
+            .creatures
+            .g_nose_count
+            .iter()
+            .map(|&v| v as u32)
+            .sum();
+        sum as f32 / n as f32
+    }
+
+    /// Mean eye_count across all live creatures. Returns 0.0 when population is 0.
+    #[wasm_bindgen]
+    pub fn mean_eye_count(&self) -> f32 {
+        let n = self.inner.creatures.len();
+        if n == 0 {
+            return 0.0;
+        }
+        let sum: u32 = self
+            .inner
+            .creatures
+            .g_eye_count
+            .iter()
+            .map(|&v| v as u32)
+            .sum();
+        sum as f32 / n as f32
+    }
+
     /// Stats sample: [tick, population, live_species_count] as f32.
     /// O(1). Called every 10 sim-ticks from the Stats panel (E.23).
     #[wasm_bindgen]
@@ -777,6 +830,62 @@ mod tests {
     }
 
     // ─── S17: typed slider setter tests ─────────────────────────────────────
+
+    // ─── P3d: observability counter tests ────────────────────────────────────
+
+    /// live_grass_cell_count never exceeds GRASS_CELL_COUNT and doesn't
+    /// double-count empty cells (cells with density == 0 are excluded).
+    #[test]
+    fn live_grass_cell_count_does_not_exceed_cell_count() {
+        use crate::constants::GRASS_CELL_COUNT;
+        let handle = WorldHandle::new("p3d-grass-cells");
+        let live = handle.live_grass_cell_count();
+        assert!(
+            live <= GRASS_CELL_COUNT as u32,
+            "live_grass_cell_count={live} must not exceed GRASS_CELL_COUNT={GRASS_CELL_COUNT}"
+        );
+        // All density values counted must be > 0 (no double-counting empty cells).
+        let manual: u32 = handle
+            .inner
+            .grass
+            .density
+            .iter()
+            .filter(|&&d| d > 0.0)
+            .count() as u32;
+        assert_eq!(
+            live, manual,
+            "live_grass_cell_count must match manual filter count"
+        );
+    }
+
+    /// total_grass_density is non-negative (no cell can have negative density).
+    #[test]
+    fn total_grass_density_is_non_negative() {
+        let handle = WorldHandle::new("p3d-grass-density");
+        let total = handle.total_grass_density();
+        assert!(
+            total >= 0.0,
+            "total_grass_density must be non-negative, got {total}"
+        );
+    }
+
+    /// mean_nose_count and mean_eye_count return 0.0 on a fresh world (founder has
+    /// nose_count=0 and eye_count=0 per Genome::founder).
+    #[test]
+    fn mean_nose_eye_count_fresh_world() {
+        let handle = WorldHandle::new("p3d-mean-traits");
+        // Genome::founder sets eye_count=0, nose_count=0.
+        assert_eq!(
+            handle.mean_nose_count(),
+            0.0,
+            "founder nose_count mean must be 0.0"
+        );
+        assert_eq!(
+            handle.mean_eye_count(),
+            0.0,
+            "founder eye_count mean must be 0.0"
+        );
+    }
 
     /// S17: per-slider typed setters mutate the correct DevSliders field.
     #[test]

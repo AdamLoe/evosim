@@ -38,10 +38,15 @@ export function installProfilerPanel(world: WorldHandle): void {
   // D5: initial paint of "enable to record" hint so tbody isn't visually blank.
   clearTable();
   renderTpsJank(world);
+  renderObsCounters(world);
 
   // TPS + jank are always visible (independent of profiler enable).
   // Poll at 1 Hz continuously so numbers stay fresh even when profiler is off.
-  window.setInterval(() => renderTpsJank(world), POLL_INTERVAL_MS);
+  // P3d: observability counters share the same 1 Hz cadence.
+  window.setInterval(() => {
+    renderTpsJank(world);
+    renderObsCounters(world);
+  }, POLL_INTERVAL_MS);
 
   checkbox.addEventListener("change", () => {
     const on = checkbox.checked;
@@ -69,10 +74,12 @@ function startPolling(world: WorldHandle): void {
   profilerPollHandle = window.setInterval(() => {
     pollAndRender(world);
     renderTpsJank(world);
+    renderObsCounters(world);
   }, POLL_INTERVAL_MS);
   // Render once immediately so the table isn't blank for 1s.
   pollAndRender(world);
   renderTpsJank(world);
+  renderObsCounters(world);
 }
 
 function stopPolling(): void {
@@ -92,6 +99,26 @@ function renderTpsJank(world: WorldHandle): void {
   }
   if (jankEl) {
     jankEl.textContent = `${world.jank_count} jank`;
+  }
+}
+
+/** Render P3d observability counters into their DOM elements (1 Hz cadence). */
+function renderObsCounters(world: WorldHandle): void {
+  const grassCellsEl = document.getElementById("perf-grass-cells");
+  const grassTotalEl = document.getElementById("perf-grass-total");
+  const meanNoseEl = document.getElementById("perf-mean-nose");
+  const meanEyeEl = document.getElementById("perf-mean-eye");
+  if (grassCellsEl) {
+    grassCellsEl.textContent = `grass cells: ${world.live_grass_cell_count()}`;
+  }
+  if (grassTotalEl) {
+    grassTotalEl.textContent = `grass total: ${world.total_grass_density().toFixed(1)}`;
+  }
+  if (meanNoseEl) {
+    meanNoseEl.textContent = `mean nose: ${world.mean_nose_count().toFixed(2)}`;
+  }
+  if (meanEyeEl) {
+    meanEyeEl.textContent = `mean eye: ${world.mean_eye_count().toFixed(2)}`;
   }
 }
 
