@@ -58,10 +58,7 @@ pub fn snapshot_hash(w: &World) -> u64 {
         write_f32(&mut h, w.creatures.max_size_reached[i]); // #7
         write_f32(&mut h, w.creatures.distance_travelled[i]); // #8
         h.write_u32(w.creatures.birth_tick[i]); // #9
-                                                // P2g: v3 move_bias fields (#10–#12).
-        write_f32(&mut h, w.creatures.move_bias_x[i]); // #10
-        write_f32(&mut h, w.creatures.move_bias_y[i]); // #11
-        h.write_u32(w.creatures.move_bias_reroll_at[i]); // #12
+                                                // D6 stub: move_bias deleted — fields #10–#12 removed.
     }
 
     // (3) grass map — per-cell density in linear cell-index order

@@ -21,6 +21,7 @@ pub struct Species {
     pub depth: u32,
 }
 
+#[derive(Clone)]
 pub struct SpeciesRegistry {
     pub list: Vec<Species>,
     /// Next species id to allocate. Exposed `pub(crate)` so `snapshot_hash`

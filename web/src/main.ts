@@ -8,7 +8,6 @@ import { installCanvasClickHandler } from "./rail/inspector";
 import { PersistenceClient } from "./persistence";
 import { showResumePrompt, showSchemaMismatchModal } from "./persistence/ui";
 import { showAutosaveFailureToast } from "./persistence/toast";
-import { showEulogyCard } from "./eulogy";
 import { attachProfiler, timed, span } from "./perf";
 
 const status = document.getElementById("status") as HTMLSpanElement;
@@ -100,9 +99,6 @@ function maybeAutosave(
   lastSavedTick = t;
   lastSavedWallMs = nowMs;
 }
-
-// F.28: eulogy gate — shown exactly once per session.
-let eulogyShown = false;
 
 // F.27: seed display + copy button.
 function installSeedDisplay(seed: string): void {
@@ -300,12 +296,6 @@ async function main(): Promise<void> {
       // F.26: autosave after each frame batch.
       if (!ended) {
         timed("maybeAutosave", () => maybeAutosave(world!, cam, now, persistence));
-      }
-
-      // F.28: eulogy — fire once when world ends.
-      if (ended && !eulogyShown) {
-        eulogyShown = true;
-        showEulogyCard(world!, persistence);
       }
 
       // Fetch ids buffer once per frame (index-aligned with creatures_buffer).

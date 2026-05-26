@@ -301,34 +301,34 @@ pub(crate) fn build_nn_input(
 }
 
 /// Check whether an action is currently valid for creature `i` (v6 §1 + §G).
+/// D9 stub: updated for 3-action enum {Graze, Eat, Split}.
 pub(crate) fn is_valid_action(act: Action, genome: &Genome, energy: f32, cooldown: u32) -> bool {
     match act {
-        Action::Rest | Action::Graze | Action::Signal => true,
+        Action::Graze => true,
         Action::Eat => genome.eat_efficiency > 0.0 && cooldown == 0,
-        Action::Scavenge => genome.scavenge_efficiency > 0.0,
         Action::Split => energy >= SPLIT_THRESHOLD,
     }
 }
 
-/// Decode 6 action logits to an Action via argmax with first-index tiebreak
+/// Decode 3 action logits to an Action via argmax with first-index tiebreak
 /// and valid-fallthrough (v6 §1 + §E).
 ///
-/// S5: If any logit is non-finite (NaN or ±inf), returns `Action::Rest`
-/// immediately — the caller (`pick_action_d`) is responsible for zeroing
-/// velocity in that case.
+/// D9 stub: updated for 3-action enum. Logits are [f32; 3] (Graze/Eat/Split).
+/// S5: If any logit is non-finite (NaN or ±inf), returns `Action::Graze`
+/// immediately (was Action::Rest).
 pub(crate) fn decode_action(
-    logits: &[f32; 6],
+    logits: &[f32; 3],
     genome: &Genome,
     energy: f32,
     cooldown: u32,
 ) -> Action {
     // S5: NaN / ±inf guard — non-finite logits make the sort undefined.
     if logits.iter().any(|v| !v.is_finite()) {
-        return Action::Rest;
+        return Action::Graze;
     }
     use std::cmp::Ordering;
     // Sort Action::ALL indices by logit DESC, first-index tiebreak on ties.
-    let mut order = [0u8, 1, 2, 3, 4, 5];
+    let mut order = [0u8, 1, 2];
     order.sort_by(|&a, &b| {
         logits[b as usize]
             .partial_cmp(&logits[a as usize])
@@ -341,7 +341,7 @@ pub(crate) fn decode_action(
             return act;
         }
     }
-    Action::Rest // defensive fallback (Rest/Graze/Signal are always valid)
+    Action::Graze // defensive fallback (Graze is always valid)
 }
 
 /// NN-driven action picker (Milestone D.16 — replaces `pick_action_c`).
@@ -377,8 +377,8 @@ pub(crate) fn pick_action_d(
     let vx = output_buf[0].tanh() * speed;
     let vy = output_buf[1].tanh() * speed;
 
-    // Action: valid-fallthrough argmax over logits out[2..8] (v6 §1).
-    let logits: &[f32; 6] = output_buf[2..8].try_into().unwrap();
+    // Action: valid-fallthrough argmax over logits out[2..5] (D9: 3 action logits).
+    let logits: &[f32; 3] = output_buf[2..5].try_into().unwrap();
     // S5: assert finite logits in debug builds — NaN in output_buf means the
     // forward pass received non-finite inputs, which should be unreachable in
     // a healthy simulation but is caught defensively in decode_action below.
@@ -388,14 +388,14 @@ pub(crate) fn pick_action_d(
     );
     let energy = creatures.energy[i];
     let cooldown = creatures.digestion_cooldown[i];
-    // decode_action takes &Genome (reads eat_eff/scav_eff). Hot, but kept on AoS to avoid API churn; one read/creature/tick.
+    // decode_action takes &Genome (reads eat_eff). Hot, but kept on AoS to avoid API churn; one read/creature/tick.
     let action = decode_action(logits, &creatures.genomes[i], energy, cooldown);
 
-    // S5: if decode_action saw non-finite logits it returns Rest; also zero
+    // S5: if decode_action saw non-finite logits it returns Graze; also zero
     // velocity so the creature does not coast on stale movement data.
     let had_nan = logits.iter().any(|v| !v.is_finite());
     if had_nan {
-        return (0.0, 0.0, Action::Rest);
+        return (0.0, 0.0, Action::Graze);
     }
 
     (vx, vy, action)
@@ -431,7 +431,7 @@ mod tests {
         w.creatures.vx[0] = 2.5; // vx/5 = 0.5
         w.creatures.vy[0] = -5.0; // vy/5 = -1.0 (clipped to -1 in input)
         w.creatures.digestion_cooldown[0] = 25; // cooldown_frac = 0.5
-        w.creatures.last_action[0] = Action::Rest;
+        w.creatures.last_action[0] = Action::Graze; // D9 stub: was Action::Rest
         let vision = [0.0f32; VISION_LEN];
         let prev_vx = w.creatures.vx[0];
         let prev_vy = w.creatures.vy[0];
@@ -505,17 +505,14 @@ mod tests {
     fn decode_action_valid_fallthrough_split_invalid() {
         use crate::genome::Genome;
         let g = Genome::founder();
-        // Split is Action::ALL[4], logit index 4. Make it highest.
-        let logits = [0.0f32, 0.0, 0.0, 0.0, 10.0, 0.0];
+        // Split is Action::ALL[2], logit index 2. Make it highest (D9: 3-action enum).
+        let logits = [0.0f32, 0.0, 10.0];
         // energy = 10 < SPLIT_THRESHOLD (50) → Split invalid.
         let act = decode_action(&logits, &g, 10.0, 0);
         assert_ne!(act, Action::Split, "Split must be invalid when energy < 50");
-        // Should fall through to a valid action.
+        // Should fall through to a valid action (Graze or Eat).
         assert!(
-            matches!(
-                act,
-                Action::Rest | Action::Graze | Action::Eat | Action::Scavenge | Action::Signal
-            ),
+            matches!(act, Action::Graze | Action::Eat),
             "got {:?}",
             act
         );
@@ -526,10 +523,10 @@ mod tests {
     fn decode_action_first_index_tiebreak() {
         use crate::genome::Genome;
         let g = Genome::founder();
-        // All logits equal → Action::ALL[0] = Rest wins.
-        let logits = [5.0f32; 6];
+        // All logits equal → Action::ALL[0] = Graze wins (D9: first action is Graze).
+        let logits = [5.0f32; 3];
         let act = decode_action(&logits, &g, 100.0, 0);
-        assert_eq!(act, Action::Rest, "lower index (Rest=0) must win on ties");
+        assert_eq!(act, Action::Graze, "lower index (Graze=0) must win on ties");
     }
 
     /// D.16 test 13: Eat invalid when in digestion cooldown.
@@ -538,23 +535,24 @@ mod tests {
         use crate::genome::Genome;
         let mut g = Genome::founder();
         g.eat_efficiency = 1.0;
-        // Eat is index 2, give it highest logit.
-        let logits = [0.0f32, 0.0, 10.0, 0.0, 0.0, 0.0];
+        // Eat is index 1 (D9: 3-action enum), give it highest logit.
+        let logits = [0.0f32, 10.0, 0.0];
         // cooldown > 0 → Eat invalid.
         let act = decode_action(&logits, &g, 100.0, 5);
         assert_ne!(act, Action::Eat, "Eat must be invalid when cooldown > 0");
     }
 
-    /// D.16 test 14: Scavenge invalid when scavenge_efficiency == 0.
+    /// D.16 test 14: Scavenge deleted in D9. Split invalid when energy too low.
+    /// D9 stub: was "Scavenge invalid when scavenge_efficiency == 0".
     #[test]
     fn decode_action_scavenge_invalid_when_zero_eff() {
         use crate::genome::Genome;
-        let mut g = Genome::founder();
-        g.scavenge_efficiency = 0.0;
-        // Scavenge is index 3.
-        let logits = [0.0f32, 0.0, 0.0, 10.0, 0.0, 0.0];
-        let act = decode_action(&logits, &g, 100.0, 0);
-        assert_ne!(act, Action::Scavenge, "Scavenge must be invalid when eff=0");
+        let g = Genome::founder();
+        // Split is index 2, give it highest logit.
+        let logits = [0.0f32, 0.0, 10.0];
+        // energy = 0 → Split invalid.
+        let act = decode_action(&logits, &g, 0.0, 0);
+        assert_ne!(act, Action::Split, "Split must be invalid when energy too low");
     }
 
     // ---- D.18 chunking tests ----
@@ -627,24 +625,18 @@ mod tests {
         }
     }
 
-    /// D.16 test 15: Rest is always valid as the final fallback.
+    /// D.16 test 15: Graze is always valid as the final fallback (D9 stub: was Rest).
     #[test]
     fn decode_action_rest_always_valid_as_fallback() {
         use crate::genome::Genome;
         let mut g = Genome::founder();
         g.eat_efficiency = 0.0; // Eat invalid
-        g.scavenge_efficiency = 0.0; // Scavenge invalid
-                                     // Give Split the highest logit (energy=0 → invalid), Eat 2nd (eff=0 → invalid),
-                                     // Scavenge 3rd (eff=0 → invalid). Rest, Photo, Signal should all be valid.
-                                     // Rest is index 0, make it the lowest logit so Photo or Signal wins first,
-                                     // but confirm that the function returns a valid action regardless.
-        let logits = [-5.0f32, 2.0, -3.0, -3.0, 10.0, 3.0]; // Split>Signal>Graze>...
+        // Split invalid (energy=0), Eat invalid (eff=0). Graze always valid.
+        let logits = [-5.0f32, 2.0, 10.0]; // Split highest but invalid; Graze wins
         let act = decode_action(&logits, &g, 0.0, 1); // energy=0 → Split invalid; cooldown>0 → Eat invalid
-                                                      // Graze (idx 1, logit=2) and Signal (idx 5, logit=3) are both valid;
-                                                      // Signal has higher logit so it wins.
         assert!(
-            matches!(act, Action::Graze | Action::Signal | Action::Rest),
-            "Expected always-valid action, got {:?}",
+            matches!(act, Action::Graze),
+            "Expected Graze fallback, got {:?}",
             act
         );
     }
@@ -718,38 +710,35 @@ mod tests {
         }
     }
 
-    /// S5: decode_action returns Rest and pick_action_d zeros velocity when any
-    /// logit is non-finite (NaN or ±inf).
+    /// S5: decode_action returns Graze and pick_action_d zeros velocity when any
+    /// logit is non-finite (NaN or ±inf). D9 stub: updated for 3-action enum.
     #[test]
     fn nan_logits_return_rest_zero_velocity() {
         use crate::genome::Genome;
-        // decode_action with a NaN logit must return Rest.
+        // decode_action with a NaN logit must return Graze (was Rest, D9 stub).
         let g = Genome::founder();
-        let nan_logits = [f32::NAN, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let nan_logits = [f32::NAN, 0.0, 0.0];
         let act = decode_action(&nan_logits, &g, 100.0, 0);
-        assert_eq!(act, Action::Rest, "NaN logit must produce Rest");
+        assert_eq!(act, Action::Graze, "NaN logit must produce Graze (D9 stub)");
 
-        let inf_logits = [f32::INFINITY, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let inf_logits = [f32::INFINITY, 0.0, 0.0];
         let act2 = decode_action(&inf_logits, &g, 100.0, 0);
-        assert_eq!(act2, Action::Rest, "+Inf logit must produce Rest");
+        assert_eq!(act2, Action::Graze, "+Inf logit must produce Graze (D9 stub)");
 
-        // pick_action_d: when output_buf[2..8] has NaN the returned velocity must be 0.
-        // We construct a World and manually inject NaN into the forward-pass output
-        // by temporarily patching output_buf ourselves.
+        // pick_action_d: when output_buf[2..5] has NaN the returned velocity must be 0.
         let w = World::new("s5-nan");
         let input_buf = [0.0f32; NN_INPUTS];
         let hidden_buf = [0.0f32; NN_HIDDEN];
         let mut output_buf = [0.0f32; NN_OUTPUTS];
         // Inject NaN into logit slots.
         output_buf[2] = f32::NAN;
-        // Bypass the forward pass and call the action-decode portion indirectly:
-        // re-use the logit slice exactly as pick_action_d does.
-        let logits: &[f32; 6] = output_buf[2..8].try_into().unwrap();
+        // D9: logits are out[2..5] (3 slots).
+        let logits: &[f32; 3] = output_buf[2..5].try_into().unwrap();
         let had_nan = logits.iter().any(|v| !v.is_finite());
         assert!(had_nan, "test setup: NaN must be detected");
         // Simulate the velocity fallback.
         let (vx, vy, action) = if had_nan {
-            (0.0_f32, 0.0_f32, Action::Rest)
+            (0.0_f32, 0.0_f32, Action::Graze)
         } else {
             let speed = w.creatures.g_move_speed[0];
             let vx = output_buf[0].tanh() * speed;
@@ -757,7 +746,7 @@ mod tests {
             let act = decode_action(logits, &w.creatures.genomes[0], w.creatures.energy[0], 0);
             (vx, vy, act)
         };
-        assert_eq!(action, Action::Rest, "had_nan path must return Rest");
+        assert_eq!(action, Action::Graze, "had_nan path must return Graze (D9 stub)");
         assert_eq!(vx, 0.0, "had_nan path must zero vx");
         assert_eq!(vy, 0.0, "had_nan path must zero vy");
         // Suppress unused-variable warnings from the buffers we allocated above.
@@ -806,17 +795,16 @@ mod tests {
             "need >= 2 creatures for a meaningful parallel test; got {n}"
         );
 
-        // Clone identical state via save/load round-trip.
-        let snap = w_base.to_save_v1();
-        let mut w_seq = World::from_save_v1(snap.clone()).expect("seq load");
-        let mut w_par = World::from_save_v1(snap).expect("par load");
+        // Clone identical state via clone_for_test (replaces save/load round-trip).
+        let mut w_seq = w_base.clone_for_test();
+        let mut w_par = w_base.clone_for_test();
 
         // Both worlds must have the same creature count.
         assert_eq!(w_seq.creatures.len(), n, "seq world population mismatch");
         assert_eq!(w_par.creatures.len(), n, "par world population mismatch");
 
         // Rebuild the carrion spatial index (normally done in run_vision_pass;
-        // from_save_v1 leaves cell_to_carrion empty).
+        // clone_for_test leaves cell_to_carrion empty).
         crate::vision::build_cell_to_carrion(&w_seq.carrion, &mut w_seq.cell_to_carrion);
         crate::vision::build_cell_to_carrion(&w_par.carrion, &mut w_par.cell_to_carrion);
 
@@ -1009,9 +997,8 @@ mod tests {
         };
         let n = w_base.creatures.len();
 
-        let snap = w_base.to_save_v1();
-        let mut w_seq = World::from_save_v1(snap.clone()).expect("seq load");
-        let mut w_par = World::from_save_v1(snap).expect("par load");
+        let mut w_seq = w_base.clone_for_test();
+        let mut w_par = w_base.clone_for_test();
 
         // P2e: set nose_count=1 for all creatures in both worlds so the bilinear
         // sampling path is exercised (not short-circuited by the nose_count=0 gate).

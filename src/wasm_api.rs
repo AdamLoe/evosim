@@ -2,7 +2,6 @@
 //! shapes so the web shell can iterate independently.
 
 use crate::constants::*;
-use crate::save::{LoadError, SaveV1};
 use crate::torus::torus_dist_sq;
 use crate::world::World;
 use wasm_bindgen::prelude::*;
@@ -549,48 +548,6 @@ impl WorldHandle {
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    // F.26 — persistence (snapshot_json + fromJson)
-
-    /// Serialize the world to JSON for autosave / Download Save (F.26).
-    /// ~1–5 ms at v1 sizes (brains dominate). Returns "{}" on the (unreachable)
-    /// serialization error path rather than panicking.
-    #[wasm_bindgen]
-    pub fn snapshot_json(&self) -> String {
-        let save = self.inner.to_save_v1();
-        serde_json::to_string(&save).unwrap_or_else(|_| "{}".into())
-    }
-
-    /// Construct a WorldHandle from a JSON save string (F.26).
-    ///
-    /// Returns `Err(JsValue)` with a prefix string for JS to switch on:
-    /// - `"schema-mismatch:<found>:<expected>"` — schema version mismatch
-    /// - `"invalid-json:<msg>"` — JSON parse error
-    /// - `"structural:<msg>"` — structural integrity failure
-    ///
-    /// JS treats any failure as "start fresh" (show schema-mismatch modal).
-    #[wasm_bindgen(js_name = fromJson)]
-    pub fn from_json(json: &str) -> Result<WorldHandle, JsValue> {
-        let save: SaveV1 = serde_json::from_str(json)
-            .map_err(|e| JsValue::from_str(&format!("invalid-json:{e}")))?;
-        let inner = World::from_save_v1(save).map_err(|e| match e {
-            LoadError::SchemaVersionMismatch { found, expected } => {
-                JsValue::from_str(&format!("schema-mismatch:{found}:{expected}"))
-            }
-            LoadError::InvalidJson(e) => JsValue::from_str(&format!("invalid-json:{e}")),
-            LoadError::StructuralError(s) => JsValue::from_str(&format!("structural:{s}")),
-        })?;
-        Ok(Self {
-            inner,
-            creature_buf: Vec::new(),
-            carrion_buf: Vec::new(),
-            grass_buf: Vec::new(),
-            id_buf: Vec::new(),
-            tick_durations_ms: std::collections::VecDeque::new(),
-            jank_count: 0,
-        })
-    }
-
-    // ─────────────────────────────────────────────────────────────────────
     // Profiler API (see docs/plans/perf-timing.md)
 
     /// Enable or disable the in-app profiler. Default: false (D9).
@@ -611,45 +568,6 @@ impl WorldHandle {
         self.inner.profile.report_json()
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // F.28 — eulogy card (hof_json)
-
-    /// JSON of the hall-of-fame eulogy snapshot (F.28).
-    ///
-    /// Shape (TS interface HoFJson):
-    /// ```json
-    /// {
-    ///   "first_mover": HoFEntry | null,
-    ///   "biggest": HoFEntry | null,
-    ///   "weirdest": HoFEntry | null,  // falls back to longest_lived per v5 §11.1
-    ///   "last_survivor": HoFEntry | null,
-    ///   "day_count": number,
-    ///   "peak_population": number,
-    ///   "peak_species": number,
-    ///   "seed": string
-    /// }
-    /// ```
-    #[wasm_bindgen]
-    pub fn hof_json(&self) -> String {
-        // v5 §11.1: weirdest falls back to longest_lived when no creature survived ≥ 500 ticks.
-        let weirdest = self
-            .inner
-            .weirdest
-            .as_ref()
-            .or(self.inner.longest_lived.as_ref());
-
-        let payload = serde_json::json!({
-            "first_mover": self.inner.first_mover_snapshot,
-            "biggest": self.inner.biggest_ever,
-            "weirdest": weirdest,
-            "last_survivor": self.inner.last_survivor,
-            "day_count": self.inner.tick / DAY_TICKS,
-            "peak_population": self.inner.peak_population,
-            "peak_species": self.inner.peak_species_count,
-            "seed": self.inner.seed,
-        });
-        serde_json::to_string(&payload).unwrap_or_else(|_| "{}".into())
-    }
 }
 
 // ─── Clock helper ─────────────────────────────────────────────────────────────
@@ -946,142 +864,4 @@ mod tests {
         );
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // F.26 wasm API tests
-
-    /// snapshot_json round-trips back through fromJson.
-    #[test]
-    fn f26_snapshot_json_round_trips() {
-        let mut handle = WorldHandle::new("f26-snap-rt");
-        for _ in 0..200 {
-            handle.step();
-        }
-        let json = handle.snapshot_json();
-        let handle2 = WorldHandle::from_json(&json).expect("fromJson must succeed");
-        assert_eq!(
-            handle2.tick(),
-            handle.tick(),
-            "tick must match after round-trip"
-        );
-        assert_eq!(
-            handle2.population(),
-            handle.population(),
-            "population must match"
-        );
-    }
-
-    /// fromJson returns a schema-mismatch JsValue for version 999.
-    #[test]
-    fn f26_from_json_schema_mismatch_prefix() {
-        // Craft a JSON with schema_version=999 by round-tripping and patching.
-        let mut handle = WorldHandle::new("f26-schema-err");
-        handle.step();
-        let json = handle.snapshot_json();
-        let patched = json.replace("\"schema_version\":4", "\"schema_version\":999");
-        // We can test the underlying save/load path without going through JsValue
-        // (JsValue::as_string() panics in native test context outside wasm32).
-        use crate::save::SaveV1;
-        let save: SaveV1 = serde_json::from_str(&patched).expect("parse");
-        let result = crate::world::World::from_save_v1(save);
-        assert!(result.is_err(), "must return Err for wrong schema version");
-        match result.err().unwrap() {
-            crate::save::LoadError::SchemaVersionMismatch { found: 999, .. } => {}
-            e => panic!("expected SchemaVersionMismatch, got: {e}"),
-        }
-    }
-
-    /// fromJson returns an error for garbage JSON (tests via raw parse path).
-    #[test]
-    fn f26_from_json_invalid_json_prefix() {
-        use crate::save::SaveV1;
-        let result: Result<SaveV1, _> = serde_json::from_str("not valid json at all {{{");
-        assert!(result.is_err(), "must fail on garbage JSON");
-    }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // F.28 wasm API tests
-
-    /// hof_json includes all four slots.
-    #[test]
-    fn f28_hof_json_includes_all_slots() {
-        let handle = WorldHandle::new("f28-hof");
-        let json = handle.hof_json();
-        let v: serde_json::Value =
-            serde_json::from_str(&json).expect("hof_json must be valid JSON");
-        assert!(
-            v.get("first_mover").is_some(),
-            "first_mover key must be present"
-        );
-        assert!(v.get("biggest").is_some(), "biggest key must be present");
-        assert!(v.get("weirdest").is_some(), "weirdest key must be present");
-        assert!(
-            v.get("last_survivor").is_some(),
-            "last_survivor key must be present"
-        );
-        assert!(
-            v.get("day_count").is_some(),
-            "day_count key must be present"
-        );
-        assert!(
-            v.get("peak_population").is_some(),
-            "peak_population key must be present"
-        );
-        assert!(
-            v.get("peak_species").is_some(),
-            "peak_species key must be present"
-        );
-        assert!(v.get("seed").is_some(), "seed key must be present");
-    }
-
-    /// hof_json day_count uses DAY_TICKS constant.
-    #[test]
-    fn f28_hof_json_day_count_uses_day_ticks() {
-        // Tick exactly DAY_TICKS * 5 + some ticks.
-        let mut handle = WorldHandle::new("f28-day");
-        // Advance tick to 5500 by running ticks (we accept that the world may end
-        // before then, in which case we test at wherever it stopped).
-        for _ in 0..5500 {
-            if !handle.step() {
-                break;
-            }
-        }
-        let json = handle.hof_json();
-        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        let expected_day = handle.tick() / DAY_TICKS;
-        assert_eq!(
-            v["day_count"].as_u64().unwrap(),
-            expected_day as u64,
-            "day_count must equal tick / DAY_TICKS"
-        );
-    }
-
-    /// hof_json weirdest falls back to longest_lived when weirdest is None.
-    #[test]
-    fn f28_hof_json_weirdest_falls_back_to_longest_lived() {
-        use crate::genome::Genome;
-        use crate::hof::HallOfFame;
-        let mut handle = WorldHandle::new("f28-fallback");
-        // Inject a longest_lived but leave weirdest as None.
-        handle.inner.longest_lived = Some(HallOfFame {
-            creature_id: 42,
-            genome: Genome::founder(),
-            species_name: "FallbackSpecies".to_string(),
-            captured_tick: 100,
-            captured_size: 1.0,
-            captured_age: 100,
-        });
-        handle.inner.weirdest = None;
-        let json = handle.hof_json();
-        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        let weirdest = &v["weirdest"];
-        assert!(
-            !weirdest.is_null(),
-            "weirdest must not be null when longest_lived is set (fallback)"
-        );
-        assert_eq!(
-            weirdest["creature_id"].as_u64().unwrap(),
-            42,
-            "weirdest must equal longest_lived.creature_id via fallback"
-        );
-    }
 }

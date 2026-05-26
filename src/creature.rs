@@ -11,27 +11,17 @@ use crate::constants::{EYE_STRIDE, EYE_VALID, SECTORS};
 use crate::genome::Genome;
 use serde::{Deserialize, Serialize};
 
-/// One discrete action a creature chose this tick.
+/// One discrete action a creature chose this tick (v1.3 D9: 3 variants).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum Action {
-    Rest = 0,
-    Graze = 1,
-    Eat = 2,
-    Scavenge = 3,
-    Split = 4,
-    Signal = 5,
+    Graze = 0,
+    Eat = 1,
+    Split = 2,
 }
 
 impl Action {
-    pub const ALL: [Action; 6] = [
-        Action::Rest,
-        Action::Graze,
-        Action::Eat,
-        Action::Scavenge,
-        Action::Split,
-        Action::Signal,
-    ];
+    pub const ALL: [Action; 3] = [Action::Graze, Action::Eat, Action::Split];
 
     pub fn one_hot_index(self) -> usize {
         self as usize
@@ -100,16 +90,6 @@ pub struct CreatureSoA {
     /// remove_indices, and resync_hot_mirrors_at. Read by hot tick paths.
     pub(crate) g_nose_count: Vec<u8>,
 
-    // ---- Per-creature move-bias direction persistence (v1.2 P2f — amendments §A.5 ADD) ----
-    /// External move-bias X component, in [-1, +1]. Applied additively to NN vx output
-    /// before speed-cap clamp (amendments §A.5). Re-rolled every MOVE_BIAS_REROLL_INTERVAL ticks.
-    pub(crate) move_bias_x: Vec<f32>,
-    /// External move-bias Y component, in [-1, +1]. Applied additively to NN vy output
-    /// before speed-cap clamp (amendments §A.5). Re-rolled every MOVE_BIAS_REROLL_INTERVAL ticks.
-    pub(crate) move_bias_y: Vec<f32>,
-    /// Tick at which move_bias_x/y are next re-rolled. Set to tick + MOVE_BIAS_REROLL_INTERVAL
-    /// at push time and updated by apply_movement_and_repulsion.
-    pub(crate) move_bias_reroll_at: Vec<u32>,
 }
 
 impl CreatureSoA {
@@ -142,9 +122,6 @@ impl CreatureSoA {
             g_vision_range: Vec::with_capacity(cap),
             g_eye_count: Vec::with_capacity(cap),
             g_nose_count: Vec::with_capacity(cap),
-            move_bias_x: Vec::with_capacity(cap),
-            move_bias_y: Vec::with_capacity(cap),
-            move_bias_reroll_at: Vec::with_capacity(cap),
         }
     }
 
@@ -182,18 +159,14 @@ impl CreatureSoA {
         self.cumulative_upkeep.push(0.0);
         self.species_id.push(species_id);
         self.parent_species_id.push(parent_species_id);
-        self.last_action.push(Action::Rest);
-        self.action_this_tick.push(Action::Rest);
+        self.last_action.push(Action::Graze);
+        self.action_this_tick.push(Action::Graze);
         self.max_size_reached.push(genome.size);
         self.distance_travelled.push(0.0);
         self.birth_tick.push(birth_tick);
         self.push_hot_mirrors(&genome); // perf-5: BEFORE genome move
         self.genomes.push(genome);
         self.brains.push(brain);
-        // move_bias fields: initialized to zero here; caller patches after push.
-        self.move_bias_x.push(0.0);
-        self.move_bias_y.push(0.0);
-        self.move_bias_reroll_at.push(0);
         // Extend trig buffer by one chunk of zeros, then populate.
         debug_assert_eq!(
             self.eye_trig.len(),
@@ -238,9 +211,6 @@ impl CreatureSoA {
             self.g_vision_range.swap_remove(k);
             self.g_eye_count.swap_remove(k);
             self.g_nose_count.swap_remove(k);
-            self.move_bias_x.swap_remove(k);
-            self.move_bias_y.swap_remove(k);
-            self.move_bias_reroll_at.swap_remove(k);
         }
     }
 
@@ -442,50 +412,4 @@ mod tests {
         }
     }
 
-    /// T3: save round-trip rebuilds hot mirrors bit-identically.
-    #[test]
-    fn save_round_trip_rebuilds_hot_mirrors() {
-        use crate::world::World;
-        let mut w = World::new("perf5-save-round-trip");
-        for _ in 0..200 {
-            w.tick_once();
-        }
-        let save = w.to_save_v1();
-        let w2 = World::from_save_v1(save).expect("load");
-        assert_eq!(w.creatures.len(), w2.creatures.len());
-        for i in 0..w.creatures.len() {
-            assert_eq!(
-                w2.creatures.g_size[i], w.creatures.genomes[i].size,
-                "g_size[{i}]"
-            );
-            assert_eq!(
-                w2.creatures.g_graze_eff[i], w.creatures.genomes[i].graze_efficiency,
-                "g_graze_eff[{i}]"
-            );
-            assert_eq!(
-                w2.creatures.g_eat_eff[i], w.creatures.genomes[i].eat_efficiency,
-                "g_eat_eff[{i}]"
-            );
-            assert_eq!(
-                w2.creatures.g_scav_eff[i], w.creatures.genomes[i].scavenge_efficiency,
-                "g_scav_eff[{i}]"
-            );
-            assert_eq!(
-                w2.creatures.g_move_speed[i], w.creatures.genomes[i].move_speed,
-                "g_move_speed[{i}]"
-            );
-            assert_eq!(
-                w2.creatures.g_vision_range[i], w.creatures.genomes[i].vision_range,
-                "g_vision_range[{i}]"
-            );
-            assert_eq!(
-                w2.creatures.g_eye_count[i], w.creatures.genomes[i].eye_count,
-                "g_eye_count[{i}]"
-            );
-            assert_eq!(
-                w2.creatures.g_nose_count[i], w.creatures.genomes[i].nose_count,
-                "g_nose_count[{i}]"
-            );
-        }
-    }
 }

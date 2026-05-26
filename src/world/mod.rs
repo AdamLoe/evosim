@@ -6,7 +6,6 @@
 //! Milestone D swaps in the real NN forward pass.
 
 pub(crate) mod nn;
-pub(crate) mod save_v1;
 pub(crate) mod tick;
 
 use self::nn::chunk_ranges;
@@ -18,7 +17,6 @@ use crate::events::{Event, EventKind, EventLog};
 use crate::genome::Genome;
 use crate::grass::GrassGrid;
 use crate::grid::SpatialGrid;
-use crate::hof::HallOfFame;
 use crate::rng::SimRng;
 use crate::species::{species_distance, SpeciesRegistry};
 use crate::torus::wrap_pos;
@@ -82,25 +80,6 @@ pub struct World {
     /// Bitset of population milestone thresholds that have fired (v5 §11, E.25.a).
     /// Bit k = POPULATION_MILESTONES[k] was crossed. One-shot: never cleared.
     pub population_milestones_fired: u32,
-    // ---- Hall-of-fame snapshots (E.25.d, consumed by F.28) ----
-    /// Creature with the highest size ever seen during this run (v6 §L).
-    pub biggest_ever: Option<HallOfFame>,
-    /// Last creature to die (highest death tick); updated on every death.
-    pub last_survivor: Option<HallOfFame>,
-    /// Creature with max species_distance from day-0 founder, requiring age ≥ 500 (v5 §11.1).
-    pub weirdest: Option<HallOfFame>,
-    /// Running max distance for weirdest candidate (avoids recomputation).
-    pub weirdest_distance: f32,
-    /// Fallback for weirdest when no creature has lived ≥ 500 ticks: longest-lived.
-    pub longest_lived: Option<HallOfFame>,
-    /// Age of the longest-lived candidate (to avoid full struct comparison).
-    pub longest_lived_age: u32,
-    /// Snapshot of the first creature to travel ≥ 5u (captured at FirstToMove fire-site).
-    pub first_mover_snapshot: Option<HallOfFame>,
-    /// Day-0 founder genome anchor for weirdness distance (captured in World::new).
-    pub founder_genome_anchor: Genome,
-    /// Day-0 founder brain weights anchor for weirdness distance (captured in World::new).
-    pub founder_brain_anchor: Vec<f32>,
     /// Per-creature vision cache (index-aligned with CreatureSoA). Milestone C.12.
     pub vision: Vec<VisionBuf>,
     /// Per-cell carrion lookup, rebuilt each tick before vision pass (S26: CSR layout).
@@ -155,9 +134,6 @@ impl World {
         let founder_genome = Genome::founder();
         let founder_brain = Brain::founder(&mut rng);
         let founder_species = species.founder(&founder_genome, &founder_brain, 0);
-        // Capture day-0 anchors for weirdness distance (E.25.d).
-        let founder_genome_anchor = founder_genome.clone();
-        let founder_brain_anchor = founder_brain.weights.clone();
         let cx = WORLD_SIZE * 0.5;
         let cy = WORLD_SIZE * 0.5;
         creatures.push(
@@ -171,24 +147,9 @@ impl World {
             founder_genome,
             founder_brain,
         );
-        // P2f: initialize founder's move_bias fields after push.
-        creatures.move_bias_x[0] = rng.symm();
-        creatures.move_bias_y[0] = rng.symm();
-        creatures.move_bias_reroll_at[0] = MOVE_BIAS_REROLL_INTERVAL; // tick=0, so tick + interval
+        // D6 stub: move_bias deleted.
         let mut grid = SpatialGrid::new();
         grid.rebuild(&creatures.x, &creatures.y);
-        // S29: initialize biggest_ever for the founder (founder never goes through
-        // handle_births, so we seed it here). Size = FOUNDER_SIZE from genome.
-        let founder_size = creatures.g_size[0];
-        let founder_species_name = species.get(founder_species).name.clone();
-        let initial_biggest_ever = Some(crate::hof::HallOfFame {
-            creature_id: 0,
-            genome: creatures.genomes[0].clone(),
-            species_name: founder_species_name,
-            captured_tick: 0,
-            captured_size: founder_size,
-            captured_age: 0,
-        });
         Self {
             tick: 0,
             seed: seed_string,
@@ -209,15 +170,6 @@ impl World {
             first_move_fired: false,
             first_eat_fired: false,
             population_milestones_fired: 0,
-            biggest_ever: initial_biggest_ever,
-            last_survivor: None,
-            weirdest: None,
-            weirdest_distance: 0.0,
-            longest_lived: None,
-            longest_lived_age: 0,
-            first_mover_snapshot: None,
-            founder_genome_anchor,
-            founder_brain_anchor,
             vision: vec![[0.0f32; VISION_LEN]], // 1 for the founder
             cell_to_carrion: CarrionIndex::new(),
             pending_extinction_check: Vec::new(),
@@ -483,34 +435,7 @@ impl World {
                 child_genome,
                 child_brain,
             );
-            // P2f: initialize child's move_bias fields (per amendments §A.5 ADD semantics).
-            let new_idx = self.creatures.len() - 1;
-            self.creatures.move_bias_x[new_idx] = self.rng.symm();
-            self.creatures.move_bias_y[new_idx] = self.rng.symm();
-            self.creatures.move_bias_reroll_at[new_idx] =
-                self.tick.saturating_add(MOVE_BIAS_REROLL_INTERVAL);
-            // S29: update biggest_ever immediately after each birth. Size is
-            // genome-determined and never changes after birth, so checking only
-            // here (and at World::new for the founder) replaces the old O(N)
-            // per-tick scan in energy_bookkeeping.
-            let newborn_idx = self.creatures.len() - 1;
-            let newborn_size = self.creatures.g_size[newborn_idx];
-            let current_best = self.biggest_ever.as_ref().map_or(0.0, |h| h.captured_size);
-            if newborn_size > current_best {
-                let species_name = self
-                    .species
-                    .get(self.creatures.species_id[newborn_idx])
-                    .name
-                    .clone();
-                self.biggest_ever = Some(crate::hof::HallOfFame {
-                    creature_id: self.creatures.id[newborn_idx],
-                    genome: self.creatures.genomes[newborn_idx].clone(),
-                    species_name,
-                    captured_tick: self.tick,
-                    captured_size: newborn_size,
-                    captured_age: self.creatures.age[newborn_idx],
-                });
-            }
+            // D6 stub: move_bias deleted.
         }
     }
 
@@ -575,6 +500,77 @@ impl World {
             cell_to_carrion: &self.cell_to_carrion,
         };
         pass.run(&mut self.vision[..n]);
+    }
+
+    /// Test-only deep clone of the World. Clones all SoA data and resets
+    /// transient state (vision, scratch bufs, spatial grid) identically to
+    /// what `from_save_v1` used to do. Only available under `#[cfg(test)]`.
+    #[cfg(test)]
+    pub fn clone_for_test(&self) -> World {
+        let n = self.creatures.len();
+        let mut creatures = CreatureSoA::with_capacity(n.max(1));
+        for i in 0..n {
+            creatures.push(
+                self.creatures.id[i],
+                self.creatures.x[i],
+                self.creatures.y[i],
+                self.creatures.energy[i],
+                self.creatures.species_id[i],
+                self.creatures.parent_species_id[i],
+                self.creatures.birth_tick[i],
+                self.creatures.genomes[i].clone(),
+                self.creatures.brains[i].clone(),
+            );
+            // Restore non-push fields.
+            creatures.vx[i] = self.creatures.vx[i];
+            creatures.vy[i] = self.creatures.vy[i];
+            creatures.age[i] = self.creatures.age[i];
+            creatures.digestion_cooldown[i] = self.creatures.digestion_cooldown[i];
+            creatures.cumulative_upkeep[i] = self.creatures.cumulative_upkeep[i];
+            creatures.last_action[i] = self.creatures.last_action[i];
+            creatures.action_this_tick[i] = self.creatures.action_this_tick[i];
+            creatures.max_size_reached[i] = self.creatures.max_size_reached[i];
+            creatures.distance_travelled[i] = self.creatures.distance_travelled[i];
+        }
+        let mut grid = SpatialGrid::new();
+        grid.rebuild(&creatures.x, &creatures.y);
+        World {
+            tick: self.tick,
+            seed: self.seed.clone(),
+            rng: self.rng.clone(),
+            grass: self.grass.clone(),
+            grid,
+            creatures,
+            carrion: self.carrion.clone(),
+            species: self.species.clone(),
+            events: self.events.clone(),
+            events_enabled: self.events_enabled,
+            sliders: self.sliders.clone(),
+            next_creature_id: self.next_creature_id,
+            peak_population: self.peak_population,
+            peak_species_count: self.peak_species_count,
+            world_ended: self.world_ended,
+            live_species_count: self.live_species_count,
+            first_move_fired: self.first_move_fired,
+            first_eat_fired: self.first_eat_fired,
+            population_milestones_fired: self.population_milestones_fired,
+            vision: vec![[0.0f32; VISION_LEN]; n],
+            cell_to_carrion: CarrionIndex::new(),
+            pending_extinction_check: Vec::new(),
+            profile: crate::profiler::Profiler::new(),
+            scratch_fx: Vec::new(),
+            scratch_fy: Vec::new(),
+            scratch_neighbors: Vec::new(),
+            scratch_damage: Vec::new(),
+            scratch_gain: Vec::new(),
+            scratch_cooldown_set: Vec::new(),
+            scratch_attempted_eat: Vec::new(),
+            scratch_attempted_scavenge: Vec::new(),
+            scratch_got_a_bite: Vec::new(),
+            scratch_eat_candidates: Vec::new(),
+            scratch_dead: Vec::new(),
+            force_sequential_nn: false,
+        }
     }
 }
 

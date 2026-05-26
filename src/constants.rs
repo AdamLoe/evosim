@@ -48,28 +48,16 @@ pub const CARRION_MAX_AGE: u32 = 100;
 // ---- Past-lifespan penalty (v5 §7) ----
 pub const PAST_LIFESPAN_MULT: f32 = 4.0; // per 1000 ticks past max_age
 
-// ---- Brain (v5 §5, v6 §E) ----
-pub const NN_INPUTS: usize = 160; // v1.2: 9 self-state + 120 vision + 6 last_action + 25 grass-patch (P2b shifts; P2d fills patch)
+// ---- Brain (v1.3 §D9) ----
+// Layout: [0..5) self-state, [5..77) vision 24×3, [77..80) last_action 3,
+//         [80..105) grass-patch 5×5, [105..112) padding zeros.
+pub const NN_INPUTS: usize = 112; // v1.3: 5 self-state + 72 vision + 3 last_action + 25 grass-patch + 7 pad
 pub const NN_HIDDEN: usize = 24;
-pub const NN_OUTPUTS: usize = 8;
+pub const NN_OUTPUTS: usize = 5; // out[0]=vx, out[1]=vy, out[2..5]=action logits (Graze/Eat/Split)
 pub const NN_WEIGHT_COUNT: usize = NN_INPUTS * NN_HIDDEN + NN_HIDDEN * NN_OUTPUTS;
 pub const NN_MUT_RATE_DEFAULT: f32 = 0.02;
 pub const NN_MUT_SIGMA_DEFAULT: f32 = 0.02;
 pub const NN_INIT_RANGE: f32 = 0.3; // uniform random weight initialisation range
-                                    // ---- F.30 founder NN hardwiring (v1.2 rewrite — see DECISIONS) ----
-/// Hidden[0] = on-grass detector: large positive weight from NN_GRASS_PATCH_CENTER_SLOT.
-pub const NN_FOUNDER_GRAZE_DETECTOR_WEIGHT: f32 = 5.0;
-/// Output Graze += large positive from hidden[0]: founder-lineage hardwired graze response.
-pub const NN_FOUNDER_GRAZE_OUTPUT_WEIGHT: f32 = 5.0;
-/// Hidden[1] = Move baseline; w_ih[1][energy_frac] + w_ho[vx/vy][1] all baseline.
-pub const NN_FOUNDER_MOVE_BASELINE: f32 = 1.0;
-/// Hidden[2] = energy_frac reader → Split logit positive.
-pub const NN_FOUNDER_SPLIT_FROM_ENERGY: f32 = 1.0;
-
-// ---- move_bias direction-persistence (v1.2 — per amendments §A.5 ADD semantics) ----
-/// Re-roll move_bias_x/y every N ticks for per-creature direction persistence.
-/// 20 ticks @ 30 tick/s ≈ 0.66s of persistent heading.
-pub const MOVE_BIAS_REROLL_INTERVAL: u32 = 20;
 
 // ---- Body mutation (v5 §6) ----
 pub const BODY_MUT_RATE_DEFAULT: f32 = 0.03;
@@ -193,14 +181,24 @@ pub const GRASS_INITIAL_SEED_COUNT_DEFAULT: u32 = 100;
 ///     outrun the past-lifespan upkeep cliff.
 pub const GRAZE_MAX_PER_TICK: f32 = 0.4;
 
-// ---- NN input layout offsets (v1.2 — see P2b/P2d) ----
-/// Vision passthrough block start (post-is_at_wall-deletion). 9 self-state slots before.
-pub const NN_VISION_OFFSET: usize = 9;
-/// Last-action one-hot block start. After 120-float vision passthrough.
-pub const NN_LAST_ACTION_OFFSET: usize = 129;
-/// Grass-patch 5x5 block start (P2d fills slots 135..160).
-pub const NN_GRASS_PATCH_OFFSET: usize = 135;
-/// Grass-patch center sample (dx=dy=0); 5x5 iteration is dy outer, dx inner,
-/// offset = (dy+2)*5 + (dx+2). Center: dy=0,dx=0 → 12; global slot 135+12 = 147.
-/// P2f reads this to hardwire the grass-sensor hidden unit.
-pub const NN_GRASS_PATCH_CENTER_SLOT: usize = 147;
+// ---- NN input layout offsets (v1.3 D9) ----
+/// Self-state block length: [energy_frac, age_frac, prev_vx, prev_vy, cooldown_frac].
+pub const NN_SELF_STATE_LEN: usize = 5;
+/// Vision passthrough block start. 5 self-state slots before.
+pub const NN_VISION_OFFSET: usize = 5;
+/// Vision block length: 24 sectors × 3 RGB features.
+/// NOTE: vision.rs currently emits 24×5=120 floats (Q3 not yet landed).
+/// If VISION_LEN==120, slots [77..80) overlap; will be fixed when Q3 lands.
+pub const NN_VISION_LEN: usize = 72;
+/// Last-action one-hot block start. After vision block (5 + 72 = 77).
+pub const NN_LAST_ACTION_OFFSET: usize = 77;
+/// Last-action block length: 3 (Graze, Eat, Split).
+pub const NN_LAST_ACTION_LEN: usize = 3;
+/// Grass-patch 5×5 block start (77 + 3 = 80).
+pub const NN_GRASS_PATCH_OFFSET: usize = 80;
+/// Grass-patch block length.
+pub const NN_GRASS_PATCH_LEN: usize = 25;
+/// Grass-patch center sample (dx=dy=0); 5×5 iteration is dy outer, dx inner,
+/// offset = (dy+2)*5 + (dx+2). Center: dy=0,dx=0 → 12; global slot 80+12 = 92.
+pub const NN_GRASS_PATCH_CENTER_SLOT: usize = NN_GRASS_PATCH_OFFSET + 12; // = 92
+// Slots [105..112) are SIMD padding zeros.

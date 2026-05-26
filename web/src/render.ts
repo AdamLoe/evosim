@@ -2,10 +2,9 @@
 // requestAnimationFrame from main.ts with a fresh creature/carrion snapshot.
 
 import type { WorldHandle } from "../wasm/evosim";
-import type { GenomeJson } from "./eulogy"; // used by renderCreaturePortrait below
 
 /// Ring colors per v6 §B: eye=white, move=yellow, scav=brown, mouth=red, armor=silver.
-/// Shared between drawCreatures (SoA path) and renderCreaturePortrait (F.28).
+/// Used by drawCreatures (SoA path).
 export const RING_COLORS = {
   eye: "rgba(255,255,255,0.85)",
   move: "rgba(240,220, 80,0.85)",
@@ -232,52 +231,3 @@ export function renderWorld(
   drawCreatures(ctx, cam, viewW, viewH, world.creatures_buffer(), ids, stride, highlightMap, nowMs);
 }
 
-/// F.28 — single-creature portrait renderer. Renders a creature from a GenomeJson
-/// into a fresh offscreen canvas (canvasSize × canvasSize px), centered.
-/// Used by the eulogy card image grid. Ring colors match RING_COLORS.
-export function renderCreaturePortrait(genome: GenomeJson, canvasSize = 96): HTMLCanvasElement {
-  const c = document.createElement("canvas");
-  c.width = canvasSize;
-  c.height = canvasSize;
-  const ctx = c.getContext("2d")!;
-
-  // Dark background to match aquarium.
-  ctx.fillStyle = "rgba(8, 12, 20, 1)";
-  ctx.fillRect(0, 0, canvasSize, canvasSize);
-
-  const cx = canvasSize / 2;
-  const cy = canvasSize / 2;
-
-  // Pick a fixed portrait zoom: largest size we expect (~10) should fit with
-  // 8px margin. radius_px = size × portraitScale. Want 10 × scale = canvasSize/2 - 8.
-  const portraitScale = (canvasSize / 2 - 8) / 10;
-  const radiusPx = Math.max(6, genome.size * portraitScale);
-
-  // Body fill (pigment).
-  const r = Math.round(genome.pigment_r * 255);
-  const g = Math.round(genome.pigment_g * 255);
-  const b = Math.round(genome.pigment_b * 255);
-  ctx.fillStyle = `rgb(${r},${g},${b})`;
-  ctx.beginPath();
-  ctx.arc(cx, cy, radiusPx, 0, Math.PI * 2);
-  ctx.fill();
-
-  // Active-trait rings (same order as drawCreatures; RING_COLORS shared).
-  let ringR = radiusPx - 1;
-  const drawPortraitRing = (color: string): void => {
-    if (ringR < 1) return;
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.arc(cx, cy, ringR, 0, Math.PI * 2);
-    ctx.stroke();
-    ringR -= 1.5;
-  };
-  if (genome.eye_count > 0)            drawPortraitRing(RING_COLORS.eye);
-  if (genome.move_speed > 0)           drawPortraitRing(RING_COLORS.move);
-  if (genome.scavenge_efficiency > 0)  drawPortraitRing(RING_COLORS.scav);
-  if (genome.eat_efficiency > 0)       drawPortraitRing(RING_COLORS.mouth);
-  if (genome.armor > 0)                drawPortraitRing(RING_COLORS.armor);
-
-  return c;
-}
