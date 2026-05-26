@@ -339,10 +339,7 @@ impl World {
             if size_i > self.creatures.max_size_reached[i] {
                 self.creatures.max_size_reached[i] = size_i;
             }
-            // S29: biggest_ever scan removed from here. It is now updated only in
-            // handle_births (on each newborn push) and in World::new (for the founder).
-            // Size is genome-determined and never changes after birth, so a per-tick
-            // O(N) scan was redundant.
+            // Size is genome-determined and never changes after birth.
             self.creatures.energy[i] -= up;
             self.creatures.cumulative_upkeep[i] += up;
             if self.creatures.digestion_cooldown[i] > 0 {

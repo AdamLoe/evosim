@@ -131,6 +131,7 @@ pub const EYE_STRIDE: [u8; 8] = [0, 12, 8, 6, 4, 3, 2, 1];
 // ---- Persistence (v5 §13, F.26/F.28) ----
 /// Ticks per "day" — used by resume prompt + eulogy card day count (F.26, F.28).
 /// At sim 1× (30 ticks/s), one "day" ≈ 33 wall-seconds. v5 §11 + F.26 DECISIONS.
+#[allow(dead_code)]
 pub const DAY_TICKS: u32 = 1000;
 
 // ---- Grass grid (v1.2 grass mechanic) ----

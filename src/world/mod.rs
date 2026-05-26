@@ -380,7 +380,7 @@ impl World {
                 child_genome,
                 child_brain,
             );
-            // D6 stub: move_bias deleted.
+            // D6: move_bias deleted.
         }
     }
 
