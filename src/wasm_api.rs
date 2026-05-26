@@ -167,52 +167,31 @@ impl WorldHandle {
     /// `[x, y, radius_world, r, g, b,
     ///   flag_eye, flag_move, flag_scav, flag_mouth, flag_armor]`.
     /// Ring flags: 1.0 if trait > 0, else 0.0. See v6 §B for ring order.
-    /// S21: dropped energy_frac (was off+6) and age_frac (was off+7) —
-    /// both were read-commented in render.ts. Switched hot-field reads from
-    /// AoS genomes[i] to perf-5 SoA mirror where mirrors exist.
+    /// D3: genome deleted — body traits are compile-time constants; pigment is 0.5 gray.
     #[wasm_bindgen]
     pub fn creatures_buffer(&mut self) -> js_sys::Float32Array {
         let n = self.inner.creatures.len();
         let stride = creature_stride() as usize;
         self.creature_buf.clear();
         self.creature_buf.resize(n * stride, 0.0);
+        // D3: all body traits are constants.
+        let body_r = FOUNDER_SIZE * BODY_RADIUS_PER_SIZE;
         for i in 0..n {
-            // AoS binding kept only for the four unmirrored fields:
-            // pigment_r/g/b and armor.
-            let g = &self.inner.creatures.genomes[i];
             let off = i * stride;
             self.creature_buf[off] = self.inner.creatures.x[i];
             self.creature_buf[off + 1] = self.inner.creatures.y[i];
-            // S21: use SoA mirror g_size instead of AoS g.size.
-            self.creature_buf[off + 2] = self.inner.creatures.g_size[i] * BODY_RADIUS_PER_SIZE;
-            // pigment_r/g/b have no SoA mirror — stay AoS.
-            self.creature_buf[off + 3] = g.pigment_r;
-            self.creature_buf[off + 4] = g.pigment_g;
-            self.creature_buf[off + 5] = g.pigment_b;
+            self.creature_buf[off + 2] = body_r;
+            // D3: pigment is placeholder gray (M5 owns color hot-mirror).
+            self.creature_buf[off + 3] = crate::vision::CREATURE_PIGMENT;
+            self.creature_buf[off + 4] = crate::vision::CREATURE_PIGMENT;
+            self.creature_buf[off + 5] = crate::vision::CREATURE_PIGMENT;
             // Feature ring flags (v6 §B, ring order: eye→move→scav→mouth→armor).
-            // S21: use perf-5 SoA mirror fields; offsets shifted from 8-12 → 6-10.
-            self.creature_buf[off + 6] = if self.inner.creatures.g_eye_count[i] > 0 {
-                1.0
-            } else {
-                0.0
-            };
-            self.creature_buf[off + 7] = if self.inner.creatures.g_move_speed[i] > 0.0 {
-                1.0
-            } else {
-                0.0
-            };
-            self.creature_buf[off + 8] = if self.inner.creatures.g_scav_eff[i] > 0.0 {
-                1.0
-            } else {
-                0.0
-            };
-            self.creature_buf[off + 9] = if self.inner.creatures.g_eat_eff[i] > 0.0 {
-                1.0
-            } else {
-                0.0
-            };
-            // armor has no SoA mirror — stay AoS.
-            self.creature_buf[off + 10] = if g.armor > 0.0 { 1.0 } else { 0.0 };
+            // D3: eye_count=24 (>0), move_speed=MOVE_SPEED_MAX (>0), scav/eat_eff=1.0 (>0), armor=0.
+            self.creature_buf[off + 6] = 1.0; // eye_count=24 always > 0
+            self.creature_buf[off + 7] = 1.0; // move_speed=MOVE_SPEED_MAX always > 0
+            self.creature_buf[off + 8] = 1.0; // scav_eff=1.0 constant
+            self.creature_buf[off + 9] = 1.0; // eat_eff=1.0 constant
+            self.creature_buf[off + 10] = 0.0; // armor=0 constant
         }
         unsafe { js_sys::Float32Array::view(&self.creature_buf) }
     }
@@ -364,7 +343,8 @@ impl WorldHandle {
         // S20: grid-backed scan. Query radius = tolerance + max possible body radius
         // (SIZE_MAX * BODY_RADIUS_PER_SIZE = 10.0) to ensure all candidates are
         // visited; we then filter by the exact per-creature distance check.
-        let query_r = tolerance_world + SIZE_MAX * BODY_RADIUS_PER_SIZE;
+        // D3: body radius is constant — FOUNDER_SIZE * BODY_RADIUS_PER_SIZE.
+        let query_r = tolerance_world + FOUNDER_SIZE * BODY_RADIUS_PER_SIZE;
         let mut found: Option<f64> = None;
         self.inner
             .grid
@@ -372,7 +352,7 @@ impl WorldHandle {
                 if found.is_some() {
                     return;
                 }
-                let body_r = self.inner.creatures.g_size[i] * BODY_RADIUS_PER_SIZE;
+                let body_r = FOUNDER_SIZE * BODY_RADIUS_PER_SIZE;
                 let r = body_r + tolerance_world;
                 // Walled: raw Euclidean distance (no torus seam).
                 let ddx = world_x - self.inner.creatures.x[i];
@@ -408,13 +388,13 @@ impl WorldHandle {
 
     /// JSON blob for the Inspector panel. Returns None if idx is out of range.
     /// O(1) — all fields are direct SoA reads.
+    /// D3: genome deleted; body traits are compile-time constants.
     #[wasm_bindgen]
     pub fn creature_inspect_json(&self, idx: u32) -> Option<String> {
         let i = idx as usize;
         if i >= self.inner.creatures.len() {
             return None;
         }
-        let g = &self.inner.creatures.genomes[i];
         let action_name = format!("{:?}", self.inner.creatures.action_this_tick[i]);
         let json = serde_json::json!({
             "index": idx,
@@ -422,21 +402,21 @@ impl WorldHandle {
             "x": self.inner.creatures.x[i],
             "y": self.inner.creatures.y[i],
             "age": self.inner.creatures.age[i],
-            "max_age": g.max_age,
+            "max_age": FOUNDER_MAX_AGE,
             "energy": self.inner.creatures.energy[i],
             "energy_frac": (self.inner.creatures.energy[i] / 100.0).clamp(0.0, 1.0),
-            "size": g.size,
+            "size": FOUNDER_SIZE,
             "current_action": action_name,
-            "graze_efficiency": g.graze_efficiency,
-            "eat_efficiency": g.eat_efficiency,
-            "scavenge_efficiency": g.scavenge_efficiency,
-            "move_speed": g.move_speed,
-            "vision_range": g.vision_range,
-            "eye_count": g.eye_count,
-            "nose_count": g.nose_count,
-            "armor": g.armor,
-            "bite_reach": g.bite_reach,
-            "pigment": [g.pigment_r, g.pigment_g, g.pigment_b],
+            "graze_efficiency": FOUNDER_GRAZE_EFF,
+            "eat_efficiency": 1.0_f32,
+            "scavenge_efficiency": 1.0_f32,
+            "move_speed": MOVE_SPEED_MAX,
+            "vision_range": VISION_RANGE_MAX,
+            "eye_count": 24_u8,
+            "nose_count": 0_u8,
+            "armor": 0.0_f32,
+            "bite_reach": BITE_REACH_MIN,
+            "pigment": [0.5_f32, 0.5_f32, 0.5_f32],
         });
         Some(serde_json::to_string(&json).unwrap_or_else(|_| "{}".into()))
     }
@@ -461,37 +441,23 @@ impl WorldHandle {
     }
 
     /// Mean nose_count across all live creatures. Returns 0.0 when population is 0.
+    /// D3: nose_count is removed as a genome trait; returns 0.0 always (all creatures are
+    /// nose-free; grass inputs are always filled).
     #[wasm_bindgen]
     pub fn mean_nose_count(&self) -> f32 {
-        let n = self.inner.creatures.len();
-        if n == 0 {
-            return 0.0;
-        }
-        let sum: u32 = self
-            .inner
-            .creatures
-            .g_nose_count
-            .iter()
-            .map(|&v| v as u32)
-            .sum();
-        sum as f32 / n as f32
+        0.0
     }
 
     /// Mean eye_count across all live creatures. Returns 0.0 when population is 0.
+    /// D3: eye_count is removed as a genome trait; all creatures use 24 sectors.
+    /// Returns 24.0 if any creatures are alive, 0.0 otherwise.
     #[wasm_bindgen]
     pub fn mean_eye_count(&self) -> f32 {
         let n = self.inner.creatures.len();
         if n == 0 {
             return 0.0;
         }
-        let sum: u32 = self
-            .inner
-            .creatures
-            .g_eye_count
-            .iter()
-            .map(|&v| v as u32)
-            .sum();
-        sum as f32 / n as f32
+        24.0
     }
 
     /// Stats sample: [tick, population] as f32.
@@ -680,21 +646,22 @@ mod tests {
         );
     }
 
-    /// mean_nose_count and mean_eye_count return 0.0 on a fresh world (founder has
-    /// nose_count=0 and eye_count=0 per Genome::founder).
+    /// mean_nose_count always returns 0.0 (D3: nose_count removed as genome trait).
+    /// mean_eye_count returns 24.0 when creatures are alive (D3: all creatures use 24 sectors).
     #[test]
     fn mean_nose_eye_count_fresh_world() {
         let handle = WorldHandle::new("p3d-mean-traits");
-        // Genome::founder sets eye_count=0, nose_count=0.
+        // D3: nose_count is removed; always 0.0.
         assert_eq!(
             handle.mean_nose_count(),
             0.0,
-            "founder nose_count mean must be 0.0"
+            "D3: mean_nose_count must always be 0.0"
         );
+        // D3: eye_count is constant 24; with 1 founder alive, mean = 24.0.
         assert_eq!(
             handle.mean_eye_count(),
-            0.0,
-            "founder eye_count mean must be 0.0"
+            24.0,
+            "D3: mean_eye_count must be 24.0 when creatures are alive"
         );
     }
 

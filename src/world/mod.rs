@@ -12,7 +12,6 @@ use self::nn::chunk_ranges;
 use crate::brain::Brain;
 use crate::constants::*;
 use crate::creature::{Action, CreatureSoA};
-use crate::genome::Genome;
 use crate::grass::GrassGrid;
 use crate::grid::SpatialGrid;
 use crate::rng::SimRng;
@@ -104,11 +103,10 @@ impl World {
         let mut rng = SimRng::from_string(&seed_string);
         let grass = GrassGrid::new(&mut rng, sliders.grass_initial_seed_count);
         let mut creatures = CreatureSoA::with_capacity(2048);
-        let founder_genome = Genome::founder();
         let founder_brain = Brain::founder(&mut rng);
         let cx = WORLD_SIZE * 0.5;
         let cy = WORLD_SIZE * 0.5;
-        creatures.push(0, cx, cy, FOUNDER_ENERGY, 0, founder_genome, founder_brain);
+        creatures.push(0, cx, cy, FOUNDER_ENERGY, 0, founder_brain);
         let mut grid = SpatialGrid::new();
         grid.rebuild(&creatures.x, &creatures.y);
         Self {
@@ -298,8 +296,7 @@ impl World {
             self.creatures.energy[i] = parent_energy_after_cost - gift;
             let child_energy = gift;
 
-            let mut child_genome = self.creatures.genomes[i].clone();
-            child_genome.mutate_in_place(&mut self.rng, self.sliders.mutation_rate_multiplier);
+            // D3: no child_genome mutation. Brain mutation only.
             let child_brain = Brain::child_from(
                 &self.creatures.brains[i],
                 &mut self.rng,
@@ -308,11 +305,8 @@ impl World {
             );
             let jitter_x = self.rng.symm() * FOUNDER_SPLIT_JITTER;
             let jitter_y = self.rng.symm() * FOUNDER_SPLIT_JITTER;
-            // Walled: clamp child position to [radius, WORLD_SIZE - radius].
-            let radius = {
-                let child_size = self.creatures.genomes[i].size; // parent genome before mutation
-                child_size * BODY_RADIUS_PER_SIZE
-            };
+            // D3: size is constant FOUNDER_SIZE for all creatures.
+            let radius = FOUNDER_SIZE * BODY_RADIUS_PER_SIZE;
             let clamp_lo = radius;
             let clamp_hi = WORLD_SIZE - radius;
             let cx = (self.creatures.x[i] + jitter_x).clamp(clamp_lo, clamp_hi);
@@ -325,10 +319,8 @@ impl World {
                 cy,
                 child_energy,
                 self.tick,
-                child_genome,
                 child_brain,
             );
-            // D6: move_bias deleted.
         }
     }
 
@@ -364,7 +356,6 @@ impl World {
                 self.creatures.y[i],
                 self.creatures.energy[i],
                 self.creatures.birth_tick[i],
-                self.creatures.genomes[i].clone(),
                 self.creatures.brains[i].clone(),
             );
             // Restore non-push fields.
@@ -375,7 +366,6 @@ impl World {
             creatures.cumulative_upkeep[i] = self.creatures.cumulative_upkeep[i];
             creatures.last_action[i] = self.creatures.last_action[i];
             creatures.action_this_tick[i] = self.creatures.action_this_tick[i];
-            creatures.max_size_reached[i] = self.creatures.max_size_reached[i];
             creatures.distance_travelled[i] = self.creatures.distance_travelled[i];
         }
         let mut grid = SpatialGrid::new();
@@ -448,18 +438,11 @@ mod tests {
         assert!(w.tick > 0);
     }
 
-    /// C.12 test 6: vision + movement loop under real-ish conditions.
-    /// Force the founder to have move_speed + eyes so that the vision loop
-    /// and movement cost accounting both exercise the hot paths.
+    /// D3: world runs without genome fields. All creatures have MOVE_SPEED_MAX, 24 eyes.
     #[test]
     fn world_runs_2000_ticks_with_movement() {
         let mut w = World::new("movement-smoke");
-        // Patch the founder's genome to have eyes and move_speed.
-        w.creatures.genomes[0].move_speed = 1.0;
-        w.creatures.genomes[0].vision_range = 30.0;
-        w.creatures.genomes[0].eye_count = 4;
-        w.creatures.resync_hot_mirrors_at(0); // perf-5: keep mirrors in sync after genome patch
-        w.creatures.recompute_eye_trig_at(0);
+        // D3: no genome patch needed — all creatures have MOVE_SPEED_MAX, 24 eyes, VISION_RANGE_MAX.
         for _ in 0..2000 {
             if !w.tick_once() {
                 break;
@@ -512,24 +495,18 @@ mod tests {
     #[test]
     fn d19_thousand_creatures_thousand_ticks_no_explode() {
         use crate::brain::Brain;
-        use crate::genome::Genome;
         use crate::vision::VISION_LEN;
 
         let mut w = World::new("d19-smoke");
         let mut seeder = SimRng::from_string("d19-seed");
 
-        // Seed in 999 extra creatures with diverse genomes (founder is already there).
+        // Seed in 999 extra creatures (founder is already there).
+        // D3: no genome diversity — just varied brain initializations.
         for k in 0..999u64 {
-            let mut g = Genome::founder();
-            g.move_speed = seeder.uniform(0.0, MOVE_SPEED_MAX);
-            g.eye_count = EYE_VALID[seeder.index(EYE_VALID.len())];
-            g.vision_range = seeder.uniform(0.0, VISION_RANGE_MAX);
-            g.eat_efficiency = seeder.uniform(0.0, EAT_EFF_MAX);
-            g.scavenge_efficiency = seeder.uniform(0.0, SCAVENGE_EFF_MAX);
             let b = Brain::founder(&mut seeder);
             let x = seeder.uniform(10.0, WORLD_SIZE - 10.0);
             let y = seeder.uniform(10.0, WORLD_SIZE - 10.0);
-            w.creatures.push(k + 1, x, y, FOUNDER_ENERGY, 0, g, b);
+            w.creatures.push(k + 1, x, y, FOUNDER_ENERGY, 0, b);
             w.vision.push([0.0f32; VISION_LEN]);
         }
 
@@ -588,6 +565,7 @@ mod tests {
     }
 
     /// perf-1 T2: child's trig cache is populated on birth; parent's is unchanged.
+    /// D3: trig is determined by sector index only (no genome fields).
     #[test]
     fn eye_trig_recomputed_on_birth() {
         use crate::brain::Brain;
@@ -602,13 +580,12 @@ mod tests {
         let parent_trig_before: Vec<f32> = w.creatures.eye_trig[..SECTORS * 2].to_vec();
         w.handle_births();
         assert!(w.creatures.len() >= 2, "birth must have produced a child");
-        // Parent's cache unchanged (cache is genome-derived, parent genome
-        // didn't change).
+        // Parent's cache unchanged.
         assert_eq!(
             &w.creatures.eye_trig[..SECTORS * 2],
             parent_trig_before.as_slice()
         );
-        // Child's cache matches a fresh recompute from its genome.
+        // Child's cache matches a fresh recompute (D3: same for all creatures).
         let child_idx = w.creatures.len() - 1;
         let mut expected = CreatureSoA::with_capacity(1);
         expected.push(
@@ -617,7 +594,6 @@ mod tests {
             0.0,
             0.0,
             0,
-            w.creatures.genomes[child_idx].clone(),
             Brain::founder(&mut SimRng::from_u64(0)), // brain irrelevant for cache
         );
         let off = child_idx * SECTORS * 2;
