@@ -93,7 +93,7 @@ pub struct World {
     pub profile: crate::profiler::Profiler,
     // Per-tick scratch buffers, promoted from in-function `vec!` to long-lived
     // fields to eliminate ~300 KB/tick allocator pressure (perf-final-report
-    // §3 item 2). Excluded from SaveV1 and from snapshot_hash by omission —
+    // §3 item 2). Excluded from SaveV1 by omission —
     // mirrors the `vision` / `cell_to_carrion` / `profile` pattern.
     pub(crate) scratch_fx: Vec<f32>,
     pub(crate) scratch_fy: Vec<f32>,
@@ -110,14 +110,6 @@ pub struct World {
     /// S27: promoted dead-indices buffer from collect_deaths.
     /// Cleared and refilled each call; caller reads it via &self.scratch_dead.
     pub(crate) scratch_dead: Vec<usize>,
-    /// S39 test (a) observation-only knob: when true, `nn_forward_all_chunks`'s
-    /// threaded branch short-circuits to the sequential branch so both paths can
-    /// be exercised in a single test process. NEVER set by production code.
-    /// Excluded from snapshot_hash, to_save_v1, and from_save_v1 by omission.
-    /// Exposed `pub` (not `pub(crate)`) so integration tests in `tests/` can
-    /// set it; the field is a test-only knob with zero effect on correctness.
-    #[cfg_attr(not(feature = "threads"), allow(dead_code))]
-    pub force_sequential_nn: bool,
 }
 
 impl World {
@@ -185,7 +177,6 @@ impl World {
             scratch_got_a_bite: Vec::new(),
             scratch_eat_candidates: Vec::new(),
             scratch_dead: Vec::new(),
-            force_sequential_nn: false,
         }
     }
 
@@ -308,9 +299,6 @@ impl World {
 
             // Promote this-tick action → next-tick last_action (v6 §1 / §E).
             // S30: copy the slice in one bulk memcpy instead of a per-element loop.
-            // Note: mem::swap cannot be used here because snapshot_hash reads both
-            // last_action AND action_this_tick; swapping would put the OLD last_action
-            // into action_this_tick at hash time, changing the golden hash.
             let n = self.creatures.len();
             self.creatures.last_action[..n].copy_from_slice(&self.creatures.action_this_tick[..n]);
 

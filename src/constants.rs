@@ -139,12 +139,6 @@ pub const SECTORS: usize = 24;
 /// EYE_VALID = [0, 2, 3, 4, 6, 8, 12, 24] → strides [-, 12, 8, 6, 4, 3, 2, 1].
 pub const EYE_STRIDE: [u8; 8] = [0, 12, 8, 6, 4, 3, 2, 1];
 
-// ---- Acceptance test (v5 §16) ----
-#[allow(dead_code)]
-pub const ACCEPTANCE_TICKS: u32 = 10_000;
-#[allow(dead_code)]
-pub const ACCEPTANCE_SEED: &str = "evosim-test-001";
-
 // ---- Persistence (v5 §13, F.26/F.28) ----
 /// Ticks per "day" — used by resume prompt + eulogy card day count (F.26, F.28).
 /// At sim 1× (30 ticks/s), one "day" ≈ 33 wall-seconds. v5 §11 + F.26 DECISIONS.

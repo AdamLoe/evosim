@@ -12,7 +12,6 @@ pub(crate) mod grass;
 pub(crate) mod grid;
 pub(crate) mod profiler;
 pub(crate) mod rng;
-pub mod snapshot_hash; // used by tests/acceptance.rs
 pub(crate) mod species;
 pub(crate) mod torus;
 pub(crate) mod vision;

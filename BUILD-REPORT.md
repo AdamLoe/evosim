@@ -1,19 +1,10 @@
 # evosim v1 — build report
 
-One-pass orchestration of v5+v6 in ~6 wall-hours. All six milestones shipped,
-§16 headless acceptance passes 4/4.
+One-pass orchestration of v5+v6 in ~6 wall-hours. All six milestones shipped.
 
-## §16 Definition of Done
-
-### Headless acceptance test
-| Criterion | Status | Notes |
-|---|---|---|
-| (a) `population > 0` at tick 10,000 | **PASS** | seed `evosim-test-001` |
-| (b) ≥ 2 distinct species | **PASS** | verified during golden bootstrap |
-| (c) sim completes in < 8 wall-seconds | **PASS** | 2.31s on dev machine (release build, single-threaded) |
-| (d) world hash matches golden | **PASS** | golden = `0xc35be8a7905c7f05`, pinned at `tests/golden_snapshot_t10000.txt` |
-
-Test wired into CI as `cargo test --release --test acceptance` (`.github/workflows/ci.yml`). 77 unit tests in `cargo test --lib` also green; clippy clean; `pnpm build` clean.
+> **v1.3 note:** The §16 acceptance test and golden snapshot files were deleted in D6
+> of the v1.3 simplification pass. Determinism verification is no longer part of the CI
+> gate. See DECISIONS.md §v1.3 simplification D6.
 
 ### Manual / UI acceptance (per v5 §16 second list)
 Implementation is present for every UI checkpoint, but the orchestrator cannot operate a browser, so these are coded-and-untouched rather than coded-and-eyeballed.

@@ -24,8 +24,6 @@ pub struct Species {
 #[derive(Clone)]
 pub struct SpeciesRegistry {
     pub list: Vec<Species>,
-    /// Next species id to allocate. Exposed `pub(crate)` so `snapshot_hash`
-    /// can include it in the canonical hash without a visibility violation (S7).
     pub(crate) next_id: u32,
 }
 

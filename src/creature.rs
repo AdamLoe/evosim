@@ -55,8 +55,7 @@ pub struct CreatureSoA {
     /// [s0_dx, s0_dy, s1_dx, s1_dy, …, s23_dx, s23_dy] per creature.
     /// Length invariant: == x.len() * SECTORS * 2.
     /// Inactive sectors are zero. Recomputed by `recompute_eye_trig_at`.
-    /// Excluded from save (re-derived on push) and from snapshot_hash
-    /// (would double-count the genome bytes it derives from).
+    /// Excluded from save (re-derived on push).
     pub eye_trig: Vec<f32>,
 
     // Hot-field mirrors (perf-5). Each entry at index i is bit-identically

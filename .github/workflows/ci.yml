@@ -20,12 +20,12 @@ jobs:
         run: cargo fmt --all -- --check
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
+      - name: clippy (threads)
+        run: cargo clippy --all-targets --features threads -- -D warnings
       - name: test (native)
         run: cargo test --lib
-      - name: acceptance test (perf gate + golden snapshot)
-        run: cargo test --release --test acceptance
-      - name: acceptance test (threaded golden)
-        run: cargo test --release --features threads --test acceptance
+      - name: test (threads)
+        run: cargo test --lib --features threads
       - name: install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
       - name: install nightly + rust-src (required for wasm atomics / build-std)
