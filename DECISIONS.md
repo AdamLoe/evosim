@@ -359,3 +359,15 @@ D5 (Hall of Fame deletion): deleted `src/hof.rs`, `HallOfFame` struct, all HoF f
 D8 (F.30 founder NN hardwiring deletion): deleted F.30 founder NN hardwiring — `Brain::founder` is now 4-line pure uniform-random init; all four `NN_FOUNDER_*` constants removed from `constants.rs`; `founder_hardwiring_at_locked_slots` test deleted; user accepts startup-extinction risk.
 
 D10 (species tracking deletion): deleted `src/species.rs` entirely; removed `SpeciesRegistry`, `live_species_count`, `peak_species_count`, `pending_extinction_check`, `species_id`/`parent_species_id` SoA fields, `finalize_extinctions()`, 4 species constants, `species_count`/`species_list_json` wasm exports, species panel in rail (SpeciesRow, renderSpeciesList, 1 Hz poll), species chart in stats.ts, species fields from inspector.ts + index.html; removed peak_species from WorldEnded event. Deleted 7 species-related tests. All gates: cargo fmt/build/test-lib 181/183 (seq/threads), clippy both features, pnpm typecheck + build.
+
+### Wave A reconciliation (2026-05-26) — 10 parallel branches merged into main
+
+Merged D6→D7→D1→D2→D4→D5→D8→D10→D3→D9 in order via `git merge --no-ff`. All conflicts resolved with union-of-deletions rule (took more-deleted side). Key conflict patterns encountered:
+
+- D3 (`genome.rs` deletion): D9 branch re-added `g_*` hot-mirror SoA fields and `genomes[]` references in creature.rs, world/mod.rs, world/nn.rs — all overridden with HEAD (D3 constants).
+- D9 (Action enum collapse): `Action::Scavenge`/`Action::Rest` refs in tick.rs/nn.rs patched to D9's 3-variant `Graze=0/Eat=1/Split=2`. `move_bias_x/y/reroll_at` SoA field references removed.
+- Duplicate test functions from merge artifact (`nn_input_patch_center_slot_is_92`, `chunk_partition_invariants_and_vision_agreement`) deduplicated; stale `genomes[]/resync_hot_mirrors_at` test removed.
+- 3 clippy warnings fixed post-merge: `EYE_STRIDE` unused import (vision.rs), `scav_eff` unused variable (tick.rs), `match`-with-single-arm→`if` (tick.rs).
+- Pre-existing `now` TypeScript TS2304 error in rail/index.ts patched to `performance.now()`.
+
+Final gate results: `cargo fmt` clean; `cargo test --lib` 117/117; `cargo clippy` default+threads clean; `cargo test --lib --features threads` 117/117; `pnpm typecheck` clean; `pnpm build` clean. SCHEMA_VERSION=5. All worktrees retained.
