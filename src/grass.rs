@@ -1,5 +1,5 @@
 //! GrassGrid — 240×240 = 57_600 flat-Vec<f32> density field over the
-//! 600u toroidal world. Each cell is 2.5u square. Independent of
+//! 600u walled world. Each cell is 2.5u square. Independent of
 //! SpatialGrid (5u, body queries). See v1.2 grass-mechanic-brief §Grass
 //! storage / §Grass dynamics per tick / §Initial grass seed / §Bilinear
 //! sampling.
@@ -11,17 +11,16 @@ use crate::rng::SimRng;
 const _: () = assert!(GRASS_CELL_COUNT == 57_600);
 const _: () = assert!(GRASS_GRID_DIM == 240);
 
-/// 240×240 grass density field over the 600u toroidal world.
+/// 240×240 grass density field over the 600u walled world.
 ///
 /// Row-major layout: cell (ix, iy) is at index `iy * GRASS_GRID_DIM + ix`.
 /// Density values are clamped to `[0.0, GRASS_MAX]` after each `step` call.
 #[derive(Clone, Debug)]
 pub struct GrassGrid {
-    /// Row-major density, length GRASS_CELL_COUNT (= 57_600). Added by P1b+P1f.
+    /// Row-major density, length GRASS_CELL_COUNT (= 57_600).
     pub density: Vec<f32>,
     /// Double-buffer scratch. Same length as `density`. Recomputed every
-    /// `step` call; never read between ticks. NOT saved (rebuilt on load
-    /// as a zero-fill).
+    /// `step` call; never read between ticks.
     pub scratch: Vec<f32>,
 }
 
@@ -29,10 +28,6 @@ impl GrassGrid {
     /// World-init constructor. Seeds `initial_seed_count` random cells
     /// with `GRASS_MAX`; all others zero. Draws from `rng` via the same
     /// world RNG used everywhere else (deterministic given fixed seed).
-    /// Idempotent re-seeding allowed: if the same cell is drawn twice,
-    /// the second write is harmless (density stays at GRASS_MAX).
-    /// For large `initial_seed_count` the actual unique-cell count may be
-    /// slightly fewer than N due to collisions — acceptable per brief §Initial grass seed.
     pub fn new(rng: &mut SimRng, initial_seed_count: u32) -> Self {
         let mut density = vec![0.0f32; GRASS_CELL_COUNT];
         let scratch = vec![0.0f32; GRASS_CELL_COUNT];
@@ -45,7 +40,7 @@ impl GrassGrid {
 
     /// One propagation tick. Reads `self.density`, writes `self.scratch`, swaps.
     ///
-    /// Formula per cell c (toroidal cardinal neighbors n, s, e, w):
+    /// Formula per cell c (walled cardinal neighbors n, s, e, w — ghost zero at boundary):
     /// ```text
     /// d' = clamp(
     ///   d[c]
@@ -55,9 +50,8 @@ impl GrassGrid {
     ///   GRASS_MAX,
     /// )
     /// ```
+    /// Out-of-bounds neighbors are treated as zero density (ghost-zero boundary).
     /// Empty cells with all-zero neighbors remain zero (no spontaneous spawn).
-    /// Scalar implementation — see v1.2 p1c plan §2 for SIMD deferral rationale.
-    /// TODO(v1.3): SIMD via wide::f32x8 for cells 0..57_600.
     pub fn step(&mut self, r_in_cell: f32, k_propagate: f32) {
         debug_assert_eq!(self.density.len(), GRASS_CELL_COUNT);
         debug_assert_eq!(self.scratch.len(), GRASS_CELL_COUNT);
@@ -68,27 +62,38 @@ impl GrassGrid {
         let s = &mut self.scratch;
 
         for iy in 0..dim {
-            // Precompute row-base offsets with toroidal wrap on Y.
             let row_self = iy * dim;
-            let row_n = if iy == 0 {
-                (dim - 1) * dim
+            // Ghost-zero at boundary: north neighbor is 0 at iy==0, south is 0 at iy==dim-1.
+            let row_n = if iy == 0 { None } else { Some((iy - 1) * dim) };
+            let row_s = if iy + 1 == dim {
+                None
             } else {
-                (iy - 1) * dim
+                Some((iy + 1) * dim)
             };
-            let row_s = if iy + 1 == dim { 0 } else { (iy + 1) * dim };
 
             for ix in 0..dim {
                 let c = row_self + ix;
-                let ce = row_self + (if ix + 1 == dim { 0 } else { ix + 1 });
-                let cw = row_self + (if ix == 0 { dim - 1 } else { ix - 1 });
-                let cn = row_n + ix;
-                let cs = row_s + ix;
+                // Ghost-zero at boundary for east/west.
+                let ce = if ix + 1 == dim {
+                    None
+                } else {
+                    Some(row_self + ix + 1)
+                };
+                let cw = if ix == 0 {
+                    None
+                } else {
+                    Some(row_self + ix - 1)
+                };
+                let cn = row_n.map(|r| r + ix);
+                let cs = row_s.map(|r| r + ix);
 
                 let v = d[c];
-                // Logistic in-cell growth term (only nonzero when v > 0):
                 let logistic = r_in_cell * v * (1.0 - v * inv_max);
-                // Cross-kernel propagation from 4 cardinal neighbors:
-                let prop = k_propagate * (d[cn] + d[cs] + d[ce] + d[cw]);
+                let prop = k_propagate
+                    * (cn.map_or(0.0, |i| d[i])
+                        + cs.map_or(0.0, |i| d[i])
+                        + ce.map_or(0.0, |i| d[i])
+                        + cw.map_or(0.0, |i| d[i]));
                 s[c] = (v + logistic + prop).clamp(0.0, GRASS_MAX);
             }
         }
@@ -96,71 +101,67 @@ impl GrassGrid {
         std::mem::swap(&mut self.density, &mut self.scratch);
     }
 
-    /// Toroidal-aware bilinear sample at continuous world position `(x, y)`.
+    /// Walled bilinear sample at continuous world position `(x, y)`.
     ///
-    /// Used by PR-2 P2d to build the 25 grass-patch NN inputs per creature.
-    /// World wraps at `WORLD_SIZE = 600.0`. Returns a value in `[0.0, GRASS_MAX]`.
+    /// Clamps input to [0, WORLD_SIZE). Out-of-bounds indices return ghost zero
+    /// (Q-D7-3 default: ghost-zero).
     pub fn bilinear_sample(&self, x: f32, y: f32) -> f32 {
-        // Step 1: wrap continuous coords into [0, WORLD_SIZE).
         let w = WORLD_SIZE;
-        let xw = ((x % w) + w) % w;
-        let yw = ((y % w) + w) % w;
+        // Clamp to world bounds instead of wrapping.
+        let xw = x.clamp(0.0, w - 1e-4);
+        let yw = y.clamp(0.0, w - 1e-4);
 
-        // Step 2: convert to fractional cell coordinates. Cell i's center is at
+        // Convert to fractional cell coordinates. Cell i's center is at
         // (i + 0.5) * GRASS_CELL_SIZE. Subtract 0.5 so cell centers fall at integers.
         let fx = xw / GRASS_CELL_SIZE - 0.5;
         let fy = yw / GRASS_CELL_SIZE - 0.5;
 
-        // Step 3: get integer floor and fractional offset, wrapping.
         let dim = GRASS_GRID_DIM as i32;
-        let ix0 = (fx.floor() as i32).rem_euclid(dim) as usize;
-        let iy0 = (fy.floor() as i32).rem_euclid(dim) as usize;
-        let ix1 = if ix0 + 1 == GRASS_GRID_DIM {
-            0
-        } else {
-            ix0 + 1
-        };
-        let iy1 = if iy0 + 1 == GRASS_GRID_DIM {
-            0
-        } else {
-            iy0 + 1
-        };
+        let ix0 = fx.floor() as i32;
+        let iy0 = fy.floor() as i32;
+        let ix1 = ix0 + 1;
+        let iy1 = iy0 + 1;
 
         let tx = fx - fx.floor(); // in [0, 1)
         let ty = fy - fy.floor();
 
-        // Step 4: read four neighbors and bilinear interpolate.
-        let d = &self.density;
-        let d00 = d[iy0 * GRASS_GRID_DIM + ix0];
-        let d10 = d[iy0 * GRASS_GRID_DIM + ix1];
-        let d01 = d[iy1 * GRASS_GRID_DIM + ix0];
-        let d11 = d[iy1 * GRASS_GRID_DIM + ix1];
+        // Ghost-zero: out-of-bounds indices read as 0.
+        let sample = |iy: i32, ix: i32| -> f32 {
+            if iy < 0 || iy >= dim || ix < 0 || ix >= dim {
+                return 0.0;
+            }
+            self.density[iy as usize * GRASS_GRID_DIM + ix as usize]
+        };
 
-        let a = d00 * (1.0 - tx) + d10 * tx; // first row
-        let b = d01 * (1.0 - tx) + d11 * tx; // second row
+        let d00 = sample(iy0, ix0);
+        let d10 = sample(iy0, ix1);
+        let d01 = sample(iy1, ix0);
+        let d11 = sample(iy1, ix1);
+
+        let a = d00 * (1.0 - tx) + d10 * tx;
+        let b = d01 * (1.0 - tx) + d11 * tx;
         a * (1.0 - ty) + b * ty
     }
 
     /// Clamp-take with NaN guard. Returns the actual delta removed
     /// (≤ `max_take`, ≤ `density[cell_idx]`).
-    ///
-    /// Called by P1e in the sequential graze loop — single-threaded, no atomics.
     #[inline]
     pub fn consume(&mut self, cell_idx: usize, max_take: f32) -> f32 {
         if !max_take.is_finite() {
             return 0.0;
         }
         let cur = self.density[cell_idx];
-        let take = cur.min(max_take).max(0.0); // defend against negative max_take
-        self.density[cell_idx] = cur - take; // never negative: take ≤ cur
+        let take = cur.min(max_take).max(0.0);
+        self.density[cell_idx] = cur - take;
         take
     }
 
-    /// Iterate every cell whose center is within toroidal distance `r` of `(cx, cy)`.
+    /// Iterate every cell whose center is within Euclidean distance `r` of `(cx, cy)`.
     ///
+    /// Walled: out-of-bounds cells are skipped (no toroidal wrap).
     /// Invokes `f(cell_idx)` once per hit. Used by P1e to find graze-overlap cells.
     /// Deterministic: row-major, left-to-right iteration order.
-    /// Contract: `r` must be finite, non-negative, and ≤ `WORLD_SIZE * 0.5`.
+    /// Contract: `r` must be finite and non-negative.
     pub fn for_each_cell_overlapping_circle(
         &self,
         cx: f32,
@@ -169,43 +170,28 @@ impl GrassGrid {
         mut f: impl FnMut(usize),
     ) {
         debug_assert!(r.is_finite() && r >= 0.0);
-        debug_assert!(
-            r <= WORLD_SIZE * 0.5,
-            "radius must be ≤ half-world (300u); got {r}"
-        );
 
-        // Bounding box in cell coords (signed; we wrap per-cell below).
-        let r_cells = (r / GRASS_CELL_SIZE).ceil() as i32 + 1; // +1 for floor/center slop
+        let r_cells = (r / GRASS_CELL_SIZE).ceil() as i32 + 1;
         let cx_cell = (cx / GRASS_CELL_SIZE).floor() as i32;
         let cy_cell = (cy / GRASS_CELL_SIZE).floor() as i32;
         let dim = GRASS_GRID_DIM as i32;
-        let half_w = WORLD_SIZE * 0.5;
         let r2 = r * r;
 
         for jy in (cy_cell - r_cells)..=(cy_cell + r_cells) {
-            let iy = jy.rem_euclid(dim) as usize;
+            if jy < 0 || jy >= dim {
+                continue;
+            }
+            let iy = jy as usize;
             for jx in (cx_cell - r_cells)..=(cx_cell + r_cells) {
-                let ix = jx.rem_euclid(dim) as usize;
-                // Use pre-wrap jx/jy for distance computation so the geometry
-                // stays correct relative to (cx, cy) without spurious half-world jumps.
+                if jx < 0 || jx >= dim {
+                    continue;
+                }
+                let ix = jx as usize;
+                // Euclidean distance from query center to cell center.
                 let world_x = (jx as f32 + 0.5) * GRASS_CELL_SIZE;
                 let world_y = (jy as f32 + 0.5) * GRASS_CELL_SIZE;
-
-                // Shortest-vector torus distance:
-                let mut dx = world_x - cx;
-                let mut dy = world_y - cy;
-                if dx > half_w {
-                    dx -= WORLD_SIZE;
-                }
-                if dx < -half_w {
-                    dx += WORLD_SIZE;
-                }
-                if dy > half_w {
-                    dy -= WORLD_SIZE;
-                }
-                if dy < -half_w {
-                    dy += WORLD_SIZE;
-                }
+                let dx = world_x - cx;
+                let dy = world_y - cy;
 
                 if dx * dx + dy * dy <= r2 {
                     f(iy * GRASS_GRID_DIM + ix);
@@ -221,15 +207,12 @@ impl GrassGrid {
     }
 }
 
-/// Convert continuous world coords to a flat cell index (toroidal wrap).
-///
-/// Uses `rem_euclid` on integer cell coordinates for bit-stable results
-/// across sequential and threaded paths. Handles negative or > WORLD_SIZE inputs.
-#[allow(dead_code)] // Used by P1g (grass density render) — not yet landed.
+/// Convert continuous world coords to a flat cell index (clamped).
+#[allow(dead_code)]
 #[inline]
 pub fn cell_index_for(x: f32, y: f32) -> usize {
-    let ix = ((x / GRASS_CELL_SIZE).floor() as i32).rem_euclid(GRASS_GRID_DIM as i32) as usize;
-    let iy = ((y / GRASS_CELL_SIZE).floor() as i32).rem_euclid(GRASS_GRID_DIM as i32) as usize;
+    let ix = ((x / GRASS_CELL_SIZE).floor() as i32).clamp(0, GRASS_GRID_DIM as i32 - 1) as usize;
+    let iy = ((y / GRASS_CELL_SIZE).floor() as i32).clamp(0, GRASS_GRID_DIM as i32 - 1) as usize;
     iy * GRASS_GRID_DIM + ix
 }
 
@@ -245,29 +228,41 @@ mod tests {
         }
     }
 
-    /// Test 1: step preserves toroidal seam symmetry — seeding (0,0) should
-    /// propagate symmetrically to east (1,0) and west (dim-1, 0).
+    /// Walled: step propagates only within bounds — corner cell (0,0) should
+    /// NOT propagate to the "far edge" cells (the torus seam neighbors no longer
+    /// exist). Only the east (1,0) and south (0,1) cells should receive signal.
     #[test]
-    fn step_preserves_torus_seam_symmetry() {
+    fn step_zero_density_at_edge() {
         let mut g = fresh_grid();
         // Seed cell (0, 0) — top-left corner.
         g.density[0] = GRASS_MAX;
         g.step(0.0, 0.05); // pure propagation, no logistic
-                           // East neighbor: cell (1, 0) = index 1
+
+        // East neighbor: cell (1, 0) = index 1 — should receive propagation.
         let east = g.density[1];
-        // West neighbor (wraps): cell (dim-1, 0) = index GRASS_GRID_DIM - 1
+        // West neighbor would be at ix=-1 — ghost zero; cell (dim-1, 0) should NOT receive.
         let west = g.density[GRASS_GRID_DIM - 1];
         assert!(
-            (east - west).abs() < 1e-6,
-            "east={east} west={west} should be equal after seam propagation"
+            east > 0.0,
+            "east neighbor must receive propagation from (0,0); east={east}"
         );
-        // North neighbor (wraps): cell (0, dim-1) = index (dim-1)*dim
-        let north = g.density[(GRASS_GRID_DIM - 1) * GRASS_GRID_DIM];
-        // South neighbor: cell (0, 1) = index GRASS_GRID_DIM
+        assert!(
+            west < 1e-9,
+            "west (wrap) must NOT receive propagation in walled world; west={west}"
+        );
+
+        // North neighbor at iy=-1 is ghost zero; cell (0, dim-1) must NOT receive.
+        let north_wrap = g.density[(GRASS_GRID_DIM - 1) * GRASS_GRID_DIM];
+        assert!(
+            north_wrap < 1e-9,
+            "north wrap cell must NOT receive propagation in walled world; north_wrap={north_wrap}"
+        );
+
+        // South neighbor: cell (0, 1) = index GRASS_GRID_DIM — should receive.
         let south = g.density[GRASS_GRID_DIM];
         assert!(
-            (north - south).abs() < 1e-6,
-            "north={north} south={south} should be equal after seam propagation"
+            south > 0.0,
+            "south neighbor must receive propagation; south={south}"
         );
     }
 
@@ -354,20 +349,27 @@ mod tests {
         );
     }
 
-    /// Test 7: bilinear sample wraps at world seam — (0,0) and (WORLD_SIZE, WORLD_SIZE) are identical.
+    /// Test 7 (walled): bilinear sample at x=0 returns the density of cell (0,0)
+    /// and does NOT wrap to the far edge.
     #[test]
-    fn bilinear_sample_wraps_at_seam() {
+    fn bilinear_sample_walled_no_wrap() {
         let mut g = fresh_grid();
-        // Set a non-trivial density pattern near the corner cells.
-        g.density[0] = 0.3;
-        g.density[GRASS_GRID_DIM - 1] = 0.7;
-        g.density[(GRASS_GRID_DIM - 1) * GRASS_GRID_DIM] = 0.5;
+        // Only the corner cell (0,0) has density.
+        g.density[0] = 0.5;
+        // Far corner (dim-1, dim-1) has different density.
         g.density[GRASS_GRID_DIM * GRASS_GRID_DIM - 1] = 0.9;
-        let v1 = g.bilinear_sample(0.0, 0.0);
-        let v2 = g.bilinear_sample(WORLD_SIZE, WORLD_SIZE);
+
+        // Sample very close to (0,0) — ghost-zero boundaries mean it's mostly g.density[0].
+        let val_corner = g.bilinear_sample(0.01, 0.01);
+        // Should be influenced by g.density[0] = 0.5, NOT the far corner = 0.9.
         assert!(
-            (v1 - v2).abs() < 1e-6,
-            "bilinear_sample(0,0)={v1} must equal bilinear_sample(WORLD_SIZE,WORLD_SIZE)={v2}"
+            val_corner > 0.0,
+            "near-origin sample must reflect cell(0,0) density"
+        );
+        // The far-corner cell must not affect the near-origin sample.
+        assert!(
+            val_corner < 0.8,
+            "far corner (0.9) must not leak into near-origin sample via wrap; got {val_corner}"
         );
     }
 
@@ -436,11 +438,12 @@ mod tests {
         );
     }
 
-    /// Test 12: for_each_cell_overlapping_circle wraps across the west seam.
+    /// Test 12 (walled): for_each_cell_overlapping_circle at world edge does NOT
+    /// wrap to cells on the far side.
     #[test]
-    fn cells_overlapping_circle_wraps() {
+    fn for_each_cell_skips_out_of_world() {
         let g = fresh_grid();
-        // Circle at (0.5, 0.5) with radius 2.0 — should find ix=0 AND ix=dim-1.
+        // Circle at (0.5, 0.5) with radius 2.0 — should find ix=0 and ix=1, but NOT ix=dim-1.
         let mut ix_hits = std::collections::BTreeSet::new();
         g.for_each_cell_overlapping_circle(0.5, 0.5, 2.0, |idx| {
             ix_hits.insert(idx % GRASS_GRID_DIM);
@@ -451,21 +454,20 @@ mod tests {
             ix_hits
         );
         assert!(
-            ix_hits.contains(&(GRASS_GRID_DIM - 1)),
-            "ix=dim-1 must be in the hit set (toroidal wrap); got {:?}",
+            !ix_hits.contains(&(GRASS_GRID_DIM - 1)),
+            "ix=dim-1 must NOT be in the hit set (walled world, no wrap); got {:?}",
             ix_hits
         );
     }
 
-    /// Test 13: for_each_cell_overlapping_circle matches brute-force torus distance scan.
+    /// Test 13: for_each_cell_overlapping_circle matches brute-force Euclidean distance scan.
     #[test]
     fn cells_overlapping_circle_count_matches_brute_force() {
         let g = fresh_grid();
-        // Use a fixed deterministic position and radius to avoid RNG dependency.
-        let cx = 37.5_f32; // 15 cell widths from origin
+        // Use a fixed deterministic position and radius away from edges.
+        let cx = 37.5_f32;
         let cy = 22.5_f32;
         let r = 4.0_f32;
-        let half_w = WORLD_SIZE * 0.5;
 
         // Collect via the method under test.
         let mut method_hits = std::collections::BTreeSet::new();
@@ -473,26 +475,14 @@ mod tests {
             method_hits.insert(idx);
         });
 
-        // Brute-force: iterate all cells, compute toroidal center distance.
+        // Brute-force: iterate all cells, compute Euclidean center distance.
         let mut brute_hits = std::collections::BTreeSet::new();
         for iy in 0..GRASS_GRID_DIM {
             for ix in 0..GRASS_GRID_DIM {
                 let world_x = (ix as f32 + 0.5) * GRASS_CELL_SIZE;
                 let world_y = (iy as f32 + 0.5) * GRASS_CELL_SIZE;
-                let mut dx = world_x - cx;
-                let mut dy = world_y - cy;
-                if dx > half_w {
-                    dx -= WORLD_SIZE;
-                }
-                if dx < -half_w {
-                    dx += WORLD_SIZE;
-                }
-                if dy > half_w {
-                    dy -= WORLD_SIZE;
-                }
-                if dy < -half_w {
-                    dy += WORLD_SIZE;
-                }
+                let dx = world_x - cx;
+                let dy = world_y - cy;
                 if dx * dx + dy * dy <= r * r {
                     brute_hits.insert(iy * GRASS_GRID_DIM + ix);
                 }
@@ -516,7 +506,6 @@ mod tests {
             g1.density, g2.density,
             "same seed must produce identical density vectors"
         );
-        // Count cells at GRASS_MAX (at most 16 seeded; may be fewer due to collisions).
         let max_count = g1
             .density
             .iter()

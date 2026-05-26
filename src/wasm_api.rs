@@ -405,13 +405,10 @@ impl WorldHandle {
                 }
                 let body_r = self.inner.creatures.g_size[i] * BODY_RADIUS_PER_SIZE;
                 let r = body_r + tolerance_world;
-                // Toroidal: use torus_dist_sq so creatures across the seam are found.
-                let d2 = torus_dist_sq(
-                    world_x,
-                    world_y,
-                    self.inner.creatures.x[i],
-                    self.inner.creatures.y[i],
-                );
+                // Walled: raw Euclidean distance (no torus seam).
+                let ddx = world_x - self.inner.creatures.x[i];
+                let ddy = world_y - self.inner.creatures.y[i];
+                let d2 = ddx * ddx + ddy * ddy;
                 if d2 <= r * r {
                     // S18: return stable id (f64) instead of SoA index.
                     found = Some(self.inner.creatures.id[i] as f64);
