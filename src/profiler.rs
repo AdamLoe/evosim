@@ -822,7 +822,8 @@ mod tests {
         clear_fake_clock(); // Use real clock for this test.
 
         const ITERS: usize = 10_000;
-        const SPANS_PER_ITER: usize = 11;
+        // 12 named sub-spans per tick (P1e added tick.graze between movement and eat_scavenge).
+        const SPANS_PER_ITER: usize = 12;
 
         let p = Profiler::new();
         p.set_enabled(true);
@@ -836,6 +837,8 @@ mod tests {
             drop(_b);
             let _c = p.push("movement_and_repulsion");
             drop(_c);
+            let _graze = p.push("graze");
+            drop(_graze);
             let _e = p.push("eat_and_scavenge");
             drop(_e);
             let _grass = p.push("grass_step");

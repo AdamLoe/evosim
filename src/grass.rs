@@ -226,7 +226,7 @@ impl GrassGrid {
 ///
 /// Uses `rem_euclid` on integer cell coordinates for bit-stable results
 /// across sequential and threaded paths. Handles negative or > WORLD_SIZE inputs.
-#[allow(dead_code)] // Used by P1e (multi-cell graze) and P1g (render) — not yet landed.
+#[allow(dead_code)] // Used by P1g (grass density render) — not yet landed.
 #[inline]
 pub fn cell_index_for(x: f32, y: f32) -> usize {
     let ix = ((x / GRASS_CELL_SIZE).floor() as i32).rem_euclid(GRASS_GRID_DIM as i32) as usize;

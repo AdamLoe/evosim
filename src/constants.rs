@@ -175,5 +175,4 @@ pub const GRASS_INITIAL_SEED_COUNT_DEFAULT: u32 = 8;
 /// Per-cell, per-tick cap on the delta a single creature can drain from a single grass cell
 /// (before graze_efficiency multiplier). Locked at 0.1 per v1.2 amendments §A.1.
 /// Founder survival math: overlap 1-4 cells × cap 0.1 = 0.1-0.4 energy/tick vs UPKEEP_BASE ~0.15/tick.
-#[allow(dead_code)] // Used by P1e (multi-cell graze) — not yet landed.
 pub const GRAZE_MAX_PER_TICK: f32 = 0.1; // see v1.2 amendments §A.1

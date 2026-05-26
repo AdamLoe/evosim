@@ -268,15 +268,25 @@ impl World {
             self.apply_movement_and_repulsion();
         }
 
-        // 5. Eat / scavenge resolution.
+        // 5. Graze: creatures with Action::Graze consume grass from overlapping cells.
+        // Sequential regardless of --features threads (shared density Vec).
+        // Runs after movement (creature at current-tick position) and before eat_scavenge.
+        // See v1.2 p1e §1 for ordering rationale.
+        {
+            crate::profile_span!(&self.profile, "tick.graze");
+            self.graze();
+        }
+
+        // 6. Eat / scavenge resolution.
         {
             crate::profile_span!(&self.profile, "tick.eat_scavenge");
             self.eat_and_scavenge();
         }
 
-        // 6. Grass propagation step (v1.2 grass mechanic).
+        // 7. Grass propagation step (v1.2 grass mechanic).
         // Sequential scalar pass over 57_600 cells. Reads slider-driven r and k.
-        // P1e will add the graze consumption step (after movement, before eat).
+        // Graze consumes density (step 5); propagation runs after (matching old
+        // ordering where sun.refill ran after photosynth_two_pass). See p1e §1.
         {
             crate::profile_span!(&self.profile, "tick.grass_step");
             self.grass.step(
@@ -285,14 +295,14 @@ impl World {
             );
         }
 
-        // 7. Energy bookkeeping.
+        // 8. Energy bookkeeping.
         {
             crate::profile_span!(&self.profile, "tick.energy_bookkeeping");
             self.energy_bookkeeping();
         }
 
-        // 8. Deaths → carrion. Span widened (R9) to cover the dead-removal
-        //    swap_remove loop and creatures.remove_indices (step 10, scales with die-off).
+        // 9. Deaths → carrion. Span widened (R9) to cover the dead-removal
+        //    swap_remove loop and creatures.remove_indices (step 11, scales with die-off).
         {
             crate::profile_span!(&self.profile, "tick.collect_deaths");
             // S27: collect_deaths writes into self.scratch_dead (promoted pool).
@@ -314,19 +324,19 @@ impl World {
             }
         }
 
-        // 9. Carrion decay.
+        // 10. Carrion decay.
         {
             crate::profile_span!(&self.profile, "tick.decay_carrion");
             self.decay_carrion();
         }
 
-        // 10. Births.
+        // 11. Births.
         {
             crate::profile_span!(&self.profile, "tick.handle_births");
             self.handle_births();
         }
 
-        // 11. Step-11 tail: last_action promotion, tick bump, milestone events,
+        // 12. Step-12 tail: last_action promotion, tick bump, milestone events,
         //     world-end check. Cheap today; future-proofs for Milestone E species
         //     detection (R9: bookkeeping_tail span).
         {

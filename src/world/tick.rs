@@ -10,6 +10,70 @@ use crate::species::species_distance;
 use crate::torus::{torus_delta, wrap_pos};
 
 impl World {
+    /// Multi-cell graze: for every creature that chose `Action::Graze` this tick,
+    /// consume grass density from every `GrassGrid` cell whose center overlaps the
+    /// creature's body circle (toroidal distance ≤ body radius).
+    ///
+    /// Per-cell delta = `min(grass[cell], GRAZE_MAX_PER_TICK * graze_efficiency)`.
+    /// Total energy gained = sum of deltas across all overlapping cells.
+    /// Energy gained equals exactly the grass density consumed (conservation property).
+    ///
+    /// Formula locked per v1.2 amendments §A.1 + p1e §5:
+    /// efficiency applies in the per-cell cap only (NOT as a post-sum multiplier).
+    ///
+    /// Runs SEQUENTIALLY regardless of `--features threads` (two creatures may overlap
+    /// the same grass cell; parallel writes would race on `density[cell]`). See p1e §3.
+    ///
+    /// Borrow-workaround: Option B (collect-then-iterate). We collect overlapping cell
+    /// indices into a scratch `Vec` using `for_each_cell_overlapping_circle` (which
+    /// takes `&self.grass`), then release that immutable borrow before calling
+    /// `consume` (which needs `&mut self.grass`). This avoids refactoring the
+    /// `for_each_cell_overlapping_circle` API into a free function.
+    pub(crate) fn graze(&mut self) {
+        let n = self.creatures.len();
+        if n == 0 {
+            return;
+        }
+
+        // Reuse the scratch_neighbors buffer to collect cell indices — avoids
+        // a per-creature heap allocation. The buffer is cleared each iteration.
+        // (scratch_neighbors holds `usize` already; no type conflict.)
+        for i in 0..n {
+            if self.creatures.action_this_tick[i] != Action::Graze {
+                continue;
+            }
+            let eff_i = self.creatures.g_graze_eff[i];
+            let max_per_cell = GRAZE_MAX_PER_TICK * eff_i;
+            if max_per_cell <= 0.0 {
+                continue;
+            }
+            let xi = self.creatures.x[i];
+            let yi = self.creatures.y[i];
+            let ri = self.creatures.g_size[i] * BODY_RADIUS_PER_SIZE;
+
+            // Phase 1: collect overlapping cell indices (immutable borrow of grass).
+            let mut cells = std::mem::take(&mut self.scratch_neighbors);
+            cells.clear();
+            self.grass
+                .for_each_cell_overlapping_circle(xi, yi, ri, |cell_idx| {
+                    cells.push(cell_idx);
+                });
+
+            // Phase 2: consume from each cell (mutable borrow of grass).
+            let mut total_gain = 0.0_f32;
+            for &cell_idx in &cells {
+                let delta = self.grass.consume(cell_idx, max_per_cell);
+                total_gain += delta;
+            }
+            self.creatures.energy[i] += total_gain;
+
+            // Restore the scratch buffer (high-water-mark allocation preserved).
+            self.scratch_neighbors = cells;
+        }
+    }
+}
+
+impl World {
     pub(crate) fn apply_movement_and_repulsion(&mut self) {
         let n = self.creatures.len();
         if n == 0 {
@@ -951,5 +1015,257 @@ mod tests {
                 w.creatures.x[i]
             );
         }
+    }
+
+    // ---- P1e graze tests ----
+
+    /// P1e test 1: barren world → creature with Action::Graze gains zero energy.
+    #[test]
+    fn graze_no_overlap_yields_zero_gain() {
+        let mut w = World::new("graze-barren");
+        w.grass.density.fill(0.0);
+        w.creatures.action_this_tick[0] = Action::Graze;
+        let before = w.creatures.energy[0];
+        w.graze();
+        assert_eq!(
+            before, w.creatures.energy[0],
+            "energy must be unchanged when grass is empty"
+        );
+    }
+
+    /// P1e test 2: creature overlapping multiple seeded cells sums deltas correctly.
+    ///
+    /// Place creature at the center of a 5×5 seeded patch (density = GRASS_MAX).
+    /// Every overlapping cell should yield exactly GRAZE_MAX_PER_TICK (since
+    /// graze_eff = 1.0 and density >= cap). Total gain = overlap_count × cap.
+    #[test]
+    fn graze_n_cell_overlap_sums_capped_deltas() {
+        use crate::constants::{GRASS_CELL_SIZE, GRASS_GRID_DIM, GRASS_MAX, GRAZE_MAX_PER_TICK};
+
+        let mut w = World::new("graze-patch");
+        // Place creature at center of world, radius from size=4.0 body.
+        let cx = WORLD_SIZE * 0.5;
+        let cy = WORLD_SIZE * 0.5;
+        w.creatures.x[0] = cx;
+        w.creatures.y[0] = cy;
+        w.creatures.genomes[0].size = 4.0;
+        w.creatures.resync_hot_mirrors_at(0);
+        w.creatures.genomes[0].graze_efficiency = 1.0;
+        w.creatures.resync_hot_mirrors_at(0);
+        w.creatures.action_this_tick[0] = Action::Graze;
+
+        // Seed the entire grass grid with GRASS_MAX so every overlapping cell yields the cap.
+        w.grass.density.fill(GRASS_MAX);
+
+        // Count how many cells overlap (use the same method under test).
+        let ri = w.creatures.g_size[0] * BODY_RADIUS_PER_SIZE;
+        let mut overlap_count = 0usize;
+        w.grass.for_each_cell_overlapping_circle(cx, cy, ri, |_| {
+            overlap_count += 1;
+        });
+        assert!(
+            overlap_count > 0,
+            "creature with size=4 should overlap at least one cell"
+        );
+
+        let energy_before = w.creatures.energy[0];
+        w.graze();
+        let energy_after = w.creatures.energy[0];
+        let expected_gain = overlap_count as f32 * GRAZE_MAX_PER_TICK;
+
+        assert!(
+            (energy_after - energy_before - expected_gain).abs() < 1e-4,
+            "energy gain={} expected={} (overlap_count={}, cap={})",
+            energy_after - energy_before,
+            expected_gain,
+            overlap_count,
+            GRAZE_MAX_PER_TICK
+        );
+        // Confirm grass density actually decreased.
+        let expected_density = GRASS_MAX - GRAZE_MAX_PER_TICK;
+        let center_cell = (((cy / GRASS_CELL_SIZE).floor() as usize) * GRASS_GRID_DIM)
+            + ((cx / GRASS_CELL_SIZE).floor() as usize);
+        assert!(
+            (w.grass.density[center_cell] - expected_density).abs() < 1e-5,
+            "center cell density should have dropped by GRAZE_MAX_PER_TICK; got {}",
+            w.grass.density[center_cell]
+        );
+    }
+
+    /// P1e test 3: creature at world seam (x ≈ WORLD_SIZE) overlaps cells on both sides.
+    ///
+    /// Place the creature at the exact x-seam (x=0, which is also WORLD_SIZE due to toroidal
+    /// wrapping) and give it a radius large enough to definitely reach both the last column
+    /// (ix = GRASS_GRID_DIM - 1, center at WORLD_SIZE - 1.25) and the first column
+    /// (ix = 0, center at 1.25). With creature at x=0 and radius = 2.0:
+    /// - dist to ix=0 center  = 1.25 ≤ 2.0 → hit
+    /// - dist to ix=239 center = 1.25 ≤ 2.0 → hit (toroidal: |0 - (WORLD_SIZE-1.25)| wraps to 1.25)
+    #[test]
+    fn graze_wraps_across_world_seam() {
+        use crate::constants::{GRASS_CELL_SIZE, GRASS_GRID_DIM, GRASS_MAX};
+
+        let mut w = World::new("graze-seam");
+        // Creature at x=0 (on the west seam). Radius = 2.0 covers first two columns and,
+        // via toroidal wrap, the last column too.
+        let cx = 0.0_f32;
+        let cy = WORLD_SIZE * 0.5;
+        w.creatures.x[0] = cx;
+        w.creatures.y[0] = cy;
+        // size = 2.0 → radius = 2.0 → reaches ix=239 center (toroidal dist = 1.25) and ix=0 center (1.25).
+        w.creatures.genomes[0].size = 2.0;
+        w.creatures.resync_hot_mirrors_at(0);
+        w.creatures.genomes[0].graze_efficiency = 1.0;
+        w.creatures.resync_hot_mirrors_at(0);
+        w.creatures.action_this_tick[0] = Action::Graze;
+
+        // Seed the east edge column (ix = GRASS_GRID_DIM - 1) and west edge (ix = 0) for the
+        // middle row. Both should be within radius 2.0 of the creature at x=0.
+        let iy = ((cy / GRASS_CELL_SIZE).floor() as usize).min(GRASS_GRID_DIM - 1);
+        let east_cell = iy * GRASS_GRID_DIM + (GRASS_GRID_DIM - 1); // ix=239 center at WORLD_SIZE-1.25
+        let west_cell = iy * GRASS_GRID_DIM; // ix=0 center at 1.25
+        w.grass.density[east_cell] = GRASS_MAX;
+        w.grass.density[west_cell] = GRASS_MAX;
+
+        w.graze();
+
+        // Both seam cells should have been drained (each is within radius 2.0 of x=0).
+        let east_drained = w.grass.density[east_cell] < GRASS_MAX - 1e-6;
+        let west_drained = w.grass.density[west_cell] < GRASS_MAX - 1e-6;
+        assert!(
+            east_drained,
+            "east seam cell (ix=239) must be grazed; density={}",
+            w.grass.density[east_cell]
+        );
+        assert!(
+            west_drained,
+            "west seam cell (ix=0) must be grazed; density={}",
+            w.grass.density[west_cell]
+        );
+    }
+
+    /// P1e test 4: single cell at density 1.0 with eff=1.0 → gain == GRAZE_MAX_PER_TICK exactly.
+    #[test]
+    fn graze_per_cell_cap_holds() {
+        use crate::constants::{GRASS_CELL_SIZE, GRASS_GRID_DIM, GRASS_MAX, GRAZE_MAX_PER_TICK};
+
+        let mut w = World::new("graze-cap");
+        // Place creature exactly at cell center of cell (ix=2, iy=2).
+        let ix = 2usize;
+        let iy = 2usize;
+        let cx = (ix as f32 + 0.5) * GRASS_CELL_SIZE;
+        let cy = (iy as f32 + 0.5) * GRASS_CELL_SIZE;
+        w.creatures.x[0] = cx;
+        w.creatures.y[0] = cy;
+        // Use a tiny radius (< half cell size) so only the center cell is overlapped.
+        w.creatures.genomes[0].size = 0.5; // radius = 0.5 < GRASS_CELL_SIZE/2 = 1.25
+        w.creatures.resync_hot_mirrors_at(0);
+        w.creatures.genomes[0].graze_efficiency = 1.0;
+        w.creatures.resync_hot_mirrors_at(0);
+        w.creatures.action_this_tick[0] = Action::Graze;
+
+        let cell_idx = iy * GRASS_GRID_DIM + ix;
+        w.grass.density[cell_idx] = GRASS_MAX;
+
+        let energy_before = w.creatures.energy[0];
+        w.graze();
+        let gained = w.creatures.energy[0] - energy_before;
+
+        assert!(
+            (gained - GRAZE_MAX_PER_TICK).abs() < 1e-5,
+            "gained={gained} expected={GRAZE_MAX_PER_TICK}"
+        );
+        assert!(
+            (w.grass.density[cell_idx] - (GRASS_MAX - GRAZE_MAX_PER_TICK)).abs() < 1e-5,
+            "density should drop by cap; got {}",
+            w.grass.density[cell_idx]
+        );
+    }
+
+    /// P1e test 5: graze_efficiency = 0 → no energy gained, no density change.
+    #[test]
+    fn graze_zero_efficiency_is_noop() {
+        use crate::constants::{GRASS_CELL_SIZE, GRASS_GRID_DIM, GRASS_MAX};
+
+        let mut w = World::new("graze-zero-eff");
+        let ix = 5usize;
+        let iy = 5usize;
+        let cx = (ix as f32 + 0.5) * GRASS_CELL_SIZE;
+        let cy = (iy as f32 + 0.5) * GRASS_CELL_SIZE;
+        w.creatures.x[0] = cx;
+        w.creatures.y[0] = cy;
+        w.creatures.genomes[0].size = 1.0;
+        w.creatures.genomes[0].graze_efficiency = 0.0;
+        w.creatures.resync_hot_mirrors_at(0);
+        w.creatures.action_this_tick[0] = Action::Graze;
+
+        let cell_idx = iy * GRASS_GRID_DIM + ix;
+        w.grass.density[cell_idx] = GRASS_MAX;
+
+        let energy_before = w.creatures.energy[0];
+        let density_before = w.grass.density[cell_idx];
+        w.graze();
+
+        assert_eq!(
+            w.creatures.energy[0], energy_before,
+            "zero efficiency must yield no energy gain"
+        );
+        assert_eq!(
+            w.grass.density[cell_idx], density_before,
+            "zero efficiency must leave density unchanged"
+        );
+    }
+
+    /// P1e test 6: energy gained == grass density consumed (conservation property).
+    ///
+    /// Formula: gain = Σ min(grass[k], GRAZE_MAX_PER_TICK * eff).
+    /// Efficiency enters only in the per-cell cap; energy gained equals grass consumed.
+    #[test]
+    fn graze_conserves_energy_with_grass_drain() {
+        use crate::constants::{GRASS_MAX, GRAZE_MAX_PER_TICK};
+
+        let mut w = World::new("graze-conserve");
+        // Seed a large area so many cells are overlapped.
+        w.grass.density.fill(GRASS_MAX);
+
+        // Use size=3 to ensure multi-cell overlap.
+        let cx = WORLD_SIZE * 0.5;
+        let cy = WORLD_SIZE * 0.5;
+        w.creatures.x[0] = cx;
+        w.creatures.y[0] = cy;
+        w.creatures.genomes[0].size = 3.0;
+        w.creatures.genomes[0].graze_efficiency = 0.8; // non-trivial efficiency
+        w.creatures.resync_hot_mirrors_at(0);
+        w.creatures.action_this_tick[0] = Action::Graze;
+
+        // Snapshot total density before graze.
+        let density_before: f32 = w.grass.density.iter().sum();
+        let energy_before = w.creatures.energy[0];
+
+        w.graze();
+
+        // Snapshot total density after.
+        let density_after: f32 = w.grass.density.iter().sum();
+        let energy_after = w.creatures.energy[0];
+
+        let density_consumed = density_before - density_after;
+        let energy_gained = energy_after - energy_before;
+
+        // Conservation: energy_gained must equal density_consumed exactly.
+        assert!(
+            (energy_gained - density_consumed).abs() < 1e-3,
+            "conservation violated: gained={energy_gained} consumed={density_consumed}"
+        );
+        // Sanity: the creature should have gained something (it's on full grass).
+        let ri = w.creatures.g_size[0] * BODY_RADIUS_PER_SIZE;
+        let eff = w.creatures.g_graze_eff[0];
+        let expected_cap = GRAZE_MAX_PER_TICK * eff;
+        let mut overlap_count = 0usize;
+        w.grass
+            .for_each_cell_overlapping_circle(cx, cy, ri, |_| overlap_count += 1);
+        let expected_gain = overlap_count as f32 * expected_cap.min(GRASS_MAX);
+        assert!(
+            (energy_gained - expected_gain).abs() < 1e-3,
+            "energy_gained={energy_gained} expected={expected_gain}"
+        );
     }
 }
