@@ -365,18 +365,6 @@ mod tests {
         assert_eq!(w.scratch_dead.len(), 0, "no dead creatures");
     }
 
-    // ---- S24 tests ----
-    // NOTE: Carrion was deleted by D2. Scavenge tests that required carrion are removed.
-    /// D2/S24/D9: eat_and_scavenge on an empty world does not panic.
-    /// D2 deleted carrion; D9 collapsed Action to 3 variants (no Scavenge).
-    #[test]
-    fn scavenge_on_empty_world_does_not_panic() {
-        let mut w = World::new("s24-empty");
-        w.creatures.action_this_tick[0] = Action::Graze;
-        // Should not panic; no carrion in D2+ codebase.
-        w.eat_and_scavenge();
-    }
-
     // ---- perf-2 tests ----
 
     /// perf-2 test 1: scratch_fx / scratch_fy are zeroed at the start of each tick.
@@ -426,12 +414,16 @@ mod tests {
             assert!(
                 w.scratch_fx.len() >= floor,
                 "scratch_fx {} < floor {}, n={}",
-                w.scratch_fx.len(), floor, n
+                w.scratch_fx.len(),
+                floor,
+                n
             );
             assert!(
                 w.scratch_fy.len() >= floor,
                 "scratch_fy {} < floor {}, n={}",
-                w.scratch_fy.len(), floor, n
+                w.scratch_fy.len(),
+                floor,
+                n
             );
             assert!(w.scratch_damage.len() >= floor);
             assert!(w.scratch_gain.len() >= floor);
@@ -779,22 +771,6 @@ mod tests {
             (energy_gained - expected_gain).abs() < 1e-3,
             "energy_gained={energy_gained} expected={expected_gain}"
         );
-    }
-
-    // ---- P2f move_bias tests ----
-    // NOTE: MOVE_BIAS_REROLL_INTERVAL constant and its re-roll logic were deleted by D6/D8.
-    // The move_bias fields remain in CreatureSoA until D9 removes them.
-
-    /// D9: move_bias fields are deleted from CreatureSoA entirely.
-    /// This test verifies no-panic on zero-velocity creature.
-    #[test]
-    fn move_bias_fields_deleted_d9() {
-        let w = World::new("p2f-fields");
-        // D9 removed move_bias_x/y/reroll_at; just confirm creature exists at index 0.
-        assert!(w.creatures.len() > 0, "world must spawn at least one creature");
-        // vx/vy are the only velocity fields now.
-        let _vx = w.creatures.vx[0];
-        let _vy = w.creatures.vy[0];
     }
 
     // ---- P3a tests ----

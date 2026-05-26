@@ -23,6 +23,10 @@ const _: () = assert!(
 );
 // NOTE: NN_OUTPUTS (5) does NOT need SIMD alignment — only row stride matters.
 const _: () = assert!(NN_WEIGHT_COUNT == NN_INPUTS * NN_HIDDEN + NN_HIDDEN * NN_OUTPUTS);
+const _: () = assert!(
+    NN_WEIGHT_COUNT == 2808,
+    "v1.3 D9: NN_WEIGHT_COUNT must be 2808 (112*24 + 24*5)"
+);
 
 /// Number of 8-wide SIMD chunks in the input vector (14).
 const INPUT_CHUNKS: usize = NN_INPUTS / 8; // 112/8 = 14
@@ -171,8 +175,7 @@ mod tests {
     #[test]
     fn nn_weight_count_post_v1_3() {
         assert_eq!(
-            NN_WEIGHT_COUNT,
-            2808,
+            NN_WEIGHT_COUNT, 2808,
             "NN_WEIGHT_COUNT must be 112×24 + 24×5 = 2808"
         );
     }
@@ -180,7 +183,11 @@ mod tests {
     /// D9: NN_INPUTS padded to multiple of 8.
     #[test]
     fn nn_inputs_padded_to_multiple_of_8() {
-        assert_eq!(NN_INPUTS % 8, 0, "NN_INPUTS={NN_INPUTS} must be multiple of 8");
+        assert_eq!(
+            NN_INPUTS % 8,
+            0,
+            "NN_INPUTS={NN_INPUTS} must be multiple of 8"
+        );
     }
 
     #[test]

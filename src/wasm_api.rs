@@ -487,7 +487,6 @@ impl WorldHandle {
     pub fn profile_report_json(&self) -> String {
         self.inner.profile.report_json()
     }
-
 }
 
 // ─── Clock helper ─────────────────────────────────────────────────────────────
@@ -698,5 +697,4 @@ mod tests {
             "unknown slider name must return false"
         );
     }
-
 }

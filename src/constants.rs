@@ -1,5 +1,7 @@
 //! All v5+v6 magic numbers, in one place. Reference each with the spec
 //! section number so future readers can audit against the pitch.
+// Some constants are forward-declared for future plan pieces; suppress unused warnings.
+#![allow(dead_code)]
 
 // ---- World shape (v5 §3.3, v6 §D) ----
 pub const WORLD_SIZE: f32 = 600.0;
@@ -98,7 +100,6 @@ pub const FOUNDER_PIGMENT_G: f32 = 0.75;
 pub const FOUNDER_PIGMENT_B: f32 = 0.35;
 pub const FOUNDER_SPLIT_JITTER: f32 = 50.0;
 
-
 // ---- Vision (v5 §10, v6 §E, Milestone C.12) ----
 /// Maximum grid cells walked per ray; bounds worst-case DDA cost (v5 §3.6).
 /// vision_range_max = 80u; HASH_CELL = 5u → ~16 cells along a ray axis.
@@ -180,4 +181,4 @@ pub const NN_GRASS_PATCH_LEN: usize = 25;
 /// Grass-patch center sample (dx=dy=0); 5×5 iteration is dy outer, dx inner,
 /// offset = (dy+2)*5 + (dx+2). Center: dy=0,dx=0 → 12; global slot 80+12 = 92.
 pub const NN_GRASS_PATCH_CENTER_SLOT: usize = NN_GRASS_PATCH_OFFSET + 12; // = 92
-// Slots [105..112) are SIMD padding zeros.
+                                                                          // Slots [105..112) are SIMD padding zeros.

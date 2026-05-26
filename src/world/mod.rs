@@ -313,14 +313,8 @@ impl World {
             let cy = (self.creatures.y[i] + jitter_y).clamp(clamp_lo, clamp_hi);
             let new_id = self.next_creature_id;
             self.next_creature_id += 1;
-            self.creatures.push(
-                new_id,
-                cx,
-                cy,
-                child_energy,
-                self.tick,
-                child_brain,
-            );
+            self.creatures
+                .push(new_id, cx, cy, child_energy, self.tick, child_brain);
         }
     }
 
@@ -542,7 +536,7 @@ mod tests {
             // random brains + crowded start. This is OK per D.19 spec note.
             assert!(w.tick > 0, "world must have run at least one tick");
         } else {
-            let mut counts = [0usize; 6];
+            let mut counts = [0usize; 3]; // v1.3 D9: 3 variants (Graze, Eat, Split)
             for &a in &w.creatures.action_this_tick {
                 counts[a as usize] += 1;
             }

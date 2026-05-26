@@ -348,9 +348,18 @@ mod tests {
             "size should be FOUNDER_SIZE={FOUNDER_SIZE}"
         );
         // D3: pigment is placeholder gray.
-        assert!((vision[0][slot + 2] - CREATURE_PIGMENT).abs() < 1e-5, "r should be CREATURE_PIGMENT");
-        assert!((vision[0][slot + 3] - CREATURE_PIGMENT).abs() < 1e-5, "g should be CREATURE_PIGMENT");
-        assert!((vision[0][slot + 4] - CREATURE_PIGMENT).abs() < 1e-5, "b should be CREATURE_PIGMENT");
+        assert!(
+            (vision[0][slot + 2] - CREATURE_PIGMENT).abs() < 1e-5,
+            "r should be CREATURE_PIGMENT"
+        );
+        assert!(
+            (vision[0][slot + 3] - CREATURE_PIGMENT).abs() < 1e-5,
+            "g should be CREATURE_PIGMENT"
+        );
+        assert!(
+            (vision[0][slot + 4] - CREATURE_PIGMENT).abs() < 1e-5,
+            "b should be CREATURE_PIGMENT"
+        );
     }
 
     #[test]
@@ -442,7 +451,7 @@ mod tests {
         // Creature B is 590u away on the east side (past wall). It should not appear.
         let slot = 0;
         let dist_a = vision[0][slot]; // creature A (at 595,300) sees wall ~5u east
-        // The wall hit should be very close (~5u away), not the 590u "wraparound" path.
+                                      // The wall hit should be very close (~5u away), not the 590u "wraparound" path.
         if dist_a > 0.0 {
             assert!(
                 dist_a < 20.0,

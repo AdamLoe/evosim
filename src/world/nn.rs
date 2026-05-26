@@ -1,4 +1,6 @@
 //! NN forward pass and action-decode helpers. Both sequential and threaded paths live here.
+//! v1.3 D9: Action enum collapsed to {Graze=0, Eat=1, Split=2}. NN_OUTPUTS=5.
+//! move_bias_* deleted. decode_action/is_valid_action take no Genome param.
 
 use super::World;
 use crate::constants::*;
@@ -204,7 +206,7 @@ pub(crate) fn build_nn_input(
     buf[2] = prev_vx / MOVE_SPEED_MAX; // vx (previous-tick post-clip)
     buf[3] = prev_vy / MOVE_SPEED_MAX; // vy
     buf[4] = cooldown as f32 / DIGESTION_COOLDOWN_TICKS as f32; // cooldown_frac
-    // buf[5..NN_VISION_OFFSET]: If NN_SELF_STATE_LEN < NN_VISION_OFFSET, extra slots stay 0.
+                                                                // buf[5..NN_VISION_OFFSET]: If NN_SELF_STATE_LEN < NN_VISION_OFFSET, extra slots stay 0.
 
     // Vision passthrough (raw world units, C.12 contract).
     // NOTE: VISION_LEN=120 (24×5) but NN_VISION_LEN=72 (24×3). Copy only 72 floats (D9 owns Q3 shrink).
@@ -256,11 +258,7 @@ pub(crate) fn is_valid_action(act: Action, energy: f32, cooldown: u32) -> bool {
 /// D3: genome removed. Logits slice length == Action::ALL.len().
 /// S5: If any logit is non-finite (NaN or ±inf), returns `Action::Graze`
 /// immediately (was Action::Rest).
-pub(crate) fn decode_action(
-    logits: &[f32; 3],
-    energy: f32,
-    cooldown: u32,
-) -> Action {
+pub(crate) fn decode_action(logits: &[f32; 3], energy: f32, cooldown: u32) -> Action {
     // S5: NaN / ±inf guard — non-finite logits make the sort undefined.
     if logits.iter().any(|v| !v.is_finite()) {
         return Action::Graze;
@@ -283,10 +281,11 @@ pub(crate) fn decode_action(
     Action::Graze // defensive fallback (Graze is always valid)
 }
 
-/// NN-driven action picker (Milestone D.16 — replaces `pick_action_c`).
+/// NN-driven action picker (v1.3 D9 — replaces `pick_action_d` v1.2).
 ///
-/// Builds the 160-input vector, runs the SIMD forward pass, decodes velocity
-/// via tanh and action via valid-fallthrough argmax (v6 §1, §E).
+/// Builds the 112-input vector, runs the SIMD forward pass, decodes velocity
+/// via tanh and action via valid-fallthrough argmax (v1.3 D9).
+/// Movement happens every tick from NN vx/vy regardless of action argmax.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn pick_action_d(
     i: usize,
@@ -342,7 +341,10 @@ mod tests {
         use crate::vision::VISION_LEN;
         assert_eq!(VISION_LEN, 120);
         // D3: NN_INPUTS=112; NN_SELF_STATE_LEN=5, NN_VISION_LEN=72, NN_LAST_ACTION_LEN=3, grass=25, pad=7.
-        assert_eq!(NN_INPUTS, NN_SELF_STATE_LEN + NN_VISION_LEN + NN_LAST_ACTION_LEN + NN_GRASS_PATCH_LEN + 7);
+        assert_eq!(
+            NN_INPUTS,
+            NN_SELF_STATE_LEN + NN_VISION_LEN + NN_LAST_ACTION_LEN + NN_GRASS_PATCH_LEN + 7
+        );
         assert_eq!(NN_INPUTS, 112);
     }
 
@@ -407,7 +409,7 @@ mod tests {
         let grass = GrassGrid::new(&mut crate::rng::SimRng::from_u64(0), 0);
         let inp = build_nn_input(0, &w.creatures, &vision, &grass, prev_vx, prev_vy);
         let eat_idx = Action::Eat.one_hot_index(); // Eat=2
-        // D3: NN_LAST_ACTION_OFFSET=77, NN_LAST_ACTION_LEN=3.
+                                                   // D3: NN_LAST_ACTION_OFFSET=77, NN_LAST_ACTION_LEN=3.
         for k in 0..NN_LAST_ACTION_LEN {
             let expected = if k == eat_idx { 1.0 } else { 0.0 };
             assert_eq!(
@@ -419,7 +421,7 @@ mod tests {
         }
     }
 
-    /// D.16 test 11: valid-fallthrough — Split highest logit but energy too low.
+    /// v1.3 D9: first-index tiebreak — lower index wins on equal logits.
     #[test]
     fn decode_action_valid_fallthrough_split_invalid() {
         // Split is index 2 in the 3-logit slice. Make it highest.
@@ -428,11 +430,7 @@ mod tests {
         let act = decode_action(&logits, 10.0, 0);
         assert_ne!(act, Action::Split, "Split must be invalid when energy < 50");
         // D9: Should fall through to a valid action (Graze or Eat).
-        assert!(
-            matches!(act, Action::Graze | Action::Eat),
-            "got {:?}",
-            act
-        );
+        assert!(matches!(act, Action::Graze | Action::Eat), "got {:?}", act);
     }
 
     /// D.16 test 12: first-index tiebreak — lower index wins on equal logits.
@@ -449,13 +447,12 @@ mod tests {
     /// D.16 test 13: Eat invalid when in digestion cooldown.
     #[test]
     fn decode_action_eat_invalid_in_cooldown() {
-        // Eat is the 3rd slot (index=2) in the 3-logit decode.
-        // D3: Action::Eat one_hot_index = 2; logit index in 3-slice = 2.
-        let logits = [0.0f32, 0.0, 10.0]; // slot 2 highest → maps to Eat or Split depending on Action::ALL order
-        // cooldown > 0 → Eat invalid.
+        // D9: Action::Eat has one_hot_index=1 (logit index 1 in the 3-slice).
+        let logits = [0.0f32, 10.0, 0.0]; // Eat logit highest
+        // cooldown > 0 → Eat invalid; falls through to Graze (always valid).
         let act = decode_action(&logits, 100.0, 5);
-        // Either it returns a valid action (not Eat, since cooldown>0).
         assert_ne!(act, Action::Eat, "Eat must be invalid when cooldown > 0");
+        assert_eq!(act, Action::Graze, "should fall through to Graze");
     }
 
     /// D.16 test 14: Split invalid when energy too low.
@@ -465,10 +462,23 @@ mod tests {
         let logits = [0.0f32, 0.0, 10.0];
         // energy = 0 → Split invalid.
         let act = decode_action(&logits, 0.0, 0);
-        assert_ne!(act, Action::Split, "Split must be invalid when energy too low");
+        assert_ne!(
+            act,
+            Action::Split,
+            "Split must be invalid when energy too low"
+        );
     }
 
-    // ---- D.18 chunking tests ----
+    /// v1.3 D9: NN_GRASS_PATCH_CENTER_SLOT == 92 (was 147 in v1.2).
+    #[test]
+    fn nn_input_patch_center_slot_is_92() {
+        assert_eq!(
+            NN_GRASS_PATCH_CENTER_SLOT, 92,
+            "center slot must be 92 (v1.3 D9 layout)"
+        );
+    }
+
+    // ---- D.18 chunking tests (unchanged) ----
 
     /// D.18 test 16: chunk_ranges partitions n=1000 into 8 non-overlapping ranges.
     #[test]
@@ -728,15 +738,6 @@ mod tests {
         }
     }
 
-    /// P2d test 3: constant pinning — NN_GRASS_PATCH_CENTER_SLOT == 92 (v1.3 D3 layout).
-    #[test]
-    fn nn_input_patch_center_slot_is_92() {
-        assert_eq!(
-            NN_GRASS_PATCH_CENTER_SLOT, 92,
-            "center slot must be 92 in v1.3 D3 layout (NN_GRASS_PATCH_OFFSET=80 + 12 center offset)"
-        );
-    }
-
     /// P2d test 4 (D3 adaptation): creature near world edge, sampling outside the
     /// walled world. bilinear_sample must clamp gracefully.
     #[test]
@@ -783,4 +784,5 @@ mod tests {
             );
         }
     }
+
 }
