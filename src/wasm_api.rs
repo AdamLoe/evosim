@@ -20,6 +20,8 @@ pub struct WorldHandle {
     /// shared across calls so JS can read a stable typed-array view.
     creature_buf: Vec<f32>,
     carrion_buf: Vec<f32>,
+    /// Reusable buffer for `grass_buffer` — avoids re-allocating 57_600 f32s each frame.
+    grass_buf: Vec<f32>,
     /// Reusable f64 buffer for `creature_ids_buffer` — index-aligned with creatures_buffer.
     id_buf: Vec<f64>,
     /// Rolling window of per-tick wall-clock durations in milliseconds (last TPS_WINDOW ticks).
@@ -48,6 +50,7 @@ impl WorldHandle {
             inner,
             creature_buf: Vec::new(),
             carrion_buf: Vec::new(),
+            grass_buf: Vec::new(),
             id_buf: Vec::new(),
             tick_durations_ms: std::collections::VecDeque::new(),
             jank_count: 0,
@@ -208,6 +211,33 @@ impl WorldHandle {
             self.carrion_buf[k * 3 + 2] = (c.pool / CARRION_POOL_CAP).clamp(0.0, 1.0);
         }
         unsafe { js_sys::Float32Array::view(&self.carrion_buf) }
+    }
+
+    // ─── Grass render API (P1g) ──────────────────────────────────────────────
+
+    /// Grass grid dimension (240). Constant accessor; called per frame by the
+    /// Canvas2D render layer to avoid hard-coding the value in TS.
+    #[wasm_bindgen(getter)]
+    pub fn grass_dim(&self) -> u32 {
+        GRASS_GRID_DIM as u32
+    }
+
+    /// Grass cell size in world-units (2.5). Constant accessor; used by the
+    /// Canvas2D render layer for world→screen coordinate conversion.
+    #[wasm_bindgen(getter)]
+    pub fn grass_cell_size(&self) -> f32 {
+        GRASS_CELL_SIZE
+    }
+
+    /// Copy the current grass density field (57_600 f32s) into a cached Vec
+    /// and return a Float32Array view over it. Called once per frame by the
+    /// Canvas2D render layer. The view is valid only until the next Rust call
+    /// that moves `self.grass_buf` (safe for single-frame use).
+    #[wasm_bindgen]
+    pub fn grass_buffer(&mut self) -> js_sys::Float32Array {
+        self.grass_buf.clear();
+        self.grass_buf.extend_from_slice(&self.inner.grass.density);
+        unsafe { js_sys::Float32Array::view(&self.grass_buf) }
     }
 
     // ─── Per-slider typed setters (S17) ─────────────────────────────────────
@@ -440,6 +470,7 @@ impl WorldHandle {
             inner,
             creature_buf: Vec::new(),
             carrion_buf: Vec::new(),
+            grass_buf: Vec::new(),
             id_buf: Vec::new(),
             tick_durations_ms: std::collections::VecDeque::new(),
             jank_count: 0,

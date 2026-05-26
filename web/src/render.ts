@@ -157,6 +157,35 @@ export function drawCreatures(
   }
 }
 
+export function drawGrassMap(
+  ctx: CanvasRenderingContext2D,
+  cam: Camera,
+  viewW: number,
+  viewH: number,
+  _worldSize: number,
+  grassDim: number,
+  grassCellSize: number,
+  density: Float32Array,
+): void {
+  // Per brief §Render layer: rgba(60, 180, 60, 0.4*density) per cell.
+  // Single-pass over all cells; off-screen cells are culled below.
+  const cellPx = grassCellSize * cam.zoom;
+  for (let iy = 0; iy < grassDim; iy++) {
+    for (let ix = 0; ix < grassDim; ix++) {
+      const d = density[iy * grassDim + ix];
+      if (d <= 0.0) continue;
+      const wx = ix * grassCellSize;
+      const wy = iy * grassCellSize;
+      const sx = (wx - cam.cx) * cam.zoom + viewW / 2;
+      const sy = (wy - cam.cy) * cam.zoom + viewH / 2;
+      // Cull cells fully off-screen.
+      if (sx + cellPx < 0 || sx > viewW || sy + cellPx < 0 || sy > viewH) continue;
+      ctx.fillStyle = `rgba(60,180,60,${(0.4 * d).toFixed(3)})`;
+      ctx.fillRect(sx, sy, cellPx + 1, cellPx + 1);
+    }
+  }
+}
+
 export function drawAquariumFrame(
   ctx: CanvasRenderingContext2D,
   cam: Camera,
@@ -193,7 +222,11 @@ export function renderWorld(
   }
   ctx.fillStyle = "#04070b";
   ctx.fillRect(0, 0, viewW, viewH);
-  // TODO P1g: grass density tint will be inserted here.
+  // Grass density tint layer (v1.2 P1g).
+  drawGrassMap(
+    ctx, cam, viewW, viewH, world.world_size,
+    world.grass_dim, world.grass_cell_size, world.grass_buffer(),
+  );
   drawAquariumFrame(ctx, cam, viewW, viewH, world.world_size);
   drawCarrion(ctx, cam, viewW, viewH, world.carrion_buffer());
   drawCreatures(ctx, cam, viewW, viewH, world.creatures_buffer(), ids, stride, highlightMap, nowMs);
