@@ -547,6 +547,10 @@ mod tests {
                                               // Set velocity directly so movement fires deterministically.
         w.creatures.vx[0] = 5.0;
         w.creatures.vy[0] = 0.0;
+        // P2f: zero move_bias so the ADD is a no-op for this deterministic test.
+        w.creatures.move_bias_x[0] = 0.0;
+        w.creatures.move_bias_y[0] = 0.0;
+        w.creatures.move_bias_reroll_at[0] = u32::MAX;
         // Pre-condition: distance_travelled starts at 0, event not fired.
         assert!(!w.first_move_fired);
         assert_eq!(w.creatures.distance_travelled[0], 0.0);

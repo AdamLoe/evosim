@@ -171,15 +171,17 @@ pub const GRASS_CELL_COUNT: usize = GRASS_GRID_DIM * GRASS_GRID_DIM; // 57_600
 /// Maximum density per cell (clamped post-step). See v1.2 grass mechanic brief.
 pub const GRASS_MAX: f32 = 1.0;
 /// Default in-cell logistic growth rate slider. See v1.2 grass mechanic brief §Grass dynamics.
-/// Raised from 0.005 to 0.01 per P3e tuning ladder §A.8 lever 3 — P1h regen showed
-/// stationary creatures deplete their cell faster than propagation refills (extinct ~5740).
-pub const GRASS_IN_CELL_GROWTH_R_DEFAULT: f32 = 0.01;
+/// Raised 0.005 → 0.01 (P1h lever 3) → 0.05 (P2h tuning) — PR-2 founders don't auto-Graze,
+/// so grass must spread fast enough that random-walking creatures encounter grass cells.
+pub const GRASS_IN_CELL_GROWTH_R_DEFAULT: f32 = 0.05;
 /// Default cross-kernel propagation rate slider. See v1.2 grass mechanic brief §Grass dynamics.
-pub const GRASS_PROPAGATION_RATE_K_DEFAULT: f32 = 0.05;
+/// Raised 0.05 → 0.1 (P2h tuning) for faster propagation across the world.
+pub const GRASS_PROPAGATION_RATE_K_DEFAULT: f32 = 0.1;
 /// Default number of cells seeded at world init. See v1.2 grass mechanic brief §Initial grass seed.
-/// Raised from 8 to 50 per P3e tuning ladder §A.8 lever 1 — gives founders more food
-/// sources within search radius before the lineage's slow random walk extincts.
-pub const GRASS_INITIAL_SEED_COUNT_DEFAULT: u32 = 50;
+/// Raised from 8 to 50 (P1h ladder lever 1) → 100 (P2h ladder lever 2) — PR-2 founders
+/// no longer benefit from the old NN_FOUNDER_PHOTO_BIAS-style Graze bias (F.30 rewrite),
+/// so the lineage needs proportionally more initial food to survive random-walk-to-grass.
+pub const GRASS_INITIAL_SEED_COUNT_DEFAULT: u32 = 100;
 /// Per-cell, per-tick cap on the delta a single creature can drain from a single grass cell
 /// (before graze_efficiency multiplier). P1h regen iterations:
 ///   - 0.1 (initial lock): extinct tick 358 (gain 0.10/tick < upkeep 0.15/tick).

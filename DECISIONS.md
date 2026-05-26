@@ -307,3 +307,27 @@ P2e (nose_count=0 gate): grass-patch inputs at slots 135..160 written only when 
 P2f (F.30 rewrite + move_bias ADD): Brain::founder hardwires hidden[0]=on-grass detector (NN_GRASS_PATCH_CENTER_SLOT=147), w_ho[Graze][0]+=large, hidden[1]=Move baseline, hidden[2]=energy_frac → Split. Deleted NN_FOUNDER_ENERGY_SENSOR_STRENGTH, NN_FOUNDER_SPLIT_ENERGY_WEIGHT, NN_FOUNDER_PHOTO_BIAS. Added new constants NN_FOUNDER_GRAZE_DETECTOR_WEIGHT=5.0, NN_FOUNDER_GRAZE_OUTPUT_WEIGHT=5.0, NN_FOUNDER_MOVE_BASELINE=1.0, NN_FOUNDER_SPLIT_FROM_ENERGY=1.0. Action enum slot indices confirmed: vx=out[0], vy=out[1]; logits=out[2..8] mapping Action::ALL=[Rest=2,Graze=3,Eat=4,Scavenge=5,Split=6,Signal=7]; GRAZE_OUT=3, SPLIT_OUT=6. Added CreatureSoA fields move_bias_x/y (f32) + move_bias_reroll_at (u32) per amendments §A.5 ADD semantics; bias initialized at push sites in World::new + handle_births + from_save_v1 (zero placeholder pending P2g schema bump); re-rolled every MOVE_BIAS_REROLL_INTERVAL=20 ticks at start of apply_movement_and_repulsion; applied additively to vx/vy before speed-cap clamp. +3 tests: founder_hardwiring_at_locked_slots, move_bias_reroll_fires_every_20_ticks, move_bias_adds_to_velocity (pins ADD semantics). 177→177 tests (sequential), 177→179 tests (threaded).
 
 P2g (schema v2 → v3): SCHEMA_VERSION 2 → 3. CreatureSoASnapshot gains nose_count: Vec<u8> + move_bias_x/y: Vec<f32> + move_bias_reroll_at: Vec<u32>. validate_save adds length + range + finite checks for each (nose_count <= 5, move_bias_x/y finite; 4 new length checks via validate_soa_lengths macro; 3 new per-element checks). snapshot_hash walks move_bias_x/y/reroll_at bytes after birth_tick (#10–#12; nose_count byte already added by P2c in hash_genome). from_save_v1 restores all new fields from snapshot (replaces P2f zero-init placeholder for move_bias). Brain weight count NN_WEIGHT_COUNT=4032 already covered parametrically — no hardcoded literals to replace. f26_schema_version_mismatch_errs bumped expected 2→3; load_old_schema_returns_version_mismatch_error updated found:2/expected:3 (was found:1/expected:2); wasm_api f26_from_json_schema_mismatch_prefix JSON patch updated "schema_version":2→"schema_version":3. +5 new validate_save tests (p2g_invalid_nose_count_fails, p2g_nan_move_bias_x_fails, p2g_nan_move_bias_y_fails, p2g_move_bias_length_mismatch_fails, p2g_v3_fields_round_trip). 179→182 tests (sequential), 179→184 tests (threaded). Files touched: src/save.rs, src/world/save_v1.rs, src/snapshot_hash.rs, src/wasm_api.rs, DECISIONS.md.
+
+### PR-2 regen (2026-05-26)
+
+PR-2 goldens regenerated post-{NN_INPUTS 160, is_at_wall deletion, nose_count trait, grass-patch inputs, nose gate, F.30 rewrite + move_bias ADD, schema v2→v3}. New sequential hash `0x95f4a2f00bbad4dc`, new threaded hash `0x95f4a2f00bbad4dc` (bit-identical — S39 invariant preserved).
+
+§16 acceptance gauntlet (intra-PR-2 acceptance was exempt per amendments §A.7; this is the PR-2 close gate):
+
+| Attempt | Constants | Result |
+|---|---|---|
+| 1 | post-P2g (seed=50, growth_r=0.01, prop_k=0.05, GRAZE=0.4) | (a) extinct tick 6267 — new F.30 means founders don't auto-Graze like PR-1 |
+| 2 | seed 50→100 (P3e lever 2) | (a) extinct tick 6273 — seed alone barely helped |
+| 3 | + growth_r 0.01→0.05 + prop_k 0.05→0.1 (faster grass spread) | (a/b/c) pass; (d) hash mismatch (expected — captured `0x95f4a2f00bbad4dc`) |
+| 4 | Bootstrap both goldens | All 4 acceptance tests pass |
+
+Final PR-2 tuning (cumulative with PR-1):
+- `GRASS_INITIAL_SEED_COUNT_DEFAULT = 100` (raised from 50; brief default was 8).
+- `GRASS_IN_CELL_GROWTH_R_DEFAULT = 0.05` (raised from 0.01; PR-2 founders need faster grass spread to compensate for nose_count=0 grass-blindness via the new F.30).
+- `GRASS_PROPAGATION_RATE_K_DEFAULT = 0.1` (raised from 0.05).
+- `GRAZE_MAX_PER_TICK = 0.4` (unchanged from PR-1).
+- `SPECIES_THRESHOLD = 4.0` (unchanged from PR-1).
+
+PR-2 fix to existing test: `e25b_first_to_move_fires_on_movement_step` (in `src/world/tick.rs`) now zeros `move_bias_x/y` and sets `move_bias_reroll_at = u32::MAX` so move_bias ADD is a no-op for this deterministic test. The pre-P2f version assumed `vx=5.0, vy=0.0` would yield `distance_travelled >= 5.0` after one step; P2f's ADD broke that assumption.
+
+All gates clean (cargo fmt, build, lib both features 182/184, clippy default + threads, all 4 acceptance tests). Reaching T=10000 with pop>0, ≥2 species, bit-identical goldens. PR-2 COMPLETE.
