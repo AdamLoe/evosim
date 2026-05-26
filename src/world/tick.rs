@@ -570,17 +570,17 @@ mod tests {
 
     /// P1e test 2: creature overlapping seeded cells sums deltas correctly.
     /// D3: FOUNDER_SIZE=1.0, BODY_RADIUS_PER_SIZE=1.0 → body radius=1.0.
-    /// GRASS_CELL_SIZE=2.5 so a circle of r=1.0 must be placed at a cell center
-    /// to overlap that cell. We position the creature exactly at cell (120,120)'s
+    /// GRASS_CELL_SIZE=5.0 so a circle of r=1.0 must be placed at a cell center
+    /// to overlap that cell. We position the creature exactly at cell (60,60)'s
     /// center so it overlaps at least one cell.
     #[test]
     fn graze_n_cell_overlap_sums_capped_deltas() {
         use crate::constants::{GRASS_CELL_SIZE, GRASS_GRID_DIM, GRASS_MAX, GRAZE_MAX_PER_TICK};
 
         let mut w = World::new("graze-patch");
-        // D3: size = FOUNDER_SIZE always. Position creature at cell (120,120) center.
-        let cell_ix: usize = 120;
-        let cell_iy: usize = 120;
+        // D3: size = FOUNDER_SIZE always. Position creature at cell (60,60) center.
+        let cell_ix: usize = 60;
+        let cell_iy: usize = 60;
         let cx = (cell_ix as f32 + 0.5) * GRASS_CELL_SIZE;
         let cy = (cell_iy as f32 + 0.5) * GRASS_CELL_SIZE;
         w.creatures.x[0] = cx;
@@ -637,8 +637,8 @@ mod tests {
         w.creatures.y[0] = cy;
         w.creatures.action_this_tick[0] = Action::Graze;
 
-        // Use FOUNDER_SIZE for body; need radius >= 1.25 to hit both seam cells.
-        // FOUNDER_SIZE * BODY_RADIUS_PER_SIZE must be >= 1.25 (GRASS_CELL_SIZE/2 = 1.25).
+        // Use FOUNDER_SIZE for body; need radius >= 2.5 to hit both seam cells.
+        // FOUNDER_SIZE * BODY_RADIUS_PER_SIZE must be >= 2.5 (GRASS_CELL_SIZE/2 = 2.5).
         let iy = ((cy / GRASS_CELL_SIZE).floor() as usize).min(GRASS_GRID_DIM - 1);
         let east_cell = iy * GRASS_GRID_DIM + (GRASS_GRID_DIM - 1);
         let west_cell = iy * GRASS_GRID_DIM;
@@ -647,24 +647,24 @@ mod tests {
 
         w.graze();
 
-        // Check whether radius is sufficient (FOUNDER_SIZE=1.0, BODY_RADIUS_PER_SIZE=1.0 → radius=1.0 < 1.25)
+        // Check whether radius is sufficient (FOUNDER_SIZE=1.0, BODY_RADIUS_PER_SIZE=1.0 → radius=1.0 < 2.5)
         // If not, this test is a no-op but must not panic.
         let ri = FOUNDER_SIZE * BODY_RADIUS_PER_SIZE;
-        if ri >= 1.25 {
+        if ri >= 2.5 {
             let east_drained = w.grass.density[east_cell] < GRASS_MAX - 1e-6;
             let west_drained = w.grass.density[west_cell] < GRASS_MAX - 1e-6;
             assert!(
                 east_drained,
-                "east seam cell (ix=239) must be grazed when radius >= 1.25; density={}",
+                "east seam cell (ix=119) must be grazed when radius >= 2.5; density={}",
                 w.grass.density[east_cell]
             );
             assert!(
                 west_drained,
-                "west seam cell (ix=0) must be grazed when radius >= 1.25; density={}",
+                "west seam cell (ix=0) must be grazed when radius >= 2.5; density={}",
                 w.grass.density[west_cell]
             );
         }
-        // If ri < 1.25, the seam cells are not reached — test passes (no panic).
+        // If ri < 2.5, the seam cells are not reached — test passes (no panic).
     }
 
     /// P1e test 4: single cell at density 1.0 with constant eff → gain == GRAZE_MAX_PER_TICK.
@@ -679,8 +679,8 @@ mod tests {
         let cy = (iy as f32 + 0.5) * GRASS_CELL_SIZE;
         w.creatures.x[0] = cx;
         w.creatures.y[0] = cy;
-        // D3: size is FOUNDER_SIZE (1.0); if radius < GRASS_CELL_SIZE/2 = 1.25 only center cell hit.
-        // FOUNDER_SIZE=1.0, BODY_RADIUS_PER_SIZE=1.0 → ri=1.0 < 1.25 → single cell overlap.
+        // D3: size is FOUNDER_SIZE (1.0); if radius < GRASS_CELL_SIZE/2 = 2.5 only center cell hit.
+        // FOUNDER_SIZE=1.0, BODY_RADIUS_PER_SIZE=1.0 → ri=1.0 < 2.5 → single cell overlap.
         w.creatures.action_this_tick[0] = Action::Graze;
 
         let cell_idx = iy * GRASS_GRID_DIM + ix;

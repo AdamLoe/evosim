@@ -705,8 +705,8 @@ mod tests {
     fn nn_input_patch_iteration_order_locked() {
         use crate::vision::VISION_LEN;
         let mut w = World::new("p2d-center");
-        let cell_ix: usize = 120;
-        let cell_iy: usize = 120;
+        let cell_ix: usize = 60;
+        let cell_iy: usize = 60;
         let cx = (cell_ix as f32 + 0.5) * GRASS_CELL_SIZE;
         let cy = (cell_iy as f32 + 0.5) * GRASS_CELL_SIZE;
         w.creatures.x[0] = cx;

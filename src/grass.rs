@@ -1,23 +1,23 @@
-//! GrassGrid — 240×240 = 57_600 flat-Vec<f32> density field over the
-//! 600u walled world. Each cell is 2.5u square. Independent of
-//! SpatialGrid (5u, body queries). See v1.2 grass-mechanic-brief §Grass
-//! storage / §Grass dynamics per tick / §Initial grass seed / §Bilinear
-//! sampling.
+//! GrassGrid — 120×120 = 14_400 flat-Vec<f32> density field over the
+//! 600u walled world. Each cell is 5u square. Independent of
+//! SpatialGrid (5u, body queries). See v1.3 M1 (cell size doubled from
+//! 2.5u; 4× fewer cells). v1.2 grass-mechanic-brief §Grass storage /
+//! §Grass dynamics per tick / §Initial grass seed / §Bilinear sampling.
 
 use crate::constants::{GRASS_CELL_COUNT, GRASS_CELL_SIZE, GRASS_GRID_DIM, GRASS_MAX, WORLD_SIZE};
 use crate::rng::SimRng;
 
-// Compile-time invariant checks (v1.2 grass mechanic brief §Grass storage).
-const _: () = assert!(GRASS_CELL_COUNT == 57_600);
-const _: () = assert!(GRASS_GRID_DIM == 240);
+// Compile-time invariant checks (v1.3 M1 — updated from 57_600/240).
+const _: () = assert!(GRASS_CELL_COUNT == 14_400);
+const _: () = assert!(GRASS_GRID_DIM == 120);
 
-/// 240×240 grass density field over the 600u walled world.
+/// 120×120 grass density field over the 600u walled world.
 ///
 /// Row-major layout: cell (ix, iy) is at index `iy * GRASS_GRID_DIM + ix`.
 /// Density values are clamped to `[0.0, GRASS_MAX]` after each `step` call.
 #[derive(Clone, Debug)]
 pub struct GrassGrid {
-    /// Row-major density, length GRASS_CELL_COUNT (= 57_600).
+    /// Row-major density, length GRASS_CELL_COUNT (= 14_400).
     pub density: Vec<f32>,
     /// Double-buffer scratch. Same length as `density`. Recomputed every
     /// `step` call; never read between ticks.
@@ -340,9 +340,9 @@ mod tests {
         // Cell (0,0) at index 0, cell (1,0) at index 1.
         g.density[0] = 0.0;
         g.density[1] = 1.0;
-        // Midpoint between cell-0 center (1.25) and cell-1 center (3.75) is x=2.5.
-        // At x=2.5, y=1.25 (cell-0's center y), expected value = 0.5.
-        let val = g.bilinear_sample(2.5, 1.25);
+        // Midpoint between cell-0 center (2.5) and cell-1 center (7.5) is x=5.0.
+        // At x=5.0, y=2.5 (cell-0's center y), expected value = 0.5.
+        let val = g.bilinear_sample(5.0, 2.5);
         assert!(
             (val - 0.5).abs() < 1e-5,
             "bilinear midpoint must be average of neighbors; got {val}"
@@ -416,8 +416,8 @@ mod tests {
     #[test]
     fn cells_overlapping_circle_finds_central_cell() {
         let g = fresh_grid();
-        // Place the query exactly at cell (119, 119)'s center: (119.5 * 2.5, 119.5 * 2.5).
-        // A radius of 0.5 is smaller than GRASS_CELL_SIZE/2, so only the containing cell hits.
+        // Place the query exactly at cell (119, 119)'s center: (119.5 * 5.0, 119.5 * 5.0).
+        // A radius of 0.5 is smaller than GRASS_CELL_SIZE/2 (2.5), so only the containing cell hits.
         let ix = 119usize;
         let iy = 119usize;
         let cx = (ix as f32 + 0.5) * GRASS_CELL_SIZE;
@@ -443,9 +443,11 @@ mod tests {
     #[test]
     fn for_each_cell_skips_out_of_world() {
         let g = fresh_grid();
-        // Circle at (0.5, 0.5) with radius 2.0 — should find ix=0 and ix=1, but NOT ix=dim-1.
+        // Cell 0 center is at (2.5, 2.5) with GRASS_CELL_SIZE=5.0.
+        // Circle at (1.0, 1.0) with radius 3.0 reaches cell (0,0) center (distance ~2.12)
+        // but not ix=dim-1 (far side of the world).
         let mut ix_hits = std::collections::BTreeSet::new();
-        g.for_each_cell_overlapping_circle(0.5, 0.5, 2.0, |idx| {
+        g.for_each_cell_overlapping_circle(1.0, 1.0, 3.0, |idx| {
             ix_hits.insert(idx % GRASS_GRID_DIM);
         });
         assert!(

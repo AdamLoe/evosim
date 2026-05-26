@@ -371,3 +371,5 @@ Merged D6→D7→D1→D2→D4→D5→D8→D10→D3→D9 in order via `git merge 
 - Pre-existing `now` TypeScript TS2304 error in rail/index.ts patched to `performance.now()`.
 
 Final gate results: `cargo fmt` clean; `cargo test --lib` 117/117; `cargo clippy` default+threads clean; `cargo test --lib --features threads` 117/117; `pnpm typecheck` clean; `pnpm build` clean. SCHEMA_VERSION=5. All worktrees retained.
+
+M1 (grass cell size 2.5u → 5.0u): `GRASS_CELL_SIZE` doubled; `GRASS_GRID_DIM` 240 → 120; `GRASS_CELL_COUNT` 57_600 → 14_400. Compile-time asserts updated. Test numerics updated (cell_ix 120 → 60 in nn.rs + tick.rs; bilinear midpoint coords 2.5/1.25 → 5.0/2.5; seam-threshold comments 1.25 → 2.5). Doc comments updated in grass.rs, constants.rs, wasm_api.rs. NN grass-patch sample stride doubles arithmetically (no code change in nn.rs patch loop). Per brief §Modifications #1: 4× perf win on GrassGrid::step + bilinear_sample.

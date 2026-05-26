@@ -130,14 +130,14 @@ pub const EYE_STRIDE: [u8; 8] = [0, 12, 8, 6, 4, 3, 2, 1];
 #[allow(dead_code)]
 pub const DAY_TICKS: u32 = 1000;
 
-// ---- Grass grid (v1.2 grass mechanic) ----
-/// Cell size in world-units. World is 600u → 240 cells per axis. See v1.2 grass
-/// mechanic brief §Grass storage.
-pub const GRASS_CELL_SIZE: f32 = 2.5;
-/// Number of grass cells per axis (240). See v1.2 grass mechanic brief.
-pub const GRASS_GRID_DIM: usize = (WORLD_SIZE / GRASS_CELL_SIZE) as usize; // 240
-/// Total grass cells (57_600). See v1.2 grass mechanic brief.
-pub const GRASS_CELL_COUNT: usize = GRASS_GRID_DIM * GRASS_GRID_DIM; // 57_600
+// ---- Grass grid (v1.3 M1 — cell size doubled) ----
+/// Cell size in world-units. World is 600u → 120 cells per axis. See v1.3 M1
+/// (doubled from 2.5u; 4× fewer cells, 4× perf win on step + bilinear sample).
+pub const GRASS_CELL_SIZE: f32 = 5.0;
+/// Number of grass cells per axis (120). See v1.3 M1.
+pub const GRASS_GRID_DIM: usize = (WORLD_SIZE / GRASS_CELL_SIZE) as usize; // 120
+/// Total grass cells (14_400). See v1.3 M1.
+pub const GRASS_CELL_COUNT: usize = GRASS_GRID_DIM * GRASS_GRID_DIM; // 14_400
 /// Maximum density per cell (clamped post-step). See v1.2 grass mechanic brief.
 pub const GRASS_MAX: f32 = 1.0;
 /// Default in-cell logistic growth rate slider. See v1.2 grass mechanic brief §Grass dynamics.

@@ -17,7 +17,7 @@ pub struct WorldHandle {
     /// Reusable serialization buffer for `creatures_buffer` — one f32 vec
     /// shared across calls so JS can read a stable typed-array view.
     creature_buf: Vec<f32>,
-    /// Reusable buffer for `grass_buffer` — avoids re-allocating 57_600 f32s each frame.
+    /// Reusable buffer for `grass_buffer` — avoids re-allocating 14_400 f32s each frame.
     grass_buf: Vec<f32>,
     /// Reusable f64 buffer for `creature_ids_buffer` — index-aligned with creatures_buffer.
     id_buf: Vec<f64>,
@@ -198,21 +198,21 @@ impl WorldHandle {
 
     // ─── Grass render API (P1g) ──────────────────────────────────────────────
 
-    /// Grass grid dimension (240). Constant accessor; called per frame by the
+    /// Grass grid dimension (120). Constant accessor; called per frame by the
     /// Canvas2D render layer to avoid hard-coding the value in TS.
     #[wasm_bindgen(getter)]
     pub fn grass_dim(&self) -> u32 {
         GRASS_GRID_DIM as u32
     }
 
-    /// Grass cell size in world-units (2.5). Constant accessor; used by the
+    /// Grass cell size in world-units (5.0). Constant accessor; used by the
     /// Canvas2D render layer for world→screen coordinate conversion.
     #[wasm_bindgen(getter)]
     pub fn grass_cell_size(&self) -> f32 {
         GRASS_CELL_SIZE
     }
 
-    /// Copy the current grass density field (57_600 f32s) into a cached Vec
+    /// Copy the current grass density field (14_400 f32s) into a cached Vec
     /// and return a Float32Array view over it. Called once per frame by the
     /// Canvas2D render layer. The view is valid only until the next Rust call
     /// that moves `self.grass_buf` (safe for single-frame use).
@@ -423,7 +423,7 @@ impl WorldHandle {
 
     // ─── P3d observability counters ──────────────────────────────────────────
 
-    /// Count of grass cells where density > 0. O(57_600) — negligible at v1 scale.
+    /// Count of grass cells where density > 0. O(14_400) — negligible at v1 scale.
     #[wasm_bindgen]
     pub fn live_grass_cell_count(&self) -> u32 {
         self.inner
@@ -434,7 +434,7 @@ impl WorldHandle {
             .count() as u32
     }
 
-    /// Sum of all grass cell densities. O(57_600) — negligible at v1 scale.
+    /// Sum of all grass cell densities. O(14_400) — negligible at v1 scale.
     #[wasm_bindgen]
     pub fn total_grass_density(&self) -> f32 {
         self.inner.grass.density.iter().sum()
