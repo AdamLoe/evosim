@@ -6,7 +6,6 @@
 use crate::brain::Brain;
 use crate::carrion::Carrion;
 use crate::creature::Action;
-use crate::events::{Event, EventLog};
 use crate::genome::Genome;
 use crate::hof::HallOfFame;
 use crate::rng::SimRng;
@@ -40,7 +39,6 @@ pub struct SaveV1 {
 
     // Bookkeeping.
     pub species: SpeciesSnapshot,
-    pub events: EventLogSnapshot,
     pub sliders: DevSliders,
 
     pub next_creature_id: u64,
@@ -102,13 +100,6 @@ pub struct GrassGridSnapshot {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SpeciesSnapshot {
     pub list: Vec<Species>,
-}
-
-/// EventLog snapshot — full history; recent ring is rebuilt from tail on load.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct EventLogSnapshot {
-    pub all: Vec<Event>,
-    pub ring_cap: usize,
 }
 
 /// Errors returned by `World::from_save_v1`.
@@ -177,10 +168,6 @@ impl SaveV1 {
             carrion: w.carrion.clone(),
             species: SpeciesSnapshot {
                 list: w.species.list.clone(),
-            },
-            events: EventLogSnapshot {
-                all: w.events.all.clone(),
-                ring_cap: w.events.ring_cap,
             },
             sliders: w.sliders.clone(),
             next_creature_id: w.next_creature_id,
@@ -406,21 +393,6 @@ pub fn validate_save(save: &SaveV1) -> Result<usize, LoadError> {
     Ok(n)
 }
 
-/// Rebuild an EventLog from a snapshot: full `all` history preserved; `recent`
-/// ring recomputed from the tail (last `ring_cap` entries).
-pub fn rehydrate_event_log(snap: EventLogSnapshot) -> EventLog {
-    let mut log = EventLog::new();
-    log.ring_cap = snap.ring_cap;
-    log.recent.clear();
-    let n = snap.all.len();
-    let start = n.saturating_sub(snap.ring_cap);
-    for ev in snap.all[start..].iter() {
-        log.recent.push_back(ev.clone());
-    }
-    log.all = snap.all;
-    log
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Inline tests
 
@@ -582,39 +554,6 @@ mod tests {
     fn f26_invalid_json_errs() {
         let result: Result<SaveV1, _> = serde_json::from_str("not valid json {{}}");
         assert!(result.is_err(), "must fail on garbage JSON");
-    }
-
-    #[test]
-    fn f26_full_event_log_round_trips() {
-        // Run with elevated mutation rate to generate events faster.
-        let mut w = World::new("f26-events");
-        w.sliders.mutation_rate_multiplier = 5.0;
-        for _ in 0..5000 {
-            if !w.tick_once() {
-                break;
-            }
-        }
-        let all_len_before = w.events.all.len();
-        // Only assert if some events were generated.
-        if all_len_before == 0 {
-            return;
-        }
-        let last_event_tick = w.events.all.last().map(|e| e.tick);
-
-        let json = serde_json::to_string(&SaveV1::from_world(&w)).expect("serialize");
-        let save2: SaveV1 = serde_json::from_str(&json).expect("deserialize");
-        let w2 = World::from_save_v1(save2).expect("from_save_v1");
-
-        assert_eq!(
-            w2.events.all.len(),
-            all_len_before,
-            "full event log length must match"
-        );
-        assert_eq!(
-            w2.events.all.last().map(|e| e.tick),
-            last_event_tick,
-            "last event tick must match"
-        );
     }
 
     #[test]

@@ -5,7 +5,7 @@ use crate::constants::*;
 use crate::creature::CreatureSoA;
 use crate::grass::GrassGrid;
 use crate::grid::SpatialGrid;
-use crate::save::{rehydrate_event_log, validate_save, LoadError, SCHEMA_VERSION};
+use crate::save::{validate_save, LoadError, SCHEMA_VERSION};
 use crate::species::SpeciesRegistry;
 use crate::vision::{CarrionIndex, VisionBuf, VISION_LEN};
 
@@ -78,9 +78,6 @@ impl World {
         let max_id = save.species.list.iter().map(|s| s.id).max().unwrap_or(0);
         let species = SpeciesRegistry::from_snapshot(save.species.list, max_id + 1);
 
-        // Rehydrate event log.
-        let events = rehydrate_event_log(save.events);
-
         Ok(World {
             tick: save.tick,
             seed: save.seed,
@@ -90,8 +87,6 @@ impl World {
             creatures,
             carrion: save.carrion,
             species,
-            events,
-            events_enabled: false,
             sliders: save.sliders,
             next_creature_id: save.next_creature_id,
             peak_population: save.peak_population,

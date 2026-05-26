@@ -139,41 +139,6 @@ body {
   display: block;
 }
 
-/* E.21: Toasts (v6 §B): white bg / dark text / top-right / slide / 4s fade. */
-#toast-stack {
-  position: fixed;
-  top: 40px;
-  right: 296px; /* sit just left of the 280px rail */
-  display: flex;
-  flex-direction: column-reverse; /* newest at top */
-  gap: 6px;
-  pointer-events: none;
-  z-index: 10;
-}
-.toast {
-  background: #fff;
-  color: #111;
-  padding: 6px 10px;
-  border-radius: 4px;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
-  font-size: 12px;
-  min-width: 180px;
-  max-width: 240px;
-  transform: translateX(40px);
-  opacity: 0;
-  transition:
-    transform 200ms ease-out,
-    opacity 200ms ease-out;
-}
-.toast.is-visible {
-  transform: translateX(0);
-  opacity: 1;
-}
-.toast.is-leaving {
-  transform: translateX(40px);
-  opacity: 0;
-}
-
 /* E.21: Events panel rows */
 .events-species-list {
   margin-bottom: 8px;

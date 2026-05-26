@@ -921,31 +921,6 @@ mod tests {
         );
     }
 
-    /// E.21: EventKind serde uses flat #[serde(tag = "type")] shape.
-    #[test]
-    fn event_kind_serde_flat_tag() {
-        use crate::events::{Event, EventKind};
-        let ev = Event {
-            tick: 42,
-            kind: EventKind::Speciation {
-                new_species_id: 1,
-                parent_species_id: 0,
-                new_species_name: "Lineage A1".to_string(),
-                creature_id: 99,
-            },
-        };
-        let json = serde_json::to_string(&ev).unwrap();
-        // Flat tag means {"tick":42,"kind":{"type":"Speciation","new_species_id":1,...}}
-        assert!(
-            json.contains("\"type\":\"Speciation\""),
-            "flat tag must be present: {json}"
-        );
-        assert!(
-            !json.contains("\"Speciation\":{"),
-            "nested form must NOT be present: {json}"
-        );
-    }
-
     // ─────────────────────────────────────────────────────────────────────
     // F.26 wasm API tests
 

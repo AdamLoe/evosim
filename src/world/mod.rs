@@ -14,7 +14,6 @@ use crate::brain::Brain;
 use crate::carrion::Carrion;
 use crate::constants::*;
 use crate::creature::{Action, CreatureSoA};
-use crate::events::{Event, EventKind, EventLog};
 use crate::genome::Genome;
 use crate::grass::GrassGrid;
 use crate::grid::SpatialGrid;
@@ -66,11 +65,6 @@ pub struct World {
     pub creatures: CreatureSoA,
     pub carrion: Vec<Carrion>,
     pub species: SpeciesRegistry,
-    pub events: EventLog,
-    /// When false (default), `self.events.push(...)` calls are suppressed.
-    /// Set to true in tests that assert event log contents. v1.1 will flip
-    /// this to true for all runs when the Events UI is re-enabled.
-    pub events_enabled: bool,
     pub sliders: DevSliders,
     pub next_creature_id: u64,
     pub peak_population: u32,
@@ -81,6 +75,7 @@ pub struct World {
     pub first_eat_fired: bool,
     /// Bitset of population milestone thresholds that have fired (v5 §11, E.25.a).
     /// Bit k = POPULATION_MILESTONES[k] was crossed. One-shot: never cleared.
+    /// Kept for potential D5 HoF use; events no longer emitted (D4).
     pub population_milestones_fired: u32,
     // ---- Hall-of-fame snapshots (E.25.d, consumed by F.28) ----
     /// Creature with the highest size ever seen during this run (v6 §L).
@@ -198,8 +193,6 @@ impl World {
             creatures,
             carrion: Vec::new(),
             species,
-            events: EventLog::new(),
-            events_enabled: false,
             sliders,
             next_creature_id: 1,
             peak_population: 1,
@@ -371,34 +364,17 @@ impl World {
                 self.peak_species_count = self.live_species_count;
             }
 
-            // E.25.a: PopulationMilestone events (v5 §11 — once per threshold ever).
+            // E.25.a: PopulationMilestone threshold tracking (once per threshold ever).
+            // Events no longer emitted (D4); bitset kept for potential D5 HoF use.
             for (k, &threshold) in POPULATION_MILESTONES.iter().enumerate() {
                 let bit = 1u32 << k;
                 if pop >= threshold && (self.population_milestones_fired & bit) == 0 {
                     self.population_milestones_fired |= bit;
-                    if self.events_enabled {
-                        self.events.push(Event {
-                            tick: self.tick,
-                            kind: EventKind::PopulationMilestone {
-                                population: threshold,
-                            },
-                        });
-                    }
                 }
             }
 
             if self.creatures.is_empty() {
                 self.world_ended = true;
-                if self.events_enabled {
-                    self.events.push(Event {
-                        tick: self.tick,
-                        kind: EventKind::WorldEnded {
-                            ticks_lived: self.tick,
-                            peak_population: self.peak_population,
-                            peak_species: self.peak_species_count,
-                        },
-                    });
-                }
                 return false;
             }
         }
@@ -455,18 +431,6 @@ impl World {
                     child_brain.weights.clone(),
                     self.tick,
                 );
-                if self.events_enabled {
-                    let new_name = self.species.get(new_species_id).name.clone();
-                    self.events.push(Event {
-                        tick: self.tick,
-                        kind: EventKind::Speciation {
-                            new_species_id,
-                            parent_species_id: parent_species,
-                            new_species_name: new_name,
-                            creature_id: new_id,
-                        },
-                    });
-                }
                 (new_species_id, parent_species)
             } else {
                 (parent_species, parent_species)
@@ -536,16 +500,6 @@ impl World {
                 let species = &mut self.species.list[cand_idx];
                 if species.died_tick.is_none() {
                     species.died_tick = Some(self.tick);
-                    if self.events_enabled {
-                        let name = species.name.clone();
-                        self.events.push(Event {
-                            tick: self.tick,
-                            kind: EventKind::Extinction {
-                                species_id: cand,
-                                species_name: name,
-                            },
-                        });
-                    }
                 }
             }
         }
@@ -755,57 +709,6 @@ mod tests {
         }
     }
 
-    // ---- E.25.a test ----
-
-    /// E.25.a: PopulationMilestone events fire once per threshold, never repeat.
-    #[test]
-    fn e25_population_milestones_fire_once() {
-        use crate::brain::Brain;
-        use crate::vision::VISION_LEN;
-
-        let mut w = World::new("e25-milestones");
-        w.events_enabled = true; // enable logging so we can assert event contents
-        let mut seeder = SimRng::from_string("e25-seed");
-
-        // Manually push 9 extra creatures to hit threshold 10.
-        for k in 1u64..10 {
-            let g = Genome::founder();
-            let b = Brain::founder(&mut seeder);
-            w.creatures
-                .push(k, 100.0 + k as f32, 100.0, FOUNDER_ENERGY, 0, 0, 0, g, b);
-            w.vision.push([0.0f32; VISION_LEN]);
-        }
-        assert_eq!(w.population(), 10);
-
-        // tick_once calls step() which checks milestones.
-        w.tick_once();
-
-        let milestone10_events: Vec<_> = w
-            .events
-            .all
-            .iter()
-            .filter(|e| matches!(e.kind, EventKind::PopulationMilestone { population: 10 }))
-            .collect();
-        assert_eq!(
-            milestone10_events.len(),
-            1,
-            "threshold 10 must fire exactly once"
-        );
-
-        // Tick again — must not re-fire.
-        w.tick_once();
-        let milestone10_count = w
-            .events
-            .all
-            .iter()
-            .filter(|e| matches!(e.kind, EventKind::PopulationMilestone { population: 10 }))
-            .count();
-        assert_eq!(
-            milestone10_count, 1,
-            "threshold 10 must not re-fire after first crossing"
-        );
-    }
-
     // ---- E.20 tests ----
 
     /// E.20 test 1: tick until first split; verify the path executed (lenient on which side
@@ -874,125 +777,6 @@ mod tests {
             "name = {}",
             w.species.get(new_species_id).name
         );
-    }
-
-    /// E.20 test 3: end-to-end — with max mutation, a Speciation event eventually fires.
-    /// Uses synthetic approach: run until speciation fires (checking events.all after each tick),
-    /// restarting a fresh world if the first world goes extinct too quickly.
-    #[test]
-    fn e20_speciation_event_lands_in_log_when_threshold_crossed() {
-        use crate::species::species_distance;
-        // Directly exercise the registry wiring with a synthetic big-drift genome
-        // inserted via handle_births-style logic to confirm the event fires.
-        // This is more reliable than depending on a live sim to accumulate drift.
-        let mut w = World::new("e20-direct");
-        w.events_enabled = true; // enable logging so we can assert event contents
-
-        // Confirm the speciate path fires: manufacture a child with huge drift
-        // and push it through the species check directly (mirrors handle_births).
-        let parent_species = w.creatures.species_id[0];
-        let anchor = w.species.get(parent_species);
-        let mut child_genome = anchor.anchor_genome.clone();
-        // Force huge drift: max size, flipped pigments.
-        child_genome.size = SIZE_MAX;
-        child_genome.pigment_r = 1.0 - child_genome.pigment_r;
-        child_genome.pigment_g = 1.0 - child_genome.pigment_g;
-        child_genome.pigment_b = 1.0 - child_genome.pigment_b;
-        let child_brain = w.creatures.brains[0].clone();
-
-        let dist = species_distance(
-            &child_genome,
-            &anchor.anchor_genome,
-            &child_brain.weights,
-            &anchor.anchor_brain_weights,
-        );
-        assert!(
-            dist > SPECIES_THRESHOLD,
-            "synthetic dist = {dist} should exceed {SPECIES_THRESHOLD}"
-        );
-
-        // Simulate what handle_births does:
-        let new_species_id = w.species.speciate(
-            parent_species,
-            child_genome.clone(),
-            child_brain.weights.clone(),
-            w.tick,
-        );
-        let new_name = w.species.get(new_species_id).name.clone();
-        w.events.push(Event {
-            tick: w.tick,
-            kind: EventKind::Speciation {
-                new_species_id,
-                parent_species_id: parent_species,
-                new_species_name: new_name,
-                creature_id: 99,
-            },
-        });
-
-        // Verify event fired and has correct shape.
-        assert!(
-            w.events
-                .all
-                .iter()
-                .any(|e| matches!(e.kind, EventKind::Speciation { .. })),
-            "Speciation event must be in log"
-        );
-        let ev = w
-            .events
-            .all
-            .iter()
-            .find(|e| matches!(e.kind, EventKind::Speciation { .. }))
-            .unwrap();
-        if let EventKind::Speciation {
-            new_species_id: nsid,
-            parent_species_id: psid,
-            ..
-        } = &ev.kind
-        {
-            let new_sp = w.species.get(*nsid);
-            assert_eq!(new_sp.parent_id, Some(*psid));
-            assert_ne!(*nsid, *psid);
-        }
-
-        // Also run a live simulation to confirm the wiring in handle_births
-        // actually fires given enough accumulated drift (run many worlds in parallel).
-        // Use aggressive mutation on a controlled seed and verify event appears
-        // or the world ends without panicking.
-        let mut found = false;
-        for seed_n in 0u32..20 {
-            let seed = format!("e20-live-{seed_n}");
-            let mut w2 = World::new(&seed);
-            w2.events_enabled = true; // enable logging so we can assert event contents
-            w2.sliders.mutation_rate_multiplier = 20.0;
-            w2.sliders.nn_mutation_sigma = 0.3;
-            // Boost grass growth so creatures survive long enough to accumulate drift.
-            w2.sliders.grass_in_cell_growth_r = 0.05;
-            for _ in 0..5_000 {
-                if !w2.tick_once() {
-                    break;
-                }
-                if w2
-                    .events
-                    .all
-                    .iter()
-                    .any(|e| matches!(e.kind, EventKind::Speciation { .. }))
-                {
-                    found = true;
-                    break;
-                }
-            }
-            if found {
-                break;
-            }
-        }
-        if !found {
-            // Acceptable: the live path may not accumulate enough drift in 5k ticks × 20 seeds.
-            // The synthetic path above already confirmed the registry + event wiring is correct.
-            // The wiring in handle_births is confirmed by the synthetic-large-drift test.
-            println!(
-                "Note: live speciation not observed in 20 short runs; synthetic path confirmed OK."
-            );
-        }
     }
 
     /// perf-1 T2: child's trig cache is populated on birth; parent's is unchanged.
