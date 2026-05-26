@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git --version)",
+      "Bash(cargo --version)",
+      "Bash(rustc --version)",
+      "Bash(pnpm --version)",
+      "Bash(wasm-pack --version)",
+      "Bash(ps -p 23979 -o pid,cmd --no-headers)",
+      "Bash(cargo check *)",
+      "Bash(ls /home/adamg/ | head -30 && find /home/adamg -maxdepth 3 -type d -name \"ml2*\" 2>/dev/null | head -10)",
+      "Read(//home/adamg/**)",
+      "Bash(python3)",
+      "Bash(pkill -f node)",
+      "Bash(pkill -f vite)",
+      "Bash(pkill -f pnpm)",
+      "Bash(rm -f /tmp/vite.log)"
+    ]
+  }
+}
