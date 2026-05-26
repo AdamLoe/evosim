@@ -5,8 +5,6 @@ use crate::carrion::Carrion;
 use crate::constants::*;
 use crate::creature::Action;
 use crate::events::{Event, EventKind};
-use crate::hof::HallOfFame;
-use crate::species::species_distance;
 use crate::torus::{torus_delta, wrap_pos};
 
 impl World {
@@ -123,17 +121,6 @@ impl World {
                 && self.creatures.distance_travelled[i] >= 5.0
             {
                 self.first_move_fired = true;
-                let g = self.creatures.genomes[i].clone();
-                let species_name = self.species.get(self.creatures.species_id[i]).name.clone();
-                // E.25.d: capture first_mover_snapshot for F.28.
-                self.first_mover_snapshot = Some(HallOfFame {
-                    creature_id: self.creatures.id[i],
-                    genome: g.clone(),
-                    species_name,
-                    captured_tick: self.tick,
-                    captured_size: g.size,
-                    captured_age: self.creatures.age[i],
-                });
                 if self.events_enabled {
                     self.events.push(Event {
                         tick: self.tick,
@@ -428,10 +415,7 @@ impl World {
             if size_i > self.creatures.max_size_reached[i] {
                 self.creatures.max_size_reached[i] = size_i;
             }
-            // S29: biggest_ever scan removed from here. It is now updated only in
-            // handle_births (on each newborn push) and in World::new (for the founder).
-            // Size is genome-determined and never changes after birth, so a per-tick
-            // O(N) scan was redundant.
+            // Size is genome-determined and never changes after birth.
             self.creatures.energy[i] -= up;
             self.creatures.cumulative_upkeep[i] += up;
             if self.creatures.digestion_cooldown[i] > 0 {
@@ -461,56 +445,6 @@ impl World {
                 self.pending_extinction_check
                     .push(self.creatures.species_id[i]);
                 self.scratch_dead.push(i);
-
-                // E.25.d: hall-of-fame tracking on death.
-                let age = self.creatures.age[i];
-                let g_clone = self.creatures.genomes[i].clone();
-                let species_name = self.species.get(self.creatures.species_id[i]).name.clone();
-
-                // last_survivor: overwrite on every death; final overwrite is the
-                // latest death tick (pop=0 means no more deaths after this).
-                self.last_survivor = Some(HallOfFame {
-                    creature_id: self.creatures.id[i],
-                    genome: g_clone.clone(),
-                    species_name: species_name.clone(),
-                    captured_tick: self.tick,
-                    captured_size: g_clone.size,
-                    captured_age: age,
-                });
-
-                // longest_lived (unconditional fallback for weirdest).
-                if age > self.longest_lived_age {
-                    self.longest_lived_age = age;
-                    self.longest_lived = Some(HallOfFame {
-                        creature_id: self.creatures.id[i],
-                        genome: g_clone.clone(),
-                        species_name: species_name.clone(),
-                        captured_tick: self.tick,
-                        captured_size: g_clone.size,
-                        captured_age: age,
-                    });
-                }
-
-                // weirdest: requires age >= 500 (v5 §11.1).
-                if age >= 500 {
-                    let dist = species_distance(
-                        &g_clone,
-                        &self.founder_genome_anchor,
-                        &self.creatures.brains[i].weights,
-                        &self.founder_brain_anchor,
-                    );
-                    if dist > self.weirdest_distance {
-                        self.weirdest_distance = dist;
-                        self.weirdest = Some(HallOfFame {
-                            creature_id: self.creatures.id[i],
-                            genome: g_clone,
-                            species_name,
-                            captured_tick: self.tick,
-                            captured_size: self.creatures.genomes[i].size,
-                            captured_age: age,
-                        });
-                    }
-                }
             }
         }
         // S27: dead indices are in self.scratch_dead; pending_extinction_check was
@@ -582,131 +516,6 @@ mod tests {
                 assert_eq!(*cid, creature_id, "FirstToMove creature_id must match");
             }
         }
-    }
-
-    // ---- E.25.d tests ----
-
-    /// E.25.d: biggest_ever tracks the creature with the highest size ever reached.
-    /// S29: biggest_ever is now seeded at World::new for the founder and updated
-    /// only in handle_births for each newborn. energy_bookkeeping no longer scans.
-    #[test]
-    fn e25_biggest_ever_tracks_max_size() {
-        // The founder always initializes biggest_ever at World::new.
-        let w = World::new("e25-biggest");
-        assert!(
-            w.biggest_ever.is_some(),
-            "biggest_ever must be Some immediately after World::new (founder seeded)"
-        );
-        let founder_size = w.creatures.g_size[0];
-        assert_eq!(
-            w.biggest_ever.as_ref().unwrap().captured_size,
-            founder_size,
-            "biggest_ever size must equal founder size at init"
-        );
-
-        // S29: Run until a birth produces a creature with size > founder_size.
-        // Use aggressive mutation to increase chance of larger genome.size.
-        let mut w2 = World::new("e25-biggest-birth");
-        w2.sliders.mutation_rate_multiplier = 5.0;
-        let initial_best = w2.biggest_ever.as_ref().unwrap().captured_size;
-        let mut found_bigger = false;
-        for _ in 0..5000 {
-            if !w2.tick_once() {
-                break;
-            }
-            if let Some(ref be) = w2.biggest_ever {
-                if be.captured_size > initial_best {
-                    found_bigger = true;
-                    break;
-                }
-            }
-        }
-        // If no bigger creature appeared in 5000 ticks (unlikely but possible
-        // with random mutations), the test just confirms no panic and the
-        // existing biggest_ever value is still valid (>= founder size).
-        assert!(
-            w2.biggest_ever.as_ref().unwrap().captured_size >= initial_best,
-            "biggest_ever must never decrease"
-        );
-        let _ = found_bigger; // may be false in unusual RNG sequences
-    }
-
-    /// E.25.d: weirdest requires age >= 500 to qualify.
-    #[test]
-    fn e25_weirdest_requires_500_ticks() {
-        let mut w = World::new("e25-weird");
-        // Give founder huge genome drift from anchor to qualify if age allows.
-        w.creatures.genomes[0].size = SIZE_MAX;
-        w.creatures.genomes[0].pigment_r = 1.0 - w.founder_genome_anchor.pigment_r;
-
-        // Age 400 — below threshold, should NOT become weirdest.
-        w.creatures.age[0] = 400;
-        w.creatures.energy[0] = -1.0; // trigger death
-        w.collect_deaths(); // S27: results in self.scratch_dead
-        assert_eq!(w.scratch_dead.len(), 1);
-        assert!(
-            w.weirdest.is_none(),
-            "age 400 must not qualify for weirdest"
-        );
-        assert!(
-            w.longest_lived.is_some(),
-            "longest_lived must track unconditionally"
-        );
-
-        // Fresh world, age 500 — should qualify.
-        let mut w2 = World::new("e25-weird2");
-        w2.creatures.genomes[0].size = SIZE_MAX;
-        w2.creatures.genomes[0].pigment_r = 1.0 - w2.founder_genome_anchor.pigment_r;
-        w2.creatures.age[0] = 500;
-        w2.creatures.energy[0] = -1.0;
-        w2.collect_deaths(); // S27: results in self.scratch_dead
-        assert_eq!(w2.scratch_dead.len(), 1);
-        assert!(w2.weirdest.is_some(), "age 500 must qualify for weirdest");
-        assert_eq!(w2.weirdest.as_ref().unwrap().captured_age, 500);
-    }
-
-    /// E.25.d: last_survivor captures the final death tick.
-    #[test]
-    fn e25_last_survivor_captures_final_death() {
-        use crate::brain::Brain;
-        use crate::vision::VISION_LEN;
-
-        let mut w = World::new("e25-last");
-        let mut seeder = SimRng::from_string("e25-last-seed");
-        // Add a second creature.
-        let g2 = Genome::founder();
-        let b2 = Brain::founder(&mut seeder);
-        w.creatures
-            .push(1, 200.0, 200.0, FOUNDER_ENERGY, 0, 0, 0, g2, b2);
-        w.vision.push([0.0f32; VISION_LEN]);
-        assert_eq!(w.creatures.len(), 2);
-
-        // Kill creature 0 this tick.
-        w.creatures.energy[0] = -1.0;
-        let id0 = w.creatures.id[0];
-        w.collect_deaths(); // S27: results in self.scratch_dead
-
-        // last_survivor should be creature 0 (only one dead so far).
-        assert!(w.last_survivor.is_some());
-        let ls = w.last_survivor.as_ref().unwrap();
-        assert_eq!(ls.creature_id, id0);
-
-        // Kill creature 1 on the next "tick" (simulate by bumping tick).
-        w.tick = 10;
-        let id1 = w.creatures.id[0]; // after swap_remove, index 0 is now creature 1
-        w.creatures.energy[0] = -1.0;
-        w.collect_deaths(); // S27: results in self.scratch_dead
-
-        // last_survivor must be updated to creature 1 (later tick).
-        let ls2 = w.last_survivor.as_ref().unwrap();
-        assert_eq!(
-            ls2.creature_id, id1,
-            "last_survivor must be the creature that died last"
-        );
-        assert_eq!(
-            ls2.captured_tick, 10,
-            "captured_tick must match the second death tick"
-        );
     }
 
     // ---- S24 tests ----

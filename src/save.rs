@@ -8,7 +8,6 @@ use crate::carrion::Carrion;
 use crate::creature::Action;
 use crate::events::{Event, EventLog};
 use crate::genome::Genome;
-use crate::hof::HallOfFame;
 use crate::rng::SimRng;
 use crate::species::Species;
 use crate::world::{DevSliders, World};
@@ -51,17 +50,6 @@ pub struct SaveV1 {
     pub first_move_fired: bool,
     pub first_eat_fired: bool,
     pub population_milestones_fired: u32,
-
-    // Hall-of-fame snapshots (E.25.d, consumed by F.28).
-    pub biggest_ever: Option<HallOfFame>,
-    pub last_survivor: Option<HallOfFame>,
-    pub weirdest: Option<HallOfFame>,
-    pub weirdest_distance: f32,
-    pub longest_lived: Option<HallOfFame>,
-    pub longest_lived_age: u32,
-    pub first_mover_snapshot: Option<HallOfFame>,
-    pub founder_genome_anchor: Genome,
-    pub founder_brain_anchor: Vec<f32>,
 }
 
 /// Per-creature SoA snapshot — one Vec per column, index-aligned.
@@ -191,15 +179,6 @@ impl SaveV1 {
             first_move_fired: w.first_move_fired,
             first_eat_fired: w.first_eat_fired,
             population_milestones_fired: w.population_milestones_fired,
-            biggest_ever: w.biggest_ever.clone(),
-            last_survivor: w.last_survivor.clone(),
-            weirdest: w.weirdest.clone(),
-            weirdest_distance: w.weirdest_distance,
-            longest_lived: w.longest_lived.clone(),
-            longest_lived_age: w.longest_lived_age,
-            first_mover_snapshot: w.first_mover_snapshot.clone(),
-            founder_genome_anchor: w.founder_genome_anchor.clone(),
-            founder_brain_anchor: w.founder_brain_anchor.clone(),
         }
     }
 }

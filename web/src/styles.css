@@ -469,50 +469,6 @@ body {
   padding: 8px 0;
 }
 
-/* F.28: Eulogy card */
-.eulogy-backdrop {
-  background: rgba(8, 12, 20, 0.7);
-}
-.eulogy-card {
-  min-width: 480px;
-  max-width: 580px;
-  text-align: center;
-}
-.eulogy-card h2 {
-  font-size: 18px;
-  margin-bottom: 12px;
-}
-.eulogy-headline {
-  font-size: 14px;
-}
-.eulogy-seed code {
-  background: rgba(255, 255, 255, 0.08);
-  padding: 2px 6px;
-  border-radius: 3px;
-  font-family: ui-monospace, monospace;
-}
-.eulogy-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
-  margin: 20px 0;
-}
-.eulogy-cell {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
-}
-.eulogy-cell-canvas {
-  width: 96px;
-  height: 96px;
-}
-.eulogy-cell-caption {
-  font-size: 11px;
-  opacity: 0.75;
-  font-family: ui-monospace, monospace;
-}
-
 /* P3b: dev-panel overlay */
 #devpanel-box {
   bottom: 8px;

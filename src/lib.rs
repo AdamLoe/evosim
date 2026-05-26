@@ -10,7 +10,6 @@ pub(crate) mod events;
 pub(crate) mod genome;
 pub(crate) mod grass;
 pub(crate) mod grid;
-pub(crate) mod hof;
 pub(crate) mod profiler;
 pub(crate) mod rng;
 pub mod save; // used by tests/acceptance.rs
