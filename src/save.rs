@@ -1,4 +1,4 @@
-//! Save/load support for v1. Schema version: 2. JSON via serde_json.
+//! Save/load support for v1. Schema version: 3. JSON via serde_json.
 //! v5 §13, v6 §I. Snapshot structs are explicit so future versions can add
 //! SaveV2 alongside without disturbing SaveV1. From<&World> conversions kept
 //! in this module; World re-exports via to_save_v1 / from_save_v1 helpers.
@@ -16,7 +16,8 @@ use serde::{Deserialize, Serialize};
 
 /// Current schema version. Bump on any save-shape change that breaks compatibility.
 /// v1 → v2 (P1b+P1f): dropped SunMapSnapshot; added GrassGridSnapshot; dropped Carrion.sun_cell.
-pub const SCHEMA_VERSION: u32 = 2;
+/// v2 → v3 (P2g): added nose_count + move_bias_x/y/reroll_at columns; NN weight count now 4032.
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Wire shape on disk. Camera / UI state lives on the JS side.
 /// All fields are owned Vecs so we can serialize without referencing &World.
@@ -83,6 +84,11 @@ pub struct CreatureSoASnapshot {
     pub birth_tick: Vec<u32>,
     pub genomes: Vec<Genome>,
     pub brains: Vec<Brain>,
+    // v3 fields (P2g): genome nose_count mirror + move-bias state.
+    pub nose_count: Vec<u8>,
+    pub move_bias_x: Vec<f32>,
+    pub move_bias_y: Vec<f32>,
+    pub move_bias_reroll_at: Vec<u32>,
 }
 
 /// GrassGrid snapshot — density only; scratch is recomputed on load.
@@ -158,6 +164,11 @@ impl SaveV1 {
                 birth_tick: w.creatures.birth_tick.clone(),
                 genomes: w.creatures.genomes.clone(),
                 brains: w.creatures.brains.clone(),
+                // v3 fields (P2g).
+                nose_count: w.creatures.g_nose_count.clone(),
+                move_bias_x: w.creatures.move_bias_x.clone(),
+                move_bias_y: w.creatures.move_bias_y.clone(),
+                move_bias_reroll_at: w.creatures.move_bias_reroll_at.clone(),
             },
             grass: GrassGridSnapshot {
                 density: w.grass.density.clone(),
@@ -227,6 +238,11 @@ pub fn validate_soa_lengths(s: &CreatureSoASnapshot) -> Result<usize, LoadError>
     check!(birth_tick);
     check!(genomes);
     check!(brains);
+    // v3 columns (P2g).
+    check!(nose_count);
+    check!(move_bias_x);
+    check!(move_bias_y);
+    check!(move_bias_reroll_at);
     Ok(n)
 }
 
@@ -286,6 +302,30 @@ pub fn validate_save(save: &SaveV1) -> Result<usize, LoadError> {
             return Err(LoadError::StructuralError(format!(
                 "creature {i} brain.nn_mutation_rate is non-finite: {}",
                 b.nn_mutation_rate
+            )));
+        }
+    }
+
+    // 5. Per-creature v3 field range checks (P2g).
+    use crate::constants::NOSE_VALID;
+    let nose_max = *NOSE_VALID.iter().max().unwrap_or(&5);
+    for i in 0..n {
+        if save.creatures.nose_count[i] > nose_max {
+            return Err(LoadError::StructuralError(format!(
+                "creature {i} nose_count {} exceeds max {nose_max}",
+                save.creatures.nose_count[i]
+            )));
+        }
+        if !save.creatures.move_bias_x[i].is_finite() {
+            return Err(LoadError::StructuralError(format!(
+                "creature {i} move_bias_x is non-finite: {}",
+                save.creatures.move_bias_x[i]
+            )));
+        }
+        if !save.creatures.move_bias_y[i].is_finite() {
+            return Err(LoadError::StructuralError(format!(
+                "creature {i} move_bias_y is non-finite: {}",
+                save.creatures.move_bias_y[i]
             )));
         }
     }
@@ -469,6 +509,23 @@ mod tests {
                 w2.creatures.brains[i].weights[0], w.creatures.brains[i].weights[0],
                 "brain.weights[0][{i}]"
             );
+            // v3 fields (P2g).
+            assert_eq!(
+                w2.creatures.genomes[i].nose_count, w.creatures.genomes[i].nose_count,
+                "nose_count[{i}]"
+            );
+            assert_eq!(
+                w2.creatures.move_bias_x[i], w.creatures.move_bias_x[i],
+                "move_bias_x[{i}]"
+            );
+            assert_eq!(
+                w2.creatures.move_bias_y[i], w.creatures.move_bias_y[i],
+                "move_bias_y[{i}]"
+            );
+            assert_eq!(
+                w2.creatures.move_bias_reroll_at[i], w.creatures.move_bias_reroll_at[i],
+                "move_bias_reroll_at[{i}]"
+            );
         }
     }
 
@@ -505,7 +562,7 @@ mod tests {
         match result {
             Err(LoadError::SchemaVersionMismatch {
                 found: 999,
-                expected: 2,
+                expected: 3,
             }) => {}
             Err(e) => panic!("expected SchemaVersionMismatch, got: {e}"),
             Ok(_) => panic!("expected Err, got Ok"),
@@ -639,21 +696,21 @@ mod tests {
         );
     }
 
-    /// P1f: old-schema version 1 returns SchemaVersionMismatch { found: 1, expected: 2 }.
+    /// P2g: old-schema version 2 returns SchemaVersionMismatch { found: 2, expected: 3 }.
     #[test]
     fn load_old_schema_returns_version_mismatch_error() {
-        let mut w = World::new("p1f-old-schema");
+        let mut w = World::new("p2g-old-schema");
         w.tick_once();
         let mut save = SaveV1::from_world(&w);
-        save.schema_version = 1;
+        save.schema_version = 2;
         match World::from_save_v1(save) {
             Err(LoadError::SchemaVersionMismatch {
-                found: 1,
-                expected: 2,
+                found: 2,
+                expected: 3,
             }) => {}
             Ok(_) => panic!("expected SchemaVersionMismatch but got Ok"),
             Err(e) => {
-                panic!("expected SchemaVersionMismatch {{ found: 1, expected: 2 }} but got {e:?}")
+                panic!("expected SchemaVersionMismatch {{ found: 2, expected: 3 }} but got {e:?}")
             }
         }
     }
@@ -695,6 +752,11 @@ mod tests {
             save.creatures
                 .genomes
                 .push(crate::genome::Genome::founder());
+            // v3 columns (P2g).
+            save.creatures.nose_count.push(0);
+            save.creatures.move_bias_x.push(0.0);
+            save.creatures.move_bias_y.push(0.0);
+            save.creatures.move_bias_reroll_at.push(0);
         }
         let result = validate_save(&save);
         assert!(
@@ -755,5 +817,92 @@ mod tests {
             matches!(result, Err(LoadError::StructuralError(_))),
             "NaN slider must yield StructuralError"
         );
+    }
+
+    // ─────────── P2g: v3 column validation tests ───────────
+
+    /// P2g: nose_count exceeding NOSE_VALID max is rejected.
+    #[test]
+    fn p2g_invalid_nose_count_fails() {
+        let mut save = make_valid_save();
+        if !save.creatures.nose_count.is_empty() {
+            save.creatures.nose_count[0] = 6; // > NOSE_VALID max (5)
+        } else {
+            return; // no creatures in world — skip
+        }
+        assert!(
+            matches!(validate_save(&save), Err(LoadError::StructuralError(_))),
+            "nose_count > 5 must yield StructuralError"
+        );
+    }
+
+    /// P2g: non-finite move_bias_x is rejected.
+    #[test]
+    fn p2g_nan_move_bias_x_fails() {
+        let mut save = make_valid_save();
+        if !save.creatures.move_bias_x.is_empty() {
+            save.creatures.move_bias_x[0] = f32::NAN;
+        } else {
+            return;
+        }
+        assert!(
+            matches!(validate_save(&save), Err(LoadError::StructuralError(_))),
+            "NaN move_bias_x must yield StructuralError"
+        );
+    }
+
+    /// P2g: non-finite move_bias_y is rejected.
+    #[test]
+    fn p2g_nan_move_bias_y_fails() {
+        let mut save = make_valid_save();
+        if !save.creatures.move_bias_y.is_empty() {
+            save.creatures.move_bias_y[0] = f32::INFINITY;
+        } else {
+            return;
+        }
+        assert!(
+            matches!(validate_save(&save), Err(LoadError::StructuralError(_))),
+            "Inf move_bias_y must yield StructuralError"
+        );
+    }
+
+    /// P2g: mismatched move_bias_x column length fails.
+    #[test]
+    fn p2g_move_bias_length_mismatch_fails() {
+        let mut save = make_valid_save();
+        save.creatures.move_bias_x.pop();
+        assert!(
+            matches!(validate_save(&save), Err(LoadError::StructuralError(_))),
+            "move_bias_x length mismatch must yield StructuralError"
+        );
+    }
+
+    /// P2g: nose_count and move_bias_* round-trip through save/load.
+    #[test]
+    fn p2g_v3_fields_round_trip() {
+        let w = make_world_500();
+        let json = serde_json::to_string(&SaveV1::from_world(&w)).expect("serialize");
+        let save2: SaveV1 = serde_json::from_str(&json).expect("deserialize");
+        let w2 = World::from_save_v1(save2).expect("from_save_v1");
+        let n = w.creatures.len();
+        assert_eq!(w2.creatures.len(), n);
+        for i in 0..n {
+            assert_eq!(
+                w2.creatures.genomes[i].nose_count, w.creatures.genomes[i].nose_count,
+                "nose_count[{i}]"
+            );
+            assert_eq!(
+                w2.creatures.move_bias_x[i], w.creatures.move_bias_x[i],
+                "move_bias_x[{i}]"
+            );
+            assert_eq!(
+                w2.creatures.move_bias_y[i], w.creatures.move_bias_y[i],
+                "move_bias_y[{i}]"
+            );
+            assert_eq!(
+                w2.creatures.move_bias_reroll_at[i], w.creatures.move_bias_reroll_at[i],
+                "move_bias_reroll_at[{i}]"
+            );
+        }
     }
 }

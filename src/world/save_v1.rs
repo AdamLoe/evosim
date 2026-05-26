@@ -55,11 +55,10 @@ impl World {
             creatures.action_this_tick[i] = save.creatures.action_this_tick[i];
             creatures.max_size_reached[i] = save.creatures.max_size_reached[i];
             creatures.distance_travelled[i] = save.creatures.distance_travelled[i];
-            // P2f: move_bias fields not yet in save schema (P2g adds them).
-            // Initialize to zeros; re-roll fires on first tick (reroll_at = save.tick + interval).
-            creatures.move_bias_x[i] = 0.0;
-            creatures.move_bias_y[i] = 0.0;
-            creatures.move_bias_reroll_at[i] = save.tick.saturating_add(MOVE_BIAS_REROLL_INTERVAL);
+            // P2g: restore move_bias fields from snapshot (replaces P2f zero-init placeholder).
+            creatures.move_bias_x[i] = save.creatures.move_bias_x[i];
+            creatures.move_bias_y[i] = save.creatures.move_bias_y[i];
+            creatures.move_bias_reroll_at[i] = save.creatures.move_bias_reroll_at[i];
         }
 
         // Rebuild spatial grid from positions.

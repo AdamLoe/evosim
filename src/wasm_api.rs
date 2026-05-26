@@ -809,7 +809,7 @@ mod tests {
         let mut handle = WorldHandle::new("f26-schema-err");
         handle.step();
         let json = handle.snapshot_json();
-        let patched = json.replace("\"schema_version\":2", "\"schema_version\":999");
+        let patched = json.replace("\"schema_version\":3", "\"schema_version\":999");
         // We can test the underlying save/load path without going through JsValue
         // (JsValue::as_string() panics in native test context outside wasm32).
         use crate::save::SaveV1;
