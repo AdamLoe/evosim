@@ -4,7 +4,7 @@
 //! Bootstrap: `EVOSIM_WRITE_GOLDEN=1 cargo test --release --test acceptance`
 //! writes `tests/golden_snapshot_t10000.txt`. Subsequent runs assert against it.
 
-use evosim::save::SaveV1;
+// D6 stub: use evosim::save::SaveV1; — deleted by D1, test deleted by D6
 use evosim::snapshot_hash::snapshot_hash;
 use evosim::world::World;
 use std::time::Instant;
@@ -110,9 +110,8 @@ fn profile_does_not_change_hash() {
     );
 }
 
-/// F.26 round-trip: save at tick N, load, step M more, hash must equal
-/// the no-save reference. Closes the F reviewer non-blocker about lacking
-/// an end-to-end save/load determinism test.
+/// D6 stub: F.26 round-trip test disabled (SaveV1 deleted by D1; test deleted by D6).
+#[cfg(any())]
 #[cfg(not(feature = "threads"))]
 #[test]
 fn save_load_step_preserves_determinism() {
@@ -151,10 +150,8 @@ fn save_load_step_preserves_determinism() {
     );
 }
 
-/// S39 test (b): snapshot_hash immediately after load equals snapshot_hash
-/// before save. Runs in BOTH feature builds (no cfg gate) so threaded-only
-/// load divergences are caught. For each n, steps n ticks, saves, loads, then
-/// asserts hash equality BEFORE any further tick_once.
+/// D6 stub: S39 save/load hash test disabled (SaveV1 deleted by D1; test deleted by D6).
+#[cfg(any())]
 #[test]
 fn save_load_hash_equal_immediately_after_load() {
     for &n in &[0u32, 1, 200, 2000] {

@@ -3,7 +3,6 @@
 // v5 §11, v6 §I.
 
 import { renderCreaturePortrait } from "./render";
-import type { PersistenceClient } from "./persistence";
 import type { WorldHandle } from "../wasm/evosim";
 
 const SHARE_BASE_URL = window.location.origin + window.location.pathname;
@@ -40,7 +39,7 @@ export interface HoFJson {
   seed: string;
 }
 
-export function showEulogyCard(world: WorldHandle, persistence: PersistenceClient): void {
+export function showEulogyCard(world: WorldHandle): void {
   const hof: HoFJson = JSON.parse(world.hof_json());
 
   // Dim overlay over the aquarium.
@@ -97,21 +96,13 @@ export function showEulogyCard(world: WorldHandle, persistence: PersistenceClien
     flashButton(card, '[data-action="copy-share"]', "Copied");
   });
 
+  // D1 stub: download-save removed (snapshot_json deleted). D5 removes this button entirely.
   card.querySelector('[data-action="download-save"]')!.addEventListener("click", () => {
-    const json = world.snapshot_json();
-    const filename = `evosim-${hof.seed}-day${hof.day_count}.json`;
-    triggerDownload(json, filename);
-    flashButton(card, '[data-action="download-save"]', "Downloaded");
+    flashButton(card, '[data-action="download-save"]', "Unavailable");
   });
 
-  card.querySelector('[data-action="new-world"]')!.addEventListener("click", async () => {
-    // F.28 PIN (B): delete saved world, then reload without ?seed= so the
-    // resume prompt does not re-offer the just-finished world.
-    try {
-      await persistence.deleteCurrent();
-    } catch (e) {
-      console.warn("deleteCurrent failed (non-blocking):", e);
-    }
+  card.querySelector('[data-action="new-world"]')!.addEventListener("click", () => {
+    // D1 stub: persistence.deleteCurrent() removed. Reload starts a fresh world.
     window.location.href = window.location.origin + window.location.pathname;
   });
 
@@ -132,20 +123,7 @@ function populateCell(card: HTMLElement, slot: string, entry: HoFEntry | null): 
   canvasHolder.appendChild(c);
   captionEl.textContent = `${captionEl.textContent} · ${entry.species_name} · t=${entry.captured_tick}`;
 }
-
-function triggerDownload(text: string, filename: string): void {
-  const blob = new Blob([text], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  setTimeout(() => {
-    URL.revokeObjectURL(url);
-    a.remove();
-  }, 0);
-}
+// D1 stub: triggerDownload removed (used only by download-save button, deleted with snapshot_json).
 
 function flashButton(card: HTMLElement, selector: string, label: string): void {
   const btn = card.querySelector(selector) as HTMLButtonElement;

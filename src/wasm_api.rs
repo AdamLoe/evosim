@@ -2,7 +2,6 @@
 //! shapes so the web shell can iterate independently.
 
 use crate::constants::*;
-use crate::save::{LoadError, SaveV1};
 use crate::torus::torus_dist_sq;
 use crate::world::World;
 use wasm_bindgen::prelude::*;
@@ -549,48 +548,6 @@ impl WorldHandle {
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    // F.26 — persistence (snapshot_json + fromJson)
-
-    /// Serialize the world to JSON for autosave / Download Save (F.26).
-    /// ~1–5 ms at v1 sizes (brains dominate). Returns "{}" on the (unreachable)
-    /// serialization error path rather than panicking.
-    #[wasm_bindgen]
-    pub fn snapshot_json(&self) -> String {
-        let save = self.inner.to_save_v1();
-        serde_json::to_string(&save).unwrap_or_else(|_| "{}".into())
-    }
-
-    /// Construct a WorldHandle from a JSON save string (F.26).
-    ///
-    /// Returns `Err(JsValue)` with a prefix string for JS to switch on:
-    /// - `"schema-mismatch:<found>:<expected>"` — schema version mismatch
-    /// - `"invalid-json:<msg>"` — JSON parse error
-    /// - `"structural:<msg>"` — structural integrity failure
-    ///
-    /// JS treats any failure as "start fresh" (show schema-mismatch modal).
-    #[wasm_bindgen(js_name = fromJson)]
-    pub fn from_json(json: &str) -> Result<WorldHandle, JsValue> {
-        let save: SaveV1 = serde_json::from_str(json)
-            .map_err(|e| JsValue::from_str(&format!("invalid-json:{e}")))?;
-        let inner = World::from_save_v1(save).map_err(|e| match e {
-            LoadError::SchemaVersionMismatch { found, expected } => {
-                JsValue::from_str(&format!("schema-mismatch:{found}:{expected}"))
-            }
-            LoadError::InvalidJson(e) => JsValue::from_str(&format!("invalid-json:{e}")),
-            LoadError::StructuralError(s) => JsValue::from_str(&format!("structural:{s}")),
-        })?;
-        Ok(Self {
-            inner,
-            creature_buf: Vec::new(),
-            carrion_buf: Vec::new(),
-            grass_buf: Vec::new(),
-            id_buf: Vec::new(),
-            tick_durations_ms: std::collections::VecDeque::new(),
-            jank_count: 0,
-        })
-    }
-
-    // ─────────────────────────────────────────────────────────────────────
     // Profiler API (see docs/plans/perf-timing.md)
 
     /// Enable or disable the in-app profiler. Default: false (D9).
@@ -944,58 +901,6 @@ mod tests {
             !json.contains("\"Speciation\":{"),
             "nested form must NOT be present: {json}"
         );
-    }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // F.26 wasm API tests
-
-    /// snapshot_json round-trips back through fromJson.
-    #[test]
-    fn f26_snapshot_json_round_trips() {
-        let mut handle = WorldHandle::new("f26-snap-rt");
-        for _ in 0..200 {
-            handle.step();
-        }
-        let json = handle.snapshot_json();
-        let handle2 = WorldHandle::from_json(&json).expect("fromJson must succeed");
-        assert_eq!(
-            handle2.tick(),
-            handle.tick(),
-            "tick must match after round-trip"
-        );
-        assert_eq!(
-            handle2.population(),
-            handle.population(),
-            "population must match"
-        );
-    }
-
-    /// fromJson returns a schema-mismatch JsValue for version 999.
-    #[test]
-    fn f26_from_json_schema_mismatch_prefix() {
-        // Craft a JSON with schema_version=999 by round-tripping and patching.
-        let mut handle = WorldHandle::new("f26-schema-err");
-        handle.step();
-        let json = handle.snapshot_json();
-        let patched = json.replace("\"schema_version\":4", "\"schema_version\":999");
-        // We can test the underlying save/load path without going through JsValue
-        // (JsValue::as_string() panics in native test context outside wasm32).
-        use crate::save::SaveV1;
-        let save: SaveV1 = serde_json::from_str(&patched).expect("parse");
-        let result = crate::world::World::from_save_v1(save);
-        assert!(result.is_err(), "must return Err for wrong schema version");
-        match result.err().unwrap() {
-            crate::save::LoadError::SchemaVersionMismatch { found: 999, .. } => {}
-            e => panic!("expected SchemaVersionMismatch, got: {e}"),
-        }
-    }
-
-    /// fromJson returns an error for garbage JSON (tests via raw parse path).
-    #[test]
-    fn f26_from_json_invalid_json_prefix() {
-        use crate::save::SaveV1;
-        let result: Result<SaveV1, _> = serde_json::from_str("not valid json at all {{{");
-        assert!(result.is_err(), "must fail on garbage JSON");
     }
 
     // ─────────────────────────────────────────────────────────────────────

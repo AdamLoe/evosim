@@ -6,7 +6,6 @@
 //! Milestone D swaps in the real NN forward pass.
 
 pub(crate) mod nn;
-pub(crate) mod save_v1;
 pub(crate) mod tick;
 
 use self::nn::chunk_ranges;
@@ -575,6 +574,89 @@ impl World {
             cell_to_carrion: &self.cell_to_carrion,
         };
         pass.run(&mut self.vision[..n]);
+    }
+
+    /// Deep-clone this World for use in tests (replaces to_save_v1/from_save_v1 pattern).
+    /// Scratch buffers and caches (vision, cell_to_carrion, profile, scratch_*)
+    /// are reset to empty — callers that need them must rebuild before use.
+    #[cfg(test)]
+    pub fn clone_for_test(&self) -> World {
+        let n = self.creatures.len();
+        let mut creatures = CreatureSoA::with_capacity(n.max(1));
+        for i in 0..n {
+            creatures.push(
+                self.creatures.id[i],
+                self.creatures.x[i],
+                self.creatures.y[i],
+                self.creatures.energy[i],
+                self.creatures.species_id[i],
+                self.creatures.parent_species_id[i],
+                self.creatures.birth_tick[i],
+                self.creatures.genomes[i].clone(),
+                self.creatures.brains[i].clone(),
+            );
+            // Restore fields not set by push.
+            creatures.vx[i] = self.creatures.vx[i];
+            creatures.vy[i] = self.creatures.vy[i];
+            creatures.age[i] = self.creatures.age[i];
+            creatures.digestion_cooldown[i] = self.creatures.digestion_cooldown[i];
+            creatures.cumulative_upkeep[i] = self.creatures.cumulative_upkeep[i];
+            creatures.last_action[i] = self.creatures.last_action[i];
+            creatures.action_this_tick[i] = self.creatures.action_this_tick[i];
+            creatures.max_size_reached[i] = self.creatures.max_size_reached[i];
+            creatures.distance_travelled[i] = self.creatures.distance_travelled[i];
+            creatures.move_bias_x[i] = self.creatures.move_bias_x[i];
+            creatures.move_bias_y[i] = self.creatures.move_bias_y[i];
+            creatures.move_bias_reroll_at[i] = self.creatures.move_bias_reroll_at[i];
+        }
+        let mut grid = SpatialGrid::new();
+        grid.rebuild(&creatures.x, &creatures.y);
+        World {
+            tick: self.tick,
+            seed: self.seed.clone(),
+            rng: self.rng.clone(),
+            grass: self.grass.clone(),
+            grid,
+            creatures,
+            carrion: self.carrion.clone(),
+            species: self.species.clone(),
+            events: self.events.clone(),
+            events_enabled: self.events_enabled,
+            sliders: self.sliders.clone(),
+            next_creature_id: self.next_creature_id,
+            peak_population: self.peak_population,
+            peak_species_count: self.peak_species_count,
+            world_ended: self.world_ended,
+            live_species_count: self.live_species_count,
+            first_move_fired: self.first_move_fired,
+            first_eat_fired: self.first_eat_fired,
+            population_milestones_fired: self.population_milestones_fired,
+            biggest_ever: self.biggest_ever.clone(),
+            last_survivor: self.last_survivor.clone(),
+            weirdest: self.weirdest.clone(),
+            weirdest_distance: self.weirdest_distance,
+            longest_lived: self.longest_lived.clone(),
+            longest_lived_age: self.longest_lived_age,
+            first_mover_snapshot: self.first_mover_snapshot.clone(),
+            founder_genome_anchor: self.founder_genome_anchor.clone(),
+            founder_brain_anchor: self.founder_brain_anchor.clone(),
+            vision: vec![[0.0f32; VISION_LEN]; n],
+            cell_to_carrion: CarrionIndex::new(),
+            pending_extinction_check: Vec::new(),
+            profile: crate::profiler::Profiler::new(),
+            scratch_fx: Vec::new(),
+            scratch_fy: Vec::new(),
+            scratch_neighbors: Vec::new(),
+            scratch_damage: Vec::new(),
+            scratch_gain: Vec::new(),
+            scratch_cooldown_set: Vec::new(),
+            scratch_attempted_eat: Vec::new(),
+            scratch_attempted_scavenge: Vec::new(),
+            scratch_got_a_bite: Vec::new(),
+            scratch_eat_candidates: Vec::new(),
+            scratch_dead: Vec::new(),
+            force_sequential_nn: false,
+        }
     }
 }
 

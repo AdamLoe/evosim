@@ -806,17 +806,16 @@ mod tests {
             "need >= 2 creatures for a meaningful parallel test; got {n}"
         );
 
-        // Clone identical state via save/load round-trip.
-        let snap = w_base.to_save_v1();
-        let mut w_seq = World::from_save_v1(snap.clone()).expect("seq load");
-        let mut w_par = World::from_save_v1(snap).expect("par load");
+        // Clone identical state via clone_for_test (replaces save/load round-trip).
+        let mut w_seq = w_base.clone_for_test();
+        let mut w_par = w_base.clone_for_test();
 
         // Both worlds must have the same creature count.
         assert_eq!(w_seq.creatures.len(), n, "seq world population mismatch");
         assert_eq!(w_par.creatures.len(), n, "par world population mismatch");
 
         // Rebuild the carrion spatial index (normally done in run_vision_pass;
-        // from_save_v1 leaves cell_to_carrion empty).
+        // clone_for_test leaves cell_to_carrion empty).
         crate::vision::build_cell_to_carrion(&w_seq.carrion, &mut w_seq.cell_to_carrion);
         crate::vision::build_cell_to_carrion(&w_par.carrion, &mut w_par.cell_to_carrion);
 
@@ -1009,9 +1008,9 @@ mod tests {
         };
         let n = w_base.creatures.len();
 
-        let snap = w_base.to_save_v1();
-        let mut w_seq = World::from_save_v1(snap.clone()).expect("seq load");
-        let mut w_par = World::from_save_v1(snap).expect("par load");
+        // Clone identical state via clone_for_test (replaces save/load round-trip).
+        let mut w_seq = w_base.clone_for_test();
+        let mut w_par = w_base.clone_for_test();
 
         // P2e: set nose_count=1 for all creatures in both worlds so the bilinear
         // sampling path is exercised (not short-circuited by the nose_count=0 gate).
