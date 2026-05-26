@@ -1,11 +1,6 @@
 //! Toroidal world arithmetic. World is WORLD_SIZE × WORLD_SIZE with
 //! wrap-around on all four edges. See v1.2 grass mechanic brief and
 //! DECISIONS.md (v1.2 toroidal-world deviation).
-//!
-//! All public items in this module are consumed by `src/grid.rs` (Commit A),
-//! `src/vision.rs`, `src/wasm_api.rs` (Commit B), and `src/world/tick.rs`,
-//! `src/world/mod.rs` (Commit C). The `#[allow(dead_code)]` annotation on
-//! each function is removed as each commit wires up the callers.
 
 use crate::constants::WORLD_SIZE;
 
@@ -20,8 +15,6 @@ pub const WORLD_HALF: f32 = WORLD_SIZE * 0.5;
 /// at most one world-size in either direction (per-tick displacement
 /// is bounded by `MOVE_SPEED_MAX + REPULSION_MAX + FOUNDER_SPLIT_JITTER`
 /// which is << `WORLD_SIZE = 600`).
-// Used by Commit C (wall-clamp replacement) and Commit C (split-jitter).
-#[allow(dead_code)]
 #[inline]
 pub fn wrap_pos(p: f32) -> f32 {
     let mut q = p;

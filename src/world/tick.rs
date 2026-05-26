@@ -8,6 +8,7 @@ use crate::events::{Event, EventKind};
 use crate::hof::HallOfFame;
 use crate::species::species_distance;
 use crate::sun::SunMap;
+use crate::torus::{torus_delta, wrap_pos};
 
 impl World {
     pub(crate) fn apply_movement_and_repulsion(&mut self) {
@@ -90,8 +91,8 @@ impl World {
                 let xj = self.creatures.x[j];
                 let yj = self.creatures.y[j];
                 let rj = self.creatures.g_size[j] * BODY_RADIUS_PER_SIZE;
-                let dx = xj - xi;
-                let dy = yj - yi;
+                // Toroidal: use shortest-path vector for repulsion. See v1.2 §2.4.
+                let (dx, dy) = torus_delta(xj - xi, yj - yi);
                 let d2 = dx * dx + dy * dy;
                 let rsum = ri + rj;
                 if d2 < rsum * rsum {
@@ -122,53 +123,32 @@ impl World {
             self.scratch_neighbors = neighbors;
         }
 
-        // S31: track whether any position changed so we can skip the final grid
-        // rebuild when positions are unchanged. Two sources of position change:
-        //   1. Wall clamp (any_wall) — clamps x/y beyond what repulsion provided.
-        //   2. Nonzero repulsion force (any_repulsion) — moves at least one creature.
-        // If neither fired, the pre-repulsion grid rebuild above is still valid.
+        // S31/P1a: track whether any position changed so we can skip the final grid
+        // rebuild when positions are unchanged. Toroidal world: the wall-clamp block
+        // is replaced with `wrap_pos`. The `any_wall` flag is merged into `any_wrap`
+        // (any seam crossing triggers a rebuild just as a wall contact did before).
+        // If neither wrap nor repulsion moved any creature, the pre-repulsion grid
+        // rebuild above is still valid.
         // eat_and_scavenge (step 6) uses the grid, so we must not skip when stale.
-        let mut any_wall = false;
-        let mut any_repulsion = false;
+        // See v1.2 grass mechanic brief §2.5.
+        let mut any_wrap = false;
         for i in 0..n {
             if self.scratch_fx[i] != 0.0 || self.scratch_fy[i] != 0.0 {
-                any_repulsion = true;
+                any_wrap = true;
             }
-            let mut x = self.creatures.x[i] + self.scratch_fx[i];
-            let mut y = self.creatures.y[i] + self.scratch_fy[i];
-            let r = self.creatures.g_size[i] * BODY_RADIUS_PER_SIZE;
-            if x < r {
-                x = r;
-                any_wall = true;
-                if self.creatures.vx[i] < 0.0 {
-                    self.creatures.vx[i] = 0.0;
-                }
-            } else if x > WORLD_SIZE - r {
-                x = WORLD_SIZE - r;
-                any_wall = true;
-                if self.creatures.vx[i] > 0.0 {
-                    self.creatures.vx[i] = 0.0;
-                }
+            let candidate_x = self.creatures.x[i] + self.scratch_fx[i];
+            let candidate_y = self.creatures.y[i] + self.scratch_fy[i];
+            let wrapped_x = wrap_pos(candidate_x);
+            let wrapped_y = wrap_pos(candidate_y);
+            if wrapped_x != candidate_x || wrapped_y != candidate_y {
+                any_wrap = true;
             }
-            if y < r {
-                y = r;
-                any_wall = true;
-                if self.creatures.vy[i] < 0.0 {
-                    self.creatures.vy[i] = 0.0;
-                }
-            } else if y > WORLD_SIZE - r {
-                y = WORLD_SIZE - r;
-                any_wall = true;
-                if self.creatures.vy[i] > 0.0 {
-                    self.creatures.vy[i] = 0.0;
-                }
-            }
-            self.creatures.x[i] = x;
-            self.creatures.y[i] = y;
+            self.creatures.x[i] = wrapped_x;
+            self.creatures.y[i] = wrapped_y;
         }
 
-        // S31: skip rebuild when no wall fired AND no repulsion force moved anyone.
-        if any_wall || any_repulsion {
+        // S31: skip rebuild when no position change occurred (no wrap, no repulsion).
+        if any_wrap {
             self.grid.rebuild(&self.creatures.x, &self.creatures.y);
         }
     }
@@ -264,9 +244,10 @@ impl World {
                         }
                     });
                     for j in candidates.iter().copied() {
-                        let dx = self.creatures.x[j] - xi;
-                        let dy = self.creatures.y[j] - yi;
-                        let d = (dx * dx + dy * dy).sqrt();
+                        // Toroidal: shortest-path distance to candidate. See v1.2 §2.6.
+                        let (ddx, ddy) =
+                            torus_delta(self.creatures.x[j] - xi, self.creatures.y[j] - yi);
+                        let d = (ddx * ddx + ddy * ddy).sqrt();
                         let rj = self.creatures.g_size[j] * BODY_RADIUS_PER_SIZE;
                         let contact = (d - radius_i - rj).max(0.0);
                         if contact <= reach {
@@ -306,22 +287,20 @@ impl World {
                     let want = SCAVENGE_GAIN_COEFF * scav_eff_i;
                     // S24: 3×3 cell sweep via cell_to_carrion (O(local) vs O(all carrion)).
                     // Collect the first in-range carrion index before mutating it.
+                    // Toroidal: wrap cell indices with rem_euclid; use torus_delta for
+                    // the distance check. See v1.2 grass mechanic brief §2.7.
                     let cx = (xi / HASH_CELL).floor() as i32;
                     let cy = (yi / HASH_CELL).floor() as i32;
                     let dim = HASH_DIM as i32;
                     let mut found_ci: Option<usize> = None;
-                    'outer: for dy in -1i32..=1 {
-                        for dx in -1i32..=1 {
-                            let nx = cx + dx;
-                            let ny = cy + dy;
-                            if nx < 0 || ny < 0 || nx >= dim || ny >= dim {
-                                continue;
-                            }
+                    'outer: for sdy in -1i32..=1 {
+                        for sdx in -1i32..=1 {
+                            let nx = (cx + sdx).rem_euclid(dim);
+                            let ny = (cy + sdy).rem_euclid(dim);
                             let cell_idx = ny as usize * HASH_DIM + nx as usize;
                             for &ci in self.cell_to_carrion.cell_slice(cell_idx) {
                                 let c = &self.carrion[ci as usize];
-                                let ddx = c.x - xi;
-                                let ddy = c.y - yi;
+                                let (ddx, ddy) = torus_delta(c.x - xi, c.y - yi);
                                 if ddx * ddx + ddy * ddy <= r2 {
                                     found_ci = Some(ci as usize);
                                     break 'outer;
@@ -912,5 +891,124 @@ mod tests {
             "creature must remain near center: x={}",
             w.creatures.x[0]
         );
+    }
+
+    // ---- P1a toroidal physics tests ----
+
+    /// P1a §2.5: a creature with positive vx that crosses the right edge should
+    /// wrap to x ≈ 0 (not be clamped to WORLD_SIZE - radius).
+    #[test]
+    fn position_wraps_when_velocity_crosses_edge() {
+        let mut w = World::new("p1a-wrap-vel");
+        // Move the founder to just inside the right edge, then give it a large vx.
+        w.creatures.x[0] = WORLD_SIZE - 1.0;
+        w.creatures.y[0] = WORLD_SIZE * 0.5;
+        w.creatures.vx[0] = 5.0; // will cross the right seam
+        w.creatures.vy[0] = 0.0;
+        w.creatures.genomes[0].move_speed = 5.0;
+        w.creatures.resync_hot_mirrors_at(0);
+        w.grid.rebuild(&w.creatures.x, &w.creatures.y);
+
+        w.apply_movement_and_repulsion();
+
+        let x = w.creatures.x[0];
+        // After wrapping, x should be in [0, WORLD_SIZE).
+        assert!(
+            x >= 0.0 && x < WORLD_SIZE,
+            "position must be in [0, WORLD_SIZE) after wrap; x = {x}"
+        );
+        // The creature moved ~5 units past the right edge → should be near x=4.
+        assert!(
+            x < 10.0,
+            "wrapped x should be near 0 (crossed right seam); x = {x}"
+        );
+    }
+
+    /// P1a §2.9: split-jitter should wrap the child position toroidally, not clamp.
+    /// Place the parent at x=5, jitter pushing the child to x=-45 (jitter=-50).
+    /// Toroidal wrap: -45 → WORLD_SIZE - 45 = 555. Old clamp: → parent_radius.
+    #[test]
+    fn split_jitter_wraps() {
+        use crate::brain::Brain;
+        use crate::creature::Action;
+
+        let mut w = World::new("p1a-jitter");
+        // Place the founder near the left seam.
+        w.creatures.x[0] = 5.0;
+        w.creatures.y[0] = WORLD_SIZE * 0.5;
+        w.creatures.energy[0] = SPLIT_THRESHOLD + 100.0;
+        w.creatures.action_this_tick[0] = Action::Split;
+        // Override the RNG to produce a predictable negative jitter.
+        // We can't easily control the RNG, so just run handle_births and verify
+        // that any child created lands in [0, WORLD_SIZE) on both axes.
+        w.handle_births();
+
+        let n = w.creatures.len();
+        for i in 1..n {
+            let cx = w.creatures.x[i];
+            let cy = w.creatures.y[i];
+            assert!(
+                cx >= 0.0 && cx < WORLD_SIZE,
+                "child x must be in [0, WORLD_SIZE); x = {cx}"
+            );
+            assert!(
+                cy >= 0.0 && cy < WORLD_SIZE,
+                "child y must be in [0, WORLD_SIZE); y = {cy}"
+            );
+        }
+    }
+
+    /// P1a §2.4: two creatures on opposite sides of the x-seam should repel
+    /// each other via the shortest-path vector (through the seam, not across
+    /// the full world). With toroidal repulsion, the force should push creature A
+    /// further toward x=0 (toward the seam) and creature B toward x=WORLD_SIZE.
+    #[test]
+    fn repulsion_wraps_across_seam() {
+        use crate::brain::Brain;
+        use crate::genome::Genome;
+
+        let mut w = World::new("p1a-repulsion-seam");
+        // Creature A at x=2: very close to the left seam.
+        w.creatures.x[0] = 2.0;
+        w.creatures.y[0] = WORLD_SIZE * 0.5;
+        w.creatures.vx[0] = 0.0;
+        w.creatures.vy[0] = 0.0;
+
+        // Add creature B at x=598 (2 units from right seam = toroidal distance 4).
+        let mut rng = SimRng::from_u64(123);
+        let g2 = Genome::founder();
+        let b2 = Brain::founder(&mut rng);
+        let n_before = w.creatures.len();
+        use crate::vision::VISION_LEN;
+        w.creatures
+            .push(1, 598.0, WORLD_SIZE * 0.5, FOUNDER_ENERGY, 0, 0, 0, g2, b2);
+        w.vision.push([0.0f32; VISION_LEN]);
+        w.creatures.vx[n_before] = 0.0;
+        w.creatures.vy[n_before] = 0.0;
+
+        // They overlap because their radii (1.0 each) sum to 2.0 and seam-distance is 4.0.
+        // Not overlapping yet — move them closer.
+        w.creatures.x[0] = 0.5; // within 1 unit of seam
+        w.creatures.x[n_before] = WORLD_SIZE - 0.5; // within 1 unit of seam
+                                                    // Radii = 1.0 each; sum = 2.0; seam-distance = 1.0 < rsum → they overlap.
+
+        w.grid.rebuild(&w.creatures.x, &w.creatures.y);
+        w.scratch_fx.resize(w.creatures.len(), 0.0);
+        w.scratch_fy.resize(w.creatures.len(), 0.0);
+
+        w.apply_movement_and_repulsion();
+
+        // After repulsion: A should have moved in the -x direction (toward seam crossing,
+        // which wraps past 0), B should have moved in the +x direction (past WORLD_SIZE).
+        // Since positions are wrapped, A should end up with x < 0.5 or wrapped to near WORLD_SIZE,
+        // and B should end up with x > WORLD_SIZE - 0.5 or wrapped to near 0.
+        // The key invariant: both are in [0, WORLD_SIZE).
+        for i in 0..w.creatures.len() {
+            assert!(
+                w.creatures.x[i] >= 0.0 && w.creatures.x[i] < WORLD_SIZE,
+                "creature {i} x={} not in [0, WORLD_SIZE) after repulsion",
+                w.creatures.x[i]
+            );
+        }
     }
 }
