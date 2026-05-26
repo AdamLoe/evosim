@@ -80,27 +80,10 @@ impl World {
             return;
         }
 
-        // P2f: re-roll per-creature move_bias_x/y every MOVE_BIAS_REROLL_INTERVAL ticks.
-        // Runs before vx/vy reads so re-rolled values are available for the ADD below.
-        let tick = self.tick;
-        for i in 0..n {
-            if tick >= self.creatures.move_bias_reroll_at[i] {
-                self.creatures.move_bias_x[i] = self.rng.symm();
-                self.creatures.move_bias_y[i] = self.rng.symm();
-                self.creatures.move_bias_reroll_at[i] =
-                    tick.saturating_add(MOVE_BIAS_REROLL_INTERVAL);
-            }
-        }
-
+        // v1.3 D9: move_bias_x/y/reroll_at deleted. Movement is pure NN vx/vy output.
         // perf-5: hot reads use g_* mirrors; cold reads (bite_reach, etc.) stay on &self.creatures.genomes[i].
         for i in 0..n {
             let speed_cap = self.creatures.g_move_speed[i];
-            // P2f: ADD move_bias on top of NN-output velocity (amendments §A.5).
-            // Founders (NN near-zero) effectively use bias only; evolved descendants
-            // whose NN learns directional motion ADD their NN signal on top.
-            // Applied before speed-cap clamp so the combined (NN + bias) velocity is capped.
-            self.creatures.vx[i] += self.creatures.move_bias_x[i] * MOVE_SPEED_MAX;
-            self.creatures.vy[i] += self.creatures.move_bias_y[i] * MOVE_SPEED_MAX;
             let vx = self.creatures.vx[i];
             let vy = self.creatures.vy[i];
             let mag2 = vx * vx + vy * vy;
@@ -314,48 +297,11 @@ impl World {
                         self.scratch_got_a_bite[i] = true;
                     }
                 }
-                Action::Scavenge => {
-                    self.scratch_attempted_scavenge[i] = true;
-                    let scav_eff_i = self.creatures.g_scav_eff[i];
-                    if scav_eff_i <= 0.0 {
-                        continue;
-                    }
-                    let r_i = self.creatures.g_size[i] * BODY_RADIUS_PER_SIZE;
-                    let r2 = r_i * r_i;
-                    let xi = self.creatures.x[i];
-                    let yi = self.creatures.y[i];
-                    let want = SCAVENGE_GAIN_COEFF * scav_eff_i;
-                    // S24: 3×3 cell sweep via cell_to_carrion (O(local) vs O(all carrion)).
-                    // Collect the first in-range carrion index before mutating it.
-                    // Toroidal: wrap cell indices with rem_euclid; use torus_delta for
-                    // the distance check. See v1.2 grass mechanic brief §2.7.
-                    let cx = (xi / HASH_CELL).floor() as i32;
-                    let cy = (yi / HASH_CELL).floor() as i32;
-                    let dim = HASH_DIM as i32;
-                    let mut found_ci: Option<usize> = None;
-                    'outer: for sdy in -1i32..=1 {
-                        for sdx in -1i32..=1 {
-                            let nx = (cx + sdx).rem_euclid(dim);
-                            let ny = (cy + sdy).rem_euclid(dim);
-                            let cell_idx = ny as usize * HASH_DIM + nx as usize;
-                            for &ci in self.cell_to_carrion.cell_slice(cell_idx) {
-                                let c = &self.carrion[ci as usize];
-                                let (ddx, ddy) = torus_delta(c.x - xi, c.y - yi);
-                                if ddx * ddx + ddy * ddy <= r2 {
-                                    found_ci = Some(ci as usize);
-                                    break 'outer;
-                                }
-                            }
-                        }
-                    }
-                    if let Some(ci) = found_ci {
-                        let c = &mut self.carrion[ci];
-                        let take = c.pool.min(want);
-                        c.pool -= take;
-                        self.scratch_gain[i] += take;
-                    }
+                _ => {
+                    // v1.3 D9: Scavenge and other actions deleted from enum.
+                    // This arm is unreachable with the new 3-variant Action enum
+                    // but kept as a no-op placeholder for safety.
                 }
-                _ => {}
             }
         }
 
@@ -549,10 +495,7 @@ mod tests {
                                               // Set velocity directly so movement fires deterministically.
         w.creatures.vx[0] = 5.0;
         w.creatures.vy[0] = 0.0;
-        // P2f: zero move_bias so the ADD is a no-op for this deterministic test.
-        w.creatures.move_bias_x[0] = 0.0;
-        w.creatures.move_bias_y[0] = 0.0;
-        w.creatures.move_bias_reroll_at[0] = u32::MAX;
+        // v1.3 D9: move_bias deleted. Movement is pure NN vx/vy output.
         // Pre-condition: distance_travelled starts at 0, event not fired.
         assert!(!w.first_move_fired);
         assert_eq!(w.creatures.distance_travelled[0], 0.0);
@@ -709,95 +652,6 @@ mod tests {
         );
     }
 
-    // ---- S24 tests ----
-
-    /// S24 test 1: Scavenge 3×3 sweep picks up a carrion blob that is within
-    /// the creature's body radius, using the cell_to_carrion index.
-    #[test]
-    fn s24_scavenge_3x3_sweep_finds_adjacent_carrion() {
-        use crate::constants::*;
-        use crate::vision::build_cell_to_carrion;
-
-        let mut w = World::new("s24-sweep");
-        // Give the founder scavenge ability and place carrion on top of it.
-        w.creatures.genomes[0].scavenge_efficiency = 1.0;
-        w.creatures.resync_hot_mirrors_at(0);
-        w.creatures.action_this_tick[0] = Action::Scavenge;
-
-        let cx = w.creatures.x[0];
-        let cy = w.creatures.y[0];
-        let carrion_pool = 5.0_f32;
-        w.carrion.push(Carrion {
-            id: 777,
-            x: cx,
-            y: cy,
-            pool: carrion_pool,
-            age: 0,
-        });
-        // Rebuild the cell index so eat_and_scavenge can use it.
-        build_cell_to_carrion(&w.carrion, &mut w.cell_to_carrion);
-
-        let energy_before = w.creatures.energy[0];
-        w.eat_and_scavenge();
-        let energy_after = w.creatures.energy[0];
-
-        // The creature should have gained some energy (scavenged from the carrion).
-        assert!(
-            energy_after > energy_before - COST_SCAVENGE_ATTEMPT,
-            "Scavenge should gain energy from adjacent carrion: before={energy_before} after={energy_after}"
-        );
-        // The carrion pool should have decreased.
-        assert!(
-            w.carrion[0].pool < carrion_pool,
-            "carrion pool should decrease after scavenging: pool={}",
-            w.carrion[0].pool
-        );
-    }
-
-    /// S24 test 2: Scavenge does NOT pick up carrion that is outside the creature's
-    /// body radius, even if it is in the same 3×3 cell window.
-    #[test]
-    fn s24_scavenge_skips_out_of_radius_carrion() {
-        use crate::constants::*;
-        use crate::vision::build_cell_to_carrion;
-
-        let mut w = World::new("s24-oor");
-        w.creatures.genomes[0].scavenge_efficiency = 1.0;
-        w.creatures.resync_hot_mirrors_at(0);
-        w.creatures.action_this_tick[0] = Action::Scavenge;
-
-        let cx = w.creatures.x[0];
-        let cy = w.creatures.y[0];
-        // Place carrion far outside the body radius but still within the 3×3 cell window.
-        let r_i = w.creatures.g_size[0] * BODY_RADIUS_PER_SIZE;
-        let far = r_i * 10.0; // well outside body radius
-        let carrion_pool = 5.0_f32;
-        w.carrion.push(Carrion {
-            id: 888,
-            x: cx + far.min(HASH_CELL * 0.9), // within 1-cell offset but outside body radius
-            y: cy,
-            pool: carrion_pool,
-            age: 0,
-        });
-        build_cell_to_carrion(&w.carrion, &mut w.cell_to_carrion);
-
-        let energy_before = w.creatures.energy[0];
-        w.eat_and_scavenge();
-        let energy_after = w.creatures.energy[0];
-
-        // The carrion pool should be unchanged (no scavenging took place).
-        assert_eq!(
-            w.carrion[0].pool, carrion_pool,
-            "out-of-radius carrion must not be scavenged"
-        );
-        // Energy dropped by the attempt cost only.
-        let delta = energy_after - energy_before;
-        assert!(
-            (delta + COST_SCAVENGE_ATTEMPT).abs() < 1e-4,
-            "only scavenge attempt cost, delta={delta}"
-        );
-    }
-
     // ---- perf-2 tests ----
 
     /// perf-2 test 1: scratch_fx / scratch_fy are zeroed at the start of each tick.
@@ -838,11 +692,10 @@ mod tests {
 
     /// perf-2 test 2: scratch Vecs resize correctly with population each tick.
     ///
-    /// P1b/P1e: photosynth income deleted (P1b); graze replacement lands in P1e.
-    /// Without energy income, population blooms from pre-loaded energy then crashes.
-    /// Verifies: (a) peak population > n0 (splits fired), (b) scratch Vecs >= n-1
-    /// each tick (one-tick lag from births is acceptable — movement step catches up),
-    /// (c) no panic over the full bloom-crash lifecycle.
+    /// Verifies: (a) scratch Vecs size correctly with population each tick,
+    /// (b) splits fire and increase population via forced action, (c) no panic.
+    /// v1.3 D9: NN weights are wired to always output high Split logit so that
+    /// splits actually fire when energy is pre-loaded to 10_000.
     #[test]
     fn scratch_grows_with_population() {
         let mut w = World::new("perf2-grow");
@@ -850,6 +703,16 @@ mod tests {
         // Pre-load energy so creatures split rapidly; captures the resize path.
         for i in 0..w.creatures.len() {
             w.creatures.energy[i] = 10_000.0;
+        }
+        // v1.3 D9: wire NN weights to output high Split logit (out[4]).
+        // Layout: w_ih[h][i] = weights[h*NN_INPUTS + i]; w_ho[o][h] = weights[NN_INPUTS*NN_HIDDEN + o*NN_HIDDEN + h].
+        // Set hidden[0] to read energy_frac (slot 0) with large weight → hidden[0] fires when energy > 0.
+        // Set w_ho[Split][0] large → Split logit dominates.
+        let w_ho_offset = NN_INPUTS * NN_HIDDEN;
+        const SPLIT_OUT_IDX: usize = 4; // output buffer index: out[0]=vx,out[1]=vy,out[2]=Graze,out[3]=Eat,out[4]=Split
+        for i in 0..w.creatures.len() {
+            w.creatures.brains[i].weights[0] = 10.0; // w_ih[hidden=0][energy_frac=0]
+            w.creatures.brains[i].weights[w_ho_offset + SPLIT_OUT_IDX * NN_HIDDEN] = 10.0; // w_ho[Split][0]
         }
         let mut peak_n = n0;
         for _ in 0..500 {
@@ -1292,88 +1155,6 @@ mod tests {
         assert!(
             (energy_gained - expected_gain).abs() < 1e-3,
             "energy_gained={energy_gained} expected={expected_gain}"
-        );
-    }
-
-    // ---- P2f move_bias tests ----
-
-    /// P2f test 1: move_bias_reroll fires after exactly MOVE_BIAS_REROLL_INTERVAL ticks.
-    /// Pins the re-roll cadence: bias stays constant until tick == reroll_at, then fires.
-    /// Uses apply_movement_and_repulsion directly to isolate the mechanism.
-    #[test]
-    fn move_bias_reroll_fires_every_20_ticks() {
-        let mut w = World::new("p2f-rerolls");
-        // Start with tick = 100 to avoid zero-tick edge cases.
-        w.tick = 100;
-        // Fix a known bias value; set reroll_at to tick + interval = 120.
-        w.creatures.move_bias_x[0] = 0.123;
-        w.creatures.move_bias_reroll_at[0] = w.tick + MOVE_BIAS_REROLL_INTERVAL; // 120
-        let before_x = w.creatures.move_bias_x[0];
-
-        // Run (interval - 1) ticks (ticks 100..119): tick < reroll_at each time, no re-roll.
-        for _ in 0..(MOVE_BIAS_REROLL_INTERVAL - 1) {
-            w.apply_movement_and_repulsion(); // tick=100..118 each call
-            w.tick += 1; // advance tick AFTER movement (mirrors World::step ordering)
-        }
-        // Now tick = 119. reroll_at = 120. Condition: 119 >= 120 → false. No re-roll yet.
-        assert_eq!(
-            w.creatures.move_bias_x[0], before_x,
-            "bias must not re-roll before reroll_at is reached (tick={} reroll_at={})",
-            w.tick, w.creatures.move_bias_reroll_at[0]
-        );
-
-        // Advance tick to 120 (= reroll_at), then call movement: re-roll fires.
-        w.tick += 1; // tick = 120
-        w.apply_movement_and_repulsion(); // tick=120 >= reroll_at=120 → fires
-        assert_ne!(
-            w.creatures.move_bias_x[0], before_x,
-            "bias must re-roll when tick reaches reroll_at (tick={})",
-            w.tick
-        );
-    }
-
-    /// P2f test 2: move_bias adds to velocity (ADD semantics per amendments §A.5).
-    /// With all-zero NN weights, the NN contributes nothing; only move_bias drives motion.
-    /// Pins that SET is NOT implemented (a pure SET would also pass, but the ADD
-    /// semantics are confirmed by the NN-output being zero before the bias ADD).
-    #[test]
-    fn move_bias_adds_to_velocity() {
-        let mut w = World::new("p2f-add");
-        // Zero all NN weights so NN output is zero for both vx and vy.
-        w.creatures.brains[0].weights = vec![0.0; NN_WEIGHT_COUNT];
-        // Set a known bias; prevent re-roll during the test.
-        w.creatures.move_bias_x[0] = 0.5;
-        w.creatures.move_bias_y[0] = -0.5;
-        w.creatures.move_bias_reroll_at[0] = u32::MAX;
-        // Give the creature move_speed > 0 so bias contributes.
-        w.creatures.genomes[0].move_speed = MOVE_SPEED_MAX;
-        w.creatures.resync_hot_mirrors_at(0);
-
-        w.step();
-
-        // NN output is zero → only move_bias contributes.
-        // Expected: vx > 0 (bias_x=0.5), vy < 0 (bias_y=-0.5).
-        // (vx/vy may have been clamped by speed cap or zeroed by Action::Rest,
-        //  but the bias was added before the clamp — track the step result.)
-        // The movement pass adds bias then clamps; with speed_cap = MOVE_SPEED_MAX
-        // and combined input = 0 + 0.5 * MOVE_SPEED_MAX = 2.5 (< cap=5), no clamping.
-        // After movement, vx is reset by the NN in the next tick's forward pass.
-        // We check the creature moved in the expected direction.
-        // NOTE: step() runs the full tick (NN → movement → ...), so by the END of the
-        // tick the NN has already been run for tick+1 and overwritten vx/vy.
-        // Instead, we verify by checking x/y moved relative to start.
-        // x increased (bias_x > 0 → moved right) and y decreased (bias_y < 0 → moved up).
-        // The exact position shift should be ≈ 0.5 * MOVE_SPEED_MAX = 2.5 world units.
-        // We assert direction only (sign), not magnitude.
-        let dx = w.creatures.x[0] - WORLD_SIZE * 0.5;
-        let dy = w.creatures.y[0] - WORLD_SIZE * 0.5;
-        assert!(
-            dx > 0.0,
-            "x must increase (bias_x > 0 → rightward motion); dx = {dx}"
-        );
-        assert!(
-            dy < 0.0,
-            "y must decrease (bias_y < 0 → upward motion); dy = {dy}"
         );
     }
 

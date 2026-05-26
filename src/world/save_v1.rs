@@ -55,10 +55,7 @@ impl World {
             creatures.action_this_tick[i] = save.creatures.action_this_tick[i];
             creatures.max_size_reached[i] = save.creatures.max_size_reached[i];
             creatures.distance_travelled[i] = save.creatures.distance_travelled[i];
-            // P2g: restore move_bias fields from snapshot (replaces P2f zero-init placeholder).
-            creatures.move_bias_x[i] = save.creatures.move_bias_x[i];
-            creatures.move_bias_y[i] = save.creatures.move_bias_y[i];
-            creatures.move_bias_reroll_at[i] = save.creatures.move_bias_reroll_at[i];
+            // v1.3 D9: move_bias fields deleted; no restore needed.
         }
 
         // Rebuild spatial grid from positions.

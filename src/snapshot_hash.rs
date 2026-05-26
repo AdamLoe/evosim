@@ -2,13 +2,13 @@
 //! ordering of world state per v6 §M. Stable across runs given identical
 //! state — regression catch on the golden value.
 //!
-//! Hash input order (v6 §M, extended by S7+S8 audit; updated P1b+P1f; P2g adds move_bias):
+//! Hash input order (v6 §M, extended by S7+S8 audit; updated P1b+P1f; v1.3 D9 drops move_bias):
 //! 1. tick (u32)
 //! 2. creature SoA — per-creature: id, position, velocity, energy, age,
 //!    genome floats in struct-declaration order, NN weight slice,
 //!    nn_mutation_rate, digestion_cooldown, cumulative_upkeep, species_id,
 //!    parent_species_id, last_action, action_this_tick, max_size_reached,
-//!    distance_travelled, birth_tick, move_bias_x, move_bias_y, move_bias_reroll_at
+//!    distance_travelled, birth_tick
 //! 3. grass map — per-cell density in linear cell-index order (replaces sun map)
 //! 4. carrion list — per-corpse: x, y, pool, age, id
 //! 5. species list — per-species: id, anchor-genome sub-hash, parent_id,
@@ -58,10 +58,7 @@ pub fn snapshot_hash(w: &World) -> u64 {
         write_f32(&mut h, w.creatures.max_size_reached[i]); // #7
         write_f32(&mut h, w.creatures.distance_travelled[i]); // #8
         h.write_u32(w.creatures.birth_tick[i]); // #9
-                                                // P2g: v3 move_bias fields (#10–#12).
-        write_f32(&mut h, w.creatures.move_bias_x[i]); // #10
-        write_f32(&mut h, w.creatures.move_bias_y[i]); // #11
-        h.write_u32(w.creatures.move_bias_reroll_at[i]); // #12
+                                                // v1.3 D9: move_bias_x/y/reroll_at deleted from hash.
     }
 
     // (3) grass map — per-cell density in linear cell-index order

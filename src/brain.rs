@@ -1,4 +1,4 @@
-//! Brain — fixed-shape NN: 160 inputs → 24 hidden (ReLU) → 8 outputs.
+//! Brain — fixed-shape NN: 112 inputs → 24 hidden (ReLU) → 5 outputs (v1.3 D9).
 //!
 //! Milestone B: holds zero-weight stubs so we can carry a Brain field on
 //! Creature and not retrofit everything later.
@@ -12,9 +12,9 @@ use serde::{Deserialize, Serialize};
 use wide::f32x8;
 
 // Compile-time layout assertions.
-const _: () = assert!(NN_INPUTS == 160);
+const _: () = assert!(NN_INPUTS == 112, "v1.3 D9: NN_INPUTS must be 112");
 const _: () = assert!(NN_HIDDEN == 24);
-const _: () = assert!(NN_OUTPUTS == 8);
+const _: () = assert!(NN_OUTPUTS == 5, "v1.3 D9: NN_OUTPUTS must be 5");
 const _: () = assert!(
     NN_INPUTS.is_multiple_of(8),
     "NN_INPUTS must be multiple of 8 for SIMD chunks"
@@ -24,67 +24,30 @@ const _: () = assert!(
     "NN_HIDDEN must be multiple of 8 for output matmul"
 );
 const _: () = assert!(NN_WEIGHT_COUNT == NN_INPUTS * NN_HIDDEN + NN_HIDDEN * NN_OUTPUTS);
+const _: () = assert!(
+    NN_WEIGHT_COUNT == 2808,
+    "v1.3 D9: NN_WEIGHT_COUNT must be 2808 (112*24 + 24*5)"
+);
 
-/// Number of 8-wide SIMD chunks in the input vector (20).
-const INPUT_CHUNKS: usize = NN_INPUTS / 8; // 160/8 = 20
+/// Number of 8-wide SIMD chunks in the input vector (14).
+const INPUT_CHUNKS: usize = NN_INPUTS / 8; // 112/8 = 14
 /// Number of 8-wide SIMD chunks in the hidden vector (3).
 const HIDDEN_CHUNKS: usize = NN_HIDDEN / 8; // 24/8 = 3
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Brain {
-    pub weights: Vec<f32>, // length = NN_WEIGHT_COUNT = 4032 (v1.2)
+    pub weights: Vec<f32>, // length = NN_WEIGHT_COUNT = 2808 (v1.3 D9)
     pub nn_mutation_rate: f32,
 }
 
 impl Brain {
+    /// v1.3 D9: pure uniform-random init. F.30 hardwiring deleted.
+    /// NN_WEIGHT_COUNT = 2808 (112×24 + 24×5).
     pub fn founder(rng: &mut SimRng) -> Self {
-        // Uniform-random init.
         let mut weights = vec![0.0_f32; NN_WEIGHT_COUNT];
         for w in &mut weights {
             *w = rng.uniform(-NN_INIT_RANGE, NN_INIT_RANGE);
         }
-
-        // F.30 hardwiring (v1.2): minimal honest founder.
-        // Weight layout (row-major, v6 §E / D.15):
-        //   w_ih[h][i] = weights[h * NN_INPUTS + i]
-        //   w_ho[o][h] = weights[NN_INPUTS * NN_HIDDEN + o * NN_HIDDEN + h]
-        //
-        // Output buffer indices (pick_action_d):
-        //   out[0] = vx, out[1] = vy
-        //   out[2..8] = logits for Action::ALL[0..6]
-        //   Action::ALL = [Rest=0, Graze=1, Eat=2, Scavenge=3, Split=4, Signal=5]
-        //   → Graze logit = out[3], Split logit = out[6]
-        //
-        // NN_GRASS_PATCH_CENTER_SLOT = 147 (locked by P2d — see constants.rs).
-        const ON_GRASS_HIDDEN: usize = 0;
-        const MOVE_BIAS_HIDDEN: usize = 1;
-        const SPLIT_ENERGY_HIDDEN: usize = 2;
-        const ENERGY_FRAC_INPUT: usize = 0;
-        const GRAZE_OUT: usize = 3; // output buffer index for Graze logit
-        const VX_OUT: usize = 0;
-        const VY_OUT: usize = 1;
-        const SPLIT_OUT: usize = 6; // output buffer index for Split logit
-
-        let w_ho_offset = NN_INPUTS * NN_HIDDEN;
-
-        // Hidden[0] = "on-grass" detector: reads grass-patch center input.
-        weights[ON_GRASS_HIDDEN * NN_INPUTS + NN_GRASS_PATCH_CENTER_SLOT] +=
-            NN_FOUNDER_GRAZE_DETECTOR_WEIGHT;
-        // Output Graze += large positive from hidden[0].
-        weights[w_ho_offset + GRAZE_OUT * NN_HIDDEN + ON_GRASS_HIDDEN] +=
-            NN_FOUNDER_GRAZE_OUTPUT_WEIGHT;
-
-        // Hidden[1] = Move baseline; vx/vy output baselines.
-        weights[MOVE_BIAS_HIDDEN * NN_INPUTS + ENERGY_FRAC_INPUT] += NN_FOUNDER_MOVE_BASELINE;
-        weights[w_ho_offset + VX_OUT * NN_HIDDEN + MOVE_BIAS_HIDDEN] += NN_FOUNDER_MOVE_BASELINE;
-        weights[w_ho_offset + VY_OUT * NN_HIDDEN + MOVE_BIAS_HIDDEN] += NN_FOUNDER_MOVE_BASELINE;
-
-        // Hidden[2] = energy_frac reader → Split.
-        weights[SPLIT_ENERGY_HIDDEN * NN_INPUTS + ENERGY_FRAC_INPUT] +=
-            NN_FOUNDER_SPLIT_FROM_ENERGY;
-        weights[w_ho_offset + SPLIT_OUT * NN_HIDDEN + SPLIT_ENERGY_HIDDEN] +=
-            NN_FOUNDER_SPLIT_FROM_ENERGY;
-
         Self {
             weights,
             nn_mutation_rate: NN_MUT_RATE_DEFAULT,
@@ -210,43 +173,21 @@ mod tests {
         assert!(b.weights.iter().any(|w| *w != 0.0));
     }
 
-    /// P2f: confirm hardwired F.30 slots have the expected additive bumps.
-    /// Each assertion checks that the weight at the target slot is at least
-    /// (hardwired_constant - NN_INIT_RANGE), i.e. the random-init baseline
-    /// cannot swamp the hardwired addition downward past that floor.
+    /// v1.3 D9: NN_WEIGHT_COUNT == 2808 (112*24 + 24*5).
     #[test]
-    fn founder_hardwiring_at_locked_slots() {
-        // Output-buffer indices (must match Brain::founder's local consts).
-        const GRAZE_OUT_IDX: usize = 3;
-        const SPLIT_OUT_IDX: usize = 6;
+    fn nn_weight_count_post_v1_3() {
+        assert_eq!(NN_WEIGHT_COUNT, 2808, "112*24 + 24*5 must equal 2808");
+        assert_eq!(NN_INPUTS * NN_HIDDEN + NN_HIDDEN * NN_OUTPUTS, 2808);
+    }
 
-        let mut rng = SimRng::from_u64(1);
-        let b = Brain::founder(&mut rng);
-        let w_ho = NN_INPUTS * NN_HIDDEN;
-
-        // hidden[0] reads NN_GRASS_PATCH_CENTER_SLOT with detector weight.
-        // Index: ON_GRASS_HIDDEN=0, so w_ih offset = 0 * NN_INPUTS + center_slot.
-        let det = b.weights[NN_GRASS_PATCH_CENTER_SLOT]; // == 0 * NN_INPUTS + slot
-        assert!(
-            det >= NN_FOUNDER_GRAZE_DETECTOR_WEIGHT - NN_INIT_RANGE,
-            "detector weight {det} < floor ({})",
-            NN_FOUNDER_GRAZE_DETECTOR_WEIGHT - NN_INIT_RANGE
-        );
-
-        // w_ho[Graze][hidden_0] += weight. hidden_0 is the first hidden unit.
-        let go = b.weights[w_ho + GRAZE_OUT_IDX * NN_HIDDEN]; // + 0 suppressed (clippy)
-        assert!(
-            go >= NN_FOUNDER_GRAZE_OUTPUT_WEIGHT - NN_INIT_RANGE,
-            "graze output weight {go} < floor ({})",
-            NN_FOUNDER_GRAZE_OUTPUT_WEIGHT - NN_INIT_RANGE
-        );
-
-        // w_ho[Split][hidden_2] += weight.
-        let so = b.weights[w_ho + SPLIT_OUT_IDX * NN_HIDDEN + 2];
-        assert!(
-            so >= NN_FOUNDER_SPLIT_FROM_ENERGY - NN_INIT_RANGE,
-            "split output weight {so} < floor ({})",
-            NN_FOUNDER_SPLIT_FROM_ENERGY - NN_INIT_RANGE
+    /// v1.3 D9: NN_INPUTS must be a multiple of 8 for SIMD forward pass.
+    #[test]
+    fn nn_inputs_padded_to_multiple_of_8() {
+        assert_eq!(
+            NN_INPUTS % 8,
+            0,
+            "NN_INPUTS={} must be multiple of 8",
+            NN_INPUTS
         );
     }
 
@@ -271,8 +212,8 @@ mod tests {
             .zip(child.weights.iter())
             .filter(|(a, b)| a != b)
             .count();
-        // Expected ≈ 0.1 × 4032 ≈ 403. Just confirm "some but not all".
-        assert!(diffs > 100 && diffs < 800, "diffs = {diffs}");
+        // Expected ≈ 0.1 × 2808 ≈ 281. Just confirm "some but not all".
+        assert!(diffs > 50 && diffs < 600, "diffs = {diffs}");
     }
 
     #[test]
@@ -295,7 +236,7 @@ mod tests {
         let mut output = [0.0f32; NN_OUTPUTS];
         let mut hidden = [0.0f32; NN_HIDDEN];
         brain.forward(&input, &mut output, &mut hidden);
-        assert_eq!(output.len(), 8);
+        assert_eq!(output.len(), 5, "v1.3 D9: NN_OUTPUTS must be 5");
         assert!(
             output.iter().all(|&v| v == 0.0),
             "zero weights → zero output"
@@ -308,7 +249,7 @@ mod tests {
         let mut out2 = [0.0f32; NN_OUTPUTS];
         let mut hid2 = [0.0f32; NN_HIDDEN];
         brain2.forward(&input2, &mut out2, &mut hid2);
-        assert_eq!(out2.len(), 8);
+        assert_eq!(out2.len(), 5, "v1.3 D9: NN_OUTPUTS must be 5");
         assert!(
             out2.iter().all(|&v| v.is_finite()),
             "non-zero weights → finite"
