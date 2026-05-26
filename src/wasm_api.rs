@@ -18,7 +18,6 @@ pub struct WorldHandle {
     /// Reusable serialization buffer for `creatures_buffer` — one f32 vec
     /// shared across calls so JS can read a stable typed-array view.
     creature_buf: Vec<f32>,
-    carrion_buf: Vec<f32>,
     /// Reusable buffer for `grass_buffer` — avoids re-allocating 57_600 f32s each frame.
     grass_buf: Vec<f32>,
     /// Reusable f64 buffer for `creature_ids_buffer` — index-aligned with creatures_buffer.
@@ -48,7 +47,6 @@ impl WorldHandle {
         Self {
             inner,
             creature_buf: Vec::new(),
-            carrion_buf: Vec::new(),
             grass_buf: Vec::new(),
             id_buf: Vec::new(),
             tick_durations_ms: std::collections::VecDeque::new(),
@@ -77,7 +75,6 @@ impl WorldHandle {
         Self {
             inner,
             creature_buf: Vec::new(),
-            carrion_buf: Vec::new(),
             grass_buf: Vec::new(),
             id_buf: Vec::new(),
             tick_durations_ms: std::collections::VecDeque::new(),
@@ -224,21 +221,6 @@ impl WorldHandle {
             self.creature_buf[off + 10] = if g.armor > 0.0 { 1.0 } else { 0.0 };
         }
         unsafe { js_sys::Float32Array::view(&self.creature_buf) }
-    }
-
-    /// Per-carrion: [x, y, pool_frac]
-    #[wasm_bindgen]
-    pub fn carrion_buffer(&mut self) -> js_sys::Float32Array {
-        let n = self.inner.carrion.len();
-        self.carrion_buf.clear();
-        self.carrion_buf.resize(n * 3, 0.0);
-        for k in 0..n {
-            let c = &self.inner.carrion[k];
-            self.carrion_buf[k * 3] = c.x;
-            self.carrion_buf[k * 3 + 1] = c.y;
-            self.carrion_buf[k * 3 + 2] = (c.pool / CARRION_POOL_CAP).clamp(0.0, 1.0);
-        }
-        unsafe { js_sys::Float32Array::view(&self.carrion_buf) }
     }
 
     // ─── Grass render API (P1g) ──────────────────────────────────────────────

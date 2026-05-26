@@ -2,100 +2,34 @@
 //! Filled in tick step 2 (v5 §3.5). Reused by D as NN inputs (v6 §E).
 //!
 //! D7: Walled world — rays that exit world bounds return a wall-sentinel gray.
-//! Wall sentinel RGB = (0.5, 0.5, 0.5) per Q-D7-4 (D2 vision palette may rename later).
+//! Wall sentinel RGB = (0.5, 0.5, 0.5) per Q-D7-4.
 
-use crate::carrion::Carrion;
 use crate::constants::*;
 use crate::creature::CreatureSoA;
 use crate::grid::SpatialGrid;
 
 pub use crate::constants::{EYE_STRIDE, SECTORS};
-pub const FEATURES_PER_SECTOR: usize = 5; // dist, size, r, g, b
+pub const FEATURES_PER_SECTOR: usize = 5; // dist, size, r, g, b (D9 owns shrinking to 3)
 pub const VISION_LEN: usize = SECTORS * FEATURES_PER_SECTOR; // 120
 
 /// Fixed per-creature vision buffer. World owns Vec<VisionBuf>.
 pub type VisionBuf = [f32; VISION_LEN];
 
-/// Carrion is rendered/seen as fixed gray per v6 §4 "What changed vs v5".
-pub const CARRION_R: f32 = 0.4;
-pub const CARRION_G: f32 = 0.4;
-pub const CARRION_B: f32 = 0.4;
-
-/// Wall-sentinel RGB (Q-D7-4). D2 (vision palette) may rename later.
+/// Wall-sentinel RGB (D7: walled world).
 pub const WALL_R: f32 = 0.5;
 pub const WALL_G: f32 = 0.5;
 pub const WALL_B: f32 = 0.5;
 
-/// CSR-layout per-cell carrion index. Replaces `Vec<Vec<u32>>` (S26).
-pub struct CarrionIndex {
-    /// CSR row-start offsets, length = HASH_DIM * HASH_DIM + 1.
-    starts: Vec<u32>,
-    /// Flat carrion-index list, length = carrion.len() after each rebuild.
-    indices: Vec<u32>,
-    /// Scratch write-head cursors for the scatter pass. Reused across calls.
-    cursors: Vec<u32>,
-}
-
-impl Default for CarrionIndex {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl CarrionIndex {
-    pub fn new() -> Self {
-        let starts = vec![0u32; HASH_DIM * HASH_DIM + 1];
-        let cursors = vec![0u32; starts.len()];
-        Self {
-            starts,
-            indices: Vec::with_capacity(256),
-            cursors,
-        }
-    }
-
-    /// Rebuild the CSR index from a flat carrion list.
-    pub fn rebuild(&mut self, carrion: &[Carrion]) {
-        self.starts.iter_mut().for_each(|s| *s = 0);
-        for c in carrion {
-            let cell = SpatialGrid::cell_of(c.x, c.y);
-            self.starts[cell + 1] += 1;
-        }
-        for k in 1..self.starts.len() {
-            self.starts[k] += self.starts[k - 1];
-        }
-        let n = carrion.len();
-        self.indices.clear();
-        self.indices.resize(n, 0);
-        self.cursors.copy_from_slice(&self.starts);
-        for (ci, c) in carrion.iter().enumerate() {
-            let cell = SpatialGrid::cell_of(c.x, c.y);
-            let pos = self.cursors[cell] as usize;
-            self.indices[pos] = ci as u32;
-            self.cursors[cell] += 1;
-        }
-    }
-
-    #[inline]
-    pub fn cell_slice(&self, cell: usize) -> &[u32] {
-        let s = self.starts[cell] as usize;
-        let e = self.starts[cell + 1] as usize;
-        &self.indices[s..e]
-    }
-}
-
-/// Ray hit from DDA traversal.
+/// Ray hit from DDA traversal. Distance is the second field.
 enum RayHit {
     Creature(usize, f32),
-    Carrion(#[allow(dead_code)] usize, f32),
     /// Ray exited world bounds at parameter `t`.
     Wall(f32),
 }
 
 pub struct VisionPass<'a> {
     pub creatures: &'a CreatureSoA,
-    pub carrion: &'a [Carrion],
     pub grid: &'a SpatialGrid,
-    pub cell_to_carrion: &'a CarrionIndex,
 }
 
 impl<'a> VisionPass<'a> {
@@ -169,16 +103,8 @@ impl<'a> VisionPass<'a> {
                         buf[slot + 3] = pigment.pigment_g;
                         buf[slot + 4] = pigment.pigment_b;
                     }
-                    RayHit::Carrion(_, dist) => {
-                        let d = dist.max(1e-4);
-                        buf[slot] = d;
-                        buf[slot + 1] = CARRION_RADIUS_FOR_VISION;
-                        buf[slot + 2] = CARRION_R;
-                        buf[slot + 3] = CARRION_G;
-                        buf[slot + 4] = CARRION_B;
-                    }
                     RayHit::Wall(dist) => {
-                        // Q3: wall sentinel — write gray RGB. Distance is the wall hit t.
+                        // D7: wall sentinel — write gray RGB. Distance is the wall hit t.
                         let d = dist.max(1e-4);
                         buf[slot] = d;
                         buf[slot + 1] = 0.0; // no size for walls
@@ -298,19 +224,6 @@ impl<'a> VisionPass<'a> {
                 }
             }
 
-            // Test carrion in this cell.
-            for &ci in self.cell_to_carrion.cell_slice(cell_idx) {
-                let c = &self.carrion[ci as usize];
-                // Walled: raw Euclidean positions.
-                if let Some(t) = ray_circle_hit(ox, oy, dx, dy, c.x, c.y, CARRION_RADIUS_FOR_VISION)
-                {
-                    if t <= best_dist {
-                        best_dist = t;
-                        best = Some(RayHit::Carrion(ci as usize, t));
-                    }
-                }
-            }
-
             // If we found a hit closer than the next cell boundary, return it.
             let next_t = t_max_x.min(t_max_y);
             if best.is_some() && best_dist < next_t {
@@ -387,11 +300,6 @@ pub(crate) fn sector_to_angle(s: usize, eye_offsets: &[f32; EYE_SLOTS], eye_coun
     theta_center + offset
 }
 
-/// Rebuild a per-cell carrion lookup from a flat carrion list.
-pub fn build_cell_to_carrion(carrion: &[Carrion], dst: &mut CarrionIndex) {
-    dst.rebuild(carrion);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -403,12 +311,6 @@ mod tests {
         let mut g = SpatialGrid::new();
         g.rebuild(&creatures.x, &creatures.y);
         g
-    }
-
-    fn make_carrion_index(carrion: &[Carrion]) -> CarrionIndex {
-        let mut dst = CarrionIndex::new();
-        build_cell_to_carrion(carrion, &mut dst);
-        dst
     }
 
     fn simple_creature(soa: &mut CreatureSoA, id: u64, x: f32, y: f32, genome: Genome) -> usize {
@@ -435,13 +337,9 @@ mod tests {
         simple_creature(&mut creatures, 1, 110.0, 100.0, gb);
 
         let grid = make_grid(&creatures);
-        let carrion = vec![];
-        let cell_to_carrion = make_carrion_index(&carrion);
         let pass = VisionPass {
             creatures: &creatures,
-            carrion: &carrion,
             grid: &grid,
-            cell_to_carrion: &cell_to_carrion,
         };
         let mut vision = vec![[0.0f32; VISION_LEN]; 2];
         pass.run(&mut vision);
@@ -458,13 +356,9 @@ mod tests {
         simple_creature(&mut creatures, 0, 300.0, 300.0, g);
 
         let grid = make_grid(&creatures);
-        let carrion = vec![];
-        let cell_to_carrion = make_carrion_index(&carrion);
         let pass = VisionPass {
             creatures: &creatures,
-            carrion: &carrion,
             grid: &grid,
-            cell_to_carrion: &cell_to_carrion,
         };
         let mut vision = vec![[0.0f32; VISION_LEN]];
         pass.run(&mut vision);
@@ -492,13 +386,9 @@ mod tests {
         simple_creature(&mut creatures, 1, 110.0, 100.0, gb);
 
         let grid = make_grid(&creatures);
-        let carrion = vec![];
-        let cell_to_carrion = make_carrion_index(&carrion);
         let pass = VisionPass {
             creatures: &creatures,
-            carrion: &carrion,
             grid: &grid,
-            cell_to_carrion: &cell_to_carrion,
         };
         let mut vision = vec![[0.0f32; VISION_LEN]; 2];
         pass.run(&mut vision);
@@ -517,48 +407,6 @@ mod tests {
     }
 
     #[test]
-    fn carrion_returns_gray() {
-        let mut creatures = CreatureSoA::with_capacity(2);
-        let ga = genome_with_eyes(4, 80.0);
-        simple_creature(&mut creatures, 0, 100.0, 100.0, ga);
-
-        let carrion = vec![Carrion {
-            id: 999,
-            x: 115.0,
-            y: 100.0,
-            pool: 1.0,
-            age: 0,
-        }];
-
-        let grid = make_grid(&creatures);
-        let cell_to_carrion = make_carrion_index(&carrion);
-        let pass = VisionPass {
-            creatures: &creatures,
-            carrion: &carrion,
-            grid: &grid,
-            cell_to_carrion: &cell_to_carrion,
-        };
-        let mut vision = vec![[0.0f32; VISION_LEN]];
-        pass.run(&mut vision);
-
-        let slot = 0;
-        let dist = vision[0][slot];
-        assert!(dist > 0.0, "sector 0 should see carrion");
-        assert!(
-            (vision[0][slot + 2] - CARRION_R).abs() < 1e-4,
-            "carrion r should be 0.4"
-        );
-        assert!(
-            (vision[0][slot + 3] - CARRION_G).abs() < 1e-4,
-            "carrion g should be 0.4"
-        );
-        assert!(
-            (vision[0][slot + 4] - CARRION_B).abs() < 1e-4,
-            "carrion b should be 0.4"
-        );
-    }
-
-    #[test]
     fn out_of_range_returns_zero() {
         let mut creatures = CreatureSoA::with_capacity(4);
         let ga = genome_with_eyes(24, 80.0);
@@ -569,13 +417,9 @@ mod tests {
         simple_creature(&mut creatures, 1, 191.0, 100.0, gb);
 
         let grid = make_grid(&creatures);
-        let carrion = vec![];
-        let cell_to_carrion = make_carrion_index(&carrion);
         let pass = VisionPass {
             creatures: &creatures,
-            carrion: &carrion,
             grid: &grid,
-            cell_to_carrion: &cell_to_carrion,
         };
         let mut vision = vec![[0.0f32; VISION_LEN]; 2];
         pass.run(&mut vision);
@@ -651,13 +495,9 @@ mod tests {
         simple_creature(&mut creatures, 1, 5.0, 300.0, gb);
 
         let grid = make_grid(&creatures);
-        let carrion = vec![];
-        let cell_to_carrion = make_carrion_index(&carrion);
         let pass = VisionPass {
             creatures: &creatures,
-            carrion: &carrion,
             grid: &grid,
-            cell_to_carrion: &cell_to_carrion,
         };
         let mut vision = vec![[0.0f32; VISION_LEN]; 2];
         pass.run(&mut vision);
@@ -678,161 +518,5 @@ mod tests {
         // Either we see the wall sentinel or zero (empty past the wall).
         // The key: creature B's position is NOT the result.
         let _ = sees_creature_b;
-    }
-
-    // ---- S26 CarrionIndex CSR tests ----
-
-    #[test]
-    fn csr_carrion_membership_matches_old_layout() {
-        let carrion = vec![
-            Carrion {
-                id: 0,
-                x: 10.0,
-                y: 10.0,
-                pool: 1.0,
-                age: 0,
-            },
-            Carrion {
-                id: 1,
-                x: 10.0,
-                y: 10.0,
-                pool: 1.0,
-                age: 0,
-            },
-            Carrion {
-                id: 2,
-                x: 590.0,
-                y: 590.0,
-                pool: 1.0,
-                age: 0,
-            },
-            Carrion {
-                id: 3,
-                x: 300.0,
-                y: 300.0,
-                pool: 1.0,
-                age: 0,
-            },
-        ];
-
-        let total = HASH_DIM * HASH_DIM;
-        let mut ref_dst: Vec<Vec<u32>> = vec![Vec::new(); total];
-        for (ci, c) in carrion.iter().enumerate() {
-            let cell = SpatialGrid::cell_of(c.x, c.y);
-            ref_dst[cell].push(ci as u32);
-        }
-
-        let mut csr = CarrionIndex::new();
-        csr.rebuild(&carrion);
-
-        for cell in 0..total {
-            let mut csr_set: Vec<u32> = csr.cell_slice(cell).to_vec();
-            let mut ref_set: Vec<u32> = ref_dst[cell].clone();
-            csr_set.sort_unstable();
-            ref_set.sort_unstable();
-            assert_eq!(
-                csr_set, ref_set,
-                "cell {cell}: CSR membership {csr_set:?} != reference {ref_set:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn csr_iteration_order_is_insertion_order() {
-        let x = 100.0_f32;
-        let y = 100.0_f32;
-        let carrion = vec![
-            Carrion {
-                id: 10,
-                x,
-                y,
-                pool: 1.0,
-                age: 0,
-            },
-            Carrion {
-                id: 20,
-                x: x + 0.1,
-                y,
-                pool: 1.0,
-                age: 0,
-            },
-            Carrion {
-                id: 30,
-                x: x + 0.2,
-                y,
-                pool: 1.0,
-                age: 0,
-            },
-        ];
-        let cell = SpatialGrid::cell_of(x, y);
-        let mut csr = CarrionIndex::new();
-        csr.rebuild(&carrion);
-        let slice = csr.cell_slice(cell);
-        assert_eq!(
-            slice,
-            &[0u32, 1, 2],
-            "carrion indices must appear in insertion order; got {slice:?}"
-        );
-    }
-
-    #[test]
-    fn csr_empty_and_full_corners() {
-        let mut csr = CarrionIndex::new();
-        csr.rebuild(&[]);
-        for cell in 0..HASH_DIM * HASH_DIM {
-            assert!(
-                csr.cell_slice(cell).is_empty(),
-                "cell {cell} must be empty for zero carrion"
-            );
-        }
-
-        let corners = vec![
-            Carrion {
-                id: 0,
-                x: 0.5,
-                y: 0.5,
-                pool: 1.0,
-                age: 0,
-            },
-            Carrion {
-                id: 1,
-                x: WORLD_SIZE - 0.5,
-                y: 0.5,
-                pool: 1.0,
-                age: 0,
-            },
-            Carrion {
-                id: 2,
-                x: 0.5,
-                y: WORLD_SIZE - 0.5,
-                pool: 1.0,
-                age: 0,
-            },
-            Carrion {
-                id: 3,
-                x: WORLD_SIZE - 0.5,
-                y: WORLD_SIZE - 0.5,
-                pool: 1.0,
-                age: 0,
-            },
-        ];
-        csr.rebuild(&corners);
-        let total_in_csr: usize = (0..HASH_DIM * HASH_DIM)
-            .map(|c| csr.cell_slice(c).len())
-            .sum();
-        assert_eq!(
-            total_in_csr,
-            corners.len(),
-            "total carrion in CSR ({total_in_csr}) must equal input count ({})",
-            corners.len()
-        );
-        for (ci, c) in corners.iter().enumerate() {
-            let cell = SpatialGrid::cell_of(c.x, c.y);
-            let slice = csr.cell_slice(cell);
-            assert!(
-                slice.contains(&(ci as u32)),
-                "corner carrion {ci} not found in cell {cell}: slice={slice:?}"
-            );
-        }
     }
 }

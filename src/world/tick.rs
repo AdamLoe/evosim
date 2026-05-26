@@ -1,7 +1,6 @@
 //! Per-tick step bodies that mutate `World`. All as `impl World` blocks; private to the `crate::world` parent.
 
 use super::World;
-use crate::carrion::Carrion;
 use crate::constants::*;
 use crate::creature::Action;
 use crate::events::{Event, EventKind};
@@ -377,15 +376,6 @@ impl World {
         let n = self.creatures.len();
         for i in 0..n {
             if self.creatures.energy[i] <= 0.0 {
-                let pool = (CARRION_POOL_COEFF * self.creatures.cumulative_upkeep[i])
-                    .clamp(0.0, CARRION_POOL_CAP);
-                self.carrion.push(Carrion {
-                    id: self.creatures.id[i],
-                    x: self.creatures.x[i],
-                    y: self.creatures.y[i],
-                    pool,
-                    age: 0,
-                });
                 // S27: push directly to pending_extinction_check (no species_lost intermediate Vec).
                 self.pending_extinction_check
                     .push(self.creatures.species_id[i]);
@@ -394,19 +384,6 @@ impl World {
         }
         // S27: dead indices are in self.scratch_dead; pending_extinction_check was
         // already written directly above (no intermediate species_lost Vec drain).
-    }
-
-    pub(crate) fn decay_carrion(&mut self) {
-        // Unscavenged carrion energy vanishes on expiry (per master §F #10 / P1b).
-        let mut i = 0;
-        while i < self.carrion.len() {
-            self.carrion[i].age += 1;
-            if self.carrion[i].age > CARRION_MAX_AGE || self.carrion[i].pool <= 0.0 {
-                self.carrion.swap_remove(i);
-            } else {
-                i += 1;
-            }
-        }
     }
 }
 
@@ -461,95 +438,6 @@ mod tests {
                 assert_eq!(*cid, creature_id, "FirstToMove creature_id must match");
             }
         }
-    }
-
-    // ---- S24 tests ----
-
-    /// S24 test 1: Scavenge 3×3 sweep picks up a carrion blob that is within
-    /// the creature's body radius, using the cell_to_carrion index.
-    #[test]
-    fn s24_scavenge_3x3_sweep_finds_adjacent_carrion() {
-        use crate::constants::*;
-        use crate::vision::build_cell_to_carrion;
-
-        let mut w = World::new("s24-sweep");
-        // Give the founder scavenge ability and place carrion on top of it.
-        w.creatures.genomes[0].scavenge_efficiency = 1.0;
-        w.creatures.resync_hot_mirrors_at(0);
-        w.creatures.action_this_tick[0] = Action::Scavenge;
-
-        let cx = w.creatures.x[0];
-        let cy = w.creatures.y[0];
-        let carrion_pool = 5.0_f32;
-        w.carrion.push(Carrion {
-            id: 777,
-            x: cx,
-            y: cy,
-            pool: carrion_pool,
-            age: 0,
-        });
-        // Rebuild the cell index so eat_and_scavenge can use it.
-        build_cell_to_carrion(&w.carrion, &mut w.cell_to_carrion);
-
-        let energy_before = w.creatures.energy[0];
-        w.eat_and_scavenge();
-        let energy_after = w.creatures.energy[0];
-
-        // The creature should have gained some energy (scavenged from the carrion).
-        assert!(
-            energy_after > energy_before - COST_SCAVENGE_ATTEMPT,
-            "Scavenge should gain energy from adjacent carrion: before={energy_before} after={energy_after}"
-        );
-        // The carrion pool should have decreased.
-        assert!(
-            w.carrion[0].pool < carrion_pool,
-            "carrion pool should decrease after scavenging: pool={}",
-            w.carrion[0].pool
-        );
-    }
-
-    /// S24 test 2: Scavenge does NOT pick up carrion that is outside the creature's
-    /// body radius, even if it is in the same 3×3 cell window.
-    #[test]
-    fn s24_scavenge_skips_out_of_radius_carrion() {
-        use crate::constants::*;
-        use crate::vision::build_cell_to_carrion;
-
-        let mut w = World::new("s24-oor");
-        w.creatures.genomes[0].scavenge_efficiency = 1.0;
-        w.creatures.resync_hot_mirrors_at(0);
-        w.creatures.action_this_tick[0] = Action::Scavenge;
-
-        let cx = w.creatures.x[0];
-        let cy = w.creatures.y[0];
-        // Place carrion far outside the body radius but still within the 3×3 cell window.
-        let r_i = w.creatures.g_size[0] * BODY_RADIUS_PER_SIZE;
-        let far = r_i * 10.0; // well outside body radius
-        let carrion_pool = 5.0_f32;
-        w.carrion.push(Carrion {
-            id: 888,
-            x: cx + far.min(HASH_CELL * 0.9), // within 1-cell offset but outside body radius
-            y: cy,
-            pool: carrion_pool,
-            age: 0,
-        });
-        build_cell_to_carrion(&w.carrion, &mut w.cell_to_carrion);
-
-        let energy_before = w.creatures.energy[0];
-        w.eat_and_scavenge();
-        let energy_after = w.creatures.energy[0];
-
-        // The carrion pool should be unchanged (no scavenging took place).
-        assert_eq!(
-            w.carrion[0].pool, carrion_pool,
-            "out-of-radius carrion must not be scavenged"
-        );
-        // Energy dropped by the attempt cost only.
-        let delta = energy_after - energy_before;
-        assert!(
-            (delta + COST_SCAVENGE_ATTEMPT).abs() < 1e-4,
-            "only scavenge attempt cost, delta={delta}"
-        );
     }
 
     // ---- perf-2 tests ----
@@ -1127,7 +1015,7 @@ mod tests {
     fn p3a_eat_bite_basic_transfer() {
         use crate::brain::Brain;
         use crate::genome::Genome;
-        use crate::vision::{build_cell_to_carrion, VISION_LEN};
+        use crate::vision::VISION_LEN;
 
         let mut w = World::new("p3a-basic");
         // Set predator (creature 0) properties.
@@ -1164,7 +1052,6 @@ mod tests {
         w.vision.push([0.0f32; VISION_LEN]);
 
         w.grid.rebuild(&w.creatures.x, &w.creatures.y);
-        build_cell_to_carrion(&w.carrion, &mut w.cell_to_carrion);
 
         let pred_energy_before = w.creatures.energy[0];
         let prey_energy_before = w.creatures.energy[1];
@@ -1196,7 +1083,7 @@ mod tests {
     fn p3a_eat_bite_with_armor() {
         use crate::brain::Brain;
         use crate::genome::Genome;
-        use crate::vision::{build_cell_to_carrion, VISION_LEN};
+        use crate::vision::VISION_LEN;
 
         let mut w = World::new("p3a-armor");
         w.creatures.energy[0] = 100.0;
@@ -1230,7 +1117,6 @@ mod tests {
         w.vision.push([0.0f32; VISION_LEN]);
 
         w.grid.rebuild(&w.creatures.x, &w.creatures.y);
-        build_cell_to_carrion(&w.carrion, &mut w.cell_to_carrion);
 
         let prey_energy_before = w.creatures.energy[1];
         let pred_energy_before = w.creatures.energy[0];
@@ -1258,7 +1144,7 @@ mod tests {
     fn p3a_eat_cooldown_still_gates() {
         use crate::brain::Brain;
         use crate::genome::Genome;
-        use crate::vision::{build_cell_to_carrion, VISION_LEN};
+        use crate::vision::VISION_LEN;
 
         let mut w = World::new("p3a-cooldown");
         w.creatures.energy[0] = 100.0;
@@ -1290,7 +1176,6 @@ mod tests {
         w.vision.push([0.0f32; VISION_LEN]);
 
         w.grid.rebuild(&w.creatures.x, &w.creatures.y);
-        build_cell_to_carrion(&w.carrion, &mut w.cell_to_carrion);
 
         let prey_energy_before = w.creatures.energy[1];
         let pred_energy_before = w.creatures.energy[0];

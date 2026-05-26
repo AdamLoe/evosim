@@ -1,5 +1,5 @@
 // Aquarium renderer. Pure draw helpers — owns no sim state. Called once per
-// requestAnimationFrame from main.ts with a fresh creature/carrion snapshot.
+// requestAnimationFrame from main.ts with a fresh creature snapshot.
 
 import type { WorldHandle } from "../wasm/evosim";
 
@@ -48,26 +48,6 @@ export function screenToWorld(cam: Camera, viewW: number, viewH: number, sx: num
   const x = (sx - viewW / 2) / cam.zoom + cam.cx;
   const y = (sy - viewH / 2) / cam.zoom + cam.cy;
   return [x, y];
-}
-
-export function drawCarrion(
-  ctx: CanvasRenderingContext2D,
-  cam: Camera,
-  viewW: number,
-  viewH: number,
-  carrion: Float32Array,
-): void {
-  ctx.fillStyle = "rgb(102, 102, 102)"; // v6 §B fixed gray
-  for (let k = 0; k < carrion.length; k += 3) {
-    const x = carrion[k];
-    const y = carrion[k + 1];
-    const pool = carrion[k + 2];
-    const [sx, sy] = worldToScreen(cam, viewW, viewH, x, y);
-    const r = 2 + 4 * pool;
-    ctx.beginPath();
-    ctx.arc(sx, sy, r * cam.zoom * 0.5 + 1, 0, Math.PI * 2);
-    ctx.fill();
-  }
 }
 
 export function drawCreatures(
@@ -227,7 +207,6 @@ export function renderWorld(
     world.grass_dim, world.grass_cell_size, world.grass_buffer(),
   );
   drawAquariumFrame(ctx, cam, viewW, viewH, world.world_size);
-  drawCarrion(ctx, cam, viewW, viewH, world.carrion_buffer());
   drawCreatures(ctx, cam, viewW, viewH, world.creatures_buffer(), ids, stride, highlightMap, nowMs);
 }
 

@@ -677,7 +677,6 @@ mod tests {
         let p = Profiler::new();
         p.set_enabled(true);
         p.record_external("renderWorld.drawCreatures", 1500);
-        p.record_external("renderWorld.drawCarrion", 300);
         p.record_external("step_n", 4200);
         let v: serde_json::Value = serde_json::from_str(&p.report_json()).unwrap();
         let frame = v["tree"]
@@ -696,8 +695,8 @@ mod tests {
             .clone();
         assert_eq!(
             rw["children"].as_array().unwrap().len(),
-            2,
-            "renderWorld must have 2 children"
+            1,
+            "renderWorld must have 1 child"
         );
         // step_n is a direct child of frame.
         let step = frame["children"]
@@ -802,13 +801,13 @@ mod tests {
         clear_fake_clock();
     }
 
-    /// Profiler overhead test: measures absolute cost of 12 spans per iteration
+    /// Profiler overhead test: measures absolute cost of 11 spans per iteration
     /// and asserts each span pair (push+drop) costs < 5µs.
     ///
     /// Rationale: comparing off vs on is impractical in unit-test mode because
     /// the off-path is nearly eliminated by the branch predictor (0µs baseline),
     /// making the ratio meaningless. Instead, we measure the absolute on-path
-    /// cost, which is the real concern: at 12 spans × 1500-creature tick, the
+    /// cost, which is the real concern: at 11 spans × 1500-creature tick, the
     /// overhead must stay < 5% of tick time.
     ///
     /// Expected: 11 push+drop pairs at ~50-200ns each = ~550ns-2200ns per tick.
@@ -822,8 +821,8 @@ mod tests {
         clear_fake_clock(); // Use real clock for this test.
 
         const ITERS: usize = 10_000;
-        // 12 named sub-spans per tick (P1e added tick.graze between movement and eat_scavenge).
-        const SPANS_PER_ITER: usize = 12;
+        // 11 named sub-spans per tick (D2 removed decay_carrion span).
+        const SPANS_PER_ITER: usize = 11;
 
         let p = Profiler::new();
         p.set_enabled(true);
@@ -847,8 +846,6 @@ mod tests {
             drop(_g);
             let _h = p.push("collect_deaths");
             drop(_h);
-            let _i = p.push("decay_carrion");
-            drop(_i);
             let _j = p.push("handle_births");
             drop(_j);
             let _k = p.push("bookkeeping_tail");
