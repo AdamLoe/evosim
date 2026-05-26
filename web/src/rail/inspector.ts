@@ -44,13 +44,14 @@ function set(id: string, text: string): void {
 }
 
 function renderInspector(data: CreatureInspectJson): void {
+  set("ins-id", `${data.id}`);
+  set("ins-pos", `(${data.x.toFixed(1)}, ${data.y.toFixed(1)})`);
   set("ins-action", data.current_action);
   set("ins-age", `${data.age} / ${data.max_age}`);
   set("ins-energy", `${data.energy.toFixed(1)} (${(data.energy_frac * 100).toFixed(0)}%)`);
   set("ins-size", data.size.toFixed(2));
   set("ins-photo", data.graze_efficiency.toFixed(2));
   set("ins-eat", data.eat_efficiency.toFixed(2));
-  set("ins-scav", data.scavenge_efficiency.toFixed(2));
   set("ins-move", data.move_speed.toFixed(2));
   set("ins-eyes", `${data.eye_count}`);
   set("ins-vision", data.vision_range.toFixed(1));
@@ -76,7 +77,6 @@ export interface CreatureInspectJson {
   current_action: string;
   graze_efficiency: number;
   eat_efficiency: number;
-  scavenge_efficiency: number;
   move_speed: number;
   vision_range: number;
   eye_count: number;

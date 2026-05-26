@@ -230,9 +230,6 @@ impl WorldHandle {
     fn apply_mutation_rate_multiplier(&mut self, value: f32) {
         self.inner.sliders.mutation_rate_multiplier = value;
     }
-    fn apply_mouth_tax(&mut self, value: f32) {
-        self.inner.sliders.mouth_tax = value;
-    }
     fn apply_nn_mutation_sigma(&mut self, value: f32) {
         self.inner.sliders.nn_mutation_sigma = value;
     }
@@ -250,12 +247,6 @@ impl WorldHandle {
     #[wasm_bindgen]
     pub fn set_mutation_rate_multiplier(&mut self, value: f32) {
         self.apply_mutation_rate_multiplier(value);
-    }
-
-    /// Typed setter — mouth tax (upkeep per eat-efficiency point).
-    #[wasm_bindgen]
-    pub fn set_mouth_tax(&mut self, value: f32) {
-        self.apply_mouth_tax(value);
     }
 
     /// Typed setter — NN mutation sigma.
@@ -302,7 +293,6 @@ impl WorldHandle {
     fn try_set_slider(&mut self, name: &str, value: f32) -> bool {
         match name {
             "mutation_rate_multiplier" => self.apply_mutation_rate_multiplier(value),
-            "mouth_tax" => self.apply_mouth_tax(value),
             "nn_mutation_sigma" => self.apply_nn_mutation_sigma(value),
             "eat_bite_fraction" => self.apply_eat_bite_fraction(value),
             "grass_propagation_rate_k" => self.apply_grass_propagation_rate_k(value),
@@ -411,11 +401,9 @@ impl WorldHandle {
             "current_action": action_name,
             "graze_efficiency": FOUNDER_GRAZE_EFF,
             "eat_efficiency": 1.0_f32,
-            "scavenge_efficiency": 1.0_f32,
             "move_speed": MOVE_SPEED_MAX,
             "vision_range": VISION_RANGE_MAX,
             "eye_count": 24_u8,
-            "nose_count": 0_u8,
             "armor": 0.0_f32,
             "bite_reach": BITE_REACH_MIN,
             // M5: NN-weight hash color replaces placeholder pigment.
@@ -444,26 +432,6 @@ impl WorldHandle {
     #[wasm_bindgen]
     pub fn total_grass_density(&self) -> f32 {
         self.inner.grass.density.iter().sum()
-    }
-
-    /// Mean nose_count across all live creatures. Returns 0.0 when population is 0.
-    /// D3: nose_count is removed as a genome trait; returns 0.0 always (all creatures are
-    /// nose-free; grass inputs are always filled).
-    #[wasm_bindgen]
-    pub fn mean_nose_count(&self) -> f32 {
-        0.0
-    }
-
-    /// Mean eye_count across all live creatures. Returns 0.0 when population is 0.
-    /// D3: eye_count is removed as a genome trait; all creatures use 24 sectors.
-    /// Returns 24.0 if any creatures are alive, 0.0 otherwise.
-    #[wasm_bindgen]
-    pub fn mean_eye_count(&self) -> f32 {
-        let n = self.inner.creatures.len();
-        if n == 0 {
-            return 0.0;
-        }
-        24.0
     }
 
     /// Stats sample: [tick, population] as f32.
@@ -651,33 +619,12 @@ mod tests {
         );
     }
 
-    /// mean_nose_count always returns 0.0 (D3: nose_count removed as genome trait).
-    /// mean_eye_count returns 24.0 when creatures are alive (D3: all creatures use 24 sectors).
-    #[test]
-    fn mean_nose_eye_count_fresh_world() {
-        let handle = WorldHandle::new("p3d-mean-traits");
-        // D3: nose_count is removed; always 0.0.
-        assert_eq!(
-            handle.mean_nose_count(),
-            0.0,
-            "D3: mean_nose_count must always be 0.0"
-        );
-        // D3: eye_count is constant 24; with 1 founder alive, mean = 24.0.
-        assert_eq!(
-            handle.mean_eye_count(),
-            24.0,
-            "D3: mean_eye_count must be 24.0 when creatures are alive"
-        );
-    }
-
     /// S17: per-slider typed setters mutate the correct DevSliders field.
     #[test]
     fn set_slider_typed_mutates_field() {
         let mut handle = WorldHandle::new("s17-typed");
         handle.set_mutation_rate_multiplier(2.5);
         assert!((handle.inner.sliders.mutation_rate_multiplier - 2.5).abs() < 1e-6);
-        handle.set_mouth_tax(0.1);
-        assert!((handle.inner.sliders.mouth_tax - 0.1).abs() < 1e-6);
         handle.set_nn_mutation_sigma(0.05);
         assert!((handle.inner.sliders.nn_mutation_sigma - 0.05).abs() < 1e-6);
     }
@@ -688,7 +635,7 @@ mod tests {
     #[test]
     fn set_slider_known_names_dispatch_ok() {
         let mut handle = WorldHandle::new("s17-known");
-        for name in &["mutation_rate_multiplier", "mouth_tax", "nn_mutation_sigma"] {
+        for name in &["mutation_rate_multiplier", "nn_mutation_sigma"] {
             assert!(handle.try_set_slider(name, 0.5), "expected true for {name}");
         }
     }
