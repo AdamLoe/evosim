@@ -1,46 +1,32 @@
 //! All v5+v6 magic numbers, in one place. Reference each with the spec
 //! section number so future readers can audit against the pitch.
-// Some constants are forward-declared for future plan pieces; suppress unused warnings.
-#![allow(dead_code)]
 
 // ---- World shape (v5 §3.3, v6 §D) ----
 pub const WORLD_SIZE: f32 = 600.0;
-/// Creature body radius in world-units per genome.size unit. (S3 — moved from world/mod.rs)
+/// Creature body radius scale in world-units (D3: constant; S3 — moved from world/mod.rs).
 pub const BODY_RADIUS_PER_SIZE: f32 = 1.0;
 
 // ---- Spatial hash (v5 §3.3) ----
 pub const HASH_CELL: f32 = 5.0;
 pub const HASH_DIM: usize = (WORLD_SIZE / HASH_CELL) as usize; // 120
 
-// ---- Energy economy upkeep (v5 §7) ----
+// ---- Energy economy upkeep (v5 §7; D3: per-trait terms removed) ----
 pub const UPKEEP_BASE: f32 = 0.05;
-pub const UPKEEP_SIZE_PER_UNIT: f32 = 0.04;
-pub const UPKEEP_MOBILITY_FLAG: f32 = 0.10;
-pub const UPKEEP_MOVE_SPEED_PER_UNIT: f32 = 0.02;
-pub const UPKEEP_PER_EYE: f32 = 0.02;
-pub const UPKEEP_VISION_COEFF: f32 = 0.001;
 pub const UPKEEP_MOUTH_DEFAULT: f32 = 0.05; // slider in v6 §K
 pub const UPKEEP_GUT: f32 = 0.02;
-pub const UPKEEP_ARMOR_PER_UNIT: f32 = 0.03;
-pub const UPKEEP_LIFESPAN_PER_1K: f32 = 0.01;
 pub const UPKEEP_NN_FIXED: f32 = 0.05;
 
 // ---- One-time costs (v5 §7) ----
 pub const COST_EAT_ATTEMPT: f32 = 0.3;
-pub const COST_SCAVENGE_ATTEMPT: f32 = 0.1;
 pub const COST_MOVE_PER_DIST: f32 = 0.02;
-#[allow(dead_code)]
-pub const COST_SPLIT: f32 = 50.0;
 pub const SPLIT_GIFT_MAX: f32 = 30.0;
 pub const SPLIT_THRESHOLD: f32 = 50.0;
 
-// ---- Eat / scavenge (v5 §3.5) ----
+// ---- Eat (v5 §3.5; scavenge action removed in D9) ----
 /// Default per-bite energy transfer fraction. Predator removes
 /// `eat_bite_fraction * prey.energy * (1 - prey.armor)` per bite.
 /// Live-tunable via DevSliders.eat_bite_fraction (P3b adds slider).
 pub const EAT_BITE_FRACTION_DEFAULT: f32 = 0.5;
-#[allow(dead_code)] // D9 re-activates this when scavenge action is restored
-pub const SCAVENGE_GAIN_COEFF: f32 = 1.5;
 pub const DIGESTION_COOLDOWN_TICKS: u32 = 50;
 
 // ---- Past-lifespan penalty (v5 §7) ----
@@ -57,47 +43,30 @@ pub const NN_MUT_RATE_DEFAULT: f32 = 0.02;
 pub const NN_MUT_SIGMA_DEFAULT: f32 = 0.02;
 pub const NN_INIT_RANGE: f32 = 0.3; // uniform random weight initialisation range
 
-// ---- Body mutation (v5 §6) ----
-pub const BODY_MUT_RATE_DEFAULT: f32 = 0.03;
+// ---- Brain mutation (v5 §6; body mutation removed in D3) ----
 pub const MUT_RATE_OF_RATES: f32 = 0.005;
 pub const MUT_RATE_JITTER: f32 = 0.20;
 
-// ---- Genome bounds (v5 §4) ----
-pub const SIZE_MIN: f32 = 1.0;
-pub const SIZE_MAX: f32 = 10.0;
-pub const MAX_AGE_MIN: u32 = 100;
-pub const MAX_AGE_MAX: u32 = 50_000;
-pub const GRAZE_EFF_MIN: f32 = 0.0;
-pub const GRAZE_EFF_MAX: f32 = 2.0;
-pub const EAT_EFF_MIN: f32 = 0.0;
-pub const EAT_EFF_MAX: f32 = 2.0;
-pub const SCAVENGE_EFF_MIN: f32 = 0.0;
-pub const SCAVENGE_EFF_MAX: f32 = 2.0;
-pub const MOVE_SPEED_MIN: f32 = 0.0;
+// ---- Trait-range constants still used as named values ----
 pub const MOVE_SPEED_MAX: f32 = 5.0;
-pub const VISION_RANGE_MIN: f32 = 0.0;
 pub const VISION_RANGE_MAX: f32 = 80.0;
-pub const ARMOR_MIN: f32 = 0.0;
-pub const ARMOR_MAX: f32 = 1.0;
+/// Used in wasm_api creature_inspect_json as the reported bite_reach value.
 pub const BITE_REACH_MIN: f32 = 1.0;
-pub const BITE_REACH_MAX: f32 = 3.0;
+/// Used by creature.rs trig-cache initializer (always 24 active sectors).
 pub const EYE_SLOTS: usize = 24;
 pub const EYE_VALID: [u8; 8] = [0, 2, 3, 4, 6, 8, 12, 24];
-pub const NOSE_VALID: [u8; 6] = [0, 1, 2, 3, 4, 5];
+pub const EYE_STRIDE: [u8; 8] = [0, 12, 8, 6, 4, 3, 2, 1];
 
 // ---- Physics (v6 §D) ----
 pub const REPULSION_K: f32 = 2.0;
 pub const REPULSION_MAX: f32 = 5.0;
 
-// ---- Founder (Milestone B default; mutation kicks in C) ----
+// ---- Founder / constant body traits (D3: genome removed; all creatures share these) ----
 pub const FOUNDER_ENERGY: f32 = 200.0;
 pub const FOUNDER_SIZE: f32 = 1.0;
 pub const FOUNDER_MAX_AGE: u32 = 5000;
 pub const FOUNDER_GRAZE_EFF: f32 = 1.0;
 pub const FOUNDER_BITE_REACH: f32 = 1.0;
-pub const FOUNDER_PIGMENT_R: f32 = 0.30;
-pub const FOUNDER_PIGMENT_G: f32 = 0.75;
-pub const FOUNDER_PIGMENT_B: f32 = 0.35;
 pub const FOUNDER_SPLIT_JITTER: f32 = 50.0;
 
 // ---- Vision (v5 §10, v6 §E, Milestone C.12) ----
@@ -120,15 +89,6 @@ pub const POPULATION_MILESTONES: [u32; 6] = [10, 50, 100, 500, 1000, 2000];
 /// Number of vision sectors per creature. Matches EYE_SLOTS; kept in both
 /// vision.rs (re-export) and constants.rs (source of truth for creature.rs).
 pub const SECTORS: usize = 24;
-/// Lookup: index = position of eye_count in EYE_VALID; value = sector stride.
-/// EYE_VALID = [0, 2, 3, 4, 6, 8, 12, 24] → strides [-, 12, 8, 6, 4, 3, 2, 1].
-pub const EYE_STRIDE: [u8; 8] = [0, 12, 8, 6, 4, 3, 2, 1];
-
-// ---- Persistence (v5 §13, F.26/F.28) ----
-/// Ticks per "day" — used by resume prompt + eulogy card day count (F.26, F.28).
-/// At sim 1× (30 ticks/s), one "day" ≈ 33 wall-seconds. v5 §11 + F.26 DECISIONS.
-#[allow(dead_code)]
-pub const DAY_TICKS: u32 = 1000;
 
 // ---- Grass grid (v1.3 M1 — cell size doubled) ----
 /// Cell size in world-units. World is 600u → 120 cells per axis. See v1.3 M1
@@ -163,12 +123,12 @@ pub const GRAZE_MAX_PER_TICK: f32 = 0.4;
 
 // ---- NN input layout offsets (v1.3 D9) ----
 /// Self-state block length: [energy_frac, age_frac, prev_vx, prev_vy, cooldown_frac].
+/// Used in tests to verify layout; not referenced in production code paths.
+#[allow(dead_code)]
 pub const NN_SELF_STATE_LEN: usize = 5;
 /// Vision passthrough block start. 5 self-state slots before.
 pub const NN_VISION_OFFSET: usize = 5;
-/// Vision block length: 24 sectors × 3 RGB features.
-/// NOTE: vision.rs currently emits 24×5=120 floats (Q3 not yet landed).
-/// If VISION_LEN==120, slots [77..80) overlap; will be fixed when Q3 lands.
+/// Vision block length: 24 sectors × 3 RGB features (Q3: dist+size dropped).
 pub const NN_VISION_LEN: usize = 72;
 /// Last-action one-hot block start. After vision block (5 + 72 = 77).
 pub const NN_LAST_ACTION_OFFSET: usize = 77;
@@ -176,9 +136,12 @@ pub const NN_LAST_ACTION_OFFSET: usize = 77;
 pub const NN_LAST_ACTION_LEN: usize = 3;
 /// Grass-patch 5×5 block start (77 + 3 = 80).
 pub const NN_GRASS_PATCH_OFFSET: usize = 80;
-/// Grass-patch block length.
+/// Grass-patch block length. Used in tests to verify layout.
+#[allow(dead_code)]
 pub const NN_GRASS_PATCH_LEN: usize = 25;
 /// Grass-patch center sample (dx=dy=0); 5×5 iteration is dy outer, dx inner,
 /// offset = (dy+2)*5 + (dx+2). Center: dy=0,dx=0 → 12; global slot 80+12 = 92.
+/// Used in tests to pin the center-slot index.
+#[allow(dead_code)]
 pub const NN_GRASS_PATCH_CENTER_SLOT: usize = NN_GRASS_PATCH_OFFSET + 12; // = 92
                                                                           // Slots [105..112) are SIMD padding zeros.

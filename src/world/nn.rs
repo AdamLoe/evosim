@@ -1,6 +1,6 @@
 //! NN forward pass and action-decode helpers. Both sequential and threaded paths live here.
 //! v1.3 D9: Action enum collapsed to {Graze=0, Eat=1, Split=2}. NN_OUTPUTS=5.
-//! move_bias_* deleted. decode_action/is_valid_action take no Genome param.
+//! decode_action/is_valid_action take no Genome param (genome removed in D3).
 
 use super::World;
 use crate::constants::*;
@@ -180,9 +180,10 @@ pub(crate) fn chunk_ranges(n: usize) -> [(usize, usize); N_CHUNKS] {
 /// `grass` is the world's grass density field, read-only during NN forward.
 ///
 /// D3: genome deleted; all body traits are compile-time constants.
+/// Q3: vision is RGB-only (24×3 = 72 floats); dist and size slots removed.
 /// Layout (NN_INPUTS=112 slots total):
-/// - `[0..5]` self-state (energy_frac, age_frac, prev_vx, prev_vy, cooldown_frac)
-/// - `[5..77]` vision passthrough (72 floats = 24 sectors × 3 RGB)
+/// - `[0..5]`   self-state (energy_frac, age_frac, prev_vx, prev_vy, cooldown_frac)
+/// - `[5..77]`  vision (72 floats = 24 sectors × 3 RGB)
 /// - `[77..80]` last_action one-hot (3 actions: Graze/Eat/Split)
 /// - `[80..105]` grass-patch 5×5 bilinear samples
 /// - `[105..112]` SIMD padding zeros
@@ -208,10 +209,9 @@ pub(crate) fn build_nn_input(
     buf[4] = cooldown as f32 / DIGESTION_COOLDOWN_TICKS as f32; // cooldown_frac
                                                                 // buf[5..NN_VISION_OFFSET]: If NN_SELF_STATE_LEN < NN_VISION_OFFSET, extra slots stay 0.
 
-    // Vision passthrough (raw world units, C.12 contract).
-    // NOTE: VISION_LEN=120 (24×5) but NN_VISION_LEN=72 (24×3). Copy only 72 floats (D9 owns Q3 shrink).
-    let copy_len = crate::vision::VISION_LEN.min(NN_VISION_LEN);
-    buf[NN_VISION_OFFSET..NN_VISION_OFFSET + copy_len].copy_from_slice(&vision[..copy_len]);
+    // Vision passthrough: VISION_LEN == NN_VISION_LEN == 72 (24 sectors × 3 RGB, Q3).
+    buf[NN_VISION_OFFSET..NN_VISION_OFFSET + NN_VISION_LEN]
+        .copy_from_slice(&vision[..NN_VISION_LEN]);
 
     // Last-action one-hot. Action::one_hot_index() maps each variant to its discriminant.
     let la = creatures.last_action[i].one_hot_index();
@@ -336,10 +336,16 @@ mod tests {
 
     /// D3/v1.3 layout contract.
     /// NN_INPUTS = 112: 5 self-state + 72 vision + 3 last_action + 25 grass-patch + 7 pad.
+    /// Q3: VISION_LEN == NN_VISION_LEN == 72 (24 sectors × 3 RGB).
     #[test]
     fn vision_layout_matches_nn_input_block() {
         use crate::vision::VISION_LEN;
-        assert_eq!(VISION_LEN, 120);
+        // Q3: FEATURES_PER_SECTOR=3 → VISION_LEN=72.
+        assert_eq!(VISION_LEN, 72);
+        assert_eq!(
+            VISION_LEN, NN_VISION_LEN,
+            "VISION_LEN must equal NN_VISION_LEN"
+        );
         // D3: NN_INPUTS=112; NN_SELF_STATE_LEN=5, NN_VISION_LEN=72, NN_LAST_ACTION_LEN=3, grass=25, pad=7.
         assert_eq!(
             NN_INPUTS,

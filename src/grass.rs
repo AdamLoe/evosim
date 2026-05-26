@@ -207,15 +207,6 @@ impl GrassGrid {
     }
 }
 
-/// Convert continuous world coords to a flat cell index (clamped).
-#[allow(dead_code)]
-#[inline]
-pub fn cell_index_for(x: f32, y: f32) -> usize {
-    let ix = ((x / GRASS_CELL_SIZE).floor() as i32).clamp(0, GRASS_GRID_DIM as i32 - 1) as usize;
-    let iy = ((y / GRASS_CELL_SIZE).floor() as i32).clamp(0, GRASS_GRID_DIM as i32 - 1) as usize;
-    iy * GRASS_GRID_DIM + ix
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

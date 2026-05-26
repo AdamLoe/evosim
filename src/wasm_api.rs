@@ -167,7 +167,7 @@ impl WorldHandle {
     /// `[x, y, radius_world, r, g, b,
     ///   flag_eye, flag_move, flag_scav, flag_mouth, flag_armor]`.
     /// Ring flags: 1.0 if trait > 0, else 0.0. See v6 §B for ring order.
-    /// D3: genome deleted — body traits are compile-time constants; pigment is 0.5 gray.
+    /// D3: genome deleted — body traits are compile-time constants; color is NN-weight hash.
     #[wasm_bindgen]
     pub fn creatures_buffer(&mut self) -> js_sys::Float32Array {
         let n = self.inner.creatures.len();
@@ -519,7 +519,7 @@ fn wasm_now_ms() -> f64 {
 
 /// Per-creature float count in [`WorldHandle::creatures_buffer`].
 /// v1.1 layout (audit S21): 11 floats.
-/// Offset 0..6: x, y, radius_world, pigment_r, pigment_g, pigment_b.
+/// Offset 0..6: x, y, radius_world, color_r, color_g, color_b (NN-weight hash).
 /// Offset 6..11: flag_eye, flag_move, flag_scav, flag_mouth, flag_armor.
 #[wasm_bindgen]
 pub fn creature_stride() -> u32 {

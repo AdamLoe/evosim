@@ -821,7 +821,7 @@ mod tests {
         clear_fake_clock(); // Use real clock for this test.
 
         const ITERS: usize = 10_000;
-        // 11 named sub-spans per tick (D2 removed decay_carrion span).
+        // 10 named sub-spans per tick.
         const SPANS_PER_ITER: usize = 11;
 
         let p = Profiler::new();
@@ -838,7 +838,7 @@ mod tests {
             drop(_c);
             let _graze = p.push("graze");
             drop(_graze);
-            let _e = p.push("eat_and_scavenge");
+            let _e = p.push("eat");
             drop(_e);
             let _grass = p.push("grass_step");
             drop(_grass);
