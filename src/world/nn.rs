@@ -47,21 +47,6 @@ pub(crate) fn count_carrion_overlap(
     count
 }
 
-/// Returns 1.0 if creature `i` is within `WALL_THRESHOLD_PAD` of any wall edge,
-/// else 0.0. Uses creature radius (size × BODY_RADIUS_PER_SIZE) for consistency
-/// with the physics step. Used by BOTH sequential and threaded NN paths (audit S11).
-pub(crate) fn compute_is_at_wall(creatures: &CreatureSoA, i: usize) -> f32 {
-    let x = creatures.x[i];
-    let y = creatures.y[i];
-    let r = creatures.g_size[i] * BODY_RADIUS_PER_SIZE; // perf-5: mirror
-    let near = x.min(y).min(WORLD_SIZE - x).min(WORLD_SIZE - y);
-    if near < r + WALL_THRESHOLD_PAD {
-        1.0
-    } else {
-        0.0
-    }
-}
-
 impl World {
     /// Run the NN forward pass for all creatures across fixed chunks (v6 §J).
     /// Sequential by default; rayon-parallel behind `cfg(feature = "threads")`.
@@ -124,7 +109,6 @@ impl World {
                                 cell_to_carrion_ref,
                                 i,
                             );
-                            let is_at_wall = compute_is_at_wall(creatures_ref, i);
                             let (vx, vy, action) = pick_action_d(
                                 i,
                                 &mut input_buf,
@@ -133,7 +117,6 @@ impl World {
                                 creatures_ref,
                                 &vision_ref[i],
                                 overlap,
-                                is_at_wall,
                                 prev_vx,
                                 prev_vy,
                             );
@@ -165,7 +148,6 @@ impl World {
             for i in lo..hi {
                 let overlap =
                     count_carrion_overlap(&self.creatures, &self.carrion, &self.cell_to_carrion, i);
-                let is_at_wall = compute_is_at_wall(&self.creatures, i);
                 let prev_vx = self.creatures.vx[i];
                 let prev_vy = self.creatures.vy[i];
                 let (vx, vy, action) = pick_action_d(
@@ -176,7 +158,6 @@ impl World {
                     &self.creatures,
                     &self.vision[i],
                     overlap,
-                    is_at_wall,
                     prev_vx,
                     prev_vy,
                 );
@@ -241,13 +222,12 @@ pub(crate) fn chunk_ranges(n: usize) -> [(usize, usize); N_CHUNKS] {
 /// values even when the vx/vy SoA columns have been temporarily detached via
 /// `mem::take` for the parallel NN path (S23).
 ///
-/// Layout: `[0..10]` self-state, `[10..130]` vision passthrough, `[130..136]` last_action one-hot, `[136..160]` reserved zero (P2b/P2d will fill).
+/// Layout: `[0..9]` self-state, `[9..129]` vision passthrough, `[129..135]` last_action one-hot, `[135..160]` reserved (P2d fills with grass-patch).
 pub(crate) fn build_nn_input(
     i: usize,
     creatures: &CreatureSoA,
     vision: &VisionBuf,
     carrion_overlap_count: u32,
-    is_at_wall_flag: f32,
     prev_vx: f32,
     prev_vy: f32,
 ) -> [f32; NN_INPUTS] {
@@ -259,7 +239,7 @@ pub(crate) fn build_nn_input(
     let age = creatures.age[i];
     let cooldown = creatures.digestion_cooldown[i];
 
-    // 0..10: self-state (v6 §E "Self-state layout (10)").
+    // 0..9: self-state (v6 §E "Self-state layout (9)"; is_at_wall removed in P2b).
     buf[0] = (energy / 100.0).clamp(0.0, 1.0); // energy_frac
     buf[1] = if g.max_age > 0 {
         (age as f32 / g.max_age as f32).clamp(0.0, 1.0)
@@ -269,17 +249,16 @@ pub(crate) fn build_nn_input(
     buf[2] = size_i / SIZE_MAX; // size (normalized)
     buf[3] = prev_vx / MOVE_SPEED_MAX; // vx (previous-tick post-clip)
     buf[4] = prev_vy / MOVE_SPEED_MAX; // vy
-    buf[5] = is_at_wall_flag; // is_at_wall
-    buf[6] = cooldown as f32 / DIGESTION_COOLDOWN_TICKS as f32; // cooldown_frac
-    buf[7] = (carrion_overlap_count as f32 / CARRION_OVERLAP_NORM_BASE).min(1.0); // carrion_overlap_norm
-                                                                                  // buf[8], buf[9]: reserved zero (v5 §5.1).
+    buf[5] = cooldown as f32 / DIGESTION_COOLDOWN_TICKS as f32; // cooldown_frac
+    buf[6] = (carrion_overlap_count as f32 / CARRION_OVERLAP_NORM_BASE).min(1.0); // carrion_overlap_norm
+                                                                                  // buf[7], buf[8]: reserved zero (v5 §5.1).
 
-    // 10..130: vision passthrough (raw world units, C.12 contract).
-    buf[10..130].copy_from_slice(vision);
+    // 9..129: vision passthrough (raw world units, C.12 contract).
+    buf[NN_VISION_OFFSET..NN_VISION_OFFSET + 120].copy_from_slice(vision);
 
-    // 130..136: last_action one-hot (v6 §2 + §E).
+    // 129..135: last_action one-hot (v6 §2 + §E).
     let la = creatures.last_action[i].one_hot_index();
-    buf[130 + la] = 1.0;
+    buf[NN_LAST_ACTION_OFFSET + la] = 1.0;
 
     buf
 }
@@ -341,7 +320,6 @@ pub(crate) fn pick_action_d(
     creatures: &CreatureSoA,
     vision: &VisionBuf,
     carrion_overlap_count: u32,
-    is_at_wall_flag: f32,
     prev_vx: f32,
     prev_vy: f32,
 ) -> (f32, f32, Action) {
@@ -350,7 +328,6 @@ pub(crate) fn pick_action_d(
         creatures,
         vision,
         carrion_overlap_count,
-        is_at_wall_flag,
         prev_vx,
         prev_vy,
     );
@@ -390,14 +367,13 @@ mod tests {
     use super::*;
 
     /// C.12 test 7: vision layout contract for D.
-    /// VISION_LEN == 120 and NN_INPUTS == 10 + VISION_LEN + 6 + 24 (== 160).
+    /// VISION_LEN == 120 and NN_INPUTS == 9 + VISION_LEN + 6 + 25 (== 160).
     #[test]
     fn vision_layout_matches_nn_input_block() {
         use crate::vision::VISION_LEN;
         assert_eq!(VISION_LEN, 120);
-        // Under P2a alone: 10 self-state + 120 vision + 6 last_action + 24 reserved zeros
-        // (P2b removes is_at_wall = -1; P2d adds 25 grass-patch = +25; net +24 vs pre-P2a).
-        assert_eq!(NN_INPUTS, 10 + VISION_LEN + 6 + 24);
+        // Post-P2b: 9 self-state + 120 vision + 6 last_action + 25 reserved (P2d fills grass-patch).
+        assert_eq!(NN_INPUTS, 9 + VISION_LEN + 6 + 25);
     }
 
     // ---- D.16 tests ----
@@ -420,7 +396,7 @@ mod tests {
         let vision = [0.0f32; VISION_LEN];
         let prev_vx = w.creatures.vx[0];
         let prev_vy = w.creatures.vy[0];
-        let inp = build_nn_input(0, &w.creatures, &vision, 2, 0.0, prev_vx, prev_vy);
+        let inp = build_nn_input(0, &w.creatures, &vision, 2, prev_vx, prev_vy);
         // energy_frac
         assert!((inp[0] - 0.5).abs() < 1e-5, "energy_frac = {}", inp[0]);
         // age_frac
@@ -431,15 +407,13 @@ mod tests {
         assert!((inp[3] - 0.5).abs() < 1e-5, "vx_norm = {}", inp[3]);
         // vy: -5.0/5.0 = -1.0
         assert!((inp[4] - (-1.0)).abs() < 1e-5, "vy_norm = {}", inp[4]);
-        // is_at_wall = 0.0 (founder at center)
-        assert_eq!(inp[5], 0.0, "is_at_wall");
-        // cooldown_frac
-        assert!((inp[6] - 0.5).abs() < 1e-5, "cooldown_frac = {}", inp[6]);
-        // carrion_overlap: 2/4 = 0.5
-        assert!((inp[7] - 0.5).abs() < 1e-5, "carrion_norm = {}", inp[7]);
-        // reserved zeros
+        // cooldown_frac (shifted from slot 6 to slot 5 after is_at_wall deletion)
+        assert!((inp[5] - 0.5).abs() < 1e-5, "cooldown_frac = {}", inp[5]);
+        // carrion_overlap: 2/4 = 0.5 (shifted from slot 7 to slot 6)
+        assert!((inp[6] - 0.5).abs() < 1e-5, "carrion_norm = {}", inp[6]);
+        // reserved zeros (shifted from slots 8,9 to slots 7,8)
+        assert_eq!(inp[7], 0.0);
         assert_eq!(inp[8], 0.0);
-        assert_eq!(inp[9], 0.0);
     }
 
     /// D.16 test 9: vision passthrough — input[10..130] == vision[0] byte-exact.
@@ -454,9 +428,9 @@ mod tests {
         }
         let prev_vx = w.creatures.vx[0];
         let prev_vy = w.creatures.vy[0];
-        let inp = build_nn_input(0, &w.creatures, &vis, 0, 0.0, prev_vx, prev_vy);
+        let inp = build_nn_input(0, &w.creatures, &vis, 0, prev_vx, prev_vy);
         assert_eq!(
-            &inp[10..130],
+            &inp[9..129],
             &vis[..],
             "vision passthrough must be byte-exact"
         );
@@ -471,15 +445,15 @@ mod tests {
         let vision = [0.0f32; VISION_LEN];
         let prev_vx = w.creatures.vx[0];
         let prev_vy = w.creatures.vy[0];
-        let inp = build_nn_input(0, &w.creatures, &vision, 0, 0.0, prev_vx, prev_vy);
+        let inp = build_nn_input(0, &w.creatures, &vision, 0, prev_vx, prev_vy);
         let eat_idx = Action::Eat.one_hot_index(); // should be 2
         for k in 0..6 {
             let expected = if k == eat_idx { 1.0 } else { 0.0 };
             assert_eq!(
-                inp[130 + k],
+                inp[129 + k],
                 expected,
                 "last_action one-hot[{k}] = {} (expected {expected})",
-                inp[130 + k]
+                inp[129 + k]
             );
         }
     }
@@ -747,53 +721,6 @@ mod tests {
         // Suppress unused-variable warnings from the buffers we allocated above.
         let _ = &input_buf;
         let _ = &hidden_buf;
-    }
-
-    /// S11: helpers_match_legacy_inline_math — confirms the free-fn helpers produce
-    /// correct values by re-computing results from scratch in the test body.
-    #[test]
-    fn helpers_match_legacy_inline_math() {
-        use crate::carrion::Carrion;
-
-        let mut w = World::new("s11-helpers");
-        // Ensure the founder is near a wall and there's a carrion in the overlap zone.
-        // Place the founder near the west wall so is_at_wall fires.
-        let r = w.creatures.g_size[0] * BODY_RADIUS_PER_SIZE;
-        w.creatures.x[0] = r + WALL_THRESHOLD_PAD * 0.5; // within WALL_THRESHOLD_PAD of west wall
-        w.creatures.y[0] = WORLD_SIZE * 0.5;
-
-        // Add a carrion at the creature's position so overlap == 1.
-        w.carrion.push(Carrion {
-            id: 999,
-            x: w.creatures.x[0],
-            y: w.creatures.y[0],
-            pool: 1.0,
-            age: 0,
-        });
-        // Rebuild the cell_to_carrion index.
-        crate::vision::build_cell_to_carrion(&w.carrion, &mut w.cell_to_carrion);
-
-        // Call the free-fn helpers.
-        let overlap = count_carrion_overlap(&w.creatures, &w.carrion, &w.cell_to_carrion, 0);
-        let is_wall = compute_is_at_wall(&w.creatures, 0);
-
-        // Verify: the carrion is at the creature's position so overlap >= 1.
-        assert!(overlap >= 1, "overlap should be at least 1, got {overlap}");
-
-        // Verify: creature is within WALL_THRESHOLD_PAD of west wall.
-        assert_eq!(
-            is_wall, 1.0,
-            "creature near west wall must have is_at_wall = 1.0"
-        );
-
-        // Verify a creature far from the wall has is_at_wall = 0.0.
-        w.creatures.x[0] = WORLD_SIZE * 0.5;
-        w.creatures.y[0] = WORLD_SIZE * 0.5;
-        let far_wall = compute_is_at_wall(&w.creatures, 0);
-        assert_eq!(
-            far_wall, 0.0,
-            "creature at center must have is_at_wall = 0.0"
-        );
     }
 
     /// S23: threaded NN par_chunks_mut path produces the same vx/vy/action_this_tick

@@ -73,7 +73,7 @@ pub struct CreatureSoA {
     // equal to genomes[i].<field>. Written only by `push`, `remove_indices`,
     // and `resync_hot_mirrors_at`. Read by every per-tick hot phase
     // (graze_step, energy_bookkeeping, apply_movement_and_repulsion,
-    // build_nn_input, count_carrion_overlap, compute_is_at_wall,
+    // build_nn_input, count_carrion_overlap,
     // eat_and_scavenge, VisionPass::fill_one).
     /// Mirror of genomes[i].size. Written ONLY by CreatureSoA::push,
     /// remove_indices, and resync_hot_mirrors_at. Read by hot tick paths.

@@ -98,7 +98,6 @@ pub const EYE_VALID: [u8; 8] = [0, 2, 3, 4, 6, 8, 12, 24];
 // ---- Physics (v6 §D) ----
 pub const REPULSION_K: f32 = 2.0;
 pub const REPULSION_MAX: f32 = 5.0;
-pub const WALL_THRESHOLD_PAD: f32 = 5.0; // is_at_wall iff dist < size + pad
 
 // ---- Founder (Milestone B default; mutation kicks in C) ----
 pub const FOUNDER_ENERGY: f32 = 200.0;
@@ -187,3 +186,16 @@ pub const GRASS_INITIAL_SEED_COUNT_DEFAULT: u32 = 50;
 ///   - 0.5 (P1h iteration): targets pop>0 at T=10000 by giving splits enough buffer to
 ///     outrun the past-lifespan upkeep cliff.
 pub const GRAZE_MAX_PER_TICK: f32 = 0.4;
+
+// ---- NN input layout offsets (v1.2 — see P2b/P2d) ----
+/// Vision passthrough block start (post-is_at_wall-deletion). 9 self-state slots before.
+pub const NN_VISION_OFFSET: usize = 9;
+/// Last-action one-hot block start. After 120-float vision passthrough.
+pub const NN_LAST_ACTION_OFFSET: usize = 129;
+/// Grass-patch 5x5 block start (P2d fills slots 135..160).
+#[allow(dead_code)] // P2d fills
+pub const NN_GRASS_PATCH_OFFSET: usize = 135;
+/// Grass-patch center sample (dx=dy=0); 5x5 iteration is dy outer, dx inner,
+/// offset = (dy+2)*5 + (dx+2). Center: dy=0,dx=0 → 12; global slot 135+12 = 147.
+#[allow(dead_code)] // P2f reads
+pub const NN_GRASS_PATCH_CENTER_SLOT: usize = 147;
