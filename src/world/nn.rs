@@ -5,6 +5,7 @@ use crate::carrion::Carrion;
 use crate::constants::*;
 use crate::creature::{Action, CreatureSoA};
 use crate::genome::Genome;
+use crate::grass::GrassGrid;
 use crate::vision::{CarrionIndex, VisionBuf};
 #[cfg(feature = "threads")]
 use rayon::prelude::*;
@@ -75,6 +76,7 @@ impl World {
                 let vision_ref = &self.vision[..n];
                 let carrion_ref = &self.carrion;
                 let cell_to_carrion_ref = &self.cell_to_carrion;
+                let grass_ref = &self.grass;
 
                 // Compute chunk_size identically to chunk_ranges (N_CHUNKS = 8).
                 let chunk_size = chunk_base_size(n);
@@ -116,6 +118,7 @@ impl World {
                                 &mut output_buf,
                                 creatures_ref,
                                 &vision_ref[i],
+                                grass_ref,
                                 overlap,
                                 prev_vx,
                                 prev_vy,
@@ -157,6 +160,7 @@ impl World {
                     &mut output_buf,
                     &self.creatures,
                     &self.vision[i],
+                    &self.grass,
                     overlap,
                     prev_vx,
                     prev_vy,
@@ -222,11 +226,20 @@ pub(crate) fn chunk_ranges(n: usize) -> [(usize, usize); N_CHUNKS] {
 /// values even when the vx/vy SoA columns have been temporarily detached via
 /// `mem::take` for the parallel NN path (S23).
 ///
-/// Layout: `[0..9]` self-state, `[9..129]` vision passthrough, `[129..135]` last_action one-hot, `[135..160]` reserved (P2d fills with grass-patch).
+/// `grass` is the world's grass density field, read-only during NN forward.
+///
+/// Layout (160 slots total):
+/// - `[0..9]` self-state (energy_frac, age_frac, size_norm, vx, vy, cooldown_frac,
+///   carrion_overlap_norm, reserved×2)
+/// - `[9..129]` vision passthrough (120 floats, raw world units)
+/// - `[129..135]` last_action one-hot (6 actions)
+/// - `[135..160]` grass-patch 5×5 bilinear samples (dy outer, dx inner;
+///   center dx=dy=0 → slot 147; P2d fills; P2e gates on nose_count)
 pub(crate) fn build_nn_input(
     i: usize,
     creatures: &CreatureSoA,
     vision: &VisionBuf,
+    grass: &GrassGrid,
     carrion_overlap_count: u32,
     prev_vx: f32,
     prev_vy: f32,
@@ -259,6 +272,25 @@ pub(crate) fn build_nn_input(
     // 129..135: last_action one-hot (v6 §2 + §E).
     let la = creatures.last_action[i].one_hot_index();
     buf[NN_LAST_ACTION_OFFSET + la] = 1.0;
+
+    // 135..160: 25 grass-patch inputs (5x5 bilinear, dy outer, dx inner; v1.2 P2d).
+    // Slot offset within block: (dy+2)*5 + (dx+2). Center (dx=dy=0) -> global slot 147.
+    // P2e (next piece) gates this block on creatures.g_nose_count[i] >= 1.
+    // Until then, all creatures see the patch.
+    let cx = creatures.x[i];
+    let cy = creatures.y[i];
+    debug_assert!(
+        cx.is_finite() && cy.is_finite(),
+        "non-finite position for creature {i}"
+    );
+    for dy in -2i32..=2 {
+        for dx in -2i32..=2 {
+            let sx = cx + (dx as f32) * GRASS_CELL_SIZE;
+            let sy = cy + (dy as f32) * GRASS_CELL_SIZE;
+            let off = ((dy + 2) as usize) * 5 + ((dx + 2) as usize);
+            buf[NN_GRASS_PATCH_OFFSET + off] = grass.bilinear_sample(sx, sy);
+        }
+    }
 
     buf
 }
@@ -319,6 +351,7 @@ pub(crate) fn pick_action_d(
     output_buf: &mut [f32; NN_OUTPUTS],
     creatures: &CreatureSoA,
     vision: &VisionBuf,
+    grass: &GrassGrid,
     carrion_overlap_count: u32,
     prev_vx: f32,
     prev_vy: f32,
@@ -327,6 +360,7 @@ pub(crate) fn pick_action_d(
         i,
         creatures,
         vision,
+        grass,
         carrion_overlap_count,
         prev_vx,
         prev_vy,
@@ -396,7 +430,8 @@ mod tests {
         let vision = [0.0f32; VISION_LEN];
         let prev_vx = w.creatures.vx[0];
         let prev_vy = w.creatures.vy[0];
-        let inp = build_nn_input(0, &w.creatures, &vision, 2, prev_vx, prev_vy);
+        let grass = GrassGrid::new(&mut crate::rng::SimRng::from_u64(0), 0);
+        let inp = build_nn_input(0, &w.creatures, &vision, &grass, 2, prev_vx, prev_vy);
         // energy_frac
         assert!((inp[0] - 0.5).abs() < 1e-5, "energy_frac = {}", inp[0]);
         // age_frac
@@ -428,7 +463,8 @@ mod tests {
         }
         let prev_vx = w.creatures.vx[0];
         let prev_vy = w.creatures.vy[0];
-        let inp = build_nn_input(0, &w.creatures, &vis, 0, prev_vx, prev_vy);
+        let grass = GrassGrid::new(&mut crate::rng::SimRng::from_u64(0), 0);
+        let inp = build_nn_input(0, &w.creatures, &vis, &grass, 0, prev_vx, prev_vy);
         assert_eq!(
             &inp[9..129],
             &vis[..],
@@ -445,7 +481,8 @@ mod tests {
         let vision = [0.0f32; VISION_LEN];
         let prev_vx = w.creatures.vx[0];
         let prev_vy = w.creatures.vy[0];
-        let inp = build_nn_input(0, &w.creatures, &vision, 0, prev_vx, prev_vy);
+        let grass = GrassGrid::new(&mut crate::rng::SimRng::from_u64(0), 0);
+        let inp = build_nn_input(0, &w.creatures, &vision, &grass, 0, prev_vx, prev_vy);
         let eat_idx = Action::Eat.one_hot_index(); // should be 2
         for k in 0..6 {
             let expected = if k == eat_idx { 1.0 } else { 0.0 };
@@ -805,6 +842,207 @@ mod tests {
                 "action_this_tick[{i}] mismatch: seq={:?} par={:?}",
                 w_seq.creatures.action_this_tick[i], w_par.creatures.action_this_tick[i]
             );
+        }
+    }
+
+    // ---- P2d grass-patch NN input tests ----
+
+    /// P2d test 1: all-density-1.0 grass → inp[135..160] all ≈ 1.0.
+    #[test]
+    fn nn_input_patch_layout_basic() {
+        use crate::vision::VISION_LEN;
+        let w = World::new("p2d-basic");
+        // Seed all cells at GRASS_MAX (1.0); bilinear sample anywhere returns 1.0.
+        let mut grass = GrassGrid::new(&mut crate::rng::SimRng::from_u64(0), 0);
+        for d in grass.density.iter_mut() {
+            *d = 1.0;
+        }
+        let vision = [0.0f32; VISION_LEN];
+        let prev_vx = w.creatures.vx[0];
+        let prev_vy = w.creatures.vy[0];
+        let inp = build_nn_input(0, &w.creatures, &vision, &grass, 0, prev_vx, prev_vy);
+        for k in 0..25 {
+            assert!(
+                (inp[NN_GRASS_PATCH_OFFSET + k] - 1.0).abs() < 1e-5,
+                "patch slot {} = {} (expected 1.0)",
+                NN_GRASS_PATCH_OFFSET + k,
+                inp[NN_GRASS_PATCH_OFFSET + k]
+            );
+        }
+    }
+
+    /// P2d test 2: pins center-slot index. Single seeded cell at creature's position
+    /// → inp[147] == seeded value, all other patch slots == 0.0.
+    /// This is the most important test — it locks the iteration-order for P2f's hardwiring.
+    ///
+    /// Strategy: place creature exactly at a grass cell center so bilinear tx=ty=0,
+    /// making bilinear_sample return the seeded cell's density exactly. Seed ONLY that
+    /// cell; all 24 offset sample points land on different cells (all-zero).
+    #[test]
+    fn nn_input_patch_iteration_order_locked() {
+        use crate::vision::VISION_LEN;
+        let mut w = World::new("p2d-center");
+        // Place the creature at the center of grass cell (120, 120).
+        // Cell center world coords: (ix + 0.5) * GRASS_CELL_SIZE.
+        // bilinear_sample at this position: fx = (120.5*2.5)/2.5 - 0.5 = 120.0
+        // → ix0=120, tx=0.0 → sample = density[iy0*dim + ix0] exactly.
+        let cell_ix: usize = 120;
+        let cell_iy: usize = 120;
+        let cx = (cell_ix as f32 + 0.5) * GRASS_CELL_SIZE;
+        let cy = (cell_iy as f32 + 0.5) * GRASS_CELL_SIZE;
+        w.creatures.x[0] = cx;
+        w.creatures.y[0] = cy;
+        // Seed ONLY this cell. The 24 offset sample points (dx/dy ∈ {-2,-1,+1,+2})
+        // land on adjacent cells which remain zero, so all non-center slots stay 0.0.
+        let center_cell = cell_iy * crate::constants::GRASS_GRID_DIM + cell_ix;
+        let mut grass = GrassGrid::new(&mut crate::rng::SimRng::from_u64(0), 0);
+        grass.density[center_cell] = 0.5;
+        let vision = [0.0f32; VISION_LEN];
+        let prev_vx = w.creatures.vx[0];
+        let prev_vy = w.creatures.vy[0];
+        let inp = build_nn_input(0, &w.creatures, &vision, &grass, 0, prev_vx, prev_vy);
+        // Center slot 147 must be the seeded value exactly.
+        assert!(
+            (inp[NN_GRASS_PATCH_CENTER_SLOT] - 0.5).abs() < 1e-5,
+            "center slot {} = {} (expected 0.5)",
+            NN_GRASS_PATCH_CENTER_SLOT,
+            inp[NN_GRASS_PATCH_CENTER_SLOT]
+        );
+        // All other patch slots must be zero.
+        for k in 0..25 {
+            let slot = NN_GRASS_PATCH_OFFSET + k;
+            if slot == NN_GRASS_PATCH_CENTER_SLOT {
+                continue;
+            }
+            assert_eq!(
+                inp[slot], 0.0,
+                "patch slot {slot} = {} (expected 0.0 — only center seeded)",
+                inp[slot]
+            );
+        }
+    }
+
+    /// P2d test 3: constant pinning — NN_GRASS_PATCH_CENTER_SLOT == 147.
+    #[test]
+    fn nn_input_patch_center_slot_is_147() {
+        assert_eq!(
+            NN_GRASS_PATCH_CENTER_SLOT, 147,
+            "center slot must be 147 (P2f depends on this)"
+        );
+    }
+
+    /// P2d test 4: toroidal seam wrap — creature near origin, seed grass near
+    /// opposite corner. The dx=-2,dy=-2 sample (slot 135) must read wrapped cells.
+    #[test]
+    fn nn_input_patch_seam_wrap() {
+        use crate::grass::cell_index_for;
+        use crate::vision::VISION_LEN;
+        // Place creature near the world origin (world wraps at WORLD_SIZE = 600.0).
+        let mut w = World::new("p2d-seam");
+        // Move founder to (1.0, 1.0) — close to the west/north seam.
+        w.creatures.x[0] = 1.0;
+        w.creatures.y[0] = 1.0;
+
+        // The dx=-2, dy=-2 sample point is at:
+        //   sx = 1.0 + (-2) * GRASS_CELL_SIZE = 1.0 - 5.0 = -4.0 → wraps to ~596.0
+        //   sy = 1.0 + (-2) * GRASS_CELL_SIZE = 1.0 - 5.0 = -4.0 → wraps to ~596.0
+        let sx = 1.0_f32 + (-2_f32) * GRASS_CELL_SIZE;
+        let sy = 1.0_f32 + (-2_f32) * GRASS_CELL_SIZE;
+        // Seed the cell containing that wrapped position.
+        let mut grass = GrassGrid::new(&mut crate::rng::SimRng::from_u64(0), 0);
+        let wrapped_cell = cell_index_for(sx, sy);
+        grass.density[wrapped_cell] = 0.8;
+
+        let vision = [0.0f32; VISION_LEN];
+        let prev_vx = w.creatures.vx[0];
+        let prev_vy = w.creatures.vy[0];
+        let inp = build_nn_input(0, &w.creatures, &vision, &grass, 0, prev_vx, prev_vy);
+        // Slot 135 = NN_GRASS_PATCH_OFFSET + 0 = dx=-2, dy=-2 sample.
+        let slot135 = inp[NN_GRASS_PATCH_OFFSET];
+        assert!(
+            slot135 > 0.0,
+            "seam-wrap slot 135 = {slot135} (expected > 0.0 — wrapped cell seeded)"
+        );
+    }
+
+    /// P2d test 5: threaded path produces same inp[135..160] as sequential path.
+    /// Subsumed by S23's existing threaded_nn_in_place_writes_match_sequential but
+    /// extended here to explicitly assert the grass-patch block is bit-identical.
+    /// Gated on `threads` feature.
+    #[cfg(feature = "threads")]
+    #[test]
+    fn nn_input_patch_threaded_matches_sequential() {
+        use crate::world::nn::chunk_ranges;
+
+        // Advance a world to a multi-creature state with grass seeded.
+        let seeds = ["p2d-threads", "p2d-threads-2", "p2d-threads-3"];
+        let w_base = {
+            let mut found = None;
+            'outer: for seed in seeds {
+                let mut w = World::new(seed);
+                w.force_sequential_nn = true;
+                for _ in 0..2000 {
+                    if !w.step() {
+                        break;
+                    }
+                    if w.creatures.len() >= 2 {
+                        found = Some(w);
+                        break 'outer;
+                    }
+                }
+            }
+            found.expect("no seed produced ≥2 creatures within 2000 ticks")
+        };
+        let n = w_base.creatures.len();
+
+        let snap = w_base.to_save_v1();
+        let mut w_seq = World::from_save_v1(snap.clone()).expect("seq load");
+        let mut w_par = World::from_save_v1(snap).expect("par load");
+
+        crate::vision::build_cell_to_carrion(&w_seq.carrion, &mut w_seq.cell_to_carrion);
+        crate::vision::build_cell_to_carrion(&w_par.carrion, &mut w_par.cell_to_carrion);
+
+        let ranges = chunk_ranges(n);
+        w_seq.force_sequential_nn = true;
+        w_seq.nn_forward_all_chunks(&ranges, n);
+
+        w_par.force_sequential_nn = false;
+        w_par.nn_forward_all_chunks(&ranges, n);
+
+        // Build NN inputs for each creature under both paths and assert patch block is identical.
+        use crate::vision::VISION_LEN;
+        for i in 0..n {
+            let vision = [0.0f32; VISION_LEN];
+            let prev_vx = w_seq.creatures.vx[i];
+            let prev_vy = w_seq.creatures.vy[i];
+            let inp_seq = build_nn_input(
+                i,
+                &w_seq.creatures,
+                &vision,
+                &w_seq.grass,
+                0,
+                prev_vx,
+                prev_vy,
+            );
+            let inp_par = build_nn_input(
+                i,
+                &w_par.creatures,
+                &vision,
+                &w_par.grass,
+                0,
+                prev_vx,
+                prev_vy,
+            );
+            for k in 0..25 {
+                let slot = NN_GRASS_PATCH_OFFSET + k;
+                assert_eq!(
+                    inp_seq[slot].to_bits(),
+                    inp_par[slot].to_bits(),
+                    "grass-patch slot {slot} mismatch for creature {i}: seq={} par={}",
+                    inp_seq[slot],
+                    inp_par[slot]
+                );
+            }
         }
     }
 }

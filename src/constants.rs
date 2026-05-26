@@ -194,9 +194,9 @@ pub const NN_VISION_OFFSET: usize = 9;
 /// Last-action one-hot block start. After 120-float vision passthrough.
 pub const NN_LAST_ACTION_OFFSET: usize = 129;
 /// Grass-patch 5x5 block start (P2d fills slots 135..160).
-#[allow(dead_code)] // P2d fills
 pub const NN_GRASS_PATCH_OFFSET: usize = 135;
 /// Grass-patch center sample (dx=dy=0); 5x5 iteration is dy outer, dx inner,
 /// offset = (dy+2)*5 + (dx+2). Center: dy=0,dx=0 → 12; global slot 135+12 = 147.
-#[allow(dead_code)] // P2f reads
+/// P2f reads this to hardwire the grass-sensor hidden unit.
+#[allow(dead_code)] // P2f reads in non-test code; tests pin the value
 pub const NN_GRASS_PATCH_CENTER_SLOT: usize = 147;
