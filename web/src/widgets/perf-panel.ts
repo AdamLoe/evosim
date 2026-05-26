@@ -102,23 +102,17 @@ function renderTpsJank(world: WorldHandle): void {
   }
 }
 
-/** Render P3d observability counters into their DOM elements (1 Hz cadence). */
+/** Render P3d observability counters into their DOM elements (1 Hz cadence).
+ * D3: mean_nose_count / mean_eye_count removed (genome deleted; body traits are constants).
+ */
 function renderObsCounters(world: WorldHandle): void {
   const grassCellsEl = document.getElementById("perf-grass-cells");
   const grassTotalEl = document.getElementById("perf-grass-total");
-  const meanNoseEl = document.getElementById("perf-mean-nose");
-  const meanEyeEl = document.getElementById("perf-mean-eye");
   if (grassCellsEl) {
     grassCellsEl.textContent = `grass cells: ${world.live_grass_cell_count()}`;
   }
   if (grassTotalEl) {
     grassTotalEl.textContent = `grass total: ${world.total_grass_density().toFixed(1)}`;
-  }
-  if (meanNoseEl) {
-    meanNoseEl.textContent = `mean nose: ${world.mean_nose_count().toFixed(2)}`;
-  }
-  if (meanEyeEl) {
-    meanEyeEl.textContent = `mean eye: ${world.mean_eye_count().toFixed(2)}`;
   }
 }
 
