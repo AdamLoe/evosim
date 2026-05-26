@@ -168,3 +168,25 @@ pub const ACCEPTANCE_SEED: &str = "evosim-test-001";
 /// Ticks per "day" — used by resume prompt + eulogy card day count (F.26, F.28).
 /// At sim 1× (30 ticks/s), one "day" ≈ 33 wall-seconds. v5 §11 + F.26 DECISIONS.
 pub const DAY_TICKS: u32 = 1000;
+
+// ---- Grass grid (v1.2 grass mechanic) ----
+/// Cell size in world-units. World is 600u → 240 cells per axis. See v1.2 grass
+/// mechanic brief §Grass storage.
+pub const GRASS_CELL_SIZE: f32 = 2.5;
+/// Number of grass cells per axis (240). See v1.2 grass mechanic brief.
+pub const GRASS_GRID_DIM: usize = (WORLD_SIZE / GRASS_CELL_SIZE) as usize; // 240
+/// Total grass cells (57_600). See v1.2 grass mechanic brief.
+pub const GRASS_CELL_COUNT: usize = GRASS_GRID_DIM * GRASS_GRID_DIM; // 57_600
+/// Maximum density per cell (clamped post-step). See v1.2 grass mechanic brief.
+pub const GRASS_MAX: f32 = 1.0;
+/// Default in-cell logistic growth rate slider. See v1.2 grass mechanic brief §Grass dynamics.
+pub const GRASS_IN_CELL_GROWTH_R_DEFAULT: f32 = 0.005;
+/// Default cross-kernel propagation rate slider. See v1.2 grass mechanic brief §Grass dynamics.
+pub const GRASS_PROPAGATION_RATE_K_DEFAULT: f32 = 0.05;
+/// Default number of cells seeded at world init. See v1.2 grass mechanic brief §Initial grass seed.
+pub const GRASS_INITIAL_SEED_COUNT_DEFAULT: u32 = 8;
+/// Per-cell, per-tick cap on the delta a single creature can drain from a single grass cell
+/// (before graze_efficiency multiplier). Locked at 0.1 per v1.2 amendments §A.1.
+/// Founder survival math: overlap 1-4 cells × cap 0.1 = 0.1-0.4 energy/tick vs UPKEEP_BASE ~0.15/tick.
+#[allow(dead_code)] // Used by P1e (multi-cell graze) — not yet landed.
+pub const GRAZE_MAX_PER_TICK: f32 = 0.1; // see v1.2 amendments §A.1

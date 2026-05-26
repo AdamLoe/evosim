@@ -3,6 +3,7 @@
 use super::World;
 use crate::constants::*;
 use crate::creature::CreatureSoA;
+use crate::grass::GrassGrid;
 use crate::grid::SpatialGrid;
 use crate::save::{rehydrate_event_log, validate_save, LoadError, SCHEMA_VERSION};
 use crate::species::SpeciesRegistry;
@@ -78,6 +79,11 @@ impl World {
             refill_rate: save.sun.refill_rate,
         };
 
+        // Rebuild GrassGrid from scratch using the save's RNG state and slider defaults.
+        // TODO P1b+P1f: replace with save.grass.density restore once GrassGridSnapshot
+        // is added to SaveV1 in the P1b+P1f combined commit.
+        let grass = fresh_grass(&mut save.rng.clone(), save.sliders.grass_initial_seed_count);
+
         // Rebuild SpeciesRegistry — next_id recomputed as max(id) + 1.
         let max_id = save.species.list.iter().map(|s| s.id).max().unwrap_or(0);
         let species = SpeciesRegistry::from_snapshot(save.species.list, max_id + 1);
@@ -90,6 +96,7 @@ impl World {
             seed: save.seed,
             rng: save.rng,
             sun,
+            grass,
             grid,
             creatures,
             carrion: save.carrion,
@@ -133,4 +140,12 @@ impl World {
             scratch_dead: Vec::new(),           // S27: pool, not saved
         })
     }
+}
+
+/// Shared helper: construct a fresh GrassGrid from an RNG + seed count.
+/// Called by both `World::new` (via DevSliders) and `from_save_v1` (with cloned save RNG).
+/// TODO P1b+P1f: `from_save_v1` will switch to restoring from `save.grass.density` once
+/// `GrassGridSnapshot` is added to `SaveV1` in the P1b+P1f combined commit.
+pub(super) fn fresh_grass(rng: &mut crate::rng::SimRng, seed_count: u32) -> GrassGrid {
+    GrassGrid::new(rng, seed_count)
 }

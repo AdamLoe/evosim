@@ -16,6 +16,7 @@ use crate::constants::*;
 use crate::creature::{Action, CreatureSoA};
 use crate::events::{Event, EventKind, EventLog};
 use crate::genome::Genome;
+use crate::grass::GrassGrid;
 use crate::grid::SpatialGrid;
 use crate::hof::HallOfFame;
 use crate::rng::SimRng;
@@ -32,6 +33,12 @@ pub struct DevSliders {
     pub sun_gradient_strength: f32,
     pub mouth_tax: f32,
     pub nn_mutation_sigma: f32,
+    /// Grass cross-kernel propagation rate (k). See v1.2 amendments §A.4.
+    pub grass_propagation_rate_k: f32,
+    /// Grass in-cell logistic growth rate (r). See v1.2 amendments §A.4.
+    pub grass_in_cell_growth_r: f32,
+    /// Number of cells seeded at world init (affects next world creation only). See v1.2 amendments §A.4.
+    pub grass_initial_seed_count: u32,
 }
 
 impl Default for DevSliders {
@@ -42,6 +49,9 @@ impl Default for DevSliders {
             sun_gradient_strength: 1.0,
             mouth_tax: UPKEEP_MOUTH_DEFAULT,
             nn_mutation_sigma: NN_MUT_SIGMA_DEFAULT,
+            grass_propagation_rate_k: GRASS_PROPAGATION_RATE_K_DEFAULT,
+            grass_in_cell_growth_r: GRASS_IN_CELL_GROWTH_R_DEFAULT,
+            grass_initial_seed_count: GRASS_INITIAL_SEED_COUNT_DEFAULT,
         }
     }
 }
@@ -51,6 +61,9 @@ pub struct World {
     pub seed: String,
     pub rng: SimRng,
     pub sun: SunMap,
+    /// Grass density field (v1.2 grass mechanic). 240×240 cells, 2.5u each.
+    /// Not saved by P1c — P1b+P1f's combined commit adds GrassGridSnapshot.
+    pub grass: GrassGrid,
     pub grid: SpatialGrid,
     pub creatures: CreatureSoA,
     pub carrion: Vec<Carrion>,
@@ -135,6 +148,8 @@ impl World {
         let seed_string = seed.into();
         let mut rng = SimRng::from_string(&seed_string);
         let sun = SunMap::new(&mut rng);
+        let sliders = DevSliders::default();
+        let grass = GrassGrid::new(&mut rng, sliders.grass_initial_seed_count);
         let mut creatures = CreatureSoA::with_capacity(2048);
         let mut species = SpeciesRegistry::new();
         let founder_genome = Genome::founder();
@@ -175,13 +190,14 @@ impl World {
             seed: seed_string,
             rng,
             sun,
+            grass,
             grid,
             creatures,
             carrion: Vec::new(),
             species,
             events: EventLog::new(),
             events_enabled: false,
-            sliders: DevSliders::default(),
+            sliders,
             next_creature_id: 1,
             peak_population: 1,
             peak_species_count: 1,
@@ -281,14 +297,25 @@ impl World {
             self.sun.refill();
         }
 
-        // 8. Energy bookkeeping.
+        // 8. Grass propagation step (v1.2 grass mechanic).
+        // Sequential scalar pass over 57_600 cells. Reads slider-driven r and k.
+        // P1e will add the graze consumption step (after movement, before eat).
+        {
+            crate::profile_span!(&self.profile, "tick.grass_step");
+            self.grass.step(
+                self.sliders.grass_in_cell_growth_r,
+                self.sliders.grass_propagation_rate_k,
+            );
+        }
+
+        // 9. Energy bookkeeping.
         {
             crate::profile_span!(&self.profile, "tick.energy_bookkeeping");
             self.energy_bookkeeping();
         }
 
-        // 9. Deaths → carrion. Span widened (R9) to cover the dead-removal
-        //    swap_remove loop and creatures.remove_indices (step 9, scales with die-off).
+        // 10. Deaths → carrion. Span widened (R9) to cover the dead-removal
+        //    swap_remove loop and creatures.remove_indices (step 10, scales with die-off).
         {
             crate::profile_span!(&self.profile, "tick.collect_deaths");
             // S27: collect_deaths writes into self.scratch_dead (promoted pool).
@@ -310,19 +337,19 @@ impl World {
             }
         }
 
-        // 10. Carrion decay.
+        // 11. Carrion decay.
         {
             crate::profile_span!(&self.profile, "tick.decay_carrion");
             self.decay_carrion();
         }
 
-        // 11. Births.
+        // 12. Births.
         {
             crate::profile_span!(&self.profile, "tick.handle_births");
             self.handle_births();
         }
 
-        // 12. Step-12 tail: last_action promotion, tick bump, milestone events,
+        // 13. Step-13 tail: last_action promotion, tick bump, milestone events,
         //     world-end check. Cheap today; future-proofs for Milestone E species
         //     detection (R9: bookkeeping_tail span).
         {

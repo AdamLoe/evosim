@@ -347,12 +347,27 @@ pub fn validate_save(save: &SaveV1) -> Result<usize, LoadError> {
         ("sun_gradient_strength", s.sun_gradient_strength),
         ("mouth_tax", s.mouth_tax),
         ("nn_mutation_sigma", s.nn_mutation_sigma),
+        ("grass_propagation_rate_k", s.grass_propagation_rate_k),
+        ("grass_in_cell_growth_r", s.grass_in_cell_growth_r),
     ] {
         if !val.is_finite() {
             return Err(LoadError::StructuralError(format!(
                 "slider '{name}' is non-finite: {val}"
             )));
         }
+    }
+    // 9b. Grass slider range checks (per v1.2 amendments §A.4 + p3b slider ranges).
+    if !(0.0..=0.2).contains(&s.grass_propagation_rate_k) {
+        return Err(LoadError::StructuralError(format!(
+            "slider 'grass_propagation_rate_k' out of range [0, 0.2]: {}",
+            s.grass_propagation_rate_k
+        )));
+    }
+    if !(0.0..=0.05).contains(&s.grass_in_cell_growth_r) {
+        return Err(LoadError::StructuralError(format!(
+            "slider 'grass_in_cell_growth_r' out of range [0, 0.05]: {}",
+            s.grass_in_cell_growth_r
+        )));
     }
 
     Ok(n)

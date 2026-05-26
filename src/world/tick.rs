@@ -914,7 +914,7 @@ mod tests {
         let x = w.creatures.x[0];
         // After wrapping, x should be in [0, WORLD_SIZE).
         assert!(
-            x >= 0.0 && x < WORLD_SIZE,
+            (0.0..WORLD_SIZE).contains(&x),
             "position must be in [0, WORLD_SIZE) after wrap; x = {x}"
         );
         // The creature moved ~5 units past the right edge → should be near x=4.
@@ -929,7 +929,6 @@ mod tests {
     /// Toroidal wrap: -45 → WORLD_SIZE - 45 = 555. Old clamp: → parent_radius.
     #[test]
     fn split_jitter_wraps() {
-        use crate::brain::Brain;
         use crate::creature::Action;
 
         let mut w = World::new("p1a-jitter");
@@ -948,11 +947,11 @@ mod tests {
             let cx = w.creatures.x[i];
             let cy = w.creatures.y[i];
             assert!(
-                cx >= 0.0 && cx < WORLD_SIZE,
+                (0.0..WORLD_SIZE).contains(&cx),
                 "child x must be in [0, WORLD_SIZE); x = {cx}"
             );
             assert!(
-                cy >= 0.0 && cy < WORLD_SIZE,
+                (0.0..WORLD_SIZE).contains(&cy),
                 "child y must be in [0, WORLD_SIZE); y = {cy}"
             );
         }
