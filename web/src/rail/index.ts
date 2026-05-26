@@ -1,12 +1,11 @@
 // Rail orchestrator: boot + pollRail. Called from main.ts each RAF frame.
-// E.22: Highlight management (toasts suppressed for v1.1 revisit).
 // E.23: Stats sampling.
 // E.24: Inspector refresh.
 
 import type { WorldHandle } from "../../wasm/evosim";
 import { maybeSampleStats } from "./stats";
 import { refreshInspector } from "./inspector";
-import { addHighlight, pruneHighlights, highlights } from "./highlight";
+import { pruneHighlights, highlights } from "./highlight";
 
 // ---- Rail state (opaque to main.ts) ----
 
@@ -62,8 +61,8 @@ export function pollRail(
   // 2. Inspector refresh (E.24). S18: no longer needs idsBuffer (uses creature_idx_by_id).
   refreshInspector(world, rail);
 
-  // 5. Highlight prune.
+  // 3. Highlight prune.
   pruneHighlights(performance.now());
 }
 
-export { highlights, addHighlight };
+export { highlights };

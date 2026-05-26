@@ -1,4 +1,4 @@
-// Inspector panel (E.21/E.24): click-targeted creature panel.
+// Inspector panel (E.24): click-targeted creature panel.
 // Opens on canvas click via creature_at; refreshes per frame while selected.
 
 import type { WorldHandle } from "../../wasm/evosim";
@@ -119,7 +119,7 @@ function clearSelection(rail: RailState): void {
   if (!isRailHidden()) {
     if (inspectorTab) inspectorTab.classList.add("hidden");
     if ((rail as { activeTab?: string }).activeTab === "inspector") {
-      rail.switchTab("events");
+      rail.switchTab("stats");
     }
   }
 }

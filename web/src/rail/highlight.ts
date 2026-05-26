@@ -1,5 +1,5 @@
 // Highlight ring state. Maps creature_id (stable u64 as number) to
-// expiry wall-clock ms. Timing is wall-clock per v6 §B (4s toast, 1.5s ring).
+// expiry wall-clock ms. Timing is wall-clock per v6 §B (1.5s ring).
 
 export const highlights: Map<number, number> = new Map();
 

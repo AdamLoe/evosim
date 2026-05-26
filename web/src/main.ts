@@ -114,7 +114,7 @@ async function main(): Promise<void> {
   // Perf-timing: install the Stats-panel toggle + 1Hz polling loop.
   installProfilerPanel(world);
 
-  // P3b: dev panel overlay (7 sliders, ~ hotkey, ⚙ button).
+  // P3b: dev panel overlay (6 sliders, ~ hotkey, ⚙ button).
   installDevPanel(world);
 
   // Sim + render loop.
@@ -139,7 +139,7 @@ async function main(): Promise<void> {
       // Fetch ids buffer once per frame (index-aligned with creatures_buffer).
       const ids = world.creature_ids_buffer() as unknown as Float64Array;
 
-      // E.21/E.22/E.23/E.24: poll the rail (events, toasts, highlights, stats, inspector).
+      // E.23/E.24: poll the rail (highlights, stats, inspector).
       // S18: ids no longer passed to pollRail (inspector uses creature_idx_by_id instead).
       timed("pollRail", () => pollRail(rail, world));
 
