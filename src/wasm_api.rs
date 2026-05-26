@@ -163,11 +163,11 @@ impl WorldHandle {
     }
 
     /// Repack creature SoA into a contiguous Float32Array. Layout per creature
-    /// (11 floats, stride = [`creature_stride`]):
-    /// `[x, y, radius_world, r, g, b,
-    ///   flag_eye, flag_move, flag_scav, flag_mouth, flag_armor]`.
+    /// (10 floats, stride = [`creature_stride`]):
+    /// `[x, y, radius_world, r, g, b, flag_eye, flag_move, flag_mouth, flag_armor]`.
     /// Ring flags: 1.0 if trait > 0, else 0.0. See v6 §B for ring order.
     /// D3: genome deleted — body traits are compile-time constants; color is NN-weight hash.
+    /// D9: scav ring slot removed (Action::Scavenge deleted; brown ring was always lit).
     #[wasm_bindgen]
     pub fn creatures_buffer(&mut self) -> js_sys::Float32Array {
         let n = self.inner.creatures.len();
@@ -186,13 +186,13 @@ impl WorldHandle {
             self.creature_buf[off + 3] = ((c >> 16) & 0xFF) as f32 / 255.0; // R
             self.creature_buf[off + 4] = ((c >> 8) & 0xFF) as f32 / 255.0; // G
             self.creature_buf[off + 5] = (c & 0xFF) as f32 / 255.0; // B
-                                                                    // Feature ring flags (v6 §B, ring order: eye→move→scav→mouth→armor).
-                                                                    // D3: eye_count=24 (>0), move_speed=MOVE_SPEED_MAX (>0), scav/eat_eff=1.0 (>0), armor=0.
+                                                                    // Feature ring flags (v6 §B, ring order: eye→move→mouth→armor).
+                                                                    // D3: eye_count=24 (>0), move_speed=MOVE_SPEED_MAX (>0), armor=0.
+                                                                    // D9: scav slot removed.
             self.creature_buf[off + 6] = 1.0; // eye_count=24 always > 0
             self.creature_buf[off + 7] = 1.0; // move_speed=MOVE_SPEED_MAX always > 0
-            self.creature_buf[off + 8] = 1.0; // scav_eff=1.0 constant
-            self.creature_buf[off + 9] = 1.0; // eat_eff=1.0 constant
-            self.creature_buf[off + 10] = 0.0; // armor=0 constant
+            self.creature_buf[off + 8] = 1.0; // eat_eff=1.0 constant
+            self.creature_buf[off + 9] = 0.0; // armor=0 constant
         }
         unsafe { js_sys::Float32Array::view(&self.creature_buf) }
     }
@@ -518,31 +518,31 @@ fn wasm_now_ms() -> f64 {
 }
 
 /// Per-creature float count in [`WorldHandle::creatures_buffer`].
-/// v1.1 layout (audit S21): 11 floats.
+/// v1.4 layout: 10 floats (v1.1 was 11; scav slot removed post-D9).
 /// Offset 0..6: x, y, radius_world, color_r, color_g, color_b (NN-weight hash).
-/// Offset 6..11: flag_eye, flag_move, flag_scav, flag_mouth, flag_armor.
+/// Offset 6..10: flag_eye, flag_move, flag_mouth, flag_armor.
 #[wasm_bindgen]
 pub fn creature_stride() -> u32 {
-    11
+    10
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// S21: creature_stride() == 11 (dropped energy_frac + age_frac).
+    /// v1.4: creature_stride() == 10 (scav slot removed post-D9).
     /// We can't call creatures_buffer() in native tests (js_sys::Float32Array
     /// requires wasm32), so we test the stride constant and fill-math directly.
     #[test]
-    fn creature_stride_is_11() {
-        assert_eq!(creature_stride(), 11);
+    fn creature_stride_is_10() {
+        assert_eq!(creature_stride(), 10);
         // verify that n creatures × stride == expected buffer size
         let n: usize = 3;
         let expected = n * creature_stride() as usize;
-        assert_eq!(expected, 33);
+        assert_eq!(expected, 30);
     }
 
-    /// S21: fill-math test. Manually resize the creature_buf as the wasm
+    /// v1.4: fill-math test. Manually resize the creature_buf as the wasm
     /// path would and assert the length matches population * stride.
     #[test]
     fn creature_buf_length_matches_population_times_stride() {
@@ -553,7 +553,7 @@ mod tests {
         handle.creature_buf.clear();
         handle.creature_buf.resize(n * stride, 0.0);
         assert_eq!(handle.creature_buf.len(), n * stride);
-        assert_eq!(handle.creature_buf.len(), 11); // 1 creature × 11 floats
+        assert_eq!(handle.creature_buf.len(), 10); // 1 creature × 10 floats
     }
 
     /// E.21: creature_inspect_json returns None for out-of-range idx.

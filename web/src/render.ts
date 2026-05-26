@@ -12,7 +12,6 @@ export const GRASS_FILL = "rgba(60, 180, 60, 0.55)";
 export const RING_COLORS = {
   eye: "rgba(255,255,255,0.85)",
   move: "rgba(240,220, 80,0.85)",
-  scav: "rgba(140, 90, 40,0.85)",
   mouth: "rgba(255, 80, 80,0.85)",
   armor: "rgba(200,200,210,0.85)",
 } as const;
@@ -82,13 +81,13 @@ export function drawCreatures(
     const r = data[i + 3];
     const g = data[i + 4];
     const b = data[i + 5];
-    // Feature ring flags (v6 §B, Milestone C.11): eye→move→scav→mouth→armor
-    // S21: offsets shifted from 8-12 → 6-10 (dropped energy_frac + age_frac).
+    // Feature ring flags (v6 §B): eye→move→mouth→armor
+    // D9: scav slot removed (Action::Scavenge deleted; brown ring was always lit).
+    // v1.4: stride 11→10, offsets 6-9.
     const flagEye   = data[i + 6] > 0.5;
     const flagMove  = data[i + 7] > 0.5;
-    const flagScav  = data[i + 8] > 0.5;
-    const flagMouth = data[i + 9] > 0.5;
-    const flagArmor = data[i + 10] > 0.5;
+    const flagMouth = data[i + 8] > 0.5;
+    const flagArmor = data[i + 9] > 0.5;
 
     const idx = i / stride;
     const [sx, sy] = worldToScreen(cam, viewW, viewH, x, y);
@@ -118,7 +117,6 @@ export function drawCreatures(
     };
     if (flagEye)   drawRing(RING_COLORS.eye);   // white  — innermost
     if (flagMove)  drawRing(RING_COLORS.move);  // yellow
-    if (flagScav)  drawRing(RING_COLORS.scav);  // brown
     if (flagMouth) drawRing(RING_COLORS.mouth); // red
     if (flagArmor) drawRing(RING_COLORS.armor); // silver — outermost
 
@@ -195,11 +193,12 @@ export function renderWorld(
   highlightMap: Map<number, number>,
   nowMs: number,
 ): void {
-  // S21 mandatory guard: stride mismatch silently corrupts the renderer.
+  // Mandatory stride guard: mismatch silently corrupts the renderer.
   // Rust wasm_api.rs::creature_stride() and web/src/render.ts must agree.
-  if (stride !== 11) {
+  // v1.4: stride 11→10 (scav slot removed post-D9).
+  if (stride !== 10) {
     throw new Error(
-      `creature_stride mismatch: expected 11, got ${stride} ` +
+      `creature_stride mismatch: expected 10, got ${stride} ` +
       `(Rust wasm_api.rs::creature_stride and web/src/render.ts must agree)`,
     );
   }
