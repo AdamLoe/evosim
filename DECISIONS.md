@@ -347,3 +347,7 @@ P3a's per-bite Eat formula change had NO observable effect on the §16 acceptanc
 **Implication:** the predator/scavenger tiers of the three-tier food chain (per brief) are not exercised by the §16 acceptance seed at default sliders. This is consistent with the v1.2 brief's intent ("grazers stumble onto seeded grass; predators need eye_count ≥ 1, mouth bit + need to evolve") — predation requires evolved traits that don't appear in 10k ticks from founders with eye_count=0, nose_count=0. The acceptance criterion is met by the grazer tier alone; the predator and scavenger tiers exist as evolvability headroom for longer runs.
 
 **Final v1.2 state:** PR-1 + PR-2 + PR-3 all landed. Goldens at `0x95f4a2f00bbad4dc`. Acceptance 4/4 pass. Lib tests 189/191 (seq/threads). Clippy clean both features. `pnpm typecheck`/`pnpm build` clean. Schema at v4. v1.2 pass COMPLETE.
+
+## v1.3 simplification
+
+D8: deleted F.30 founder NN hardwiring — `Brain::founder` is now 4-line pure uniform-random init; all four `NN_FOUNDER_*` constants removed from `constants.rs`; `founder_hardwiring_at_locked_slots` test deleted; user accepts startup-extinction risk.
