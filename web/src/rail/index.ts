@@ -63,7 +63,7 @@ export function pollRail(
   refreshInspector(world, rail);
 
   // 5. Highlight prune.
-  pruneHighlights(now);
+  pruneHighlights(performance.now());
 }
 
 export { highlights, addHighlight };

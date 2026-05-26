@@ -194,65 +194,62 @@ impl World {
         // D3: all creatures have eat_eff = 1.0, scav_eff = 1.0, armor = 0.0,
         //     bite_reach = BITE_REACH_CONSTANT, size = FOUNDER_SIZE (all constant).
         let eat_eff = 1.0_f32;
-        let scav_eff = 1.0_f32;
+        let _scav_eff = 1.0_f32; // D2: carrion deleted; scav_eff kept as dead constant
         let size = FOUNDER_SIZE;
         let bite_reach = FOUNDER_BITE_REACH;
         let armor = 0.0_f32;
 
         for i in 0..n {
-            match self.creatures.action_this_tick[i] {
-                Action::Eat => {
-                    self.scratch_attempted_eat[i] = true;
-                    if self.creatures.digestion_cooldown[i] > 0 {
-                        continue;
+            if self.creatures.action_this_tick[i] == Action::Eat {
+                self.scratch_attempted_eat[i] = true;
+                if self.creatures.digestion_cooldown[i] > 0 {
+                    continue;
+                }
+                let radius_i = size * BODY_RADIUS_PER_SIZE;
+                let reach = bite_reach * size;
+                let max_range = radius_i + reach + size * BODY_RADIUS_PER_SIZE;
+                let xi = self.creatures.x[i];
+                let yi = self.creatures.y[i];
+                let mut best: Option<(usize, f32)> = None;
+                // S25: use pooled scratch buffer instead of per-Eat Vec::with_capacity(8).
+                let mut candidates = std::mem::take(&mut self.scratch_eat_candidates);
+                candidates.clear();
+                self.grid.for_each_in_radius(xi, yi, max_range, |j| {
+                    if j != i {
+                        candidates.push(j);
                     }
-                    let radius_i = size * BODY_RADIUS_PER_SIZE;
-                    let reach = bite_reach * size;
-                    let max_range = radius_i + reach + size * BODY_RADIUS_PER_SIZE;
-                    let xi = self.creatures.x[i];
-                    let yi = self.creatures.y[i];
-                    let mut best: Option<(usize, f32)> = None;
-                    // S25: use pooled scratch buffer instead of per-Eat Vec::with_capacity(8).
-                    let mut candidates = std::mem::take(&mut self.scratch_eat_candidates);
-                    candidates.clear();
-                    self.grid.for_each_in_radius(xi, yi, max_range, |j| {
-                        if j != i {
-                            candidates.push(j);
-                        }
-                    });
-                    for j in candidates.iter().copied() {
-                        // D7: walled, raw Euclidean distance.
-                        let ddx = self.creatures.x[j] - xi;
-                        let ddy = self.creatures.y[j] - yi;
-                        let d = (ddx * ddx + ddy * ddy).sqrt();
-                        let rj = size * BODY_RADIUS_PER_SIZE; // D3: same size for all
-                        let contact = (d - radius_i - rj).max(0.0);
-                        if contact <= reach {
-                            best = match best {
-                                None => Some((j, d)),
-                                Some((_, bd)) if d < bd => Some((j, d)),
-                                Some((bj, bd))
-                                    if d == bd && self.creatures.id[j] < self.creatures.id[bj] =>
-                                {
-                                    Some((j, d))
-                                }
-                                other => other,
-                            };
-                        }
-                    }
-                    self.scratch_eat_candidates = candidates;
-                    if let Some((j, _)) = best {
-                        // D3: armor = 0.0 for all prey.
-                        let bite_frac = self.sliders.eat_bite_fraction;
-                        let prey_energy = self.creatures.energy[j];
-                        let transfer = bite_frac * prey_energy * (1.0 - armor);
-                        self.scratch_damage[j] += transfer;
-                        self.scratch_gain[i] += transfer * eat_eff;
-                        self.scratch_cooldown_set[i] = true;
-                        self.scratch_got_a_bite[i] = true;
+                });
+                for j in candidates.iter().copied() {
+                    // D7: walled, raw Euclidean distance.
+                    let ddx = self.creatures.x[j] - xi;
+                    let ddy = self.creatures.y[j] - yi;
+                    let d = (ddx * ddx + ddy * ddy).sqrt();
+                    let rj = size * BODY_RADIUS_PER_SIZE; // D3: same size for all
+                    let contact = (d - radius_i - rj).max(0.0);
+                    if contact <= reach {
+                        best = match best {
+                            None => Some((j, d)),
+                            Some((_, bd)) if d < bd => Some((j, d)),
+                            Some((bj, bd))
+                                if d == bd && self.creatures.id[j] < self.creatures.id[bj] =>
+                            {
+                                Some((j, d))
+                            }
+                            other => other,
+                        };
                     }
                 }
-                _ => {}
+                self.scratch_eat_candidates = candidates;
+                if let Some((j, _)) = best {
+                    // D3: armor = 0.0 for all prey.
+                    let bite_frac = self.sliders.eat_bite_fraction;
+                    let prey_energy = self.creatures.energy[j];
+                    let transfer = bite_frac * prey_energy * (1.0 - armor);
+                    self.scratch_damage[j] += transfer;
+                    self.scratch_gain[i] += transfer * eat_eff;
+                    self.scratch_cooldown_set[i] = true;
+                    self.scratch_got_a_bite[i] = true;
+                }
             }
         }
 

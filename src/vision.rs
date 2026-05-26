@@ -12,7 +12,7 @@ use crate::constants::*;
 use crate::creature::CreatureSoA;
 use crate::grid::SpatialGrid;
 
-pub use crate::constants::{EYE_STRIDE, SECTORS};
+pub use crate::constants::SECTORS;
 pub const FEATURES_PER_SECTOR: usize = 5; // dist, size, r, g, b (D9 owns shrinking to 3)
 pub const VISION_LEN: usize = SECTORS * FEATURES_PER_SECTOR; // 120
 

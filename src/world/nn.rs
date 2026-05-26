@@ -449,7 +449,7 @@ mod tests {
     fn decode_action_eat_invalid_in_cooldown() {
         // D9: Action::Eat has one_hot_index=1 (logit index 1 in the 3-slice).
         let logits = [0.0f32, 10.0, 0.0]; // Eat logit highest
-        // cooldown > 0 → Eat invalid; falls through to Graze (always valid).
+                                          // cooldown > 0 → Eat invalid; falls through to Graze (always valid).
         let act = decode_action(&logits, 100.0, 5);
         assert_ne!(act, Action::Eat, "Eat must be invalid when cooldown > 0");
         assert_eq!(act, Action::Graze, "should fall through to Graze");
@@ -784,5 +784,4 @@ mod tests {
             );
         }
     }
-
 }
