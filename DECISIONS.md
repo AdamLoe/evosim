@@ -372,4 +372,22 @@ Merged D6→D7→D1→D2→D4→D5→D8→D10→D3→D9 in order via `git merge 
 
 Final gate results: `cargo fmt` clean; `cargo test --lib` 117/117; `cargo clippy` default+threads clean; `cargo test --lib --features threads` 117/117; `pnpm typecheck` clean; `pnpm build` clean. SCHEMA_VERSION=5. All worktrees retained.
 
-M1 (grass cell size 2.5u → 5.0u): `GRASS_CELL_SIZE` doubled; `GRASS_GRID_DIM` 240 → 120; `GRASS_CELL_COUNT` 57_600 → 14_400. Compile-time asserts updated. Test numerics updated (cell_ix 120 → 60 in nn.rs + tick.rs; bilinear midpoint coords 2.5/1.25 → 5.0/2.5; seam-threshold comments 1.25 → 2.5). Doc comments updated in grass.rs, constants.rs, wasm_api.rs. NN grass-patch sample stride doubles arithmetically (no code change in nn.rs patch loop). Per brief §Modifications #1: 4× perf win on GrassGrid::step + bilinear_sample.
+D1 (persistence deletion, commit 73bf739): deleted `src/save.rs` (917 LOC), `src/world/save_v1.rs` (132 LOC), `web/src/persistence/` (293 LOC); stripped autosave scheduling, resume modal, schema-mismatch modal, IDB worker from main.ts. Every reload starts a fresh world. Per Q4 user sign-off: full deletion, no IDB, no export.
+
+D2 (carrion deletion, commit 12c6fb4): deleted `src/carrion.rs`; removed `CarrionIndex` from vision.rs; removed `decay_carrion` + scavenge resolution from tick.rs; removed `count_carrion_overlap` NN scalar from nn.rs; removed `drawCarrion` from render.ts. Downstream of D9 Scavenge removal.
+
+D3 (genome deletion, commit 76f7aba): deleted `src/genome.rs` (507 LOC); removed all `CreatureSoA g_*` hot-mirror fields; removed body-trait mutation step; removed founder anchor. All creatures structurally identical — only NN weights vary. Per Q1 user sign-off.
+
+D7 (torus revert to walled world, commit fc1ee1f): deleted `src/torus.rs` (160 LOC); restored wall-clamp in `apply_movement_and_repulsion`; walls reported via sentinel gray color in vision raycasts (Q3 decision — no `is_at_wall` NN slot). `SpatialGrid::cell_of` reverts to clamping.
+
+D9 (action enum collapse + move_bias deletion, commit 86909fd + d2b68c3): `Action` enum collapsed to `{Graze=0, Eat=1, Split=2}`; `NN_OUTPUTS = 5` (3 logits + vx + vy); deleted `Action::{Rest, Scavenge, Signal, Armor, Pigment}`; deleted `move_bias_x/y/reroll_at` SoA fields and re-roll logic. Per Q2 and Q6 user sign-off.
+
+M1 (grass cell size 2.5u → 5.0u, commit 7074b33): `GRASS_CELL_SIZE` doubled; `GRASS_GRID_DIM` 240 → 120; `GRASS_CELL_COUNT` 57_600 → 14_400. Compile-time asserts updated. Test numerics updated (cell_ix 120 → 60 in nn.rs + tick.rs; bilinear midpoint coords 2.5/1.25 → 5.0/2.5; seam-threshold comments 1.25 → 2.5). Doc comments updated in grass.rs, constants.rs, wasm_api.rs. NN grass-patch sample stride doubles arithmetically (no code change in nn.rs patch loop). Per brief §Modifications #1: 4× perf win on GrassGrid::step + bilinear_sample.
+
+M2 (grass full alpha, commit ad44415): `drawGrassMap` fillStyle hoisted outside the cell loop; density-modulation alpha removed; grass cells paint uniform green at full opacity regardless of density. Visual simplification per brief §Modifications #2.
+
+M3 (perf pass): skipped — deferred to Phase 6/v1.4. UI/render perf was the observed bottleneck; backend perf (brain transpose, GrassGrid SIMD) deprioritized after Wave A landed within budget. Per Q-perf user answer.
+
+M4 (UI keepalive, commit d5ec449 + 23ca603): simplified all 5 surviving panels to v1.3 data model. Deleted species chart (D10), toast stack (D4), eulogy modal (D5). Inspector shows NN weight count + color hash + energy; dev panel retains fewer sliders. Per Q7 + Q8 user answers.
+
+M5 (NN-hash color, commit 1f89640 + d506236): `xxhash64(brain.weights)` low 24 bits → `0x00RRGGBB` creature color. Hot-mirror `color: u32` added to `CreatureSoA`. `Brain::child_from` recomputes hash after mutation. Replaces pigment genome trait (deleted in D3).
