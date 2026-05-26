@@ -88,6 +88,7 @@ impl Brain {
         }
     }
 
+    #[cfg(test)]
     pub fn zero() -> Self {
         Self {
             weights: vec![0.0; NN_WEIGHT_COUNT],
@@ -145,6 +146,7 @@ impl Brain {
 
     /// Scalar (non-SIMD) forward pass — used as the reference implementation
     /// in tests to verify SIMD correctness within 1e-5 relative error.
+    #[cfg(test)]
     pub fn forward_scalar(
         &self,
         input: &[f32; NN_INPUTS],

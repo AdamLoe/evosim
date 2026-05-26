@@ -212,12 +212,6 @@ impl GrassGrid {
             }
         }
     }
-
-    /// Cheap getter for the snapshot/render path.
-    #[inline]
-    pub fn density_at_cell(&self, cell_idx: usize) -> f32 {
-        self.density[cell_idx]
-    }
 }
 
 #[cfg(test)]

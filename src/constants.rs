@@ -52,10 +52,6 @@ pub const MOVE_SPEED_MAX: f32 = 5.0;
 pub const VISION_RANGE_MAX: f32 = 80.0;
 /// Used in wasm_api creature_inspect_json as the reported bite_reach value.
 pub const BITE_REACH_MIN: f32 = 1.0;
-/// Used by creature.rs trig-cache initializer (always 24 active sectors).
-pub const EYE_SLOTS: usize = 24;
-pub const EYE_VALID: [u8; 8] = [0, 2, 3, 4, 6, 8, 12, 24];
-pub const EYE_STRIDE: [u8; 8] = [0, 12, 8, 6, 4, 3, 2, 1];
 
 // ---- Physics (v6 §D) ----
 pub const REPULSION_K: f32 = 2.0;
@@ -123,7 +119,7 @@ pub const GRAZE_MAX_PER_TICK: f32 = 0.4;
 
 // ---- NN input layout offsets (v1.3 D9) ----
 /// Self-state block length: [energy_frac, age_frac, prev_vx, prev_vy, cooldown_frac].
-/// Used in tests to verify layout; not referenced in production code paths.
+/// Used in layout tests; `#[allow(dead_code)]` because tests are cfg(test)-only.
 #[allow(dead_code)]
 pub const NN_SELF_STATE_LEN: usize = 5;
 /// Vision passthrough block start. 5 self-state slots before.
@@ -136,12 +132,12 @@ pub const NN_LAST_ACTION_OFFSET: usize = 77;
 pub const NN_LAST_ACTION_LEN: usize = 3;
 /// Grass-patch 5×5 block start (77 + 3 = 80).
 pub const NN_GRASS_PATCH_OFFSET: usize = 80;
-/// Grass-patch block length. Used in tests to verify layout.
+/// Grass-patch block length. Used in layout tests; `#[allow(dead_code)]` because tests are cfg(test)-only.
 #[allow(dead_code)]
 pub const NN_GRASS_PATCH_LEN: usize = 25;
 /// Grass-patch center sample (dx=dy=0); 5×5 iteration is dy outer, dx inner,
 /// offset = (dy+2)*5 + (dx+2). Center: dy=0,dx=0 → 12; global slot 80+12 = 92.
-/// Used in tests to pin the center-slot index.
+/// Used in tests to pin the center-slot index; `#[allow(dead_code)]` because tests are cfg(test)-only.
 #[allow(dead_code)]
 pub const NN_GRASS_PATCH_CENTER_SLOT: usize = NN_GRASS_PATCH_OFFSET + 12; // = 92
                                                                           // Slots [105..112) are SIMD padding zeros.

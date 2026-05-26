@@ -335,6 +335,7 @@ impl World {
     /// Test-only deep clone of the World. Clones all SoA data and resets
     /// transient state (vision, scratch bufs, spatial grid). Only available under `#[cfg(test)]`.
     #[cfg(test)]
+    #[allow(dead_code)]
     pub fn clone_for_test(&self) -> World {
         let n = self.creatures.len();
         let mut creatures = CreatureSoA::with_capacity(n.max(1));

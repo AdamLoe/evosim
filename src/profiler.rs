@@ -155,6 +155,7 @@ impl Profiler {
     /// `path` is a dotted ancestor chain under ROOT_FRAME, e.g.
     /// "renderWorld.drawCreatures". The leaf node is created lazily.
     /// Silently no-ops if the profiler is disabled (fast path in wasm_api).
+    #[cfg(test)]
     pub fn record_external(&self, path: &str, dur_us: u32) {
         let mut inner = self.inner.borrow_mut();
         let now_ms = inner.now_ms_relative();

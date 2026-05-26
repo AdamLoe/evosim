@@ -6,7 +6,7 @@
 //! Move speed cap = MOVE_SPEED_MAX. Vision = 24 sectors at VISION_RANGE_MAX.
 
 use crate::brain::Brain;
-use crate::constants::{EYE_SLOTS, EYE_STRIDE, EYE_VALID, SECTORS, VISION_RANGE_MAX};
+use crate::constants::SECTORS;
 use serde::{Deserialize, Serialize};
 
 /// One discrete action a creature chose this tick.
@@ -154,26 +154,18 @@ impl CreatureSoA {
 
     /// Recompute the 48 trig values for creature index `i`.
     ///
-    /// D3: all creatures have a fixed 24-sector layout (eye_count = 24, no offsets,
-    /// no vision_range gating). All 24 sectors are evenly spaced at TAU * s / 24.
+    /// D3: all creatures have a fixed 24-sector layout (eye_count = 24, no offsets).
+    /// All 24 sectors are evenly spaced at TAU * s / 24.
     ///
     /// Caller must have already pushed the creature at `i`.
     pub(crate) fn recompute_eye_trig_at(&mut self, i: usize) {
         let base = i * SECTORS * 2;
-        // D3: all 24 sectors always active with uniform spacing. No eye_offsets.
-        // We still use EYE_VALID/EYE_STRIDE machinery with eye_count=24 and
-        // vision_range=VISION_RANGE_MAX to be compatible with vision.rs fill_one.
-        let k = EYE_SLOTS; // 24
-        let k_idx = EYE_VALID.iter().position(|&v| v as usize == k).unwrap_or(7);
-        let stride = EYE_STRIDE[k_idx] as usize; // 1 for eye_count=24
-        for s in (0..SECTORS).step_by(stride) {
+        // D3: all 24 sectors always active with uniform spacing. stride=1 (all slots).
+        for s in 0..SECTORS {
             let theta_center = std::f32::consts::TAU * (s as f32) / (SECTORS as f32);
-            // No per-eye offset in D3.
             self.eye_trig[base + s * 2] = theta_center.cos();
             self.eye_trig[base + s * 2 + 1] = theta_center.sin();
         }
-        // D3: sanity — VISION_RANGE_MAX > 0 so all sectors are written above.
-        let _ = VISION_RANGE_MAX; // referenced to confirm the constant is used
     }
 }
 
