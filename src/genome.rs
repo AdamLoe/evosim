@@ -17,6 +17,7 @@ pub struct TraitMutationRates {
     pub move_speed: f32,
     pub eye_count: f32,
     pub eye_offsets: f32, // applied per-slot
+    pub nose_count: f32,
     pub vision_range: f32,
     pub armor: f32,
     pub bite_reach: f32,
@@ -36,6 +37,7 @@ impl TraitMutationRates {
             move_speed: rate,
             eye_count: rate,
             eye_offsets: rate,
+            nose_count: rate,
             vision_range: rate,
             armor: rate,
             bite_reach: rate,
@@ -60,6 +62,7 @@ pub struct Genome {
     pub move_speed: f32,
     pub eye_count: u8,
     pub eye_offsets: [f32; EYE_SLOTS],
+    pub nose_count: u8,
     pub vision_range: f32,
     pub armor: f32,
     pub bite_reach: f32,
@@ -80,6 +83,7 @@ impl Genome {
             move_speed: 0.0,
             eye_count: 0,
             eye_offsets: [0.0; EYE_SLOTS],
+            nose_count: 0,
             vision_range: 0.0,
             armor: 0.0,
             bite_reach: FOUNDER_BITE_REACH,
@@ -194,6 +198,27 @@ impl Genome {
             }
         }
 
+        // nose_count: pick uniformly from index-adjacent valid values.
+        if rng.unit() < r.nose_count * rate_multiplier {
+            let cur_idx = NOSE_VALID
+                .iter()
+                .position(|&v| v == self.nose_count)
+                .unwrap_or(0);
+            let mut candidates = [0u8; 2];
+            let mut n_candidates = 0usize;
+            if cur_idx > 0 {
+                candidates[n_candidates] = NOSE_VALID[cur_idx - 1];
+                n_candidates += 1;
+            }
+            if cur_idx + 1 < NOSE_VALID.len() {
+                candidates[n_candidates] = NOSE_VALID[cur_idx + 1];
+                n_candidates += 1;
+            }
+            if n_candidates > 0 {
+                self.nose_count = candidates[rng.index(n_candidates)];
+            }
+        }
+
         mutate_f32(
             &mut self.vision_range,
             r.vision_range * rate_multiplier,
@@ -254,6 +279,7 @@ impl Genome {
         drift_rate(&mut self.mutation_rates.move_speed, rng);
         drift_rate(&mut self.mutation_rates.eye_count, rng);
         drift_rate(&mut self.mutation_rates.eye_offsets, rng);
+        drift_rate(&mut self.mutation_rates.nose_count, rng);
         drift_rate(&mut self.mutation_rates.vision_range, rng);
         drift_rate(&mut self.mutation_rates.armor, rng);
         drift_rate(&mut self.mutation_rates.bite_reach, rng);
@@ -315,6 +341,7 @@ mod tests {
         }
         assert_eq!(g.size, before.size);
         assert_eq!(g.eye_count, before.eye_count);
+        assert_eq!(g.nose_count, before.nose_count);
     }
 
     #[test]
@@ -406,5 +433,75 @@ mod tests {
             }
         }
         assert!(saw_4 && saw_8);
+    }
+
+    #[test]
+    fn founder_nose_count_is_zero() {
+        assert_eq!(Genome::founder().nose_count, 0);
+    }
+
+    #[test]
+    fn nose_count_only_mutates_to_adjacent() {
+        let mut g = Genome::founder();
+        g.nose_count = 2;
+        g.mutation_rates = TraitMutationRates::uniform(0.0);
+        g.mutation_rates.nose_count = 1.0;
+        let mut rng = SimRng::from_u64(5);
+        let mut saw_1 = false;
+        let mut saw_3 = false;
+        for _ in 0..1000 {
+            let mut h = g.clone();
+            h.mutate_in_place(&mut rng, 1.0);
+            assert!(
+                matches!(h.nose_count, 1..=3),
+                "nose_count {} not in {{1,2,3}}",
+                h.nose_count
+            );
+            if h.nose_count == 1 {
+                saw_1 = true;
+            }
+            if h.nose_count == 3 {
+                saw_3 = true;
+            }
+        }
+        assert!(saw_1 && saw_3, "must see both adjacent values 1 and 3");
+    }
+
+    #[test]
+    fn nose_count_bounds_respected() {
+        // Start at minimum (0): only 0 or 1 allowed.
+        {
+            let mut g = Genome::founder();
+            g.nose_count = 0;
+            g.mutation_rates = TraitMutationRates::uniform(0.0);
+            g.mutation_rates.nose_count = 1.0;
+            let mut rng = SimRng::from_u64(6);
+            for _ in 0..1000 {
+                let mut h = g.clone();
+                h.mutate_in_place(&mut rng, 1.0);
+                assert!(
+                    matches!(h.nose_count, 0 | 1),
+                    "nose_count {} out of bounds at min",
+                    h.nose_count
+                );
+            }
+        }
+        // Start at maximum (5): only 4 or 5 allowed.
+        {
+            let mut g = Genome::founder();
+            g.nose_count = 5;
+            g.mutation_rates = TraitMutationRates::uniform(0.0);
+            g.mutation_rates.nose_count = 1.0;
+            let mut rng = SimRng::from_u64(7);
+            for _ in 0..1000 {
+                let mut h = g.clone();
+                h.mutate_in_place(&mut rng, 1.0);
+                assert!(
+                    matches!(h.nose_count, 4 | 5),
+                    "nose_count {} out of bounds at max",
+                    h.nose_count
+                );
+            }
+        }
     }
 }

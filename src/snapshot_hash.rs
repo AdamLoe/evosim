@@ -157,6 +157,7 @@ fn hash_genome(h: &mut XxHash64, g: &Genome) {
     for k in 0..g.eye_offsets.len() {
         write_f32(h, g.eye_offsets[k]);
     }
+    h.write_u8(g.nose_count);
     write_f32(h, g.vision_range);
     write_f32(h, g.armor);
     write_f32(h, g.bite_reach);
@@ -173,6 +174,7 @@ fn hash_genome(h: &mut XxHash64, g: &Genome) {
     write_f32(h, mr.move_speed);
     write_f32(h, mr.eye_count);
     write_f32(h, mr.eye_offsets);
+    write_f32(h, mr.nose_count);
     write_f32(h, mr.vision_range);
     write_f32(h, mr.armor);
     write_f32(h, mr.bite_reach);
@@ -255,6 +257,30 @@ mod tests {
             h1.finish(),
             h2.finish(),
             "all NaN patterns must hash identically (canonical 0x7fc0_0000)"
+        );
+    }
+
+    /// P2c: nose_count byte appears in snapshot hash — mutating it changes the hash.
+    #[test]
+    fn nose_count_appears_in_hash() {
+        use crate::world::World;
+        let mut w1 = World::new("nose-hash-base");
+        let mut w2 = World::new("nose-hash-base");
+        // Advance both worlds identically to the same state.
+        for _ in 0..50 {
+            w1.tick_once();
+            w2.tick_once();
+        }
+        // Mutate nose_count on creature 0 in w2 only.
+        if !w2.creatures.is_empty() {
+            let prev = w2.creatures.genomes[0].nose_count;
+            w2.creatures.genomes[0].nose_count = if prev == 5 { 4 } else { prev + 1 };
+            w2.creatures.resync_hot_mirrors_at(0);
+        }
+        assert_ne!(
+            snapshot_hash(&w1),
+            snapshot_hash(&w2),
+            "changing nose_count must alter the snapshot hash"
         );
     }
 

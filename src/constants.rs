@@ -94,6 +94,7 @@ pub const BITE_REACH_MIN: f32 = 1.0;
 pub const BITE_REACH_MAX: f32 = 3.0;
 pub const EYE_SLOTS: usize = 24;
 pub const EYE_VALID: [u8; 8] = [0, 2, 3, 4, 6, 8, 12, 24];
+pub const NOSE_VALID: [u8; 6] = [0, 1, 2, 3, 4, 5];
 
 // ---- Physics (v6 §D) ----
 pub const REPULSION_K: f32 = 2.0;

@@ -417,6 +417,7 @@ impl WorldHandle {
             "move_speed": g.move_speed,
             "vision_range": g.vision_range,
             "eye_count": g.eye_count,
+            "nose_count": g.nose_count,
             "armor": g.armor,
             "bite_reach": g.bite_reach,
             "pigment": [g.pigment_r, g.pigment_g, g.pigment_b],

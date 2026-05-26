@@ -96,6 +96,9 @@ pub struct CreatureSoA {
     /// Mirror of genomes[i].eye_count. Written ONLY by CreatureSoA::push,
     /// remove_indices, and resync_hot_mirrors_at. Read by hot tick paths.
     pub(crate) g_eye_count: Vec<u8>,
+    /// Mirror of genomes[i].nose_count. Written ONLY by CreatureSoA::push,
+    /// remove_indices, and resync_hot_mirrors_at. Read by hot tick paths.
+    pub(crate) g_nose_count: Vec<u8>,
 }
 
 impl CreatureSoA {
@@ -127,6 +130,7 @@ impl CreatureSoA {
             g_move_speed: Vec::with_capacity(cap),
             g_vision_range: Vec::with_capacity(cap),
             g_eye_count: Vec::with_capacity(cap),
+            g_nose_count: Vec::with_capacity(cap),
         }
     }
 
@@ -215,6 +219,7 @@ impl CreatureSoA {
             self.g_move_speed.swap_remove(k);
             self.g_vision_range.swap_remove(k);
             self.g_eye_count.swap_remove(k);
+            self.g_nose_count.swap_remove(k);
         }
     }
 
@@ -229,6 +234,7 @@ impl CreatureSoA {
         self.g_move_speed.push(g.move_speed);
         self.g_vision_range.push(g.vision_range);
         self.g_eye_count.push(g.eye_count);
+        self.g_nose_count.push(g.nose_count);
     }
 
     /// Resync the seven hot mirror scalars at index `i` from `genomes[i]`.
@@ -244,6 +250,7 @@ impl CreatureSoA {
         self.g_move_speed[i] = g.move_speed;
         self.g_vision_range[i] = g.vision_range;
         self.g_eye_count[i] = g.eye_count;
+        self.g_nose_count[i] = g.nose_count;
     }
 
     /// Recompute the 48 trig values for creature index `i` from its genome.
@@ -380,6 +387,7 @@ mod tests {
             assert_eq!(soa.g_move_speed[i], g.move_speed, "move[{i}]");
             assert_eq!(soa.g_vision_range[i], g.vision_range, "vision[{i}]");
             assert_eq!(soa.g_eye_count[i], g.eye_count, "eye_count[{i}]");
+            assert_eq!(soa.g_nose_count[i], g.nose_count, "nose_count[{i}]");
         }
     }
 
@@ -409,6 +417,7 @@ mod tests {
         for i in 0..soa.len() {
             assert_eq!(soa.g_size[i], soa.genomes[i].size);
             assert_eq!(soa.g_eye_count[i], soa.genomes[i].eye_count);
+            assert_eq!(soa.g_nose_count[i], soa.genomes[i].nose_count);
         }
     }
 
@@ -451,6 +460,10 @@ mod tests {
             assert_eq!(
                 w2.creatures.g_eye_count[i], w.creatures.genomes[i].eye_count,
                 "g_eye_count[{i}]"
+            );
+            assert_eq!(
+                w2.creatures.g_nose_count[i], w.creatures.genomes[i].nose_count,
+                "g_nose_count[{i}]"
             );
         }
     }
