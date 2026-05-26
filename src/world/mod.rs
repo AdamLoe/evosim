@@ -1,4 +1,4 @@
-//! World — owns SoA + sun + carrion + species + RNG + tick orchestration.
+//! World — owns SoA + grass + carrion + species + RNG + tick orchestration.
 //!
 //! Within-tick ordering follows v5 §3.5 exactly. Milestone B stubs vision
 //! and NN forward (no inputs needed yet) and uses a hardcoded action
@@ -21,16 +21,13 @@ use crate::grid::SpatialGrid;
 use crate::hof::HallOfFame;
 use crate::rng::SimRng;
 use crate::species::{species_distance, SpeciesRegistry};
-use crate::sun::SunMap;
 use crate::torus::wrap_pos;
 use crate::vision::{build_cell_to_carrion, CarrionIndex, VisionBuf, VisionPass, VISION_LEN};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DevSliders {
-    pub base_sun_rate: f32,
     pub mutation_rate_multiplier: f32,
-    pub sun_gradient_strength: f32,
     pub mouth_tax: f32,
     pub nn_mutation_sigma: f32,
     /// Grass cross-kernel propagation rate (k). See v1.2 amendments §A.4.
@@ -44,9 +41,7 @@ pub struct DevSliders {
 impl Default for DevSliders {
     fn default() -> Self {
         Self {
-            base_sun_rate: SUN_REFILL_RATE,
             mutation_rate_multiplier: 1.0,
-            sun_gradient_strength: 1.0,
             mouth_tax: UPKEEP_MOUTH_DEFAULT,
             nn_mutation_sigma: NN_MUT_SIGMA_DEFAULT,
             grass_propagation_rate_k: GRASS_PROPAGATION_RATE_K_DEFAULT,
@@ -60,9 +55,7 @@ pub struct World {
     pub tick: u32,
     pub seed: String,
     pub rng: SimRng,
-    pub sun: SunMap,
     /// Grass density field (v1.2 grass mechanic). 240×240 cells, 2.5u each.
-    /// Not saved by P1c — P1b+P1f's combined commit adds GrassGridSnapshot.
     pub grass: GrassGrid,
     pub grid: SpatialGrid,
     pub creatures: CreatureSoA,
@@ -147,7 +140,6 @@ impl World {
     pub fn new(seed: impl Into<String>) -> Self {
         let seed_string = seed.into();
         let mut rng = SimRng::from_string(&seed_string);
-        let sun = SunMap::new(&mut rng);
         let sliders = DevSliders::default();
         let grass = GrassGrid::new(&mut rng, sliders.grass_initial_seed_count);
         let mut creatures = CreatureSoA::with_capacity(2048);
@@ -189,7 +181,6 @@ impl World {
             tick: 0,
             seed: seed_string,
             rng,
-            sun,
             grass,
             grid,
             creatures,
@@ -245,8 +236,6 @@ impl World {
             return false;
         }
 
-        self.sun.refill_rate = self.sliders.base_sun_rate;
-
         // Profiler: outer "tick" span wraps the entire step.
         // Each sub-span is brace-scoped so its guard drops before the next
         // sibling span pushes (required for correct parent attribution).
@@ -279,25 +268,13 @@ impl World {
             self.apply_movement_and_repulsion();
         }
 
-        // 5. Photosynth two-pass.
-        {
-            crate::profile_span!(&self.profile, "tick.photosynth");
-            self.photosynth_two_pass();
-        }
-
-        // 6. Eat / scavenge resolution.
+        // 5. Eat / scavenge resolution.
         {
             crate::profile_span!(&self.profile, "tick.eat_scavenge");
             self.eat_and_scavenge();
         }
 
-        // 7. Sun refill.
-        {
-            crate::profile_span!(&self.profile, "tick.sun_refill");
-            self.sun.refill();
-        }
-
-        // 8. Grass propagation step (v1.2 grass mechanic).
+        // 6. Grass propagation step (v1.2 grass mechanic).
         // Sequential scalar pass over 57_600 cells. Reads slider-driven r and k.
         // P1e will add the graze consumption step (after movement, before eat).
         {
@@ -308,13 +285,13 @@ impl World {
             );
         }
 
-        // 9. Energy bookkeeping.
+        // 7. Energy bookkeeping.
         {
             crate::profile_span!(&self.profile, "tick.energy_bookkeeping");
             self.energy_bookkeeping();
         }
 
-        // 10. Deaths → carrion. Span widened (R9) to cover the dead-removal
+        // 8. Deaths → carrion. Span widened (R9) to cover the dead-removal
         //    swap_remove loop and creatures.remove_indices (step 10, scales with die-off).
         {
             crate::profile_span!(&self.profile, "tick.collect_deaths");
@@ -337,19 +314,19 @@ impl World {
             }
         }
 
-        // 11. Carrion decay.
+        // 9. Carrion decay.
         {
             crate::profile_span!(&self.profile, "tick.decay_carrion");
             self.decay_carrion();
         }
 
-        // 12. Births.
+        // 10. Births.
         {
             crate::profile_span!(&self.profile, "tick.handle_births");
             self.handle_births();
         }
 
-        // 13. Step-13 tail: last_action promotion, tick bump, milestone events,
+        // 11. Step-11 tail: last_action promotion, tick bump, milestone events,
         //     world-end check. Cheap today; future-proofs for Milestone E species
         //     detection (R9: bookkeeping_tail span).
         {
@@ -694,9 +671,8 @@ mod tests {
             w.vision.push([0.0f32; VISION_LEN]);
         }
 
-        let sun_start: f32 = w.sun.current.iter().sum();
         let energy_start: f32 = w.creatures.energy.iter().sum();
-        let total_energy_before = energy_start + sun_start;
+        let total_energy_before = energy_start;
 
         for _ in 0..1000 {
             w.tick_once();
@@ -704,19 +680,18 @@ mod tests {
 
         // (a) no panic — implicit by reaching here.
 
-        // (b) total energy stayed bounded. Sun regen max = 0.08 × 400 cells × 1000 ticks.
-        let sun_after: f32 = w.sun.current.iter().sum();
+        // (b) total energy stayed bounded. Grass regen is bounded; use a loose
+        //     per-tick bound of 1000 energy units added (generous slack for 1k ticks).
         let energy_after: f32 = w.creatures.energy.iter().sum();
         let carrion_after: f32 = w.carrion.iter().map(|c| c.pool).sum();
-        let total_energy_after = energy_after + sun_after + carrion_after;
+        let total_energy_after = energy_after + carrion_after;
         assert!(
             total_energy_after.is_finite(),
             "total energy must be finite"
         );
-        let max_expected =
-            total_energy_before + SUN_REFILL_RATE * (SUN_DIM * SUN_DIM) as f32 * 1000.0 + 1000.0;
+        let max_expected = total_energy_before + 1e6;
         assert!(
-            total_energy_after < max_expected * 1.5,
+            total_energy_after < max_expected,
             "total energy {total_energy_after:.1} exceeded sane bound {max_expected:.1}"
         );
 
@@ -962,8 +937,8 @@ mod tests {
             w2.events_enabled = true; // enable logging so we can assert event contents
             w2.sliders.mutation_rate_multiplier = 20.0;
             w2.sliders.nn_mutation_sigma = 0.3;
-            // Also boost sun so creatures survive long enough to accumulate drift.
-            w2.sliders.base_sun_rate = SUN_REFILL_RATE * 3.0;
+            // Boost grass growth so creatures survive long enough to accumulate drift.
+            w2.sliders.grass_in_cell_growth_r = 0.05;
             for _ in 0..5_000 {
                 if !w2.tick_once() {
                     break;

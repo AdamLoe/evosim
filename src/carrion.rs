@@ -10,6 +10,4 @@ pub struct Carrion {
     pub y: f32,
     pub pool: f32,
     pub age: u32,
-    /// Sun cell index the corpse should refund into when it expires.
-    pub sun_cell: usize,
 }

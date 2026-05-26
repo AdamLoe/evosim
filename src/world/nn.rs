@@ -753,7 +753,6 @@ mod tests {
     #[test]
     fn helpers_match_legacy_inline_math() {
         use crate::carrion::Carrion;
-        use crate::sun::SunMap;
 
         let mut w = World::new("s11-helpers");
         // Ensure the founder is near a wall and there's a carrion in the overlap zone.
@@ -763,14 +762,12 @@ mod tests {
         w.creatures.y[0] = WORLD_SIZE * 0.5;
 
         // Add a carrion at the creature's position so overlap == 1.
-        let cell = SunMap::cell_index_for(w.creatures.x[0], w.creatures.y[0]);
         w.carrion.push(Carrion {
             id: 999,
             x: w.creatures.x[0],
             y: w.creatures.y[0],
             pool: 1.0,
             age: 0,
-            sun_cell: cell,
         });
         // Rebuild the cell_to_carrion index.
         crate::vision::build_cell_to_carrion(&w.carrion, &mut w.cell_to_carrion);

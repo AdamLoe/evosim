@@ -1,5 +1,5 @@
 // Aquarium renderer. Pure draw helpers — owns no sim state. Called once per
-// requestAnimationFrame from main.ts with a fresh creature/sun/carrion snapshot.
+// requestAnimationFrame from main.ts with a fresh creature/carrion snapshot.
 
 import type { WorldHandle } from "../wasm/evosim";
 import type { GenomeJson } from "./eulogy"; // used by renderCreaturePortrait below
@@ -49,38 +49,6 @@ export function screenToWorld(cam: Camera, viewW: number, viewH: number, sx: num
   const x = (sx - viewW / 2) / cam.zoom + cam.cx;
   const y = (sy - viewH / 2) / cam.zoom + cam.cy;
   return [x, y];
-}
-
-export function drawSunMap(
-  ctx: CanvasRenderingContext2D,
-  cam: Camera,
-  viewW: number,
-  viewH: number,
-  worldSize: number,
-  sunDim: number,
-  sunFracs: Float32Array,
-  sunCaps: Float32Array,
-): void {
-  const cell = worldSize / sunDim;
-  for (let j = 0; j < sunDim; j++) {
-    for (let i = 0; i < sunDim; i++) {
-      const k = j * sunDim + i;
-      const cap = sunCaps[k];
-      const frac = sunFracs[k];
-      // Cell color: warm yellow scaled by capacity (background potential),
-      // brightness modulated by current fraction.
-      // capacity ranges roughly 1..7 → normalize to [0,1] for hue intensity.
-      const capN = Math.min(1, Math.max(0, (cap - 1) / 6));
-      const brightness = 0.04 + 0.18 * capN * frac; // dim by default; cells light up when full
-      const [sx, sy] = worldToScreen(cam, viewW, viewH, i * cell, j * cell);
-      const w = cell * cam.zoom + 1;
-      const r = Math.round(255 * brightness);
-      const g = Math.round(220 * brightness);
-      const b = Math.round(120 * brightness * 0.6);
-      ctx.fillStyle = `rgb(${r},${g},${b})`;
-      ctx.fillRect(sx, sy, w, w);
-    }
-  }
 }
 
 export function drawCarrion(
@@ -225,7 +193,7 @@ export function renderWorld(
   }
   ctx.fillStyle = "#04070b";
   ctx.fillRect(0, 0, viewW, viewH);
-  drawSunMap(ctx, cam, viewW, viewH, world.world_size, world.sun_dim, world.sun_buffer(), world.sun_capacity_buffer());
+  // TODO P1g: grass density tint will be inserted here.
   drawAquariumFrame(ctx, cam, viewW, viewH, world.world_size);
   drawCarrion(ctx, cam, viewW, viewH, world.carrion_buffer());
   drawCreatures(ctx, cam, viewW, viewH, world.creatures_buffer(), ids, stride, highlightMap, nowMs);

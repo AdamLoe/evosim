@@ -558,7 +558,6 @@ mod tests {
             y: 100.0,
             pool: 1.0,
             age: 0,
-            sun_cell: 0,
         }];
 
         let grid = make_grid(&creatures);
@@ -679,7 +678,6 @@ mod tests {
                 y: 10.0,
                 pool: 1.0,
                 age: 0,
-                sun_cell: 0,
             },
             Carrion {
                 id: 1,
@@ -687,7 +685,6 @@ mod tests {
                 y: 10.0,
                 pool: 1.0,
                 age: 0,
-                sun_cell: 0,
             }, // same cell as [0]
             Carrion {
                 id: 2,
@@ -695,7 +692,6 @@ mod tests {
                 y: 590.0,
                 pool: 1.0,
                 age: 0,
-                sun_cell: 0,
             },
             Carrion {
                 id: 3,
@@ -703,7 +699,6 @@ mod tests {
                 y: 300.0,
                 pool: 1.0,
                 age: 0,
-                sun_cell: 0,
             },
         ];
 
@@ -747,7 +742,6 @@ mod tests {
                 y,
                 pool: 1.0,
                 age: 0,
-                sun_cell: 0,
             },
             Carrion {
                 id: 20,
@@ -755,7 +749,6 @@ mod tests {
                 y,
                 pool: 1.0,
                 age: 0,
-                sun_cell: 0,
             },
             Carrion {
                 id: 30,
@@ -763,7 +756,6 @@ mod tests {
                 y,
                 pool: 1.0,
                 age: 0,
-                sun_cell: 0,
             },
         ];
         let cell = SpatialGrid::cell_of(x, y);
@@ -799,7 +791,6 @@ mod tests {
                 y: 0.5,
                 pool: 1.0,
                 age: 0,
-                sun_cell: 0,
             },
             Carrion {
                 id: 1,
@@ -807,7 +798,6 @@ mod tests {
                 y: 0.5,
                 pool: 1.0,
                 age: 0,
-                sun_cell: 0,
             },
             Carrion {
                 id: 2,
@@ -815,7 +805,6 @@ mod tests {
                 y: WORLD_SIZE - 0.5,
                 pool: 1.0,
                 age: 0,
-                sun_cell: 0,
             },
             Carrion {
                 id: 3,
@@ -823,7 +812,6 @@ mod tests {
                 y: WORLD_SIZE - 0.5,
                 pool: 1.0,
                 age: 0,
-                sun_cell: 0,
             },
         ];
         csr.rebuild(&corners);

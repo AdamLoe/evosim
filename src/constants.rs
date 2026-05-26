@@ -10,18 +10,6 @@ pub const BODY_RADIUS_PER_SIZE: f32 = 1.0;
 pub const HASH_CELL: f32 = 5.0;
 pub const HASH_DIM: usize = (WORLD_SIZE / HASH_CELL) as usize; // 120
 
-// ---- Sun map (v5 §3.3, v6 §D) ----
-pub const SUN_CELL: f32 = 30.0;
-pub const SUN_DIM: usize = (WORLD_SIZE / SUN_CELL) as usize; // 20
-pub const SUN_REFILL_RATE: f32 = 0.30; // R, default — slider in v6 §K; raised from 0.08 (see F.30 DECISIONS)
-pub const SUN_GRADIENT_WEST: f32 = 3.0;
-pub const SUN_GRADIENT_EAST: f32 = 1.0;
-pub const HOTSPOT_COUNT: usize = 3;
-pub const HOTSPOT_SIGMA: f32 = 80.0;
-pub const HOTSPOT_PEAK: f32 = 4.0;
-pub const HOTSPOT_MIN_SPACING: f32 = 200.0;
-pub const HOTSPOT_MIN_WALL: f32 = 60.0;
-
 // ---- Energy economy upkeep (v5 §7) ----
 pub const UPKEEP_BASE: f32 = 0.05;
 pub const UPKEEP_SIZE_PER_UNIT: f32 = 0.04;
@@ -45,7 +33,6 @@ pub const SPLIT_GIFT_MAX: f32 = 30.0;
 pub const SPLIT_THRESHOLD: f32 = 50.0;
 
 // ---- Eat / scavenge (v5 §3.5) ----
-pub const PHOTO_GAIN_COEFF: f32 = 0.5; // payout = coeff × eff × size × factor
 pub const EAT_DAMAGE_COEFF: f32 = 1.0; // damage = coeff × attacker.size
 pub const EAT_GAIN_COEFF: f32 = 1.5; // gain = coeff × eat_efficiency
 pub const SCAVENGE_GAIN_COEFF: f32 = 1.5;

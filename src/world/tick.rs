@@ -7,7 +7,6 @@ use crate::creature::Action;
 use crate::events::{Event, EventKind};
 use crate::hof::HallOfFame;
 use crate::species::species_distance;
-use crate::sun::SunMap;
 use crate::torus::{torus_delta, wrap_pos};
 
 impl World {
@@ -150,50 +149,6 @@ impl World {
         // S31: skip rebuild when no position change occurred (no wrap, no repulsion).
         if any_wrap {
             self.grid.rebuild(&self.creatures.x, &self.creatures.y);
-        }
-    }
-
-    pub(crate) fn photosynth_two_pass(&mut self) {
-        // 5a. demand
-        // perf-5: hot reads use g_* mirrors; cold reads stay on &self.creatures.genomes[i].
-        self.sun.demand.fill(0.0);
-        for i in 0..self.creatures.len() {
-            if self.creatures.action_this_tick[i] != Action::Photosynth {
-                continue;
-            }
-            let want = PHOTO_GAIN_COEFF * self.creatures.g_photo_eff[i] * self.creatures.g_size[i];
-            if want <= 0.0 {
-                continue;
-            }
-            let cell = SunMap::cell_index_for(self.creatures.x[i], self.creatures.y[i]);
-            self.sun.demand[cell] += want;
-        }
-        // 5b. payout
-        for i in 0..self.creatures.len() {
-            if self.creatures.action_this_tick[i] != Action::Photosynth {
-                continue;
-            }
-            let want = PHOTO_GAIN_COEFF * self.creatures.g_photo_eff[i] * self.creatures.g_size[i];
-            if want <= 0.0 {
-                continue;
-            }
-            let cell = SunMap::cell_index_for(self.creatures.x[i], self.creatures.y[i]);
-            let demand = self.sun.demand[cell];
-            if demand <= 0.0 {
-                continue;
-            }
-            let factor = (self.sun.current[cell] / demand).min(1.0);
-            self.creatures.energy[i] += want * factor;
-        }
-        // 5c. drain
-        for k in 0..self.sun.current.len() {
-            let d = self.sun.demand[k];
-            if d <= 0.0 {
-                continue;
-            }
-            let factor = (self.sun.current[k] / d).min(1.0);
-            let paid = d * factor;
-            self.sun.current[k] = (self.sun.current[k] - paid).max(0.0);
         }
     }
 
@@ -410,14 +365,12 @@ impl World {
             if self.creatures.energy[i] <= 0.0 {
                 let pool = (CARRION_POOL_COEFF * self.creatures.cumulative_upkeep[i])
                     .clamp(0.0, CARRION_POOL_CAP);
-                let cell = SunMap::cell_index_for(self.creatures.x[i], self.creatures.y[i]);
                 self.carrion.push(Carrion {
                     id: self.creatures.id[i],
                     x: self.creatures.x[i],
                     y: self.creatures.y[i],
                     pool,
                     age: 0,
-                    sun_cell: cell,
                 });
                 // S27: push directly to pending_extinction_check (no species_lost intermediate Vec).
                 self.pending_extinction_check
@@ -480,15 +433,11 @@ impl World {
     }
 
     pub(crate) fn decay_carrion(&mut self) {
+        // Unscavenged carrion energy vanishes on expiry (per master §F #10 / P1b).
         let mut i = 0;
         while i < self.carrion.len() {
             self.carrion[i].age += 1;
             if self.carrion[i].age > CARRION_MAX_AGE || self.carrion[i].pool <= 0.0 {
-                let remaining = self.carrion[i].pool.max(0.0);
-                let cell = self.carrion[i].sun_cell;
-                if remaining > 0.0 {
-                    self.sun.return_to_cell(cell, remaining);
-                }
                 self.carrion.swap_remove(i);
             } else {
                 i += 1;
@@ -500,42 +449,6 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::super::*;
-
-    #[test]
-    fn energy_conservation_in_photosynth_pass() {
-        let mut w = World::new("conserve");
-        w.creatures.action_this_tick[0] = Action::Photosynth;
-        let before_energy = w.creatures.energy[0];
-        let before_sun: f32 = w.sun.current.iter().sum();
-        w.photosynth_two_pass();
-        let after_energy = w.creatures.energy[0];
-        let after_sun: f32 = w.sun.current.iter().sum();
-        let gained = after_energy - before_energy;
-        let drained = before_sun - after_sun;
-        assert!(gained >= 0.0);
-        assert!(
-            (gained - drained).abs() < 1e-3,
-            "gain {gained} vs drain {drained}"
-        );
-    }
-
-    #[test]
-    fn carrion_returns_to_sun_on_decay() {
-        let mut w = World::new("decay-test");
-        let cell = SunMap::cell_index_for(100.0, 100.0);
-        w.sun.current[cell] = 0.0;
-        w.carrion.push(Carrion {
-            id: 999,
-            x: 100.0,
-            y: 100.0,
-            pool: 0.5,
-            age: CARRION_MAX_AGE,
-            sun_cell: cell,
-        });
-        w.decay_carrion();
-        assert!(w.sun.current[cell] > 0.0);
-        assert!(w.carrion.is_empty());
-    }
 
     // ---- E.25.b test ----
 
@@ -724,7 +637,6 @@ mod tests {
 
         let cx = w.creatures.x[0];
         let cy = w.creatures.y[0];
-        let cell = crate::sun::SunMap::cell_index_for(cx, cy);
         let carrion_pool = 5.0_f32;
         w.carrion.push(Carrion {
             id: 777,
@@ -732,7 +644,6 @@ mod tests {
             y: cy,
             pool: carrion_pool,
             age: 0,
-            sun_cell: cell,
         });
         // Rebuild the cell index so eat_and_scavenge can use it.
         build_cell_to_carrion(&w.carrion, &mut w.cell_to_carrion);
@@ -771,7 +682,6 @@ mod tests {
         // Place carrion far outside the body radius but still within the 3×3 cell window.
         let r_i = w.creatures.g_size[0] * BODY_RADIUS_PER_SIZE;
         let far = r_i * 10.0; // well outside body radius
-        let cell = crate::sun::SunMap::cell_index_for(cx, cy);
         let carrion_pool = 5.0_f32;
         w.carrion.push(Carrion {
             id: 888,
@@ -779,7 +689,6 @@ mod tests {
             y: cy,
             pool: carrion_pool,
             age: 0,
-            sun_cell: cell,
         });
         build_cell_to_carrion(&w.carrion, &mut w.cell_to_carrion);
 
@@ -838,27 +747,60 @@ mod tests {
         }
     }
 
-    /// perf-2 test 2: all scratch Vecs grow with the population over 500 ticks.
+    /// perf-2 test 2: scratch Vecs resize correctly with population each tick.
+    ///
+    /// P1b/P1e: photosynth income deleted (P1b); graze replacement lands in P1e.
+    /// Without energy income, population blooms from pre-loaded energy then crashes.
+    /// Verifies: (a) peak population > n0 (splits fired), (b) scratch Vecs >= n-1
+    /// each tick (one-tick lag from births is acceptable — movement step catches up),
+    /// (c) no panic over the full bloom-crash lifecycle.
     #[test]
     fn scratch_grows_with_population() {
         let mut w = World::new("perf2-grow");
         let n0 = w.creatures.len();
-        // Run until population grows past the initial scratch capacity.
-        for _ in 0..500 {
-            w.tick_once();
+        // Pre-load energy so creatures split rapidly; captures the resize path.
+        for i in 0..w.creatures.len() {
+            w.creatures.energy[i] = 10_000.0;
         }
-        let n1 = w.creatures.len();
-        assert!(n1 > n0, "test setup: population should have grown");
-        // Scratch Vecs MUST be at least as long as the current population.
-        assert!(w.scratch_fx.len() >= n1);
-        assert!(w.scratch_fy.len() >= n1);
-        assert!(w.scratch_damage.len() >= n1);
-        assert!(w.scratch_gain.len() >= n1);
-        assert!(w.scratch_cooldown_set.len() >= n1);
-        assert!(w.scratch_attempted_eat.len() >= n1);
-        assert!(w.scratch_attempted_scavenge.len() >= n1);
-        assert!(w.scratch_got_a_bite.len() >= n1);
-        // No panic across 500 ticks of growth confirms resize handles growth.
+        let mut peak_n = n0;
+        for _ in 0..500 {
+            // Check invariant BEFORE tick: at this point handle_births from the
+            // PREVIOUS tick may have added creatures. Scratch Vecs were sized
+            // by apply_movement_and_repulsion in the previous tick for n_prev_births.
+            // new_births = w.creatures.len() - n_at_last_movement_step; allow lag of 1.
+            let n = w.creatures.len();
+            peak_n = peak_n.max(n);
+            // Each scratch Vec must be at least n-1 (one-tick lag from births is acceptable).
+            let floor = n.saturating_sub(1);
+            assert!(
+                w.scratch_fx.len() >= floor,
+                "tick pre-check: scratch_fx {} < floor {}, n={}",
+                w.scratch_fx.len(),
+                floor,
+                n
+            );
+            assert!(
+                w.scratch_fy.len() >= floor,
+                "tick pre-check: scratch_fy {} < floor {}, n={}",
+                w.scratch_fy.len(),
+                floor,
+                n
+            );
+            assert!(w.scratch_damage.len() >= floor);
+            assert!(w.scratch_gain.len() >= floor);
+            assert!(w.scratch_cooldown_set.len() >= floor);
+            assert!(w.scratch_attempted_eat.len() >= floor);
+            assert!(w.scratch_attempted_scavenge.len() >= floor);
+            assert!(w.scratch_got_a_bite.len() >= floor);
+            if !w.tick_once() {
+                break; // world-end is expected after the energy boom
+            }
+        }
+        // The population must have peaked above the initial count (splits fired).
+        assert!(
+            peak_n > n0,
+            "population should have peaked above initial n0={n0}"
+        );
     }
 
     /// S31: a creature not crossing a seam with no overlapping neighbors should NOT

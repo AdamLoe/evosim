@@ -19,7 +19,6 @@ pub struct WorldHandle {
     /// Reusable serialization buffer for `creatures_buffer` — one f32 vec
     /// shared across calls so JS can read a stable typed-array view.
     creature_buf: Vec<f32>,
-    sun_buf: Vec<f32>,
     carrion_buf: Vec<f32>,
     /// Reusable f64 buffer for `creature_ids_buffer` — index-aligned with creatures_buffer.
     id_buf: Vec<f64>,
@@ -48,7 +47,6 @@ impl WorldHandle {
         Self {
             inner,
             creature_buf: Vec::new(),
-            sun_buf: Vec::new(),
             carrion_buf: Vec::new(),
             id_buf: Vec::new(),
             tick_durations_ms: std::collections::VecDeque::new(),
@@ -142,11 +140,6 @@ impl WorldHandle {
         WORLD_SIZE
     }
 
-    #[wasm_bindgen(getter)]
-    pub fn sun_dim(&self) -> u32 {
-        SUN_DIM as u32
-    }
-
     /// Repack creature SoA into a contiguous Float32Array. Layout per creature
     /// (11 floats, stride = [`creature_stride`]):
     /// `[x, y, radius_world, r, g, b,
@@ -202,25 +195,6 @@ impl WorldHandle {
         unsafe { js_sys::Float32Array::view(&self.creature_buf) }
     }
 
-    #[wasm_bindgen]
-    pub fn sun_buffer(&mut self) -> js_sys::Float32Array {
-        // current / capacity per cell, normalized [0, 1].
-        let n = self.inner.sun.current.len();
-        self.sun_buf.clear();
-        self.sun_buf.resize(n, 0.0);
-        for k in 0..n {
-            let c = self.inner.sun.capacity[k].max(1e-6);
-            self.sun_buf[k] = (self.inner.sun.current[k] / c).clamp(0.0, 1.0);
-        }
-        unsafe { js_sys::Float32Array::view(&self.sun_buf) }
-    }
-
-    #[wasm_bindgen]
-    pub fn sun_capacity_buffer(&mut self) -> js_sys::Float32Array {
-        // capacity only (used by the renderer to draw the underlying potential).
-        unsafe { js_sys::Float32Array::view(&self.inner.sun.capacity) }
-    }
-
     /// Per-carrion: [x, y, pool_frac]
     #[wasm_bindgen]
     pub fn carrion_buffer(&mut self) -> js_sys::Float32Array {
@@ -239,16 +213,8 @@ impl WorldHandle {
     // ─── Per-slider typed setters (S17) ─────────────────────────────────────
     // Private apply_* helpers: exactly one mutation site per DevSliders field.
 
-    fn apply_base_sun_rate(&mut self, value: f32) {
-        self.inner.sliders.base_sun_rate = value;
-    }
     fn apply_mutation_rate_multiplier(&mut self, value: f32) {
         self.inner.sliders.mutation_rate_multiplier = value;
-    }
-    /// Side effect: also triggers sun.recompute_capacity (v6 §D).
-    fn apply_sun_gradient_strength(&mut self, value: f32) {
-        self.inner.sliders.sun_gradient_strength = value;
-        self.inner.sun.recompute_capacity(value);
     }
     fn apply_mouth_tax(&mut self, value: f32) {
         self.inner.sliders.mouth_tax = value;
@@ -257,22 +223,10 @@ impl WorldHandle {
         self.inner.sliders.nn_mutation_sigma = value;
     }
 
-    /// Typed setter — base sun refill rate.
-    #[wasm_bindgen]
-    pub fn set_base_sun_rate(&mut self, value: f32) {
-        self.apply_base_sun_rate(value);
-    }
-
     /// Typed setter — per-birth mutation rate multiplier.
     #[wasm_bindgen]
     pub fn set_mutation_rate_multiplier(&mut self, value: f32) {
         self.apply_mutation_rate_multiplier(value);
-    }
-
-    /// Typed setter — sun gradient strength (also triggers sun.recompute_capacity).
-    #[wasm_bindgen]
-    pub fn set_sun_gradient_strength(&mut self, value: f32) {
-        self.apply_sun_gradient_strength(value);
     }
 
     /// Typed setter — mouth tax (upkeep per eat-efficiency point).
@@ -306,9 +260,7 @@ impl WorldHandle {
     /// without constructing a `JsValue` (which panics on non-wasm32 targets).
     fn try_set_slider(&mut self, name: &str, value: f32) -> bool {
         match name {
-            "base_sun_rate" => self.apply_base_sun_rate(value),
             "mutation_rate_multiplier" => self.apply_mutation_rate_multiplier(value),
-            "sun_gradient_strength" => self.apply_sun_gradient_strength(value),
             "mouth_tax" => self.apply_mouth_tax(value),
             "nn_mutation_sigma" => self.apply_nn_mutation_sigma(value),
             _ => return false,
@@ -487,7 +439,6 @@ impl WorldHandle {
         Ok(Self {
             inner,
             creature_buf: Vec::new(),
-            sun_buf: Vec::new(),
             carrion_buf: Vec::new(),
             id_buf: Vec::new(),
             tick_durations_ms: std::collections::VecDeque::new(),
@@ -740,12 +691,8 @@ mod tests {
     #[test]
     fn set_slider_typed_mutates_field() {
         let mut handle = WorldHandle::new("s17-typed");
-        handle.set_base_sun_rate(0.99);
-        assert!((handle.inner.sliders.base_sun_rate - 0.99).abs() < 1e-6);
         handle.set_mutation_rate_multiplier(2.5);
         assert!((handle.inner.sliders.mutation_rate_multiplier - 2.5).abs() < 1e-6);
-        handle.set_sun_gradient_strength(0.5);
-        assert!((handle.inner.sliders.sun_gradient_strength - 0.5).abs() < 1e-6);
         handle.set_mouth_tax(0.1);
         assert!((handle.inner.sliders.mouth_tax - 0.1).abs() < 1e-6);
         handle.set_nn_mutation_sigma(0.05);
@@ -758,13 +705,7 @@ mod tests {
     #[test]
     fn set_slider_known_names_dispatch_ok() {
         let mut handle = WorldHandle::new("s17-known");
-        for name in &[
-            "base_sun_rate",
-            "mutation_rate_multiplier",
-            "sun_gradient_strength",
-            "mouth_tax",
-            "nn_mutation_sigma",
-        ] {
+        for name in &["mutation_rate_multiplier", "mouth_tax", "nn_mutation_sigma"] {
             assert!(handle.try_set_slider(name, 0.5), "expected true for {name}");
         }
     }
@@ -836,7 +777,7 @@ mod tests {
         let mut handle = WorldHandle::new("f26-schema-err");
         handle.step();
         let json = handle.snapshot_json();
-        let patched = json.replace("\"schema_version\":1", "\"schema_version\":999");
+        let patched = json.replace("\"schema_version\":2", "\"schema_version\":999");
         // We can test the underlying save/load path without going through JsValue
         // (JsValue::as_string() panics in native test context outside wasm32).
         use crate::save::SaveV1;

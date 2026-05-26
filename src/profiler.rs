@@ -811,8 +811,8 @@ mod tests {
     /// cost, which is the real concern: at 12 spans × 1500-creature tick, the
     /// overhead must stay < 5% of tick time.
     ///
-    /// Expected: 12 push+drop pairs at ~50-200ns each = ~600ns-2400ns per tick.
-    /// A tick with 1500 creatures takes ~1-5ms → overhead ≈ 0.05-0.24% (well < 5%).
+    /// Expected: 11 push+drop pairs at ~50-200ns each = ~550ns-2200ns per tick.
+    /// A tick with 1500 creatures takes ~1-5ms → overhead ≈ 0.05-0.22% (well < 5%).
     ///
     /// This test asserts < 5µs per span pair (very lenient: ~25× the expected cost)
     /// to catch only catastrophic regressions (e.g., accidentally allocating on push).
@@ -822,7 +822,7 @@ mod tests {
         clear_fake_clock(); // Use real clock for this test.
 
         const ITERS: usize = 10_000;
-        const SPANS_PER_ITER: usize = 12;
+        const SPANS_PER_ITER: usize = 11;
 
         let p = Profiler::new();
         p.set_enabled(true);
@@ -836,12 +836,10 @@ mod tests {
             drop(_b);
             let _c = p.push("movement_and_repulsion");
             drop(_c);
-            let _d = p.push("photosynth_two_pass");
-            drop(_d);
             let _e = p.push("eat_and_scavenge");
             drop(_e);
-            let _f = p.push("sun_refill");
-            drop(_f);
+            let _grass = p.push("grass_step");
+            drop(_grass);
             let _g = p.push("energy_bookkeeping");
             drop(_g);
             let _h = p.push("collect_deaths");

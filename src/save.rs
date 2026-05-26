@@ -1,4 +1,4 @@
-//! Save/load support for v1. Schema version: 1. JSON via serde_json.
+//! Save/load support for v1. Schema version: 2. JSON via serde_json.
 //! v5 §13, v6 §I. Snapshot structs are explicit so future versions can add
 //! SaveV2 alongside without disturbing SaveV1. From<&World> conversions kept
 //! in this module; World re-exports via to_save_v1 / from_save_v1 helpers.
@@ -15,7 +15,8 @@ use crate::world::{DevSliders, World};
 use serde::{Deserialize, Serialize};
 
 /// Current schema version. Bump on any save-shape change that breaks compatibility.
-pub const SCHEMA_VERSION: u32 = 1;
+/// v1 → v2 (P1b+P1f): dropped SunMapSnapshot; added GrassGridSnapshot; dropped Carrion.sun_cell.
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Wire shape on disk. Camera / UI state lives on the JS side.
 /// All fields are owned Vecs so we can serialize without referencing &World.
@@ -32,7 +33,7 @@ pub struct SaveV1 {
     pub creatures: CreatureSoASnapshot,
 
     // Maps.
-    pub sun: SunMapSnapshot,
+    pub grass: GrassGridSnapshot,
     pub carrion: Vec<Carrion>,
 
     // Bookkeeping.
@@ -84,15 +85,10 @@ pub struct CreatureSoASnapshot {
     pub brains: Vec<Brain>,
 }
 
-/// SunMap snapshot — hotspots stored for replay.
+/// GrassGrid snapshot — density only; scratch is recomputed on load.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SunMapSnapshot {
-    pub capacity: Vec<f32>,
-    pub current: Vec<f32>,
-    pub hotspots: Vec<(f32, f32)>,
-    pub demand: Vec<f32>,
-    pub gradient_strength: f32,
-    pub refill_rate: f32,
+pub struct GrassGridSnapshot {
+    pub density: Vec<f32>,
 }
 
 /// SpeciesRegistry snapshot — next_id is recomputed on load as max(id)+1.
@@ -138,7 +134,6 @@ impl std::error::Error for LoadError {}
 
 impl SaveV1 {
     pub fn from_world(w: &World) -> Self {
-        let hotspots = w.sun.hotspots.to_vec();
         SaveV1 {
             schema_version: SCHEMA_VERSION,
             seed: w.seed.clone(),
@@ -164,13 +159,8 @@ impl SaveV1 {
                 genomes: w.creatures.genomes.clone(),
                 brains: w.creatures.brains.clone(),
             },
-            sun: SunMapSnapshot {
-                capacity: w.sun.capacity.clone(),
-                current: w.sun.current.clone(),
-                hotspots,
-                demand: w.sun.demand.clone(),
-                gradient_strength: w.sun.gradient_strength,
-                refill_rate: w.sun.refill_rate,
+            grass: GrassGridSnapshot {
+                density: w.grass.density.clone(),
             },
             carrion: w.carrion.clone(),
             species: SpeciesSnapshot {
@@ -247,47 +237,43 @@ pub fn validate_soa_lengths(s: &CreatureSoASnapshot) -> Result<usize, LoadError>
 ///
 /// Checks performed:
 /// 1. SoA column length parity (delegates to `validate_soa_lengths`).
-/// 2. Sun cell count == SUN_DIM * SUN_DIM.
-/// 3. Hotspot count == HOTSPOT_COUNT.
-/// 4. Brain weight count == NN_WEIGHT_COUNT per creature.
-/// 5. Brain `nn_mutation_rate` is finite per creature.
-/// 6. Creature positions (x, y) are finite per creature.
-/// 7. Creature energies are finite per creature.
-/// 8. No `parent_species_id` is `u32::MAX` (old sentinel value).
-/// 9. All `DevSliders` fields are finite.
+/// 2. Grass cell count == GRASS_CELL_COUNT; all densities finite and in `[0, GRASS_MAX]`.
+/// 3. Brain weight count == NN_WEIGHT_COUNT per creature.
+/// 4. Brain `nn_mutation_rate` is finite per creature.
+/// 5. Creature positions (x, y) are finite per creature.
+/// 6. Creature energies are finite per creature.
+/// 7. No `parent_species_id` is `u32::MAX` (old sentinel value).
+/// 8. All `DevSliders` fields are finite.
 pub fn validate_save(save: &SaveV1) -> Result<usize, LoadError> {
-    use crate::constants::{HOTSPOT_COUNT, NN_WEIGHT_COUNT, SUN_DIM};
+    use crate::constants::{GRASS_CELL_COUNT, GRASS_MAX, NN_WEIGHT_COUNT};
 
     // 1. SoA column parity.
     let n = validate_soa_lengths(&save.creatures)?;
 
-    // 2. Sun cell count.
-    let expected_sun = SUN_DIM * SUN_DIM;
-    if save.sun.capacity.len() != expected_sun {
+    // 2. Grass cell count.
+    if save.grass.density.len() != GRASS_CELL_COUNT {
         return Err(LoadError::StructuralError(format!(
-            "sun.capacity len {} != expected {}",
-            save.sun.capacity.len(),
-            expected_sun
-        )));
-    }
-    if save.sun.current.len() != expected_sun {
-        return Err(LoadError::StructuralError(format!(
-            "sun.current len {} != expected {}",
-            save.sun.current.len(),
-            expected_sun
+            "grass.density len {} != expected {}",
+            save.grass.density.len(),
+            GRASS_CELL_COUNT
         )));
     }
 
-    // 3. Hotspot count.
-    if save.sun.hotspots.len() != HOTSPOT_COUNT {
-        return Err(LoadError::StructuralError(format!(
-            "sun.hotspots len {} != expected {}",
-            save.sun.hotspots.len(),
-            HOTSPOT_COUNT
-        )));
+    // 2b. Grass densities finite + in [0, GRASS_MAX].
+    for (k, &d) in save.grass.density.iter().enumerate() {
+        if !d.is_finite() {
+            return Err(LoadError::StructuralError(format!(
+                "grass.density[{k}] is non-finite: {d}"
+            )));
+        }
+        if !(0.0..=GRASS_MAX).contains(&d) {
+            return Err(LoadError::StructuralError(format!(
+                "grass.density[{k}] out of range [0, {GRASS_MAX}]: {d}"
+            )));
+        }
     }
 
-    // 4-5. Per-creature brain checks.
+    // 3-4. Per-creature brain checks.
     for i in 0..n {
         let b = &save.creatures.brains[i];
         if b.weights.len() != NN_WEIGHT_COUNT {
@@ -339,12 +325,10 @@ pub fn validate_save(save: &SaveV1) -> Result<usize, LoadError> {
         }
     }
 
-    // 9. Slider fields finite.
+    // 8. Slider fields finite.
     let s = &save.sliders;
     for (name, val) in [
-        ("base_sun_rate", s.base_sun_rate),
         ("mutation_rate_multiplier", s.mutation_rate_multiplier),
-        ("sun_gradient_strength", s.sun_gradient_strength),
         ("mouth_tax", s.mouth_tax),
         ("nn_mutation_sigma", s.nn_mutation_sigma),
         ("grass_propagation_rate_k", s.grass_propagation_rate_k),
@@ -521,7 +505,7 @@ mod tests {
         match result {
             Err(LoadError::SchemaVersionMismatch {
                 found: 999,
-                expected: 1,
+                expected: 2,
             }) => {}
             Err(e) => panic!("expected SchemaVersionMismatch, got: {e}"),
             Ok(_) => panic!("expected Err, got Ok"),
@@ -568,17 +552,20 @@ mod tests {
     }
 
     #[test]
-    fn f26_sun_round_trips_exactly() {
+    fn p1f_grass_round_trips_exactly() {
         let w = make_world_500();
         let json = serde_json::to_string(&SaveV1::from_world(&w)).expect("serialize");
         let save2: SaveV1 = serde_json::from_str(&json).expect("deserialize");
         let w2 = World::from_save_v1(save2).expect("from_save_v1");
-        let n = w.sun.current.len();
-        assert_eq!(w2.sun.current.len(), n, "sun len must match");
-        for k in 0..n {
-            assert_eq!(w2.sun.current[k], w.sun.current[k], "sun.current[{k}]");
-            assert_eq!(w2.sun.capacity[k], w.sun.capacity[k], "sun.capacity[{k}]");
-        }
+        assert_eq!(
+            w2.grass.density, w.grass.density,
+            "grass.density must match"
+        );
+        assert_eq!(
+            w2.grass.scratch.len(),
+            w.grass.density.len(),
+            "scratch.len must equal density.len"
+        );
     }
 
     /// S34: LoadError implements std::error::Error so it can be boxed.
@@ -618,31 +605,60 @@ mod tests {
         );
     }
 
-    /// S12 negative 2: wrong sun cell count.
+    /// P1f negative: wrong grass cell count.
     #[test]
-    fn s12_sun_cell_count_mismatch_fails() {
+    fn p1f_grass_cell_count_mismatch_fails() {
         let mut save = make_valid_save();
-        save.sun.capacity.pop(); // one short
+        save.grass.density.pop(); // one short
         let result = validate_save(&save);
         assert!(
             matches!(result, Err(LoadError::StructuralError(_))),
-            "wrong sun capacity len must yield StructuralError"
+            "wrong grass density len must yield StructuralError"
         );
     }
 
-    /// S12 negative 3: wrong hotspot count.
+    /// P1f negative: NaN in grass density.
     #[test]
-    fn s12_hotspot_count_mismatch_fails() {
+    fn p1f_nan_grass_density_fails() {
         let mut save = make_valid_save();
-        save.sun.hotspots.pop();
-        let result = validate_save(&save);
+        save.grass.density[0] = f32::NAN;
         assert!(
-            matches!(result, Err(LoadError::StructuralError(_))),
-            "wrong hotspot count must yield StructuralError"
+            matches!(validate_save(&save), Err(LoadError::StructuralError(_))),
+            "NaN grass density must yield StructuralError"
         );
     }
 
-    /// S12 negative 4: non-finite nn_mutation_rate.
+    /// P1f negative: out-of-range grass density.
+    #[test]
+    fn p1f_out_of_range_grass_density_fails() {
+        let mut save = make_valid_save();
+        save.grass.density[0] = 2.0;
+        assert!(
+            matches!(validate_save(&save), Err(LoadError::StructuralError(_))),
+            "out-of-range grass density must yield StructuralError"
+        );
+    }
+
+    /// P1f: old-schema version 1 returns SchemaVersionMismatch { found: 1, expected: 2 }.
+    #[test]
+    fn load_old_schema_returns_version_mismatch_error() {
+        let mut w = World::new("p1f-old-schema");
+        w.tick_once();
+        let mut save = SaveV1::from_world(&w);
+        save.schema_version = 1;
+        match World::from_save_v1(save) {
+            Err(LoadError::SchemaVersionMismatch {
+                found: 1,
+                expected: 2,
+            }) => {}
+            Ok(_) => panic!("expected SchemaVersionMismatch but got Ok"),
+            Err(e) => {
+                panic!("expected SchemaVersionMismatch {{ found: 1, expected: 2 }} but got {e:?}")
+            }
+        }
+    }
+
+    /// S12: non-finite nn_mutation_rate.
     #[test]
     fn s12_nan_nn_mutation_rate_fails() {
         let mut save = make_valid_save();

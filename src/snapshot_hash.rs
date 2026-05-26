@@ -2,15 +2,15 @@
 //! ordering of world state per v6 §M. Stable across runs given identical
 //! state — regression catch on the golden value.
 //!
-//! Hash input order (v6 §M, extended by S7+S8 audit):
+//! Hash input order (v6 §M, extended by S7+S8 audit; updated P1b+P1f):
 //! 1. tick (u32)
 //! 2. creature SoA — per-creature: id, position, velocity, energy, age,
 //!    genome floats in struct-declaration order, NN weight slice,
 //!    nn_mutation_rate, digestion_cooldown, cumulative_upkeep, species_id,
 //!    parent_species_id, last_action, action_this_tick, max_size_reached,
 //!    distance_travelled, birth_tick
-//! 3. sun map — per-cell: current, capacity in row-major order
-//! 4. carrion list — per-corpse: x, y, pool, age, id, sun_cell
+//! 3. grass map — per-cell density in linear cell-index order (replaces sun map)
+//! 4. carrion list — per-corpse: x, y, pool, age, id
 //! 5. species list — per-species: id, anchor-genome sub-hash, parent_id,
 //!    name, born_tick, died_tick, child_count, depth, anchor_brain_weights
 //!    + top-level registry next_id
@@ -60,15 +60,14 @@ pub fn snapshot_hash(w: &World) -> u64 {
         h.write_u32(w.creatures.birth_tick[i]); // #9
     }
 
-    // (3) sun map — per-cell, row-major
-    let m = w.sun.capacity.len();
-    h.write_u32(m as u32);
-    for k in 0..m {
-        write_f32(&mut h, w.sun.current[k]);
-        write_f32(&mut h, w.sun.capacity[k]);
+    // (3) grass map — per-cell density in linear cell-index order
+    let mg = w.grass.density.len();
+    h.write_u32(mg as u32);
+    for k in 0..mg {
+        write_f32(&mut h, w.grass.density[k]);
     }
 
-    // (4) carrion list — positional fingerprint + S7 id + sun_cell (#10–#11)
+    // (4) carrion list — positional fingerprint + S7 id
     let nc = w.carrion.len();
     h.write_u32(nc as u32);
     for cc in &w.carrion {
@@ -76,10 +75,7 @@ pub fn snapshot_hash(w: &World) -> u64 {
         write_f32(&mut h, cc.y);
         write_f32(&mut h, cc.pool);
         h.write_u32(cc.age);
-        h.write_u64(cc.id); // #10
-                            // sun_cell is usize; safe to cast: SUN_DIM × SUN_DIM = 400 << u32::MAX.
-        debug_assert!(cc.sun_cell < u32::MAX as usize, "sun_cell overflows u32");
-        h.write_u32(cc.sun_cell as u32); // #11
+        h.write_u64(cc.id);
     }
 
     // (5) species list — id + anchor genome sub-hash + S7 fields (#12–#17) + next_id (#18)
