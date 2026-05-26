@@ -1,9 +1,13 @@
 # evosim
 
 Browser-deployed idle evolution sandbox. Rust → wasm sim, plain-TS Vite shell,
-Canvas 2D rendering. Spec lives in [docs/archive/PITCH-v5.md](docs/archive/PITCH-v5.md) and
-[docs/archive/PITCH-v6.md](docs/archive/PITCH-v6.md); v6 supersedes v5 on conflict.
-See [docs/README.md](docs/README.md) for the full documentation index.
+Canvas 2D rendering. See [docs/README.md](docs/README.md) for the full
+documentation index.
+
+v1.3 state: no save/resume, no carrion, no genome (only NN-weight evolution),
+no species tracking, no events or Hall of Fame. Walled world. 3-action enum
+(`Graze / Eat / Split`). Grass cells 5 world-units. Creature color derived from
+NN-weight xxhash64.
 
 ## Repo layout
 
@@ -13,8 +17,8 @@ See [docs/README.md](docs/README.md) for the full documentation index.
 /web                   Vite + TypeScript shell
 /web/wasm              wasm-pack output (gitignored, regenerated each build)
 /docs                  README, architecture, development, contributing guides
-/docs/archive          PITCH-v1..v6, ORCHESTRATOR.md, original notes, milestone plans
-/DECISIONS.md          running log of orchestrator decisions outside v5+v6
+/docs/plans            v1.3 planning docs (canonical record of this pass)
+/DECISIONS.md          running log of orchestrator decisions
 ```
 
 ## Local development
@@ -34,8 +38,8 @@ pnpm install
 pnpm dev
 ```
 
-The dev server prints a local URL; opening it should show a bouncing blue
-circle (Milestone A walking skeleton).
+The dev server prints a local URL; opening it shows a walled world with grass
+cells and evolving creatures.
 
 ## Deployment
 
@@ -55,9 +59,9 @@ single-threaded path if isolation is unavailable.
 ## Tests
 
 ```bash
-cargo test --lib                          # 77 unit tests
-cargo test --release --test acceptance    # §16 acceptance gate (golden hash)
+cargo test --lib                          # unit tests (default build)
+cargo test --lib --features threads       # unit tests (threaded build)
 cd web && pnpm typecheck
 ```
 
-See [docs/development.md](docs/development.md) for full details including how to re-bootstrap the golden snapshot.
+See [docs/development.md](docs/development.md) for full details.
