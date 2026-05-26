@@ -44,13 +44,12 @@ impl SpatialGrid {
 
     #[inline]
     pub fn cell_of(x: f32, y: f32) -> usize {
-        // Toroidal world: wrap cell index modulo HASH_DIM via rem_euclid.
-        // Integer rem_euclid is bit-stable; avoids float % surprises.
-        // See v1.2 grass mechanic brief.
+        // Walled world: clamp cell index to [0, HASH_DIM-1].
+        // Out-of-bounds positions (e.g. from float rounding) land in edge cells.
         let ix = (x / HASH_CELL).floor() as i32;
         let iy = (y / HASH_CELL).floor() as i32;
-        let ix = ix.rem_euclid(HASH_DIM as i32) as usize;
-        let iy = iy.rem_euclid(HASH_DIM as i32) as usize;
+        let ix = ix.clamp(0, HASH_DIM as i32 - 1) as usize;
+        let iy = iy.clamp(0, HASH_DIM as i32 - 1) as usize;
         iy * HASH_DIM + ix
     }
 
@@ -86,16 +85,11 @@ impl SpatialGrid {
     /// Iterate creature indices in cells inside a bounding box around
     /// `(x, y)` with the given radius. Caller must filter by exact distance.
     ///
-    /// Toroidal: the bounding box may cross the world seam on either axis.
-    /// Cell indices are wrapped with `rem_euclid(HASH_DIM)` so every candidate
-    /// cell is visited correctly even when the query box spans the seam.
-    ///
-    /// Contract: `radius < WORLD_SIZE * 0.5` (half-world). All callers
-    /// satisfy this constraint (max vision range 80u << 300u). See v1.2
-    /// grass mechanic brief §F #4.
+    /// Walled world: cell indices are clamped to [0, HASH_DIM-1]; no seam
+    /// wrapping. Out-of-bounds cells are simply skipped.
     pub fn for_each_in_radius(&self, x: f32, y: f32, radius: f32, mut f: impl FnMut(usize)) {
         debug_assert!(
-            radius < crate::torus::WORLD_HALF,
+            radius < WORLD_SIZE * 0.5,
             "for_each_in_radius requires radius < half-world (300u); got {radius}"
         );
         let dim = HASH_DIM as i32;
@@ -104,11 +98,15 @@ impl SpatialGrid {
         let lo_y = ((y - radius) / HASH_CELL).floor() as i32;
         let hi_y = ((y + radius) / HASH_CELL).floor() as i32;
         for iy in lo_y..=hi_y {
-            let wy = iy.rem_euclid(dim) as usize;
-            let row = wy * HASH_DIM;
+            if iy < 0 || iy >= dim {
+                continue;
+            }
+            let row = iy as usize * HASH_DIM;
             for ix in lo_x..=hi_x {
-                let wx = ix.rem_euclid(dim) as usize;
-                let c = row + wx;
+                if ix < 0 || ix >= dim {
+                    continue;
+                }
+                let c = row + ix as usize;
                 let s = self.starts[c] as usize;
                 let e = self.starts[c + 1] as usize;
                 for &idx in &self.indices[s..e] {
@@ -123,28 +121,32 @@ impl SpatialGrid {
 mod tests {
     use super::*;
 
-    /// Toroidal: cell_of with negative x/y wraps to the far edge (seam wrap).
+    /// Walled world: cell_of clamps negative x/y to 0 (not wrap to last column).
     #[test]
-    fn cell_of_wraps_negative() {
-        // x = -1.0 → floor(-0.2) = -1 → rem_euclid(120) = 119 → cell column 119.
+    fn cell_of_clamps_negative() {
+        // x = -1.0 → clamp to column 0.
         let c = SpatialGrid::cell_of(-1.0, 0.0);
-        assert_eq!(c, HASH_DIM - 1, "negative x should wrap to last column");
+        assert_eq!(c, 0, "negative x should clamp to column 0");
         let c2 = SpatialGrid::cell_of(0.0, -1.0);
+        assert_eq!(c2, 0, "negative y should clamp to row 0");
+    }
+
+    /// Walled world: cell_of with x/y >= WORLD_SIZE clamps to last cell.
+    #[test]
+    fn cell_of_clamps_above() {
+        // x = WORLD_SIZE = 600.0 → floor(120) = 120 → clamp(119) → column 119.
+        let c = SpatialGrid::cell_of(WORLD_SIZE, 0.0);
+        assert_eq!(
+            c,
+            HASH_DIM - 1,
+            "x == WORLD_SIZE should clamp to last column"
+        );
+        let c2 = SpatialGrid::cell_of(0.0, WORLD_SIZE);
         assert_eq!(
             c2,
             (HASH_DIM - 1) * HASH_DIM,
-            "negative y should wrap to last row"
+            "y == WORLD_SIZE should clamp to last row"
         );
-    }
-
-    /// Toroidal: cell_of with x/y >= WORLD_SIZE wraps to the near edge.
-    #[test]
-    fn cell_of_wraps_above() {
-        // x = WORLD_SIZE = 600.0 → floor(120) = 120 → rem_euclid(120) = 0 → column 0.
-        let c = SpatialGrid::cell_of(WORLD_SIZE, 0.0);
-        assert_eq!(c, 0, "x == WORLD_SIZE should wrap to column 0");
-        let c2 = SpatialGrid::cell_of(0.0, WORLD_SIZE);
-        assert_eq!(c2, 0, "y == WORLD_SIZE should wrap to row 0");
     }
 
     /// S32: the cached cells[] array matches a direct recompute of cell_of for
@@ -238,13 +240,10 @@ mod tests {
         );
     }
 
-    /// Toroidal: a creature near x=595 should be visible from a query centered
-    /// at x=5 with radius 15 (wrapping across the seam). Without toroidal wrap
-    /// the old code would clamp and miss the creature.
+    /// Walled world: a creature near x=595 should NOT be found by a query centered
+    /// at x=5 with small radius — there is no seam wrap.
     #[test]
-    fn for_each_in_radius_finds_across_seam() {
-        // Place creature A at (5, 300) and B at (595, 300).
-        // A query at (5, 300) with radius 15 should find B via the seam (10 units away).
+    fn for_each_in_radius_no_seam_wrap() {
         let xs = vec![5.0, 595.0];
         let ys = vec![300.0, 300.0];
         let mut g = SpatialGrid::new();
@@ -257,54 +256,34 @@ mod tests {
             }
         });
         assert!(
-            found_b,
-            "creature at x=595 should be found by query at x=5 r=15 via seam"
+            !found_b,
+            "walled world: creature at x=595 must NOT be found by query at x=5 r=15"
         );
     }
 
-    /// Toroidal: a query that wraps across BOTH axes should find creatures in
-    /// all four corners simultaneously.
+    /// Walled world: for_each_in_radius at world edge does not panic when
+    /// the query box extends outside [0, WORLD_SIZE).
     #[test]
-    fn for_each_in_radius_seam_both_axes() {
-        // Four creatures: one near each corner.
-        let xs = vec![3.0, 597.0, 3.0, 597.0];
-        let ys = vec![3.0, 3.0, 597.0, 597.0];
+    fn for_each_in_radius_edge_query_no_panic() {
+        let xs = vec![1.0, 599.0];
+        let ys = vec![300.0, 300.0];
         let mut g = SpatialGrid::new();
         g.rebuild(&xs, &ys);
 
-        // Query at (0, 0) with radius 10 — wraps in both axes.
-        let mut found = vec![];
-        g.for_each_in_radius(0.0, 0.0, 10.0, |i| found.push(i));
-        found.sort();
-        assert_eq!(
-            found,
-            vec![0, 1, 2, 3],
-            "all four corner creatures should be reachable from (0,0) r=10; got {found:?}"
+        // Query that would go below 0 on x.
+        let mut hits = vec![];
+        g.for_each_in_radius(1.0, 300.0, 8.0, |i| hits.push(i));
+        assert!(
+            hits.contains(&0),
+            "creature at x=1 must be found near left edge"
         );
-    }
 
-    /// Toroidal: no creature index should be visited twice even when the query
-    /// box straddles the seam and wraps to cells on both sides.
-    #[test]
-    fn for_each_in_radius_no_duplicate_visits() {
-        // Place one creature right at the seam area, one in the middle.
-        let xs = vec![1.0, 599.0, 300.0];
-        let ys = vec![300.0, 300.0, 300.0];
-        let mut g = SpatialGrid::new();
-        g.rebuild(&xs, &ys);
-
-        // Query at (0, 300) with small radius — wraps across x-seam.
-        let mut visits: Vec<usize> = vec![];
-        g.for_each_in_radius(0.0, 300.0, 8.0, |i| visits.push(i));
-        let len = visits.len();
-        visits.dedup(); // won't remove non-consecutive dups; sort first
-        let mut sorted = visits.clone();
-        sorted.sort();
-        sorted.dedup();
-        assert_eq!(
-            sorted.len(),
-            len,
-            "no creature should be visited twice; got visits={visits:?}"
+        // Query that would go above WORLD_SIZE on x.
+        let mut hits2 = vec![];
+        g.for_each_in_radius(599.0, 300.0, 8.0, |i| hits2.push(i));
+        assert!(
+            hits2.contains(&1),
+            "creature at x=599 must be found near right edge"
         );
     }
 }

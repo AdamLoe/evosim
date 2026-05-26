@@ -7,7 +7,6 @@ use crate::creature::Action;
 use crate::events::{Event, EventKind};
 use crate::hof::HallOfFame;
 use crate::species::species_distance;
-use crate::torus::{torus_delta, wrap_pos};
 
 impl World {
     /// Multi-cell graze: for every creature that chose `Action::Graze` this tick,
@@ -173,8 +172,9 @@ impl World {
                 let xj = self.creatures.x[j];
                 let yj = self.creatures.y[j];
                 let rj = self.creatures.g_size[j] * BODY_RADIUS_PER_SIZE;
-                // Toroidal: use shortest-path vector for repulsion. See v1.2 §2.4.
-                let (dx, dy) = torus_delta(xj - xi, yj - yi);
+                // Walled: raw Euclidean displacement for repulsion.
+                let dx = xj - xi;
+                let dy = yj - yi;
                 let d2 = dx * dx + dy * dy;
                 let rsum = ri + rj;
                 if d2 < rsum * rsum {
@@ -205,32 +205,29 @@ impl World {
             self.scratch_neighbors = neighbors;
         }
 
-        // S31/P1a: track whether any position changed so we can skip the final grid
-        // rebuild when positions are unchanged. Toroidal world: the wall-clamp block
-        // is replaced with `wrap_pos`. The `any_wall` flag is merged into `any_wrap`
-        // (any seam crossing triggers a rebuild just as a wall contact did before).
-        // If neither wrap nor repulsion moved any creature, the pre-repulsion grid
-        // rebuild above is still valid.
+        // S31: track whether any position changed so we can skip the final grid
+        // rebuild when positions are unchanged.
+        // Walled: clamp positions to [radius, WORLD_SIZE - radius] after repulsion forces.
         // eat_and_scavenge (step 6) uses the grid, so we must not skip when stale.
-        // See v1.2 grass mechanic brief §2.5.
-        let mut any_wrap = false;
+        let mut any_moved = false;
         for i in 0..n {
             if self.scratch_fx[i] != 0.0 || self.scratch_fy[i] != 0.0 {
-                any_wrap = true;
+                any_moved = true;
             }
-            let candidate_x = self.creatures.x[i] + self.scratch_fx[i];
-            let candidate_y = self.creatures.y[i] + self.scratch_fy[i];
-            let wrapped_x = wrap_pos(candidate_x);
-            let wrapped_y = wrap_pos(candidate_y);
-            if wrapped_x != candidate_x || wrapped_y != candidate_y {
-                any_wrap = true;
+            let ri = self.creatures.g_size[i] * BODY_RADIUS_PER_SIZE;
+            let lo = ri;
+            let hi = WORLD_SIZE - ri;
+            let new_x = (self.creatures.x[i] + self.scratch_fx[i]).clamp(lo, hi);
+            let new_y = (self.creatures.y[i] + self.scratch_fy[i]).clamp(lo, hi);
+            if new_x != self.creatures.x[i] || new_y != self.creatures.y[i] {
+                any_moved = true;
             }
-            self.creatures.x[i] = wrapped_x;
-            self.creatures.y[i] = wrapped_y;
+            self.creatures.x[i] = new_x;
+            self.creatures.y[i] = new_y;
         }
 
-        // S31: skip rebuild when no position change occurred (no wrap, no repulsion).
-        if any_wrap {
+        // S31: skip rebuild when no position change occurred (no repulsion, no wall contact).
+        if any_moved {
             self.grid.rebuild(&self.creatures.x, &self.creatures.y);
         }
     }
@@ -282,9 +279,9 @@ impl World {
                         }
                     });
                     for j in candidates.iter().copied() {
-                        // Toroidal: shortest-path distance to candidate. See v1.2 §2.6.
-                        let (ddx, ddy) =
-                            torus_delta(self.creatures.x[j] - xi, self.creatures.y[j] - yi);
+                        // Walled: raw Euclidean distance to candidate.
+                        let ddx = self.creatures.x[j] - xi;
+                        let ddy = self.creatures.y[j] - yi;
                         let d = (ddx * ddx + ddy * ddy).sqrt();
                         let rj = self.creatures.g_size[j] * BODY_RADIUS_PER_SIZE;
                         let contact = (d - radius_i - rj).max(0.0);
@@ -327,20 +324,20 @@ impl World {
                     let want = SCAVENGE_GAIN_COEFF * scav_eff_i;
                     // S24: 3×3 cell sweep via cell_to_carrion (O(local) vs O(all carrion)).
                     // Collect the first in-range carrion index before mutating it.
-                    // Toroidal: wrap cell indices with rem_euclid; use torus_delta for
-                    // the distance check. See v1.2 grass mechanic brief §2.7.
+                    // Walled: clamp cell indices to [0, HASH_DIM-1]; use Euclidean distance.
                     let cx = (xi / HASH_CELL).floor() as i32;
                     let cy = (yi / HASH_CELL).floor() as i32;
                     let dim = HASH_DIM as i32;
                     let mut found_ci: Option<usize> = None;
                     'outer: for sdy in -1i32..=1 {
+                        let ny = (cy + sdy).clamp(0, dim - 1);
                         for sdx in -1i32..=1 {
-                            let nx = (cx + sdx).rem_euclid(dim);
-                            let ny = (cy + sdy).rem_euclid(dim);
+                            let nx = (cx + sdx).clamp(0, dim - 1);
                             let cell_idx = ny as usize * HASH_DIM + nx as usize;
                             for &ci in self.cell_to_carrion.cell_slice(cell_idx) {
                                 let c = &self.carrion[ci as usize];
-                                let (ddx, ddy) = torus_delta(c.x - xi, c.y - yi);
+                                let ddx = c.x - xi;
+                                let ddy = c.y - yi;
                                 if ddx * ddx + ddy * ddy <= r2 {
                                     found_ci = Some(ci as usize);
                                     break 'outer;
@@ -892,12 +889,12 @@ mod tests {
         );
     }
 
-    /// S31: a creature not crossing a seam with no overlapping neighbors should NOT
-    /// trigger a grid rebuild (any_wrap = false AND any_repulsion = false).
+    /// S31: a stationary creature with no overlapping neighbors should NOT
+    /// trigger a grid rebuild (any_moved = false AND any_repulsion = false).
     /// We verify correctness by running a tick and confirming the grid is still
     /// valid (correct creature positions) even when the rebuild was skipped.
     #[test]
-    fn s31_no_wrap_no_repulsion_grid_still_valid() {
+    fn s31_no_move_no_repulsion_grid_still_valid() {
         let mut w = World::new("s31-wall-skip");
         // Place the founder at the center with zero velocity so it doesn't move.
         w.creatures.x[0] = WORLD_SIZE * 0.5;
@@ -924,87 +921,114 @@ mod tests {
         );
     }
 
-    // ---- P1a toroidal physics tests ----
+    // ---- D7 walled physics tests ----
 
-    /// P1a §2.5: a creature with positive vx that crosses the right edge should
-    /// wrap to x ≈ 0 (not be clamped to WORLD_SIZE - radius).
+    /// D7: a creature with positive vx that would cross the right edge should
+    /// be clamped to WORLD_SIZE - radius (not wrap to x ≈ 0).
     #[test]
-    fn position_wraps_when_velocity_crosses_edge() {
-        let mut w = World::new("p1a-wrap-vel");
+    fn creature_clamped_at_right_edge() {
+        let mut w = World::new("d7-clamp-right");
+        let ri = w.creatures.g_size[0] * BODY_RADIUS_PER_SIZE;
         // Move the founder to just inside the right edge, then give it a large vx.
         w.creatures.x[0] = WORLD_SIZE - 1.0;
         w.creatures.y[0] = WORLD_SIZE * 0.5;
-        w.creatures.vx[0] = 5.0; // will cross the right seam
+        w.creatures.vx[0] = 5.0; // would cross the right edge
         w.creatures.vy[0] = 0.0;
         w.creatures.genomes[0].move_speed = 5.0;
         w.creatures.resync_hot_mirrors_at(0);
+        // Zero move bias so it doesn't interfere.
+        w.creatures.move_bias_x[0] = 0.0;
+        w.creatures.move_bias_y[0] = 0.0;
+        w.creatures.move_bias_reroll_at[0] = u32::MAX;
         w.grid.rebuild(&w.creatures.x, &w.creatures.y);
 
         w.apply_movement_and_repulsion();
 
         let x = w.creatures.x[0];
-        // After wrapping, x should be in [0, WORLD_SIZE).
+        // After wall-clamp, x must be <= WORLD_SIZE - radius.
         assert!(
-            (0.0..WORLD_SIZE).contains(&x),
-            "position must be in [0, WORLD_SIZE) after wrap; x = {x}"
+            x <= WORLD_SIZE - ri + 1e-4,
+            "creature must be clamped at right wall; x={x}, limit={}",
+            WORLD_SIZE - ri
         );
-        // The creature moved ~5 units past the right edge → should be near x=4.
+        // Must not have wrapped to near 0.
         assert!(
-            x < 10.0,
-            "wrapped x should be near 0 (crossed right seam); x = {x}"
+            x > 10.0,
+            "creature must NOT wrap to near x=0 (walled world); x={x}"
         );
     }
 
-    /// P1a §2.9: split-jitter should wrap the child position toroidally, not clamp.
-    /// Place the parent at x=5, jitter pushing the child to x=-45 (jitter=-50).
-    /// Toroidal wrap: -45 → WORLD_SIZE - 45 = 555. Old clamp: → parent_radius.
+    /// D7: a creature at the left edge moving left is clamped at x=radius.
     #[test]
-    fn split_jitter_wraps() {
+    fn creature_clamped_at_left_edge() {
+        let mut w = World::new("d7-clamp-left");
+        let ri = w.creatures.g_size[0] * BODY_RADIUS_PER_SIZE;
+        w.creatures.x[0] = 1.0;
+        w.creatures.y[0] = WORLD_SIZE * 0.5;
+        w.creatures.vx[0] = -5.0; // moving left toward x=0
+        w.creatures.vy[0] = 0.0;
+        w.creatures.genomes[0].move_speed = 5.0;
+        w.creatures.resync_hot_mirrors_at(0);
+        w.creatures.move_bias_x[0] = 0.0;
+        w.creatures.move_bias_y[0] = 0.0;
+        w.creatures.move_bias_reroll_at[0] = u32::MAX;
+        w.grid.rebuild(&w.creatures.x, &w.creatures.y);
+
+        w.apply_movement_and_repulsion();
+
+        let x = w.creatures.x[0];
+        // Must be at least ri (radius).
+        assert!(
+            x >= ri - 1e-4,
+            "creature must be clamped at left wall; x={x}, limit={ri}"
+        );
+    }
+
+    /// D7: split-jitter clamps the child position to [radius, WORLD_SIZE - radius].
+    #[test]
+    fn split_jitter_clamped() {
         use crate::creature::Action;
 
-        let mut w = World::new("p1a-jitter");
-        // Place the founder near the left seam.
-        w.creatures.x[0] = 5.0;
+        let mut w = World::new("d7-jitter-clamp");
+        // Place the founder near the left wall.
+        w.creatures.x[0] = 2.0;
         w.creatures.y[0] = WORLD_SIZE * 0.5;
         w.creatures.energy[0] = SPLIT_THRESHOLD + 100.0;
         w.creatures.action_this_tick[0] = Action::Split;
-        // Override the RNG to produce a predictable negative jitter.
-        // We can't easily control the RNG, so just run handle_births and verify
-        // that any child created lands in [0, WORLD_SIZE) on both axes.
         w.handle_births();
 
         let n = w.creatures.len();
         for i in 1..n {
+            let ri = w.creatures.g_size[i] * BODY_RADIUS_PER_SIZE;
             let cx = w.creatures.x[i];
             let cy = w.creatures.y[i];
+            // Walled: child must be in [ri, WORLD_SIZE - ri].
             assert!(
-                (0.0..WORLD_SIZE).contains(&cx),
-                "child x must be in [0, WORLD_SIZE); x = {cx}"
+                cx >= ri - 1e-4 && cx <= WORLD_SIZE - ri + 1e-4,
+                "child x={cx} must be in [ri={ri}, WORLD_SIZE-ri={}]",
+                WORLD_SIZE - ri
             );
             assert!(
-                (0.0..WORLD_SIZE).contains(&cy),
-                "child y must be in [0, WORLD_SIZE); y = {cy}"
+                cy >= ri - 1e-4 && cy <= WORLD_SIZE - ri + 1e-4,
+                "child y={cy} must be in [ri={ri}, WORLD_SIZE-ri={}]",
+                WORLD_SIZE - ri
             );
         }
     }
 
-    /// P1a §2.4: two creatures on opposite sides of the x-seam should repel
-    /// each other via the shortest-path vector (through the seam, not across
-    /// the full world). With toroidal repulsion, the force should push creature A
-    /// further toward x=0 (toward the seam) and creature B toward x=WORLD_SIZE.
+    /// D7: two creatures far on opposite sides of the world (x=2 vs x=598)
+    /// do NOT repel each other via phantom seam crossing in the walled world.
     #[test]
-    fn repulsion_wraps_across_seam() {
+    fn repulsion_does_not_cross_seam() {
         use crate::brain::Brain;
         use crate::genome::Genome;
 
-        let mut w = World::new("p1a-repulsion-seam");
-        // Creature A at x=2: very close to the left seam.
+        let mut w = World::new("d7-repulsion-no-seam");
         w.creatures.x[0] = 2.0;
         w.creatures.y[0] = WORLD_SIZE * 0.5;
         w.creatures.vx[0] = 0.0;
         w.creatures.vy[0] = 0.0;
 
-        // Add creature B at x=598 (2 units from right seam = toroidal distance 4).
         let mut rng = SimRng::from_u64(123);
         let g2 = Genome::founder();
         let b2 = Brain::founder(&mut rng);
@@ -1015,31 +1039,31 @@ mod tests {
         w.vision.push([0.0f32; VISION_LEN]);
         w.creatures.vx[n_before] = 0.0;
         w.creatures.vy[n_before] = 0.0;
+        w.creatures.move_bias_x[0] = 0.0;
+        w.creatures.move_bias_y[0] = 0.0;
+        w.creatures.move_bias_reroll_at[0] = u32::MAX;
+        w.creatures.move_bias_x[n_before] = 0.0;
+        w.creatures.move_bias_y[n_before] = 0.0;
+        w.creatures.move_bias_reroll_at[n_before] = u32::MAX;
 
-        // They overlap because their radii (1.0 each) sum to 2.0 and seam-distance is 4.0.
-        // Not overlapping yet — move them closer.
-        w.creatures.x[0] = 0.5; // within 1 unit of seam
-        w.creatures.x[n_before] = WORLD_SIZE - 0.5; // within 1 unit of seam
-                                                    // Radii = 1.0 each; sum = 2.0; seam-distance = 1.0 < rsum → they overlap.
+        let x0_before = w.creatures.x[0];
+        let x1_before = w.creatures.x[n_before];
 
         w.grid.rebuild(&w.creatures.x, &w.creatures.y);
-        w.scratch_fx.resize(w.creatures.len(), 0.0);
-        w.scratch_fy.resize(w.creatures.len(), 0.0);
-
         w.apply_movement_and_repulsion();
 
-        // After repulsion: A should have moved in the -x direction (toward seam crossing,
-        // which wraps past 0), B should have moved in the +x direction (past WORLD_SIZE).
-        // Since positions are wrapped, A should end up with x < 0.5 or wrapped to near WORLD_SIZE,
-        // and B should end up with x > WORLD_SIZE - 0.5 or wrapped to near 0.
-        // The key invariant: both are in [0, WORLD_SIZE).
-        for i in 0..w.creatures.len() {
-            assert!(
-                w.creatures.x[i] >= 0.0 && w.creatures.x[i] < WORLD_SIZE,
-                "creature {i} x={} not in [0, WORLD_SIZE) after repulsion",
-                w.creatures.x[i]
-            );
-        }
+        // In the walled world, A at x=2 and B at x=598 are 596 units apart —
+        // far beyond any repulsion range. Neither should have moved due to repulsion.
+        let dx0 = (w.creatures.x[0] - x0_before).abs();
+        let dx1 = (w.creatures.x[n_before] - x1_before).abs();
+        assert!(
+            dx0 < 1e-4,
+            "creature A at x=2 must not be repelled by far-side B; moved {dx0}"
+        );
+        assert!(
+            dx1 < 1e-4,
+            "creature B at x=598 must not be repelled by far-side A; moved {dx1}"
+        );
     }
 
     // ---- P1e graze tests ----
@@ -1114,57 +1138,6 @@ mod tests {
             (w.grass.density[center_cell] - expected_density).abs() < 1e-5,
             "center cell density should have dropped by GRAZE_MAX_PER_TICK; got {}",
             w.grass.density[center_cell]
-        );
-    }
-
-    /// P1e test 3: creature at world seam (x ≈ WORLD_SIZE) overlaps cells on both sides.
-    ///
-    /// Place the creature at the exact x-seam (x=0, which is also WORLD_SIZE due to toroidal
-    /// wrapping) and give it a radius large enough to definitely reach both the last column
-    /// (ix = GRASS_GRID_DIM - 1, center at WORLD_SIZE - 1.25) and the first column
-    /// (ix = 0, center at 1.25). With creature at x=0 and radius = 2.0:
-    /// - dist to ix=0 center  = 1.25 ≤ 2.0 → hit
-    /// - dist to ix=239 center = 1.25 ≤ 2.0 → hit (toroidal: |0 - (WORLD_SIZE-1.25)| wraps to 1.25)
-    #[test]
-    fn graze_wraps_across_world_seam() {
-        use crate::constants::{GRASS_CELL_SIZE, GRASS_GRID_DIM, GRASS_MAX};
-
-        let mut w = World::new("graze-seam");
-        // Creature at x=0 (on the west seam). Radius = 2.0 covers first two columns and,
-        // via toroidal wrap, the last column too.
-        let cx = 0.0_f32;
-        let cy = WORLD_SIZE * 0.5;
-        w.creatures.x[0] = cx;
-        w.creatures.y[0] = cy;
-        // size = 2.0 → radius = 2.0 → reaches ix=239 center (toroidal dist = 1.25) and ix=0 center (1.25).
-        w.creatures.genomes[0].size = 2.0;
-        w.creatures.resync_hot_mirrors_at(0);
-        w.creatures.genomes[0].graze_efficiency = 1.0;
-        w.creatures.resync_hot_mirrors_at(0);
-        w.creatures.action_this_tick[0] = Action::Graze;
-
-        // Seed the east edge column (ix = GRASS_GRID_DIM - 1) and west edge (ix = 0) for the
-        // middle row. Both should be within radius 2.0 of the creature at x=0.
-        let iy = ((cy / GRASS_CELL_SIZE).floor() as usize).min(GRASS_GRID_DIM - 1);
-        let east_cell = iy * GRASS_GRID_DIM + (GRASS_GRID_DIM - 1); // ix=239 center at WORLD_SIZE-1.25
-        let west_cell = iy * GRASS_GRID_DIM; // ix=0 center at 1.25
-        w.grass.density[east_cell] = GRASS_MAX;
-        w.grass.density[west_cell] = GRASS_MAX;
-
-        w.graze();
-
-        // Both seam cells should have been drained (each is within radius 2.0 of x=0).
-        let east_drained = w.grass.density[east_cell] < GRASS_MAX - 1e-6;
-        let west_drained = w.grass.density[west_cell] < GRASS_MAX - 1e-6;
-        assert!(
-            east_drained,
-            "east seam cell (ix=239) must be grazed; density={}",
-            w.grass.density[east_cell]
-        );
-        assert!(
-            west_drained,
-            "west seam cell (ix=0) must be grazed; density={}",
-            w.grass.density[west_cell]
         );
     }
 

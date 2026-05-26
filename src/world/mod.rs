@@ -21,7 +21,6 @@ use crate::grid::SpatialGrid;
 use crate::hof::HallOfFame;
 use crate::rng::SimRng;
 use crate::species::{species_distance, SpeciesRegistry};
-use crate::torus::wrap_pos;
 use crate::vision::{build_cell_to_carrion, CarrionIndex, VisionBuf, VisionPass, VISION_LEN};
 use serde::{Deserialize, Serialize};
 
@@ -433,10 +432,15 @@ impl World {
             );
             let jitter_x = self.rng.symm() * FOUNDER_SPLIT_JITTER;
             let jitter_y = self.rng.symm() * FOUNDER_SPLIT_JITTER;
-            // Toroidal: wrap the child's position instead of clamping to walls.
-            // See v1.2 grass mechanic brief §2.9.
-            let cx = wrap_pos(self.creatures.x[i] + jitter_x);
-            let cy = wrap_pos(self.creatures.y[i] + jitter_y);
+            // Walled: clamp child position to [radius, WORLD_SIZE - radius].
+            let radius = {
+                let child_size = self.creatures.genomes[i].size; // parent genome before mutation
+                child_size * BODY_RADIUS_PER_SIZE
+            };
+            let clamp_lo = radius;
+            let clamp_hi = WORLD_SIZE - radius;
+            let cx = (self.creatures.x[i] + jitter_x).clamp(clamp_lo, clamp_hi);
+            let cy = (self.creatures.y[i] + jitter_y).clamp(clamp_lo, clamp_hi);
             let new_id = self.next_creature_id;
             self.next_creature_id += 1;
             let parent_species = self.creatures.species_id[i];
