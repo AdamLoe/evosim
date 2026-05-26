@@ -143,7 +143,7 @@ pub fn trait_body_distance_sq(g1: &Genome, g2: &Genome) -> f32 {
     }
     term!(size, 1.0);
     term!(max_age, 2000.0);
-    term!(photosynth_efficiency, 0.3);
+    term!(graze_efficiency, 0.3);
     term!(eat_efficiency, 0.3);
     term!(scavenge_efficiency, 0.3);
     term!(move_speed, 1.0);

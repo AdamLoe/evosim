@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 pub struct TraitMutationRates {
     pub size: f32,
     pub max_age: f32,
-    pub photosynth_efficiency: f32,
+    pub graze_efficiency: f32,
     pub eat_efficiency: f32,
     pub scavenge_efficiency: f32,
     pub move_speed: f32,
@@ -30,7 +30,7 @@ impl TraitMutationRates {
         Self {
             size: rate,
             max_age: rate,
-            photosynth_efficiency: rate,
+            graze_efficiency: rate,
             eat_efficiency: rate,
             scavenge_efficiency: rate,
             move_speed: rate,
@@ -54,7 +54,7 @@ impl TraitMutationRates {
 pub struct Genome {
     pub size: f32,
     pub max_age: u32,
-    pub photosynth_efficiency: f32,
+    pub graze_efficiency: f32,
     pub eat_efficiency: f32,
     pub scavenge_efficiency: f32,
     pub move_speed: f32,
@@ -74,7 +74,7 @@ impl Genome {
         Self {
             size: FOUNDER_SIZE,
             max_age: FOUNDER_MAX_AGE,
-            photosynth_efficiency: FOUNDER_PHOTO_EFF,
+            graze_efficiency: FOUNDER_GRAZE_EFF,
             eat_efficiency: 0.0,
             scavenge_efficiency: 0.0,
             move_speed: 0.0,
@@ -100,7 +100,7 @@ impl Genome {
         let r = self.mutation_rates.clone();
         let sigma_size = 0.1 * self.size;
         let sigma_max_age = 0.1 * self.max_age as f32;
-        let sigma_photo = 0.1 * self.photosynth_efficiency.max(0.1);
+        let sigma_graze = 0.1 * self.graze_efficiency.max(0.1);
         let sigma_eat = 0.1 * self.eat_efficiency.max(0.1);
         let sigma_scav = 0.1 * self.scavenge_efficiency.max(0.1);
         let sigma_move = 0.1 * self.move_speed.max(0.1);
@@ -128,11 +128,11 @@ impl Genome {
             rng,
         );
         mutate_f32(
-            &mut self.photosynth_efficiency,
-            r.photosynth_efficiency * rate_multiplier,
-            sigma_photo,
-            PHOTO_EFF_MIN,
-            PHOTO_EFF_MAX,
+            &mut self.graze_efficiency,
+            r.graze_efficiency * rate_multiplier,
+            sigma_graze,
+            GRAZE_EFF_MIN,
+            GRAZE_EFF_MAX,
             rng,
         );
         mutate_f32(
@@ -248,7 +248,7 @@ impl Genome {
         // rate and the eye-offset rate.
         drift_rate(&mut self.mutation_rates.size, rng);
         drift_rate(&mut self.mutation_rates.max_age, rng);
-        drift_rate(&mut self.mutation_rates.photosynth_efficiency, rng);
+        drift_rate(&mut self.mutation_rates.graze_efficiency, rng);
         drift_rate(&mut self.mutation_rates.eat_efficiency, rng);
         drift_rate(&mut self.mutation_rates.scavenge_efficiency, rng);
         drift_rate(&mut self.mutation_rates.move_speed, rng);
@@ -328,7 +328,7 @@ mod tests {
         assert!((g.size - before.size).abs() > 0.0);
         // bounds still hold
         assert!(g.size >= SIZE_MIN && g.size <= SIZE_MAX);
-        assert!(g.photosynth_efficiency >= PHOTO_EFF_MIN);
+        assert!(g.graze_efficiency >= GRAZE_EFF_MIN);
     }
 
     /// S6: mutate_f32 must not propagate NaN or ±inf into genome fields.

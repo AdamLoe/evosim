@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 #[repr(u8)]
 pub enum Action {
     Rest = 0,
-    Photosynth = 1,
+    Graze = 1,
     Eat = 2,
     Scavenge = 3,
     Split = 4,
@@ -26,7 +26,7 @@ pub enum Action {
 impl Action {
     pub const ALL: [Action; 6] = [
         Action::Rest,
-        Action::Photosynth,
+        Action::Graze,
         Action::Eat,
         Action::Scavenge,
         Action::Split,
@@ -72,15 +72,15 @@ pub struct CreatureSoA {
     // Hot-field mirrors (perf-5). Each entry at index i is bit-identically
     // equal to genomes[i].<field>. Written only by `push`, `remove_indices`,
     // and `resync_hot_mirrors_at`. Read by every per-tick hot phase
-    // (photosynth_two_pass, energy_bookkeeping, apply_movement_and_repulsion,
+    // (graze_step, energy_bookkeeping, apply_movement_and_repulsion,
     // build_nn_input, count_carrion_overlap, compute_is_at_wall,
     // eat_and_scavenge, VisionPass::fill_one).
     /// Mirror of genomes[i].size. Written ONLY by CreatureSoA::push,
     /// remove_indices, and resync_hot_mirrors_at. Read by hot tick paths.
     pub(crate) g_size: Vec<f32>,
-    /// Mirror of genomes[i].photosynth_efficiency. Written ONLY by CreatureSoA::push,
+    /// Mirror of genomes[i].graze_efficiency. Written ONLY by CreatureSoA::push,
     /// remove_indices, and resync_hot_mirrors_at. Read by hot tick paths.
-    pub(crate) g_photo_eff: Vec<f32>,
+    pub(crate) g_graze_eff: Vec<f32>,
     /// Mirror of genomes[i].eat_efficiency. Written ONLY by CreatureSoA::push,
     /// remove_indices, and resync_hot_mirrors_at. Read by hot tick paths.
     pub(crate) g_eat_eff: Vec<f32>,
@@ -121,7 +121,7 @@ impl CreatureSoA {
             brains: Vec::with_capacity(cap),
             eye_trig: Vec::with_capacity(cap * SECTORS * 2),
             g_size: Vec::with_capacity(cap),
-            g_photo_eff: Vec::with_capacity(cap),
+            g_graze_eff: Vec::with_capacity(cap),
             g_eat_eff: Vec::with_capacity(cap),
             g_scav_eff: Vec::with_capacity(cap),
             g_move_speed: Vec::with_capacity(cap),
@@ -209,7 +209,7 @@ impl CreatureSoA {
             self.brains.swap_remove(k);
             swap_remove_chunk(&mut self.eye_trig, k, SECTORS * 2);
             self.g_size.swap_remove(k);
-            self.g_photo_eff.swap_remove(k);
+            self.g_graze_eff.swap_remove(k);
             self.g_eat_eff.swap_remove(k);
             self.g_scav_eff.swap_remove(k);
             self.g_move_speed.swap_remove(k);
@@ -223,7 +223,7 @@ impl CreatureSoA {
     /// to avoid moving `g` before borrowing it.
     fn push_hot_mirrors(&mut self, g: &Genome) {
         self.g_size.push(g.size);
-        self.g_photo_eff.push(g.photosynth_efficiency);
+        self.g_graze_eff.push(g.graze_efficiency);
         self.g_eat_eff.push(g.eat_efficiency);
         self.g_scav_eff.push(g.scavenge_efficiency);
         self.g_move_speed.push(g.move_speed);
@@ -238,7 +238,7 @@ impl CreatureSoA {
     pub(crate) fn resync_hot_mirrors_at(&mut self, i: usize) {
         let g = &self.genomes[i];
         self.g_size[i] = g.size;
-        self.g_photo_eff[i] = g.photosynth_efficiency;
+        self.g_graze_eff[i] = g.graze_efficiency;
         self.g_eat_eff[i] = g.eat_efficiency;
         self.g_scav_eff[i] = g.scavenge_efficiency;
         self.g_move_speed[i] = g.move_speed;
@@ -374,7 +374,7 @@ mod tests {
         for i in 0..soa.len() {
             let g = &soa.genomes[i];
             assert_eq!(soa.g_size[i], g.size, "size[{i}]");
-            assert_eq!(soa.g_photo_eff[i], g.photosynth_efficiency, "photo[{i}]");
+            assert_eq!(soa.g_graze_eff[i], g.graze_efficiency, "graze_eff[{i}]");
             assert_eq!(soa.g_eat_eff[i], g.eat_efficiency, "eat[{i}]");
             assert_eq!(soa.g_scav_eff[i], g.scavenge_efficiency, "scav[{i}]");
             assert_eq!(soa.g_move_speed[i], g.move_speed, "move[{i}]");
@@ -429,8 +429,8 @@ mod tests {
                 "g_size[{i}]"
             );
             assert_eq!(
-                w2.creatures.g_photo_eff[i], w.creatures.genomes[i].photosynth_efficiency,
-                "g_photo_eff[{i}]"
+                w2.creatures.g_graze_eff[i], w.creatures.genomes[i].graze_efficiency,
+                "g_graze_eff[{i}]"
             );
             assert_eq!(
                 w2.creatures.g_eat_eff[i], w.creatures.genomes[i].eat_efficiency,

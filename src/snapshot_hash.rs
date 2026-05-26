@@ -149,7 +149,7 @@ pub fn snapshot_hash(w: &World) -> u64 {
 fn hash_genome(h: &mut XxHash64, g: &Genome) {
     write_f32(h, g.size);
     h.write_u32(g.max_age);
-    write_f32(h, g.photosynth_efficiency);
+    write_f32(h, g.graze_efficiency);
     write_f32(h, g.eat_efficiency);
     write_f32(h, g.scavenge_efficiency);
     write_f32(h, g.move_speed);
@@ -167,7 +167,7 @@ fn hash_genome(h: &mut XxHash64, g: &Genome) {
     let mr = &g.mutation_rates;
     write_f32(h, mr.size);
     write_f32(h, mr.max_age);
-    write_f32(h, mr.photosynth_efficiency);
+    write_f32(h, mr.graze_efficiency);
     write_f32(h, mr.eat_efficiency);
     write_f32(h, mr.scavenge_efficiency);
     write_f32(h, mr.move_speed);

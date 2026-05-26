@@ -381,7 +381,7 @@ impl WorldHandle {
             "energy_frac": (self.inner.creatures.energy[i] / 100.0).clamp(0.0, 1.0),
             "size": g.size,
             "current_action": action_name,
-            "photosynth_efficiency": g.photosynth_efficiency,
+            "graze_efficiency": g.graze_efficiency,
             "eat_efficiency": g.eat_efficiency,
             "scavenge_efficiency": g.scavenge_efficiency,
             "move_speed": g.move_speed,

@@ -712,11 +712,11 @@ mod tests {
             let non_photo: usize = counts
                 .iter()
                 .enumerate()
-                .filter(|(i, _)| *i != Action::Photosynth as usize)
+                .filter(|(i, _)| *i != Action::Graze as usize)
                 .map(|(_, c)| *c)
                 .sum();
-            // Photosynth is the safe choice; if all survivors pick it exclusively,
-            // that's still plausible with random brains (low-energy creatures photo).
+            // Graze is the safe choice; if all survivors pick it exclusively,
+            // that's still plausible with random brains (low-energy creatures graze).
             // The key assertion: NN was invoked (no panic, ticks > 0).
             assert!(
                 non_photo > 0 || !w.creatures.is_empty(),

@@ -54,16 +54,16 @@ pub const NN_WEIGHT_COUNT: usize = NN_INPUTS * NN_HIDDEN + NN_HIDDEN * NN_OUTPUT
 pub const NN_MUT_RATE_DEFAULT: f32 = 0.02;
 pub const NN_MUT_SIGMA_DEFAULT: f32 = 0.02;
 pub const NN_INIT_RANGE: f32 = 0.3; // uniform random weight initialisation range
-/// Photosynth-bias wiring constants applied to Brain::founder() after random init.
+/// Graze-bias wiring constants applied to Brain::founder() after random init.
 /// We hardwire hidden unit 0 as an "energy sensor": the energy_frac input (index 0)
 /// drives it strongly positive. Then the Split output reads it positively (high energy
-/// → split) while Photosynth gets a large base prior that is independent of energy.
-/// This gives every founder the survival-critical energy → split/photo switch without
+/// → split) while Graze gets a large base prior that is independent of energy.
+/// This gives every founder the survival-critical energy → split/graze switch without
 /// changing the NN architecture or weight count. Offspring mutate independently.
 /// See F.30 DECISIONS for rationale.
 pub const NN_FOUNDER_ENERGY_SENSOR_STRENGTH: f32 = 10.0; // w_ih[0][energy_frac_input]
 pub const NN_FOUNDER_SPLIT_ENERGY_WEIGHT: f32 = 10.0; // w_ho[Split][energy_sensor_hidden]
-pub const NN_FOUNDER_PHOTO_BIAS: f32 = 5.0; // added to all Photo output weights (base prior)
+pub const NN_FOUNDER_PHOTO_BIAS: f32 = 5.0; // added to all Graze output weights (base prior)
 
 // ---- Body mutation (v5 §6) ----
 pub const BODY_MUT_RATE_DEFAULT: f32 = 0.03;
@@ -75,8 +75,8 @@ pub const SIZE_MIN: f32 = 1.0;
 pub const SIZE_MAX: f32 = 10.0;
 pub const MAX_AGE_MIN: u32 = 100;
 pub const MAX_AGE_MAX: u32 = 50_000;
-pub const PHOTO_EFF_MIN: f32 = 0.0;
-pub const PHOTO_EFF_MAX: f32 = 2.0;
+pub const GRAZE_EFF_MIN: f32 = 0.0;
+pub const GRAZE_EFF_MAX: f32 = 2.0;
 pub const EAT_EFF_MIN: f32 = 0.0;
 pub const EAT_EFF_MAX: f32 = 2.0;
 pub const SCAVENGE_EFF_MIN: f32 = 0.0;
@@ -101,7 +101,7 @@ pub const WALL_THRESHOLD_PAD: f32 = 5.0; // is_at_wall iff dist < size + pad
 pub const FOUNDER_ENERGY: f32 = 200.0;
 pub const FOUNDER_SIZE: f32 = 1.0;
 pub const FOUNDER_MAX_AGE: u32 = 5000;
-pub const FOUNDER_PHOTO_EFF: f32 = 1.0;
+pub const FOUNDER_GRAZE_EFF: f32 = 1.0;
 pub const FOUNDER_BITE_REACH: f32 = 1.0;
 pub const FOUNDER_PIGMENT_R: f32 = 0.30;
 pub const FOUNDER_PIGMENT_G: f32 = 0.75;

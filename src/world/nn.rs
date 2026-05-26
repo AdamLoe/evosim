@@ -287,7 +287,7 @@ pub(crate) fn build_nn_input(
 /// Check whether an action is currently valid for creature `i` (v6 §1 + §G).
 pub(crate) fn is_valid_action(act: Action, genome: &Genome, energy: f32, cooldown: u32) -> bool {
     match act {
-        Action::Rest | Action::Photosynth | Action::Signal => true,
+        Action::Rest | Action::Graze | Action::Signal => true,
         Action::Eat => genome.eat_efficiency > 0.0 && cooldown == 0,
         Action::Scavenge => genome.scavenge_efficiency > 0.0,
         Action::Split => energy >= SPLIT_THRESHOLD,
@@ -325,7 +325,7 @@ pub(crate) fn decode_action(
             return act;
         }
     }
-    Action::Rest // defensive fallback (Rest/Photosynth/Signal are always valid)
+    Action::Rest // defensive fallback (Rest/Graze/Signal are always valid)
 }
 
 /// NN-driven action picker (Milestone D.16 — replaces `pick_action_c`).
@@ -497,7 +497,7 @@ mod tests {
         assert!(
             matches!(
                 act,
-                Action::Rest | Action::Photosynth | Action::Eat | Action::Scavenge | Action::Signal
+                Action::Rest | Action::Graze | Action::Eat | Action::Scavenge | Action::Signal
             ),
             "got {:?}",
             act
@@ -621,12 +621,12 @@ mod tests {
                                      // Scavenge 3rd (eff=0 → invalid). Rest, Photo, Signal should all be valid.
                                      // Rest is index 0, make it the lowest logit so Photo or Signal wins first,
                                      // but confirm that the function returns a valid action regardless.
-        let logits = [-5.0f32, 2.0, -3.0, -3.0, 10.0, 3.0]; // Split>Signal>Photo>...
+        let logits = [-5.0f32, 2.0, -3.0, -3.0, 10.0, 3.0]; // Split>Signal>Graze>...
         let act = decode_action(&logits, &g, 0.0, 1); // energy=0 → Split invalid; cooldown>0 → Eat invalid
-                                                      // Photosynth (idx 1, logit=2) and Signal (idx 5, logit=3) are both valid;
+                                                      // Graze (idx 1, logit=2) and Signal (idx 5, logit=3) are both valid;
                                                       // Signal has higher logit so it wins.
         assert!(
-            matches!(act, Action::Photosynth | Action::Signal | Action::Rest),
+            matches!(act, Action::Graze | Action::Signal | Action::Rest),
             "Expected always-valid action, got {:?}",
             act
         );

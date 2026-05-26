@@ -50,7 +50,7 @@ function renderInspector(data: CreatureInspectJson): void {
   set("ins-age", `${data.age} / ${data.max_age}`);
   set("ins-energy", `${data.energy.toFixed(1)} (${(data.energy_frac * 100).toFixed(0)}%)`);
   set("ins-size", data.size.toFixed(2));
-  set("ins-photo", data.photosynth_efficiency.toFixed(2));
+  set("ins-photo", data.graze_efficiency.toFixed(2));
   set("ins-eat", data.eat_efficiency.toFixed(2));
   set("ins-scav", data.scavenge_efficiency.toFixed(2));
   set("ins-move", data.move_speed.toFixed(2));
@@ -80,7 +80,7 @@ export interface CreatureInspectJson {
   energy_frac: number;
   size: number;
   current_action: string;
-  photosynth_efficiency: number;
+  graze_efficiency: number;
   eat_efficiency: number;
   scavenge_efficiency: number;
   move_speed: number;
