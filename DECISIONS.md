@@ -293,3 +293,5 @@ Final tuning:
 - `graze_conserves_energy_with_grass_drain` test tolerance: 1e-3 → 1e-2 (float-sum precision scales with per-tick delta size; at GRAZE_MAX=0.4 the accumulated rounding exceeded 1e-3 by ~25%).
 
 All gates clean (cargo fmt, build, test --lib both features, clippy default + threads, all 4 acceptance tests). Reaching T=10000 with population > 0 and ≥ 2 species. P1h regen commit ends PR-1 and the v1.2 PR-1 is COMPLETE.
+
+P2a (NN_INPUTS 136→160): bumped NN_INPUTS, recomputed NN_WEIGHT_COUNT (parametric, expands to 4032), bumped INPUT_CHUNKS 17→20, gutted Brain::founder F.30 hardwiring leaving uniform-random init. NN_FOUNDER_* constants kept with #[allow(dead_code)] for P2f deletion. RNG advance: founder now consumes 4032 rng.uniform calls (was 3456) — +576 extra draws at world init; absorbed at PR-2 regen. 1 test touched: threaded_nn_in_place_writes_match_sequential updated to try multiple seeds (s23-base seed now goes extinct before splitting with uniform-random init; test now falls back to split-test seed which is known to split within 2000 ticks).

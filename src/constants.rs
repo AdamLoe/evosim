@@ -47,7 +47,7 @@ pub const CARRION_MAX_AGE: u32 = 100;
 pub const PAST_LIFESPAN_MULT: f32 = 4.0; // per 1000 ticks past max_age
 
 // ---- Brain (v5 §5, v6 §E) ----
-pub const NN_INPUTS: usize = 136;
+pub const NN_INPUTS: usize = 160; // v1.2: 9 self-state + 120 vision + 6 last_action + 25 grass-patch (P2b shifts; P2d fills patch)
 pub const NN_HIDDEN: usize = 24;
 pub const NN_OUTPUTS: usize = 8;
 pub const NN_WEIGHT_COUNT: usize = NN_INPUTS * NN_HIDDEN + NN_HIDDEN * NN_OUTPUTS;
@@ -61,8 +61,11 @@ pub const NN_INIT_RANGE: f32 = 0.3; // uniform random weight initialisation rang
 /// This gives every founder the survival-critical energy → split/graze switch without
 /// changing the NN architecture or weight count. Offspring mutate independently.
 /// See F.30 DECISIONS for rationale.
+#[allow(dead_code)] // P2f deletes
 pub const NN_FOUNDER_ENERGY_SENSOR_STRENGTH: f32 = 10.0; // w_ih[0][energy_frac_input]
+#[allow(dead_code)] // P2f deletes
 pub const NN_FOUNDER_SPLIT_ENERGY_WEIGHT: f32 = 10.0; // w_ho[Split][energy_sensor_hidden]
+#[allow(dead_code)] // P2f deletes
 pub const NN_FOUNDER_PHOTO_BIAS: f32 = 5.0; // added to all Graze output weights (base prior)
 
 // ---- Body mutation (v5 §6) ----

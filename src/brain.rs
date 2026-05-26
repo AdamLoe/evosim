@@ -1,4 +1,4 @@
-//! Brain — fixed-shape NN: 136 inputs → 24 hidden (ReLU) → 8 outputs.
+//! Brain — fixed-shape NN: 160 inputs → 24 hidden (ReLU) → 8 outputs.
 //!
 //! Milestone B: holds zero-weight stubs so we can carry a Brain field on
 //! Creature and not retrofit everything later.
@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use wide::f32x8;
 
 // Compile-time layout assertions.
-const _: () = assert!(NN_INPUTS == 136);
+const _: () = assert!(NN_INPUTS == 160);
 const _: () = assert!(NN_HIDDEN == 24);
 const _: () = assert!(NN_OUTPUTS == 8);
 const _: () = assert!(
@@ -25,14 +25,14 @@ const _: () = assert!(
 );
 const _: () = assert!(NN_WEIGHT_COUNT == NN_INPUTS * NN_HIDDEN + NN_HIDDEN * NN_OUTPUTS);
 
-/// Number of 8-wide SIMD chunks in the input vector (17).
-const INPUT_CHUNKS: usize = NN_INPUTS / 8; // 136/8 = 17
+/// Number of 8-wide SIMD chunks in the input vector (20).
+const INPUT_CHUNKS: usize = NN_INPUTS / 8; // 160/8 = 20
 /// Number of 8-wide SIMD chunks in the hidden vector (3).
 const HIDDEN_CHUNKS: usize = NN_HIDDEN / 8; // 24/8 = 3
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Brain {
-    pub weights: Vec<f32>, // length = NN_WEIGHT_COUNT = 3456
+    pub weights: Vec<f32>, // length = NN_WEIGHT_COUNT = 4032 (v1.2)
     pub nn_mutation_rate: f32,
 }
 
@@ -42,38 +42,6 @@ impl Brain {
         for w in &mut weights {
             *w = rng.uniform(-NN_INIT_RANGE, NN_INIT_RANGE);
         }
-        // Hardwire a survival-critical "energy sensor" into the founder brain.
-        //
-        // Hidden unit 0 is wired to respond strongly to the energy_frac input
-        // (NN input index 0). At high energy → hidden[0] fires → Split wins;
-        // at low energy → hidden[0] is small → Graze base prior wins.
-        //
-        // Wiring (see F.30 DECISIONS):
-        //   w_ih[0][energy_frac] += NN_FOUNDER_ENERGY_SENSOR_STRENGTH
-        //   w_ho[Split][hidden0] += NN_FOUNDER_SPLIT_ENERGY_WEIGHT
-        //   all Graze output weights += NN_FOUNDER_PHOTO_BIAS (base prior)
-        //
-        // Offspring mutate independently; this only tilts the initial prior.
-        let energy_frac_input = 0; // NN input 0 = energy_frac (v6 §E, §3)
-        let hidden_sensor = 0; // we repurpose hidden unit 0 as the energy sensor
-        let photo_out = 3; // out[3] = Graze (out[2]=Rest, out[2+1]=Graze)
-        let split_out = 6; // out[6] = Split (out[2+4])
-
-        // (1) Energy sensor: input → hidden[0]
-        weights[hidden_sensor * NN_INPUTS + energy_frac_input] += NN_FOUNDER_ENERGY_SENSOR_STRENGTH;
-
-        // (2) Split logit: hidden[0] → out[Split]  (fires when energy is high)
-        weights[NN_INPUTS * NN_HIDDEN + split_out * NN_HIDDEN + hidden_sensor] +=
-            NN_FOUNDER_SPLIT_ENERGY_WEIGHT;
-
-        // (3) Graze base prior: add to all Graze output weights
-        //     At low energy (hidden[0]≈0), Graze prior beats Signal/Rest by a
-        //     wide margin. At high energy, Split logit via hidden[0] overcomes Graze.
-        let photo_base = NN_INPUTS * NN_HIDDEN + photo_out * NN_HIDDEN;
-        for w in &mut weights[photo_base..photo_base + NN_HIDDEN] {
-            *w += NN_FOUNDER_PHOTO_BIAS;
-        }
-
         Self {
             weights,
             nn_mutation_rate: NN_MUT_RATE_DEFAULT,
@@ -104,7 +72,7 @@ impl Brain {
         hidden: &mut [f32; NN_HIDDEN],
     ) {
         // --- Layer 1: input → hidden (ReLU) ---
-        // 17 SIMD chunks × 24 hidden units.
+        // 20 SIMD chunks × 24 hidden units.
         let w_ih = &self.weights[..NN_INPUTS * NN_HIDDEN];
         for h in 0..NN_HIDDEN {
             let row = &w_ih[h * NN_INPUTS..h * NN_INPUTS + NN_INPUTS];
@@ -220,7 +188,7 @@ mod tests {
             .zip(child.weights.iter())
             .filter(|(a, b)| a != b)
             .count();
-        // Expected ≈ 0.1 × 3456 ≈ 346. Just confirm "some but not all".
+        // Expected ≈ 0.1 × 4032 ≈ 403. Just confirm "some but not all".
         assert!(diffs > 100 && diffs < 800, "diffs = {diffs}");
     }
 
@@ -316,7 +284,7 @@ mod tests {
     fn forward_pass_relu_clips_negative_hidden() {
         // Craft a brain so hidden unit 0 has strongly negative pre-activation.
         // All input→hidden row 0 weights = -1.0; input = all +1.0.
-        // Pre-activation = -1 * 136 = -136 → after ReLU = 0.
+        // Pre-activation = -1 * 160 = -160 → after ReLU = 0.
         // Then make all hidden→output weights for unit 0 = +100 (large).
         // If ReLU is correct, the large weights shouldn't affect output.
         // Compare against a brain with hidden→output row 0 weights = 0.
@@ -341,7 +309,7 @@ mod tests {
         let mut hid_b = [0.0f32; NN_HIDDEN];
         brain_b.forward(&input, &mut out_b, &mut hid_b);
 
-        // hidden[0] in brain_a should be 0 (ReLU of -136).
+        // hidden[0] in brain_a should be 0 (ReLU of -160).
         assert_eq!(hid_a[0], 0.0, "ReLU must clip negative pre-activation to 0");
         // Since hidden[0] = 0, the large w_ho weights don't contribute.
         assert_eq!(out_a, out_b, "clipped hidden unit must not affect outputs");

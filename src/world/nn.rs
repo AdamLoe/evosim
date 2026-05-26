@@ -234,14 +234,14 @@ pub(crate) fn chunk_ranges(n: usize) -> [(usize, usize); N_CHUNKS] {
     out
 }
 
-/// Build the 136-float NN input vector for creature `i` (v6 §E, Milestone D.16).
+/// Build the 160-float NN input vector for creature `i` (v6 §E, Milestone D.16).
 ///
 /// `prev_vx` and `prev_vy` are the creature's velocity from the END of the
 /// previous tick. Passed explicitly so that callers can supply the correct
 /// values even when the vx/vy SoA columns have been temporarily detached via
 /// `mem::take` for the parallel NN path (S23).
 ///
-/// Layout: `[0..10]` self-state, `[10..130]` vision passthrough, `[130..136]` last_action one-hot.
+/// Layout: `[0..10]` self-state, `[10..130]` vision passthrough, `[130..136]` last_action one-hot, `[136..160]` reserved zero (P2b/P2d will fill).
 pub(crate) fn build_nn_input(
     i: usize,
     creatures: &CreatureSoA,
@@ -330,7 +330,7 @@ pub(crate) fn decode_action(
 
 /// NN-driven action picker (Milestone D.16 — replaces `pick_action_c`).
 ///
-/// Builds the 136-input vector, runs the SIMD forward pass, decodes velocity
+/// Builds the 160-input vector, runs the SIMD forward pass, decodes velocity
 /// via tanh and action via valid-fallthrough argmax (v6 §1, §E).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn pick_action_d(
@@ -390,13 +390,14 @@ mod tests {
     use super::*;
 
     /// C.12 test 7: vision layout contract for D.
-    /// VISION_LEN == 120 and NN_INPUTS == 10 + VISION_LEN + 6 (== 136).
+    /// VISION_LEN == 120 and NN_INPUTS == 10 + VISION_LEN + 6 + 24 (== 160).
     #[test]
     fn vision_layout_matches_nn_input_block() {
         use crate::vision::VISION_LEN;
         assert_eq!(VISION_LEN, 120);
-        // D's NN input block: 10 self-state + 120 vision + 6 last_action one-hot.
-        assert_eq!(NN_INPUTS, 10 + VISION_LEN + 6);
+        // Under P2a alone: 10 self-state + 120 vision + 6 last_action + 24 reserved zeros
+        // (P2b removes is_at_wall = -1; P2d adds 25 grass-patch = +25; net +24 vs pre-P2a).
+        assert_eq!(NN_INPUTS, 10 + VISION_LEN + 6 + 24);
     }
 
     // ---- D.16 tests ----
@@ -809,11 +810,27 @@ mod tests {
         use crate::world::nn::chunk_ranges;
 
         // Advance a single sequential world to get a multi-creature state.
-        let mut w_base = World::new("s23-base");
-        w_base.force_sequential_nn = true;
-        for _ in 0..50 {
-            w_base.step();
-        }
+        // With uniform-random init (P2a gutted F.30 hardwiring), try multiple
+        // seeds until one produces ≥2 creatures (the first split may take
+        // several hundred ticks and some seeds go extinct first).
+        let seeds = ["s23-base", "split-test", "s23-alt"];
+        let w_base = {
+            let mut found = None;
+            'outer: for seed in seeds {
+                let mut w = World::new(seed);
+                w.force_sequential_nn = true;
+                for _ in 0..2000 {
+                    if !w.step() {
+                        break;
+                    }
+                    if w.creatures.len() >= 2 {
+                        found = Some(w);
+                        break 'outer;
+                    }
+                }
+            }
+            found.expect("no seed produced ≥2 creatures within 2000 ticks")
+        };
         let n = w_base.creatures.len();
         assert!(
             n >= 2,
