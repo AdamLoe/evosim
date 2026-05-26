@@ -347,3 +347,7 @@ P3a's per-bite Eat formula change had NO observable effect on the §16 acceptanc
 **Implication:** the predator/scavenger tiers of the three-tier food chain (per brief) are not exercised by the §16 acceptance seed at default sliders. This is consistent with the v1.2 brief's intent ("grazers stumble onto seeded grass; predators need eye_count ≥ 1, mouth bit + need to evolve") — predation requires evolved traits that don't appear in 10k ticks from founders with eye_count=0, nose_count=0. The acceptance criterion is met by the grazer tier alone; the predator and scavenger tiers exist as evolvability headroom for longer runs.
 
 **Final v1.2 state:** PR-1 + PR-2 + PR-3 all landed. Goldens at `0x95f4a2f00bbad4dc`. Acceptance 4/4 pass. Lib tests 189/191 (seq/threads). Clippy clean both features. `pnpm typecheck`/`pnpm build` clean. Schema at v4. v1.2 pass COMPLETE.
+
+## v1.3 simplification
+
+D6 (snapshot_hash + acceptance + S39 deletion, 2026-05-26): Deleted `src/snapshot_hash.rs`, `tests/acceptance.rs`, both golden files, `ACCEPTANCE_TICKS`/`ACCEPTANCE_SEED` constants, `World::force_sequential_nn` field, the S39 threaded-equivalence bypass in `nn_forward_all_chunks`, and 2 S39 threaded-equivalence tests. Gated `SimRng::state()` with `#[cfg(test)]`. CI acceptance steps replaced with `cargo clippy --features threads` + `cargo test --lib --features threads`. Trade-off: determinism floor (10k-tick golden hash) is gone; `cargo test --lib` (default + threads) is the only test gate going forward. Per Q5 user sign-off.

@@ -87,20 +87,17 @@ impl SimRng {
     }
 
     /// Return the four `u64`s of the xoshiro256++ internal state, in storage
-    /// order (`s[0]..s[3]`).
+    /// order (`s[0]..s[3]`). Test-only (not shipped to wasm production bundle).
     ///
-    /// Used by `snapshot_hash` to fold the RNG into the canonical hash
-    /// without going through `serde_json`'s byte stream (S8). The field
-    /// `Xoshiro256PlusPlus::s` is private upstream; this accessor extracts it
-    /// via `serde_json::to_value` as a one-shot field extractor, then parses
-    /// the four `u64` values. The hash byte stream is independent of
-    /// `serde_json`'s output format because we hash the parsed `u64` values,
-    /// not the JSON bytes.
+    /// The field `Xoshiro256PlusPlus::s` is private upstream; this accessor
+    /// extracts it via `serde_json::to_value` as a one-shot field extractor,
+    /// then parses the four `u64` values.
     ///
     /// Stable: hinges on `rand_xoshiro 0.6`'s `Serialize` derive emitting
     /// the four state words under the field key `"s"`. The version is pinned
     /// to `0.6` in `Cargo.toml`. If `rand_xoshiro` ever bumps and renames the
     /// field, the `rng_state_round_trip_matches_serde` unit test will catch it.
+    #[cfg(test)]
     pub(crate) fn state(&self) -> [u64; 4] {
         let v =
             serde_json::to_value(&self.0).expect("Xoshiro256PlusPlus serialization is infallible");

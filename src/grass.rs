@@ -17,8 +17,7 @@ const _: () = assert!(GRASS_GRID_DIM == 240);
 /// Density values are clamped to `[0.0, GRASS_MAX]` after each `step` call.
 #[derive(Clone, Debug)]
 pub struct GrassGrid {
-    /// Row-major density, length GRASS_CELL_COUNT (= 57_600).
-    /// Hash-stable: snapshot_hash will walk this in linear order (added by P1b+P1f).
+    /// Row-major density, length GRASS_CELL_COUNT (= 57_600). Added by P1b+P1f.
     pub density: Vec<f32>,
     /// Double-buffer scratch. Same length as `density`. Recomputed every
     /// `step` call; never read between ticks. NOT saved (rebuilt on load

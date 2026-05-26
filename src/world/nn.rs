@@ -53,18 +53,18 @@ impl World {
     /// Sequential by default; rayon-parallel behind `cfg(feature = "threads")`.
     /// Results are bit-identical because the forward pass contains no RNG.
     pub(crate) fn nn_forward_all_chunks(&mut self, ranges: &[(usize, usize); N_CHUNKS], n: usize) {
-        // Threaded path: runs when compiled with --features threads AND the
-        // S39 observation-only toggle is not set. Returns early so the sequential
-        // fallthrough below does not run.
+        // Threaded path: runs when compiled with --features threads.
+        // Returns early so the sequential fallthrough below does not run.
         #[cfg(feature = "threads")]
-        if !self.force_sequential_nn {
-            // S23: write NN outputs directly into the SoA columns via par_chunks_mut.
-            // Strategy: mem::take the three output columns off self.creatures so the
-            // borrow checker sees them as independent locals. The remaining SoA fields
-            // (x, y, energy, vision, etc.) are read-only during the parallel block.
-            // After the parallel work, restore the three columns. The heap buffers
-            // are never reallocated — only the Vec metadata (ptr/len/cap, 24 bytes
-            // each) moves to the stack. Pattern mirrors perf-2 §5 scratch_neighbors.
+        {
+            let _ = ranges; // threaded path uses chunk_base_size(n) directly
+                            // S23: write NN outputs directly into the SoA columns via par_chunks_mut.
+                            // Strategy: mem::take the three output columns off self.creatures so the
+                            // borrow checker sees them as independent locals. The remaining SoA fields
+                            // (x, y, energy, vision, etc.) are read-only during the parallel block.
+                            // After the parallel work, restore the three columns. The heap buffers
+                            // are never reallocated — only the Vec metadata (ptr/len/cap, 24 bytes
+                            // each) moves to the stack. Pattern mirrors perf-2 §5 scratch_neighbors.
             let mut vx_local = std::mem::take(&mut self.creatures.vx);
             let mut vy_local = std::mem::take(&mut self.creatures.vy);
             let mut act_local = std::mem::take(&mut self.creatures.action_this_tick);
@@ -138,38 +138,43 @@ impl World {
             self.creatures.vx = vx_local;
             self.creatures.vy = vy_local;
             self.creatures.action_this_tick = act_local;
-            return;
         }
 
-        // Sequential fallthrough: runs in default builds always, and in
-        // threaded builds when force_sequential_nn is true (S39 test (a) knob).
-        let _ = n; // unused in the sequential path
-        for &(lo, hi) in ranges {
-            let mut input_buf = [0.0f32; NN_INPUTS];
-            let mut hidden_buf = [0.0f32; NN_HIDDEN];
-            let mut output_buf = [0.0f32; NN_OUTPUTS];
-            for i in lo..hi {
-                let overlap =
-                    count_carrion_overlap(&self.creatures, &self.carrion, &self.cell_to_carrion, i);
-                let prev_vx = self.creatures.vx[i];
-                let prev_vy = self.creatures.vy[i];
-                let (vx, vy, action) = pick_action_d(
-                    i,
-                    &mut input_buf,
-                    &mut hidden_buf,
-                    &mut output_buf,
-                    &self.creatures,
-                    &self.vision[i],
-                    &self.grass,
-                    overlap,
-                    prev_vx,
-                    prev_vy,
-                );
-                self.creatures.vx[i] = vx;
-                self.creatures.vy[i] = vy;
-                self.creatures.action_this_tick[i] = action;
+        // Sequential fallthrough: runs in default builds only.
+        #[cfg(not(feature = "threads"))]
+        {
+            let _ = n; // unused in the sequential path
+            for &(lo, hi) in ranges {
+                let mut input_buf = [0.0f32; NN_INPUTS];
+                let mut hidden_buf = [0.0f32; NN_HIDDEN];
+                let mut output_buf = [0.0f32; NN_OUTPUTS];
+                for i in lo..hi {
+                    let overlap = count_carrion_overlap(
+                        &self.creatures,
+                        &self.carrion,
+                        &self.cell_to_carrion,
+                        i,
+                    );
+                    let prev_vx = self.creatures.vx[i];
+                    let prev_vy = self.creatures.vy[i];
+                    let (vx, vy, action) = pick_action_d(
+                        i,
+                        &mut input_buf,
+                        &mut hidden_buf,
+                        &mut output_buf,
+                        &self.creatures,
+                        &self.vision[i],
+                        &self.grass,
+                        overlap,
+                        prev_vx,
+                        prev_vy,
+                    );
+                    self.creatures.vx[i] = vx;
+                    self.creatures.vy[i] = vy;
+                    self.creatures.action_this_tick[i] = action;
+                }
             }
-        }
+        } // end #[cfg(not(feature = "threads"))]
     }
 }
 
@@ -765,91 +770,6 @@ mod tests {
         let _ = &hidden_buf;
     }
 
-    /// S23: threaded NN par_chunks_mut path produces the same vx/vy/action_this_tick
-    /// as the sequential path for the same world state. Gated on `threads` feature
-    /// so it only runs when rayon is available.
-    ///
-    /// Strategy: advance a single world (sequential) to a non-trivial state, then
-    /// deserialize two independent copies from the same snapshot and run each
-    /// copy's nn_forward_all_chunks under sequential vs threaded paths. Both
-    /// copies start from identical SoA state, so the outputs must be bit-identical.
-    #[cfg(feature = "threads")]
-    #[test]
-    fn threaded_nn_in_place_writes_match_sequential() {
-        use crate::world::nn::chunk_ranges;
-
-        // Advance a single sequential world to get a multi-creature state.
-        // With uniform-random init (P2a gutted F.30 hardwiring), try multiple
-        // seeds until one produces ≥2 creatures (the first split may take
-        // several hundred ticks and some seeds go extinct first).
-        let seeds = ["s23-base", "split-test", "s23-alt"];
-        let w_base = {
-            let mut found = None;
-            'outer: for seed in seeds {
-                let mut w = World::new(seed);
-                w.force_sequential_nn = true;
-                for _ in 0..2000 {
-                    if !w.step() {
-                        break;
-                    }
-                    if w.creatures.len() >= 2 {
-                        found = Some(w);
-                        break 'outer;
-                    }
-                }
-            }
-            found.expect("no seed produced ≥2 creatures within 2000 ticks")
-        };
-        let n = w_base.creatures.len();
-        assert!(
-            n >= 2,
-            "need >= 2 creatures for a meaningful parallel test; got {n}"
-        );
-
-        // Clone identical state via save/load round-trip.
-        let snap = w_base.to_save_v1();
-        let mut w_seq = World::from_save_v1(snap.clone()).expect("seq load");
-        let mut w_par = World::from_save_v1(snap).expect("par load");
-
-        // Both worlds must have the same creature count.
-        assert_eq!(w_seq.creatures.len(), n, "seq world population mismatch");
-        assert_eq!(w_par.creatures.len(), n, "par world population mismatch");
-
-        // Rebuild the carrion spatial index (normally done in run_vision_pass;
-        // from_save_v1 leaves cell_to_carrion empty).
-        crate::vision::build_cell_to_carrion(&w_seq.carrion, &mut w_seq.cell_to_carrion);
-        crate::vision::build_cell_to_carrion(&w_par.carrion, &mut w_par.cell_to_carrion);
-
-        let ranges = chunk_ranges(n);
-
-        // Sequential run.
-        w_seq.force_sequential_nn = true;
-        w_seq.nn_forward_all_chunks(&ranges, n);
-
-        // Threaded run.
-        w_par.force_sequential_nn = false;
-        w_par.nn_forward_all_chunks(&ranges, n);
-
-        // Outputs must be bit-identical.
-        for i in 0..n {
-            assert_eq!(
-                w_seq.creatures.vx[i], w_par.creatures.vx[i],
-                "vx[{i}] mismatch: seq={} par={}",
-                w_seq.creatures.vx[i], w_par.creatures.vx[i]
-            );
-            assert_eq!(
-                w_seq.creatures.vy[i], w_par.creatures.vy[i],
-                "vy[{i}] mismatch: seq={} par={}",
-                w_seq.creatures.vy[i], w_par.creatures.vy[i]
-            );
-            assert_eq!(
-                w_seq.creatures.action_this_tick[i], w_par.creatures.action_this_tick[i],
-                "action_this_tick[{i}] mismatch: seq={:?} par={:?}",
-                w_seq.creatures.action_this_tick[i], w_par.creatures.action_this_tick[i]
-            );
-        }
-    }
-
     // ---- P2d grass-patch NN input tests ----
 
     /// P2d test 1: all-density-1.0 grass → inp[135..160] all ≈ 1.0.
@@ -977,99 +897,6 @@ mod tests {
             slot135 > 0.0,
             "seam-wrap slot 135 = {slot135} (expected > 0.0 — wrapped cell seeded)"
         );
-    }
-
-    /// P2d test 5: threaded path produces same inp[135..160] as sequential path.
-    /// Subsumed by S23's existing threaded_nn_in_place_writes_match_sequential but
-    /// extended here to explicitly assert the grass-patch block is bit-identical.
-    /// Gated on `threads` feature.
-    #[cfg(feature = "threads")]
-    #[test]
-    fn nn_input_patch_threaded_matches_sequential() {
-        use crate::world::nn::chunk_ranges;
-
-        // Advance a world to a multi-creature state with grass seeded.
-        let seeds = ["p2d-threads", "p2d-threads-2", "p2d-threads-3"];
-        let w_base = {
-            let mut found = None;
-            'outer: for seed in seeds {
-                let mut w = World::new(seed);
-                w.force_sequential_nn = true;
-                for _ in 0..2000 {
-                    if !w.step() {
-                        break;
-                    }
-                    if w.creatures.len() >= 2 {
-                        found = Some(w);
-                        break 'outer;
-                    }
-                }
-            }
-            found.expect("no seed produced ≥2 creatures within 2000 ticks")
-        };
-        let n = w_base.creatures.len();
-
-        let snap = w_base.to_save_v1();
-        let mut w_seq = World::from_save_v1(snap.clone()).expect("seq load");
-        let mut w_par = World::from_save_v1(snap).expect("par load");
-
-        // P2e: set nose_count=1 for all creatures in both worlds so the bilinear
-        // sampling path is exercised (not short-circuited by the nose_count=0 gate).
-        for i in 0..n {
-            w_seq.creatures.genomes[i].nose_count = 1;
-            w_seq.creatures.resync_hot_mirrors_at(i);
-            w_par.creatures.genomes[i].nose_count = 1;
-            w_par.creatures.resync_hot_mirrors_at(i);
-        }
-        // Seed grass so grass-patch slots are non-trivially non-zero.
-        w_seq.grass.density.fill(1.0);
-        w_par.grass.density.fill(1.0);
-
-        crate::vision::build_cell_to_carrion(&w_seq.carrion, &mut w_seq.cell_to_carrion);
-        crate::vision::build_cell_to_carrion(&w_par.carrion, &mut w_par.cell_to_carrion);
-
-        let ranges = chunk_ranges(n);
-        w_seq.force_sequential_nn = true;
-        w_seq.nn_forward_all_chunks(&ranges, n);
-
-        w_par.force_sequential_nn = false;
-        w_par.nn_forward_all_chunks(&ranges, n);
-
-        // Build NN inputs for each creature under both paths and assert patch block is identical.
-        use crate::vision::VISION_LEN;
-        for i in 0..n {
-            let vision = [0.0f32; VISION_LEN];
-            let prev_vx = w_seq.creatures.vx[i];
-            let prev_vy = w_seq.creatures.vy[i];
-            let inp_seq = build_nn_input(
-                i,
-                &w_seq.creatures,
-                &vision,
-                &w_seq.grass,
-                0,
-                prev_vx,
-                prev_vy,
-            );
-            let inp_par = build_nn_input(
-                i,
-                &w_par.creatures,
-                &vision,
-                &w_par.grass,
-                0,
-                prev_vx,
-                prev_vy,
-            );
-            for k in 0..25 {
-                let slot = NN_GRASS_PATCH_OFFSET + k;
-                assert_eq!(
-                    inp_seq[slot].to_bits(),
-                    inp_par[slot].to_bits(),
-                    "grass-patch slot {slot} mismatch for creature {i}: seq={} par={}",
-                    inp_seq[slot],
-                    inp_par[slot]
-                );
-            }
-        }
     }
 
     /// P2e test: nose_count=0 gate — grass-blind creatures see all-zero patch slots.
