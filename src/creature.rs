@@ -238,26 +238,4 @@ mod tests {
         soa.remove_indices(&[0, 2]);
         assert_eq!(soa.len(), 3);
     }
-
-    /// D3: body radius is constant across all creatures.
-    #[test]
-    fn body_radius_constant_across_population() {
-        use crate::constants::{BODY_RADIUS_PER_SIZE, FOUNDER_SIZE};
-        let expected_radius = FOUNDER_SIZE * BODY_RADIUS_PER_SIZE;
-        let mut soa = CreatureSoA::with_capacity(10);
-        let mut rng = SimRng::from_u64(7);
-        for k in 0u64..10 {
-            let b = Brain::founder(&mut rng);
-            soa.push(k, k as f32 * 5.0, 0.0, 100.0, 0, b);
-        }
-        // D3: all creatures share the same body radius (no g_size mirror needed).
-        // The "body radius" is simply FOUNDER_SIZE * BODY_RADIUS_PER_SIZE.
-        for _i in 0..soa.len() {
-            let body_r = FOUNDER_SIZE * BODY_RADIUS_PER_SIZE;
-            assert!(
-                (body_r - expected_radius).abs() < 1e-6,
-                "body_radius must equal FOUNDER_SIZE * BODY_RADIUS_PER_SIZE"
-            );
-        }
-    }
 }

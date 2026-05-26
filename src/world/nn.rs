@@ -463,7 +463,7 @@ mod tests {
 
     /// D.16 test 14: Split invalid when energy too low.
     #[test]
-    fn decode_action_scavenge_invalid_when_zero_eff() {
+    fn decode_action_split_invalid_when_low_energy() {
         // Split is index 2, give it highest logit.
         let logits = [0.0f32, 0.0, 10.0];
         // energy = 0 → Split invalid.
@@ -639,7 +639,7 @@ mod tests {
     /// S5: decode_action returns Graze and pick_action_d zeros velocity when any
     /// logit is non-finite (NaN or ±inf). D3: genome removed from decode_action.
     #[test]
-    fn nan_logits_return_rest_zero_velocity() {
+    fn nan_logits_return_graze_zero_velocity() {
         // decode_action with a NaN logit must return Graze.
         let nan_logits = [f32::NAN, 0.0, 0.0];
         let act = decode_action(&nan_logits, 100.0, 0);

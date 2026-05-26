@@ -482,9 +482,9 @@ mod tests {
         );
     }
 
-    /// P1a §2.9: split-jitter should wrap the child position toroidally, not clamp.
+    /// D7: walled world — split-jitter clamps child position to [0, WORLD_SIZE); no toroidal wrap.
     #[test]
-    fn split_jitter_wraps() {
+    fn split_jitter_stays_in_bounds() {
         use crate::creature::Action;
 
         let mut w = World::new("p1a-jitter");
@@ -509,10 +509,10 @@ mod tests {
         }
     }
 
-    /// P1a §2.4: two creatures on opposite sides of the x-seam should repel
-    /// each other via the shortest-path vector.
+    /// D7: walled world — two creatures near opposite walls are repelled outward
+    /// and clamped to [0, WORLD_SIZE) after movement; no seam-wrap occurs.
     #[test]
-    fn repulsion_wraps_across_seam() {
+    fn repulsion_clamps_to_walls_after_movement() {
         use crate::brain::Brain;
 
         let mut w = World::new("p1a-repulsion-seam");
