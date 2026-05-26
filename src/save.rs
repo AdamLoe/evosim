@@ -10,7 +10,6 @@ use crate::events::{Event, EventLog};
 use crate::genome::Genome;
 use crate::hof::HallOfFame;
 use crate::rng::SimRng;
-use crate::species::Species;
 use crate::world::{DevSliders, World};
 use serde::{Deserialize, Serialize};
 
@@ -39,15 +38,12 @@ pub struct SaveV1 {
     pub carrion: Vec<Carrion>,
 
     // Bookkeeping.
-    pub species: SpeciesSnapshot,
     pub events: EventLogSnapshot,
     pub sliders: DevSliders,
 
     pub next_creature_id: u64,
     pub peak_population: u32,
-    pub peak_species_count: u32,
     pub world_ended: bool,
-    pub live_species_count: u32,
     pub first_move_fired: bool,
     pub first_eat_fired: bool,
     pub population_milestones_fired: u32,
@@ -76,8 +72,6 @@ pub struct CreatureSoASnapshot {
     pub age: Vec<u32>,
     pub digestion_cooldown: Vec<u32>,
     pub cumulative_upkeep: Vec<f32>,
-    pub species_id: Vec<u32>,
-    pub parent_species_id: Vec<u32>,
     pub last_action: Vec<Action>,
     pub action_this_tick: Vec<Action>,
     pub max_size_reached: Vec<f32>,
@@ -96,12 +90,6 @@ pub struct CreatureSoASnapshot {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GrassGridSnapshot {
     pub density: Vec<f32>,
-}
-
-/// SpeciesRegistry snapshot — next_id is recomputed on load as max(id)+1.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SpeciesSnapshot {
-    pub list: Vec<Species>,
 }
 
 /// EventLog snapshot — full history; recent ring is rebuilt from tail on load.
@@ -156,8 +144,6 @@ impl SaveV1 {
                 age: w.creatures.age.clone(),
                 digestion_cooldown: w.creatures.digestion_cooldown.clone(),
                 cumulative_upkeep: w.creatures.cumulative_upkeep.clone(),
-                species_id: w.creatures.species_id.clone(),
-                parent_species_id: w.creatures.parent_species_id.clone(),
                 last_action: w.creatures.last_action.clone(),
                 action_this_tick: w.creatures.action_this_tick.clone(),
                 max_size_reached: w.creatures.max_size_reached.clone(),
@@ -175,9 +161,6 @@ impl SaveV1 {
                 density: w.grass.density.clone(),
             },
             carrion: w.carrion.clone(),
-            species: SpeciesSnapshot {
-                list: w.species.list.clone(),
-            },
             events: EventLogSnapshot {
                 all: w.events.all.clone(),
                 ring_cap: w.events.ring_cap,
@@ -185,9 +168,7 @@ impl SaveV1 {
             sliders: w.sliders.clone(),
             next_creature_id: w.next_creature_id,
             peak_population: w.peak_population,
-            peak_species_count: w.peak_species_count,
             world_ended: w.world_ended,
-            live_species_count: w.live_species_count,
             first_move_fired: w.first_move_fired,
             first_eat_fired: w.first_eat_fired,
             population_milestones_fired: w.population_milestones_fired,
@@ -230,8 +211,6 @@ pub fn validate_soa_lengths(s: &CreatureSoASnapshot) -> Result<usize, LoadError>
     check!(age);
     check!(digestion_cooldown);
     check!(cumulative_upkeep);
-    check!(species_id);
-    check!(parent_species_id);
     check!(last_action);
     check!(action_this_tick);
     check!(max_size_reached);
@@ -357,15 +336,6 @@ pub fn validate_save(save: &SaveV1) -> Result<usize, LoadError> {
         }
     }
 
-    // 8. parent_species_id sentinel check (u32::MAX was an old placeholder).
-    for i in 0..n {
-        if save.creatures.parent_species_id[i] == u32::MAX {
-            return Err(LoadError::StructuralError(format!(
-                "creature {i} parent_species_id is u32::MAX (invalid sentinel)"
-            )));
-        }
-    }
-
     // 8. Slider fields finite.
     let s = &save.sliders;
     for (name, val) in [
@@ -481,14 +451,6 @@ mod tests {
             assert_eq!(
                 w2.creatures.cumulative_upkeep[i], w.creatures.cumulative_upkeep[i],
                 "cumulative_upkeep[{i}]"
-            );
-            assert_eq!(
-                w2.creatures.species_id[i], w.creatures.species_id[i],
-                "species_id[{i}]"
-            );
-            assert_eq!(
-                w2.creatures.parent_species_id[i], w.creatures.parent_species_id[i],
-                "parent_species_id[{i}]"
             );
             assert_eq!(
                 w2.creatures.last_action[i], w.creatures.last_action[i],
@@ -747,8 +709,6 @@ mod tests {
             save.creatures.age.push(0);
             save.creatures.digestion_cooldown.push(0);
             save.creatures.cumulative_upkeep.push(0.0);
-            save.creatures.species_id.push(0);
-            save.creatures.parent_species_id.push(0);
             save.creatures
                 .last_action
                 .push(crate::creature::Action::Rest);
@@ -802,21 +762,7 @@ mod tests {
         );
     }
 
-    /// S12 negative 7: parent_species_id == u32::MAX sentinel.
-    #[test]
-    fn s12_parent_species_id_sentinel_fails() {
-        let mut save = make_valid_save();
-        if !save.creatures.parent_species_id.is_empty() {
-            save.creatures.parent_species_id[0] = u32::MAX;
-        }
-        let result = validate_save(&save);
-        assert!(
-            matches!(result, Err(LoadError::StructuralError(_))),
-            "u32::MAX parent_species_id must yield StructuralError"
-        );
-    }
-
-    /// S12 negative 8: non-finite slider value.
+    /// S12 negative 7: non-finite slider value.
     #[test]
     fn s12_nan_slider_fails() {
         let mut save = make_valid_save();

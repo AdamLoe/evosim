@@ -6,7 +6,6 @@ use crate::creature::CreatureSoA;
 use crate::grass::GrassGrid;
 use crate::grid::SpatialGrid;
 use crate::save::{rehydrate_event_log, validate_save, LoadError, SCHEMA_VERSION};
-use crate::species::SpeciesRegistry;
 use crate::vision::{CarrionIndex, VisionBuf, VISION_LEN};
 
 impl World {
@@ -40,8 +39,6 @@ impl World {
                 save.creatures.x[i],
                 save.creatures.y[i],
                 save.creatures.energy[i],
-                save.creatures.species_id[i],
-                save.creatures.parent_species_id[i],
                 save.creatures.birth_tick[i],
                 g.clone(),
                 b.clone(),
@@ -74,10 +71,6 @@ impl World {
             scratch: vec![0.0f32; GRASS_CELL_COUNT],
         };
 
-        // Rebuild SpeciesRegistry — next_id recomputed as max(id) + 1.
-        let max_id = save.species.list.iter().map(|s| s.id).max().unwrap_or(0);
-        let species = SpeciesRegistry::from_snapshot(save.species.list, max_id + 1);
-
         // Rehydrate event log.
         let events = rehydrate_event_log(save.events);
 
@@ -89,15 +82,12 @@ impl World {
             grid,
             creatures,
             carrion: save.carrion,
-            species,
             events,
             events_enabled: false,
             sliders: save.sliders,
             next_creature_id: save.next_creature_id,
             peak_population: save.peak_population,
-            peak_species_count: save.peak_species_count,
             world_ended: save.world_ended,
-            live_species_count: save.live_species_count,
             first_move_fired: save.first_move_fired,
             first_eat_fired: save.first_eat_fired,
             population_milestones_fired: save.population_milestones_fired,
@@ -112,7 +102,6 @@ impl World {
             founder_brain_anchor: save.founder_brain_anchor,
             vision,
             cell_to_carrion: CarrionIndex::new(),
-            pending_extinction_check: Vec::new(),
             force_sequential_nn: false, // S39: observation-only; never saved
             // Profiler is never saved/loaded — always start fresh (D9/D10).
             profile: crate::profiler::Profiler::new(),

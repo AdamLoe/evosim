@@ -44,8 +44,6 @@ function set(id: string, text: string): void {
 }
 
 function renderInspector(data: CreatureInspectJson): void {
-  set("ins-species", `${data.species_name} (#${data.species_id})`);
-  set("ins-parent", data.parent_species_name ?? "—");
   set("ins-action", data.current_action);
   set("ins-age", `${data.age} / ${data.max_age}`);
   set("ins-energy", `${data.energy.toFixed(1)} (${(data.energy_frac * 100).toFixed(0)}%)`);
@@ -68,10 +66,6 @@ function renderInspector(data: CreatureInspectJson): void {
 export interface CreatureInspectJson {
   index: number;
   id: number;
-  species_id: number;
-  species_name: string;
-  parent_species_id: number;
-  parent_species_name: string | null;
   x: number;
   y: number;
   age: number;
@@ -154,8 +148,7 @@ export function refreshInspector(
     // Creature died. 2-second placeholder per DECISIONS E.24.
     if (!state.diedAt) {
       state.diedAt = performance.now();
-      set("ins-species", "Creature died");
-      set("ins-action", "—");
+      set("ins-action", "Creature died");
     }
     if (performance.now() - state.diedAt > 2000) {
       clearSelection(rail);

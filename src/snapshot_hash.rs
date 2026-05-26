@@ -18,7 +18,6 @@
 //!    (LE on both real targets: x86_64-linux, wasm32-unknown) via write_u64.
 //!    Replaces serde_json byte stream (v1.0 approach; see DECISIONS audit v1.1).
 
-use crate::constants::NN_WEIGHT_COUNT;
 use crate::genome::Genome;
 use crate::world::World;
 use std::hash::Hasher;
@@ -51,8 +50,6 @@ pub fn snapshot_hash(w: &World) -> u64 {
         // S7: 9 additional SoA fields appended after nn_mutation_rate (#1–#9)
         h.write_u32(w.creatures.digestion_cooldown[i]); // #1
         write_f32(&mut h, w.creatures.cumulative_upkeep[i]); // #2
-        h.write_u32(w.creatures.species_id[i]); // #3
-        h.write_u32(w.creatures.parent_species_id[i]); // #4
         h.write_u8(w.creatures.last_action[i] as u8); // #5
         h.write_u8(w.creatures.action_this_tick[i] as u8); // #6
         write_f32(&mut h, w.creatures.max_size_reached[i]); // #7
@@ -82,57 +79,7 @@ pub fn snapshot_hash(w: &World) -> u64 {
         h.write_u64(cc.id);
     }
 
-    // (5) species list — id + anchor genome sub-hash + S7 fields (#12–#17) + next_id (#18)
-    let ns = w.species.list.len();
-    h.write_u32(ns as u32);
-    for sp in &w.species.list {
-        h.write_u32(sp.id);
-        // Sub-hash the anchor genome to keep the per-species loop body compact.
-        let mut ah = XxHash64::with_seed(0);
-        hash_genome(&mut ah, &sp.anchor_genome);
-        h.write_u64(ah.finish());
-        // S7: species fields appended after anchor sub-hash (#12–#17)
-        // #12: parent_id — Option<u32> encoded as (presence u8, value u32)
-        match sp.parent_id {
-            None => {
-                h.write_u8(0);
-                h.write_u32(0);
-            }
-            Some(v) => {
-                h.write_u8(1);
-                h.write_u32(v);
-            }
-        }
-        // #13: name — length-prefixed UTF-8 bytes (prevents boundary collision)
-        h.write_u32(sp.name.len() as u32);
-        h.write(sp.name.as_bytes());
-        // #13.5 / 14 ordering per plan: born_tick → died_tick → child_count → depth → anchor_brain_weights
-        h.write_u32(sp.born_tick); // #13.5
-                                   // #14: died_tick — Option<u32> same encoding as parent_id
-        match sp.died_tick {
-            None => {
-                h.write_u8(0);
-                h.write_u32(0);
-            }
-            Some(v) => {
-                h.write_u8(1);
-                h.write_u32(v);
-            }
-        }
-        h.write_u32(sp.child_count); // #15
-        h.write_u32(sp.depth); // #16
-                               // #17: anchor_brain_weights — length is NN_WEIGHT_COUNT (invariant)
-        debug_assert_eq!(
-            sp.anchor_brain_weights.len(),
-            NN_WEIGHT_COUNT,
-            "anchor_brain_weights length must equal NN_WEIGHT_COUNT"
-        );
-        for &wf in &sp.anchor_brain_weights {
-            write_f32(&mut h, wf); // #17
-        }
-    }
-    // #18: SpeciesRegistry.next_id — appended after the species loop
-    h.write_u32(w.species.next_id);
+    // (5) species list — removed (D10). D6 will delete this file entirely.
 
     // (6) RNG state — four u64s of xoshiro256++ internal state, in storage order.
     // Written via Hasher::write_u64 (native-endian → LE on both real targets).

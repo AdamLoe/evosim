@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 pub struct HallOfFame {
     pub creature_id: u64,
     pub genome: Genome,
+    /// Species name stub — species tracking deleted (D10). D5 will remove this field entirely.
     pub species_name: String,
     pub captured_tick: u32,
     pub captured_size: f32,

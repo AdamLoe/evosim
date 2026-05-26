@@ -15,7 +15,6 @@ pub(crate) mod profiler;
 pub(crate) mod rng;
 pub mod save; // used by tests/acceptance.rs
 pub mod snapshot_hash; // used by tests/acceptance.rs
-pub(crate) mod species;
 pub(crate) mod torus;
 pub(crate) mod vision;
 pub mod world; // used by tests/acceptance.rs

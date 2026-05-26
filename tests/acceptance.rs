@@ -38,13 +38,7 @@ fn acceptance_t10000() {
         w.tick,
     );
 
-    // (b) ≥ 2 distinct live species.
-    assert!(
-        w.live_species_count >= 2,
-        "(b) live_species_count must be ≥ 2; got {} at tick {}",
-        w.live_species_count,
-        w.tick,
-    );
+    // (b) live_species_count removed (D10) — D6 will delete this file.
 
     // (c) wall-clock under budget.
     assert!(
@@ -216,10 +210,7 @@ fn acceptance_t10000_threaded() {
         w.population() > 0,
         "(a) population must be > 0 at tick {TICKS}"
     );
-    assert!(
-        w.live_species_count >= 2,
-        "(b) live_species_count must be ≥ 2"
-    );
+    // (b) live_species_count removed (D10) — D6 will delete this file.
 
     let hash = snapshot_hash(&w);
 

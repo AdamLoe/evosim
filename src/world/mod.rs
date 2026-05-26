@@ -20,7 +20,6 @@ use crate::grass::GrassGrid;
 use crate::grid::SpatialGrid;
 use crate::hof::HallOfFame;
 use crate::rng::SimRng;
-use crate::species::{species_distance, SpeciesRegistry};
 use crate::torus::wrap_pos;
 use crate::vision::{build_cell_to_carrion, CarrionIndex, VisionBuf, VisionPass, VISION_LEN};
 use serde::{Deserialize, Serialize};
@@ -65,7 +64,6 @@ pub struct World {
     pub grid: SpatialGrid,
     pub creatures: CreatureSoA,
     pub carrion: Vec<Carrion>,
-    pub species: SpeciesRegistry,
     pub events: EventLog,
     /// When false (default), `self.events.push(...)` calls are suppressed.
     /// Set to true in tests that assert event log contents. v1.1 will flip
@@ -74,9 +72,7 @@ pub struct World {
     pub sliders: DevSliders,
     pub next_creature_id: u64,
     pub peak_population: u32,
-    pub peak_species_count: u32,
     pub world_ended: bool,
-    pub live_species_count: u32,
     pub first_move_fired: bool,
     pub first_eat_fired: bool,
     /// Bitset of population milestone thresholds that have fired (v5 §11, E.25.a).
@@ -105,9 +101,6 @@ pub struct World {
     pub vision: Vec<VisionBuf>,
     /// Per-cell carrion lookup, rebuilt each tick before vision pass (S26: CSR layout).
     pub(crate) cell_to_carrion: CarrionIndex,
-    /// Species ids that lost a creature this tick; checked after removals to
-    /// emit extinction events. Drained each `finalize_extinctions`.
-    pub(crate) pending_extinction_check: Vec<u32>,
     /// In-app hierarchical profiler. Runtime-toggleable, default OFF.
     /// Excluded from SaveV1 and from the §16 snapshot hash (D10).
     /// See docs/plans/perf-timing.md for the full design.
@@ -151,26 +144,14 @@ impl World {
         let mut rng = SimRng::from_string(&seed_string);
         let grass = GrassGrid::new(&mut rng, sliders.grass_initial_seed_count);
         let mut creatures = CreatureSoA::with_capacity(2048);
-        let mut species = SpeciesRegistry::new();
         let founder_genome = Genome::founder();
         let founder_brain = Brain::founder(&mut rng);
-        let founder_species = species.founder(&founder_genome, &founder_brain, 0);
         // Capture day-0 anchors for weirdness distance (E.25.d).
         let founder_genome_anchor = founder_genome.clone();
         let founder_brain_anchor = founder_brain.weights.clone();
         let cx = WORLD_SIZE * 0.5;
         let cy = WORLD_SIZE * 0.5;
-        creatures.push(
-            0,
-            cx,
-            cy,
-            FOUNDER_ENERGY,
-            founder_species,
-            founder_species,
-            0,
-            founder_genome,
-            founder_brain,
-        );
+        creatures.push(0, cx, cy, FOUNDER_ENERGY, 0, founder_genome, founder_brain);
         // P2f: initialize founder's move_bias fields after push.
         creatures.move_bias_x[0] = rng.symm();
         creatures.move_bias_y[0] = rng.symm();
@@ -180,11 +161,10 @@ impl World {
         // S29: initialize biggest_ever for the founder (founder never goes through
         // handle_births, so we seed it here). Size = FOUNDER_SIZE from genome.
         let founder_size = creatures.g_size[0];
-        let founder_species_name = species.get(founder_species).name.clone();
         let initial_biggest_ever = Some(crate::hof::HallOfFame {
             creature_id: 0,
             genome: creatures.genomes[0].clone(),
-            species_name: founder_species_name,
+            species_name: String::new(),
             captured_tick: 0,
             captured_size: founder_size,
             captured_age: 0,
@@ -197,15 +177,12 @@ impl World {
             grid,
             creatures,
             carrion: Vec::new(),
-            species,
             events: EventLog::new(),
             events_enabled: false,
             sliders,
             next_creature_id: 1,
             peak_population: 1,
-            peak_species_count: 1,
             world_ended: false,
-            live_species_count: 1,
             first_move_fired: false,
             first_eat_fired: false,
             population_milestones_fired: 0,
@@ -220,7 +197,6 @@ impl World {
             founder_brain_anchor,
             vision: vec![[0.0f32; VISION_LEN]], // 1 for the founder
             cell_to_carrion: CarrionIndex::new(),
-            pending_extinction_check: Vec::new(),
             profile: crate::profiler::Profiler::new(),
             scratch_fx: Vec::new(),
             scratch_fy: Vec::new(),
@@ -367,9 +343,6 @@ impl World {
             if pop > self.peak_population {
                 self.peak_population = pop;
             }
-            if self.live_species_count > self.peak_species_count {
-                self.peak_species_count = self.live_species_count;
-            }
 
             // E.25.a: PopulationMilestone events (v5 §11 — once per threshold ever).
             for (k, &threshold) in POPULATION_MILESTONES.iter().enumerate() {
@@ -395,7 +368,6 @@ impl World {
                         kind: EventKind::WorldEnded {
                             ticks_lived: self.tick,
                             peak_population: self.peak_population,
-                            peak_species: self.peak_species_count,
                         },
                     });
                 }
@@ -439,46 +411,12 @@ impl World {
             let cy = wrap_pos(self.creatures.y[i] + jitter_y);
             let new_id = self.next_creature_id;
             self.next_creature_id += 1;
-            let parent_species = self.creatures.species_id[i];
-            let anchor = self.species.get(parent_species);
-            let dist = species_distance(
-                &child_genome,
-                &anchor.anchor_genome,
-                &child_brain.weights,
-                &anchor.anchor_brain_weights,
-            );
-
-            let (child_species_id, parent_species_id) = if dist > SPECIES_THRESHOLD {
-                let new_species_id = self.species.speciate(
-                    parent_species,
-                    child_genome.clone(),
-                    child_brain.weights.clone(),
-                    self.tick,
-                );
-                if self.events_enabled {
-                    let new_name = self.species.get(new_species_id).name.clone();
-                    self.events.push(Event {
-                        tick: self.tick,
-                        kind: EventKind::Speciation {
-                            new_species_id,
-                            parent_species_id: parent_species,
-                            new_species_name: new_name,
-                            creature_id: new_id,
-                        },
-                    });
-                }
-                (new_species_id, parent_species)
-            } else {
-                (parent_species, parent_species)
-            };
 
             self.creatures.push(
                 new_id,
                 cx,
                 cy,
                 child_energy,
-                child_species_id,
-                parent_species_id,
                 self.tick,
                 child_genome,
                 child_brain,
@@ -497,15 +435,10 @@ impl World {
             let newborn_size = self.creatures.g_size[newborn_idx];
             let current_best = self.biggest_ever.as_ref().map_or(0.0, |h| h.captured_size);
             if newborn_size > current_best {
-                let species_name = self
-                    .species
-                    .get(self.creatures.species_id[newborn_idx])
-                    .name
-                    .clone();
                 self.biggest_ever = Some(crate::hof::HallOfFame {
                     creature_id: self.creatures.id[newborn_idx],
                     genome: self.creatures.genomes[newborn_idx].clone(),
-                    species_name,
+                    species_name: String::new(),
                     captured_tick: self.tick,
                     captured_size: newborn_size,
                     captured_age: self.creatures.age[newborn_idx],
@@ -514,48 +447,8 @@ impl World {
         }
     }
 
-    pub fn finalize_extinctions(&mut self) {
-        // S28: replace HashSet<u32> with Vec<bool> indexed by species_id.
-        // Species IDs are assigned sequentially starting at 0, so species_id < species.list.len().
-        // Using a dense bool avoids HashMap/HashSet overhead (O(1) indexed lookup vs hash).
-        // Compatible with S9 lint (no .iter()/.into_iter() on HashMap/HashSet).
-        let max_id = self.species.list.len();
-        let mut alive = vec![false; max_id];
-        let mut live_count = 0u32;
-        for i in 0..self.creatures.len() {
-            let sid = self.creatures.species_id[i] as usize;
-            if sid < max_id && !alive[sid] {
-                alive[sid] = true;
-                live_count += 1;
-            }
-        }
-        let candidates = std::mem::take(&mut self.pending_extinction_check);
-        for cand in candidates {
-            let cand_idx = cand as usize;
-            if cand_idx >= max_id || !alive[cand_idx] {
-                let species = &mut self.species.list[cand_idx];
-                if species.died_tick.is_none() {
-                    species.died_tick = Some(self.tick);
-                    if self.events_enabled {
-                        let name = species.name.clone();
-                        self.events.push(Event {
-                            tick: self.tick,
-                            kind: EventKind::Extinction {
-                                species_id: cand,
-                                species_name: name,
-                            },
-                        });
-                    }
-                }
-            }
-        }
-        self.live_species_count = live_count;
-    }
-
     pub fn tick_once(&mut self) -> bool {
-        let alive = self.step();
-        self.finalize_extinctions();
-        alive
+        self.step()
     }
 
     /// Rebuild the per-cell carrion index and run the vision pass.
@@ -586,7 +479,6 @@ mod tests {
     fn world_initializes_with_one_creature() {
         let w = World::new("test-seed");
         assert_eq!(w.population(), 1);
-        assert_eq!(w.species.list.len(), 1);
     }
 
     #[test]
@@ -695,7 +587,7 @@ mod tests {
             let b = Brain::founder(&mut seeder);
             let x = seeder.uniform(10.0, WORLD_SIZE - 10.0);
             let y = seeder.uniform(10.0, WORLD_SIZE - 10.0);
-            w.creatures.push(k + 1, x, y, FOUNDER_ENERGY, 0, 0, 0, g, b);
+            w.creatures.push(k + 1, x, y, FOUNDER_ENERGY, 0, g, b);
             w.vision.push([0.0f32; VISION_LEN]);
         }
 
@@ -772,7 +664,7 @@ mod tests {
             let g = Genome::founder();
             let b = Brain::founder(&mut seeder);
             w.creatures
-                .push(k, 100.0 + k as f32, 100.0, FOUNDER_ENERGY, 0, 0, 0, g, b);
+                .push(k, 100.0 + k as f32, 100.0, FOUNDER_ENERGY, 0, g, b);
             w.vision.push([0.0f32; VISION_LEN]);
         }
         assert_eq!(w.population(), 10);
@@ -806,195 +698,6 @@ mod tests {
         );
     }
 
-    // ---- E.20 tests ----
-
-    /// E.20 test 1: tick until first split; verify the path executed (lenient on which side
-    /// of the threshold the first split lands on — first split rarely crosses SPECIES_THRESHOLD).
-    #[test]
-    fn e20_tiny_mutation_keeps_species() {
-        // Use same seed as lone_creature_eventually_splits which is known to split.
-        let mut w = World::new("split-test");
-        let parent_species_before = w.creatures.species_id[0];
-        for _ in 0..20_000 {
-            let pop_before = w.population();
-            if !w.tick_once() {
-                // World ended — if pop was already > 1 at some point, fine.
-                // But if we never split, fail.
-                break;
-            }
-            if w.population() > pop_before {
-                // The test exercised the wiring in handle_births.
-                let n = w.creatures.len();
-                let child_species = w.creatures.species_id[n - 1];
-                // Both outcomes are valid — either same species or speciation.
-                // The wiring is load-bearing regardless.
-                let _ = (parent_species_before, child_species);
-                return;
-            }
-        }
-        panic!("never split — sliders or balance off");
-    }
-
-    /// E.20 test 2: synthetic large-drift mutation creates a new species.
-    #[test]
-    fn e20_synthetic_large_drift_creates_new_species() {
-        use crate::species::species_distance;
-        let mut w = World::new("e20-big");
-        let parent_genome = w.creatures.genomes[0].clone();
-        let parent_brain = w.creatures.brains[0].clone();
-        let parent_species = w.creatures.species_id[0];
-
-        // Construct a child genome with a HUGE body drift (delta size +7).
-        let mut child_genome = parent_genome.clone();
-        child_genome.size = 8.0; // delta 7.0 / sigma=1.0 -> contribution ~49 to body_sq
-        child_genome.pigment_r = 1.0 - parent_genome.pigment_r;
-        let child_brain = parent_brain.clone();
-
-        let d = species_distance(
-            &child_genome,
-            &parent_genome,
-            &child_brain.weights,
-            &parent_brain.weights,
-        );
-        assert!(d > SPECIES_THRESHOLD, "synthetic d = {d}");
-
-        let new_species_id = w.species.speciate(
-            parent_species,
-            child_genome.clone(),
-            child_brain.weights.clone(),
-            w.tick,
-        );
-        assert_ne!(new_species_id, parent_species);
-        assert_eq!(
-            w.species.get(new_species_id).parent_id,
-            Some(parent_species)
-        );
-        assert!(
-            w.species.get(new_species_id).name.starts_with("Lineage A"),
-            "name = {}",
-            w.species.get(new_species_id).name
-        );
-    }
-
-    /// E.20 test 3: end-to-end — with max mutation, a Speciation event eventually fires.
-    /// Uses synthetic approach: run until speciation fires (checking events.all after each tick),
-    /// restarting a fresh world if the first world goes extinct too quickly.
-    #[test]
-    fn e20_speciation_event_lands_in_log_when_threshold_crossed() {
-        use crate::species::species_distance;
-        // Directly exercise the registry wiring with a synthetic big-drift genome
-        // inserted via handle_births-style logic to confirm the event fires.
-        // This is more reliable than depending on a live sim to accumulate drift.
-        let mut w = World::new("e20-direct");
-        w.events_enabled = true; // enable logging so we can assert event contents
-
-        // Confirm the speciate path fires: manufacture a child with huge drift
-        // and push it through the species check directly (mirrors handle_births).
-        let parent_species = w.creatures.species_id[0];
-        let anchor = w.species.get(parent_species);
-        let mut child_genome = anchor.anchor_genome.clone();
-        // Force huge drift: max size, flipped pigments.
-        child_genome.size = SIZE_MAX;
-        child_genome.pigment_r = 1.0 - child_genome.pigment_r;
-        child_genome.pigment_g = 1.0 - child_genome.pigment_g;
-        child_genome.pigment_b = 1.0 - child_genome.pigment_b;
-        let child_brain = w.creatures.brains[0].clone();
-
-        let dist = species_distance(
-            &child_genome,
-            &anchor.anchor_genome,
-            &child_brain.weights,
-            &anchor.anchor_brain_weights,
-        );
-        assert!(
-            dist > SPECIES_THRESHOLD,
-            "synthetic dist = {dist} should exceed {SPECIES_THRESHOLD}"
-        );
-
-        // Simulate what handle_births does:
-        let new_species_id = w.species.speciate(
-            parent_species,
-            child_genome.clone(),
-            child_brain.weights.clone(),
-            w.tick,
-        );
-        let new_name = w.species.get(new_species_id).name.clone();
-        w.events.push(Event {
-            tick: w.tick,
-            kind: EventKind::Speciation {
-                new_species_id,
-                parent_species_id: parent_species,
-                new_species_name: new_name,
-                creature_id: 99,
-            },
-        });
-
-        // Verify event fired and has correct shape.
-        assert!(
-            w.events
-                .all
-                .iter()
-                .any(|e| matches!(e.kind, EventKind::Speciation { .. })),
-            "Speciation event must be in log"
-        );
-        let ev = w
-            .events
-            .all
-            .iter()
-            .find(|e| matches!(e.kind, EventKind::Speciation { .. }))
-            .unwrap();
-        if let EventKind::Speciation {
-            new_species_id: nsid,
-            parent_species_id: psid,
-            ..
-        } = &ev.kind
-        {
-            let new_sp = w.species.get(*nsid);
-            assert_eq!(new_sp.parent_id, Some(*psid));
-            assert_ne!(*nsid, *psid);
-        }
-
-        // Also run a live simulation to confirm the wiring in handle_births
-        // actually fires given enough accumulated drift (run many worlds in parallel).
-        // Use aggressive mutation on a controlled seed and verify event appears
-        // or the world ends without panicking.
-        let mut found = false;
-        for seed_n in 0u32..20 {
-            let seed = format!("e20-live-{seed_n}");
-            let mut w2 = World::new(&seed);
-            w2.events_enabled = true; // enable logging so we can assert event contents
-            w2.sliders.mutation_rate_multiplier = 20.0;
-            w2.sliders.nn_mutation_sigma = 0.3;
-            // Boost grass growth so creatures survive long enough to accumulate drift.
-            w2.sliders.grass_in_cell_growth_r = 0.05;
-            for _ in 0..5_000 {
-                if !w2.tick_once() {
-                    break;
-                }
-                if w2
-                    .events
-                    .all
-                    .iter()
-                    .any(|e| matches!(e.kind, EventKind::Speciation { .. }))
-                {
-                    found = true;
-                    break;
-                }
-            }
-            if found {
-                break;
-            }
-        }
-        if !found {
-            // Acceptable: the live path may not accumulate enough drift in 5k ticks × 20 seeds.
-            // The synthetic path above already confirmed the registry + event wiring is correct.
-            // The wiring in handle_births is confirmed by the synthetic-large-drift test.
-            println!(
-                "Note: live speciation not observed in 20 short runs; synthetic path confirmed OK."
-            );
-        }
-    }
-
     /// perf-1 T2: child's trig cache is populated on birth; parent's is unchanged.
     #[test]
     fn eye_trig_recomputed_on_birth() {
@@ -1024,8 +727,6 @@ mod tests {
             0.0,
             0.0,
             0.0,
-            0,
-            0,
             0,
             w.creatures.genomes[child_idx].clone(),
             Brain::founder(&mut SimRng::from_u64(0)), // brain irrelevant for cache

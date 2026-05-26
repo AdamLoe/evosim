@@ -114,12 +114,6 @@ pub const FOUNDER_PIGMENT_G: f32 = 0.75;
 pub const FOUNDER_PIGMENT_B: f32 = 0.35;
 pub const FOUNDER_SPLIT_JITTER: f32 = 50.0;
 
-// ---- Species detection (v6 §H) ----
-pub const SPECIES_W_BODY: f32 = 3.0;
-pub const SPECIES_W_BRAIN: f32 = 1.0;
-pub const SPECIES_THRESHOLD: f32 = 4.0; // v6 §H default; v1.1 raised to 6.0 for sun-driven fast drift, v1.2 reverts (slower grass-driven drift won't trigger 6.0 in 10k ticks). See DECISIONS v1.2 PR-1 regen.
-pub const SPECIES_EYE_JUMP_COST: f32 = 1.5;
-
 // ---- NN input normalization (v6 §E, §3; see DECISIONS for unspecified bases) ----
 /// Normalization base for carrion_overlap_norm NN input (v6 §3; no canonical base in spec).
 /// 4 overlapping corpses ≈ "corpse-rich zone". DECISIONS: carrion_overlap_norm base.

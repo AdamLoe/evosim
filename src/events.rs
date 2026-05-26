@@ -12,12 +12,15 @@ pub struct Event {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum EventKind {
+    // D10: species push sites removed. D4 will delete these variants entirely.
+    #[allow(dead_code)]
     Speciation {
         new_species_id: u32,
         parent_species_id: u32,
         new_species_name: String,
         creature_id: u64,
     },
+    #[allow(dead_code)]
     Extinction {
         species_id: u32,
         species_name: String,
@@ -34,7 +37,6 @@ pub enum EventKind {
     WorldEnded {
         ticks_lived: u32,
         peak_population: u32,
-        peak_species: u32,
     },
 }
 

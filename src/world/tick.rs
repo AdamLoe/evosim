@@ -6,7 +6,6 @@ use crate::constants::*;
 use crate::creature::Action;
 use crate::events::{Event, EventKind};
 use crate::hof::HallOfFame;
-use crate::species::species_distance;
 use crate::torus::{torus_delta, wrap_pos};
 
 impl World {
@@ -124,12 +123,11 @@ impl World {
             {
                 self.first_move_fired = true;
                 let g = self.creatures.genomes[i].clone();
-                let species_name = self.species.get(self.creatures.species_id[i]).name.clone();
                 // E.25.d: capture first_mover_snapshot for F.28.
                 self.first_mover_snapshot = Some(HallOfFame {
                     creature_id: self.creatures.id[i],
                     genome: g.clone(),
-                    species_name,
+                    species_name: String::new(),
                     captured_tick: self.tick,
                     captured_size: g.size,
                     captured_age: self.creatures.age[i],
@@ -457,22 +455,18 @@ impl World {
                     pool,
                     age: 0,
                 });
-                // S27: push directly to pending_extinction_check (no species_lost intermediate Vec).
-                self.pending_extinction_check
-                    .push(self.creatures.species_id[i]);
                 self.scratch_dead.push(i);
 
                 // E.25.d: hall-of-fame tracking on death.
                 let age = self.creatures.age[i];
                 let g_clone = self.creatures.genomes[i].clone();
-                let species_name = self.species.get(self.creatures.species_id[i]).name.clone();
 
                 // last_survivor: overwrite on every death; final overwrite is the
                 // latest death tick (pop=0 means no more deaths after this).
                 self.last_survivor = Some(HallOfFame {
                     creature_id: self.creatures.id[i],
                     genome: g_clone.clone(),
-                    species_name: species_name.clone(),
+                    species_name: String::new(),
                     captured_tick: self.tick,
                     captured_size: g_clone.size,
                     captured_age: age,
@@ -484,27 +478,22 @@ impl World {
                     self.longest_lived = Some(HallOfFame {
                         creature_id: self.creatures.id[i],
                         genome: g_clone.clone(),
-                        species_name: species_name.clone(),
+                        species_name: String::new(),
                         captured_tick: self.tick,
                         captured_size: g_clone.size,
                         captured_age: age,
                     });
                 }
 
-                // weirdest: requires age >= 500 (v5 §11.1).
+                // weirdest: requires age >= 500 (v5 §11.1). Species distance removed (D10);
+                // weirdest tracking remains but always produces zero distance.
                 if age >= 500 {
-                    let dist = species_distance(
-                        &g_clone,
-                        &self.founder_genome_anchor,
-                        &self.creatures.brains[i].weights,
-                        &self.founder_brain_anchor,
-                    );
-                    if dist > self.weirdest_distance {
-                        self.weirdest_distance = dist;
+                    // Distance is zero without species tracking; capture first eligible creature.
+                    if self.weirdest.is_none() {
                         self.weirdest = Some(HallOfFame {
                             creature_id: self.creatures.id[i],
                             genome: g_clone,
-                            species_name,
+                            species_name: String::new(),
                             captured_tick: self.tick,
                             captured_size: self.creatures.genomes[i].size,
                             captured_age: age,
@@ -676,8 +665,7 @@ mod tests {
         // Add a second creature.
         let g2 = Genome::founder();
         let b2 = Brain::founder(&mut seeder);
-        w.creatures
-            .push(1, 200.0, 200.0, FOUNDER_ENERGY, 0, 0, 0, g2, b2);
+        w.creatures.push(1, 200.0, 200.0, FOUNDER_ENERGY, 0, g2, b2);
         w.vision.push([0.0f32; VISION_LEN]);
         assert_eq!(w.creatures.len(), 2);
 
@@ -1011,7 +999,7 @@ mod tests {
         let n_before = w.creatures.len();
         use crate::vision::VISION_LEN;
         w.creatures
-            .push(1, 598.0, WORLD_SIZE * 0.5, FOUNDER_ENERGY, 0, 0, 0, g2, b2);
+            .push(1, 598.0, WORLD_SIZE * 0.5, FOUNDER_ENERGY, 0, g2, b2);
         w.vision.push([0.0f32; VISION_LEN]);
         w.creatures.vx[n_before] = 0.0;
         w.creatures.vy[n_before] = 0.0;
@@ -1420,17 +1408,8 @@ mod tests {
         let pred_x = w.creatures.x[0];
         let pred_y = w.creatures.y[0];
         // Place prey within bite reach.
-        w.creatures.push(
-            1,
-            pred_x + 1.5,
-            pred_y,
-            100.0,
-            0,
-            0,
-            0,
-            prey_genome,
-            prey_brain,
-        );
+        w.creatures
+            .push(1, pred_x + 1.5, pred_y, 100.0, 0, prey_genome, prey_brain);
         w.vision.push([0.0f32; VISION_LEN]);
 
         w.grid.rebuild(&w.creatures.x, &w.creatures.y);
@@ -1486,17 +1465,8 @@ mod tests {
         let prey_brain = Brain::founder(&mut rng);
         let pred_x = w.creatures.x[0];
         let pred_y = w.creatures.y[0];
-        w.creatures.push(
-            1,
-            pred_x + 1.5,
-            pred_y,
-            100.0,
-            0,
-            0,
-            0,
-            prey_genome,
-            prey_brain,
-        );
+        w.creatures
+            .push(1, pred_x + 1.5, pred_y, 100.0, 0, prey_genome, prey_brain);
         w.vision.push([0.0f32; VISION_LEN]);
 
         w.grid.rebuild(&w.creatures.x, &w.creatures.y);
@@ -1546,17 +1516,8 @@ mod tests {
         let prey_brain = Brain::founder(&mut rng);
         let pred_x = w.creatures.x[0];
         let pred_y = w.creatures.y[0];
-        w.creatures.push(
-            1,
-            pred_x + 1.5,
-            pred_y,
-            100.0,
-            0,
-            0,
-            0,
-            prey_genome,
-            prey_brain,
-        );
+        w.creatures
+            .push(1, pred_x + 1.5, pred_y, 100.0, 0, prey_genome, prey_brain);
         w.vision.push([0.0f32; VISION_LEN]);
 
         w.grid.rebuild(&w.creatures.x, &w.creatures.y);
