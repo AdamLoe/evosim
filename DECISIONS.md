@@ -391,3 +391,20 @@ M3 (perf pass): skipped — deferred to Phase 6/v1.4. UI/render perf was the obs
 M4 (UI keepalive, commit d5ec449 + 23ca603): simplified all 5 surviving panels to v1.3 data model. Deleted species chart (D10), toast stack (D4), eulogy modal (D5). Inspector shows NN weight count + color hash + energy; dev panel retains fewer sliders. Per Q7 + Q8 user answers.
 
 M5 (NN-hash color, commit 1f89640 + d506236): `xxhash64(brain.weights)` low 24 bits → `0x00RRGGBB` creature color. Hot-mirror `color: u32` added to `CreatureSoA`. `Brain::child_from` recomputes hash after mutation. Replaces pigment genome trait (deleted in D3).
+
+## v1.4 cleanup (2026-05-26)
+
+4 commits landed (all High + Medium Priority items from `docs/plans/v1.4-cleanup-punchlist.md`).
+Final gate: cargo test --lib 119/119 (default + threads); clippy -D warnings clean both features; pnpm typecheck clean; pnpm build 29.92 kB JS (gzip 10.70 kB).
+
+- 80786e4 `refactor(rust): drop EYE_VALID/EYE_STRIDE/EYE_SLOTS, density_at_cell, dead-code allows` — lib.rs `pub mod world` → `pub(crate)`; EYE_VALID/EYE_STRIDE/EYE_SLOTS deleted from constants.rs; creature.rs `recompute_eye_trig_at` inlines `stride=1`; `VISION_RANGE_MAX` dummy ref removed; `density_at_cell` dead method deleted from grass.rs; Brain::zero/forward_scalar and Profiler::record_external gated under `#[cfg(test)]`; World::clone_for_test gets `#[allow(dead_code)]`.
+- dcbcb1b `fix(render): remove scav ring from creature buffer + render (post-D9)` — creatures_buffer stride 11→10; constant 1.0 scav slot removed; render.ts RING_COLORS.scav deleted; flagScav read + drawRing call removed; renderWorld stride guard updated 11→10.
+- ef99b78 `fix(inspector): remove vestigial scavenge_efficiency + nose_count stubs; populate id/pos rows; drop mouth_tax wasm export` — creature_inspect_json drops "scavenge_efficiency" and "nose_count" constant-stub fields; mean_nose_count + mean_eye_count wasm exports deleted; set_mouth_tax wasm export + apply_mouth_tax helper + "mouth_tax" try_set_slider arm deleted; renderInspector populates ins-id and ins-pos; CreatureInspectJson drops scavenge_efficiency field; ins-scav HTML row removed.
+- 0ed5d23 `refactor(tests): rename stale test names + delete tautological body-radius test` — split_jitter_wraps → split_jitter_stays_in_bounds; repulsion_wraps_across_seam → repulsion_clamps_to_walls_after_movement; decode_action_scavenge_invalid_when_zero_eff → decode_action_split_invalid_when_low_energy; nan_logits_return_rest_zero_velocity → nan_logits_return_graze_zero_velocity; body_radius_constant_across_population deleted (pure tautology).
+
+Deferred to orchestrator (Low Priority / Orchestrator-Decision items):
+- §19 Pass-progress noise comments (D3:, M5:, Q3: inline markers) — stylistic call, user owns.
+- §20 serde derives on Action/Brain/DevSliders — Low Pri; no consumer confirmed but removal could break future serialization.
+- §17 POPULATION_MILESTONES / first_move_fired / first_eat_fired — tracking fields that run every tick with no consumer; kept as hooks per orchestrator decision note in punchlist.
+- §22 Stale docs/plans reference in render.ts comment — Low Pri noise.
+- §E Worktree branches/dirs (16 locked) — cannot prune while Claude holds the lock; run `git worktree prune` + `git branch -D worktree-agent-*` after next session restart.
