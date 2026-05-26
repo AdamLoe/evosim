@@ -44,8 +44,13 @@ impl SpatialGrid {
 
     #[inline]
     pub fn cell_of(x: f32, y: f32) -> usize {
-        let ix = ((x / HASH_CELL) as usize).min(HASH_DIM - 1);
-        let iy = ((y / HASH_CELL) as usize).min(HASH_DIM - 1);
+        // Toroidal world: wrap cell index modulo HASH_DIM via rem_euclid.
+        // Integer rem_euclid is bit-stable; avoids float % surprises.
+        // See v1.2 grass mechanic brief.
+        let ix = (x / HASH_CELL).floor() as i32;
+        let iy = (y / HASH_CELL).floor() as i32;
+        let ix = ix.rem_euclid(HASH_DIM as i32) as usize;
+        let iy = iy.rem_euclid(HASH_DIM as i32) as usize;
         iy * HASH_DIM + ix
     }
 
@@ -103,6 +108,30 @@ impl SpatialGrid {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Toroidal: cell_of with negative x/y wraps to the far edge (seam wrap).
+    #[test]
+    fn cell_of_wraps_negative() {
+        // x = -1.0 → floor(-0.2) = -1 → rem_euclid(120) = 119 → cell column 119.
+        let c = SpatialGrid::cell_of(-1.0, 0.0);
+        assert_eq!(c, HASH_DIM - 1, "negative x should wrap to last column");
+        let c2 = SpatialGrid::cell_of(0.0, -1.0);
+        assert_eq!(
+            c2,
+            (HASH_DIM - 1) * HASH_DIM,
+            "negative y should wrap to last row"
+        );
+    }
+
+    /// Toroidal: cell_of with x/y >= WORLD_SIZE wraps to the near edge.
+    #[test]
+    fn cell_of_wraps_above() {
+        // x = WORLD_SIZE = 600.0 → floor(120) = 120 → rem_euclid(120) = 0 → column 0.
+        let c = SpatialGrid::cell_of(WORLD_SIZE, 0.0);
+        assert_eq!(c, 0, "x == WORLD_SIZE should wrap to column 0");
+        let c2 = SpatialGrid::cell_of(0.0, WORLD_SIZE);
+        assert_eq!(c2, 0, "y == WORLD_SIZE should wrap to row 0");
+    }
 
     /// S32: the cached cells[] array matches a direct recompute of cell_of for
     /// every creature after rebuild.
