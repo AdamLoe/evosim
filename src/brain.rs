@@ -7,6 +7,8 @@
 use crate::constants::*;
 use crate::rng::SimRng;
 use serde::{Deserialize, Serialize};
+use std::hash::Hasher;
+use twox_hash::XxHash64;
 use wide::f32x8;
 
 // Compile-time layout assertions.
@@ -35,8 +37,38 @@ const HIDDEN_CHUNKS: usize = NN_HIDDEN / 8; // 24/8 = 3
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Brain {
-    pub weights: Vec<f32>, // length = NN_WEIGHT_COUNT = 2808 (v1.3)
+    /// NN weight vector. Length = NN_WEIGHT_COUNT = 2808 (v1.3).
+    /// WARNING: do NOT mutate weights after construction without recomputing
+    /// `weight_hash` and `color_rgb` — only `child_from` and `founder` are
+    /// correct write sites (M5).
+    pub weights: Vec<f32>,
     pub nn_mutation_rate: f32,
+    /// Packed 0x00RRGGBB derived from `weight_hash` low 24 bits. Cached at birth.
+    pub color_rgb: u32,
+    /// Full XxHash64(weights, seed=0). Cached at birth; color_rgb = low 24 bits.
+    pub weight_hash: u64,
+}
+
+/// Hash a weight slice via XxHash64 with seed 0.
+/// Stable across runs and compiler versions (not DefaultHasher).
+fn hash_weights(weights: &[f32]) -> u64 {
+    let mut h = XxHash64::with_seed(0);
+    // SAFETY: f32 is Plain Old Data; we read the raw bytes for hashing only.
+    // No alignment hazard — `as_ptr()` from a Vec<f32> is always 4-byte aligned
+    // and `from_raw_parts` with `size_of_val` stays within the allocation.
+    let bytes: &[u8] = unsafe {
+        std::slice::from_raw_parts(
+            weights.as_ptr() as *const u8,
+            std::mem::size_of_val(weights),
+        )
+    };
+    h.write(bytes);
+    h.finish()
+}
+
+/// Truncate a 64-bit hash to a packed 24-bit RGB color (0x00RRGGBB).
+fn color_from_hash(h: u64) -> u32 {
+    (h & 0x00FF_FFFF) as u32
 }
 
 impl Brain {
@@ -46,9 +78,13 @@ impl Brain {
         for w in &mut weights {
             *w = rng.uniform(-NN_INIT_RANGE, NN_INIT_RANGE);
         }
+        let weight_hash = hash_weights(&weights);
+        let color_rgb = color_from_hash(weight_hash);
         Self {
             weights,
             nn_mutation_rate: NN_MUT_RATE_DEFAULT,
+            color_rgb,
+            weight_hash,
         }
     }
 
@@ -56,6 +92,8 @@ impl Brain {
         Self {
             weights: vec![0.0; NN_WEIGHT_COUNT],
             nn_mutation_rate: NN_MUT_RATE_DEFAULT,
+            color_rgb: 0,
+            weight_hash: 0,
         }
     }
 
@@ -154,6 +192,9 @@ impl Brain {
             let jitter = 1.0 + rng.symm() * MUT_RATE_JITTER;
             child.nn_mutation_rate = (child.nn_mutation_rate * jitter).clamp(0.0, 1.0);
         }
+        // M5: recompute color on FINAL mutated weights (overwrites stale parent fields).
+        child.weight_hash = hash_weights(&child.weights);
+        child.color_rgb = color_from_hash(child.weight_hash);
         child
     }
 }
@@ -197,6 +238,7 @@ mod tests {
         parent.nn_mutation_rate = 0.0;
         let child = Brain::child_from(&parent, &mut rng, 0.02, 1.0);
         assert_eq!(parent.weights, child.weights);
+        assert_eq!(parent.color_rgb, child.color_rgb);
     }
 
     #[test]
@@ -353,6 +395,64 @@ mod tests {
             assert!(
                 output.iter().all(|v| v.is_finite()),
                 "NaN/inf on extreme input (sign={sign})"
+            );
+        }
+    }
+
+    // ---- M5 color-hash tests ----
+
+    /// M5: identical weight vectors produce identical color_rgb.
+    #[test]
+    fn identical_weights_produce_identical_color() {
+        let mut rng = SimRng::from_u64(42);
+        let b1 = Brain::founder(&mut rng);
+        let mut b2 = b1.clone();
+        // Recompute on same weights — should match.
+        b2.weight_hash = hash_weights(&b2.weights);
+        b2.color_rgb = color_from_hash(b2.weight_hash);
+        assert_eq!(b1.color_rgb, b2.color_rgb);
+        assert_eq!(b1.weight_hash, b2.weight_hash);
+    }
+
+    /// M5: a mutated child has a different color_rgb from its parent.
+    #[test]
+    fn mutated_child_changes_color() {
+        let mut rng = SimRng::from_u64(7);
+        let mut parent = Brain::founder(&mut rng);
+        parent.nn_mutation_rate = 0.5; // high rate — almost certain to mutate
+        let child = Brain::child_from(&parent, &mut rng, 0.1, 1.0);
+        // With rate=0.5 and sigma=0.1, at least some weights will change → color differs.
+        // (If by chance the hash collides, this would fail — but P(collision) ≈ 1/16M.)
+        assert_ne!(
+            parent.color_rgb, child.color_rgb,
+            "mutated child must have different color_rgb"
+        );
+    }
+
+    /// M5: zero-mutation child keeps parent color because weights are unchanged.
+    #[test]
+    fn zero_mutation_child_keeps_parent_color() {
+        let mut rng = SimRng::from_u64(3);
+        let mut parent = Brain::founder(&mut rng);
+        parent.nn_mutation_rate = 0.0;
+        let child = Brain::child_from(&parent, &mut rng, 0.02, 1.0);
+        assert_eq!(
+            parent.color_rgb, child.color_rgb,
+            "zero-mutation child must keep parent color_rgb"
+        );
+        assert_eq!(parent.weight_hash, child.weight_hash);
+    }
+
+    /// M5: color_rgb always fits in 24 bits (high byte is zero).
+    #[test]
+    fn color_packs_into_24_bits() {
+        let mut rng = SimRng::from_u64(99);
+        for _ in 0..20 {
+            let b = Brain::founder(&mut rng);
+            assert_eq!(
+                b.color_rgb & 0xFF00_0000,
+                0,
+                "color_rgb high byte must be zero (24-bit only)"
             );
         }
     }

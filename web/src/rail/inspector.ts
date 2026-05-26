@@ -56,11 +56,11 @@ function renderInspector(data: CreatureInspectJson): void {
   set("ins-vision", data.vision_range.toFixed(1));
   set("ins-armor", data.armor.toFixed(2));
   set("ins-bite", data.bite_reach.toFixed(2));
-  const [r, g, b] = data.pigment;
-  set(
-    "ins-pigment",
-    `(${(r * 255).toFixed(0)}, ${(g * 255).toFixed(0)}, ${(b * 255).toFixed(0)})`,
-  );
+  // M5: NN-weight hash color replaces placeholder pigment.
+  set("ins-color", data.color_rgb);
+  set("ins-hash", data.weight_hash);
+  set("ins-nn-rate", data.nn_mutation_rate.toFixed(4));
+  set("ins-nn-count", `${data.nn_weight_count}`);
 }
 
 export interface CreatureInspectJson {
@@ -82,7 +82,11 @@ export interface CreatureInspectJson {
   eye_count: number;
   armor: number;
   bite_reach: number;
-  pigment: [number, number, number];
+  // M5: NN-weight hash color replaces placeholder pigment.
+  color_rgb: string;
+  weight_hash: string;
+  nn_mutation_rate: number;
+  nn_weight_count: number;
 }
 
 function openInspector(data: CreatureInspectJson, rail: RailState): void {
