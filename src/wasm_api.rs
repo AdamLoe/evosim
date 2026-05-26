@@ -57,6 +57,35 @@ impl WorldHandle {
         }
     }
 
+    /// Construct from a string seed with an explicit initial grass seed count.
+    /// Overrides the `GRASS_INITIAL_SEED_COUNT_DEFAULT` constant for world creation.
+    /// Used by the dev panel's `grass_initial_seed_count` slider (P3b).
+    #[wasm_bindgen(js_name = newWithGrassSeed)]
+    pub fn new_with_grass_seed(seed: &str, initial_grass_seed_count: u32) -> Self {
+        let actual_seed = if seed.is_empty() {
+            let mut bytes = [0u8; 8];
+            getrandom::getrandom(&mut bytes).ok();
+            let n = u64::from_le_bytes(bytes);
+            format!("seed-{n:016x}")
+        } else {
+            seed.to_string()
+        };
+        let sliders = crate::world::DevSliders {
+            grass_initial_seed_count: initial_grass_seed_count,
+            ..Default::default()
+        };
+        let inner = World::new_with_sliders(actual_seed, sliders);
+        Self {
+            inner,
+            creature_buf: Vec::new(),
+            carrion_buf: Vec::new(),
+            grass_buf: Vec::new(),
+            id_buf: Vec::new(),
+            tick_durations_ms: std::collections::VecDeque::new(),
+            jank_count: 0,
+        }
+    }
+
     /// One tick. Returns true while alive.
     #[wasm_bindgen]
     pub fn step(&mut self) -> bool {
@@ -255,6 +284,12 @@ impl WorldHandle {
     fn apply_eat_bite_fraction(&mut self, value: f32) {
         self.inner.sliders.eat_bite_fraction = value;
     }
+    fn apply_grass_propagation_rate_k(&mut self, value: f32) {
+        self.inner.sliders.grass_propagation_rate_k = value;
+    }
+    fn apply_grass_in_cell_growth_r(&mut self, value: f32) {
+        self.inner.sliders.grass_in_cell_growth_r = value;
+    }
 
     /// Typed setter — per-birth mutation rate multiplier.
     #[wasm_bindgen]
@@ -280,6 +315,18 @@ impl WorldHandle {
         self.apply_eat_bite_fraction(value);
     }
 
+    /// Typed setter — grass cross-cell propagation rate (k).
+    #[wasm_bindgen]
+    pub fn set_grass_propagation_rate_k(&mut self, value: f32) {
+        self.apply_grass_propagation_rate_k(value);
+    }
+
+    /// Typed setter — grass in-cell logistic growth rate (r).
+    #[wasm_bindgen]
+    pub fn set_grass_in_cell_growth_r(&mut self, value: f32) {
+        self.apply_grass_in_cell_growth_r(value);
+    }
+
     /// Apply a dev-panel slider live by name. JS console workflow
     /// (BUILD-REPORT Known Issue #4). Returns `Err` on unknown name so a
     /// console typo is visible instead of silently ignored.
@@ -303,6 +350,8 @@ impl WorldHandle {
             "mouth_tax" => self.apply_mouth_tax(value),
             "nn_mutation_sigma" => self.apply_nn_mutation_sigma(value),
             "eat_bite_fraction" => self.apply_eat_bite_fraction(value),
+            "grass_propagation_rate_k" => self.apply_grass_propagation_rate_k(value),
+            "grass_in_cell_growth_r" => self.apply_grass_in_cell_growth_r(value),
             _ => return false,
         }
         true

@@ -143,9 +143,12 @@ pub struct World {
 
 impl World {
     pub fn new(seed: impl Into<String>) -> Self {
+        Self::new_with_sliders(seed, DevSliders::default())
+    }
+
+    pub fn new_with_sliders(seed: impl Into<String>, sliders: DevSliders) -> Self {
         let seed_string = seed.into();
         let mut rng = SimRng::from_string(&seed_string);
-        let sliders = DevSliders::default();
         let grass = GrassGrid::new(&mut rng, sliders.grass_initial_seed_count);
         let mut creatures = CreatureSoA::with_capacity(2048);
         let mut species = SpeciesRegistry::new();

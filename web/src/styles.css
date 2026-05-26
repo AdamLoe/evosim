@@ -499,3 +499,47 @@ body {
   opacity: 0.75;
   font-family: ui-monospace, monospace;
 }
+
+/* P3b: dev-panel overlay */
+#devpanel-box {
+  bottom: 8px;
+  right: 8px;
+  min-width: 280px;
+  max-width: 360px;
+  z-index: 5;
+  display: none;
+  flex-direction: column;
+  gap: 6px;
+}
+#devpanel-box.is-visible { display: flex; }
+.devpanel-row {
+  display: grid;
+  grid-template-columns: 110px 1fr 56px;
+  gap: 6px;
+  align-items: center;
+  font-size: 11px;
+  font-family: ui-monospace, monospace;
+}
+.devpanel-row label { opacity: 0.7; }
+.devpanel-row input[type=range] { width: 100%; }
+.devpanel-readout {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+}
+.devpanel-section-header {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.4;
+  margin-top: 4px;
+}
+#devpanel-toggle {
+  background: rgba(255,255,255,0.08);
+  color: var(--fg);
+  border: 1px solid rgba(255,255,255,0.15);
+  padding: 2px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+  font: inherit;
+}

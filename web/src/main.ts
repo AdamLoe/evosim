@@ -3,6 +3,7 @@ import { makeCamera, renderWorld } from "./render";
 import { attachCameraControls } from "./camera";
 import { installRail, pollRail, highlights } from "./rail/index";
 import { installProfilerPanel } from "./widgets/perf-panel";
+import { installDevPanel, getInitialGrassSeedCount } from "./widgets/devpanel";
 import { installCanvasClickHandler } from "./rail/inspector";
 import { PersistenceClient } from "./persistence";
 import { showResumePrompt, showSchemaMismatchModal } from "./persistence/ui";
@@ -214,7 +215,7 @@ async function main(): Promise<void> {
   }
 
   if (!world) {
-    world = new WorldHandle(urlSeed ?? "");
+    world = WorldHandle.newWithGrassSeed(urlSeed ?? "", getInitialGrassSeedCount());
   }
 
   // S22: cache seed once per world lifetime (world.seed is a getter that
@@ -271,6 +272,9 @@ async function main(): Promise<void> {
 
   // Perf-timing: install the Stats-panel toggle + 1Hz polling loop.
   installProfilerPanel(world);
+
+  // P3b: dev panel overlay (7 sliders, ~ hotkey, ⚙ button).
+  installDevPanel(world);
 
   // Sim + render loop.
   let lastRender = performance.now();
