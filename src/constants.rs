@@ -37,13 +37,9 @@ pub const SPLIT_THRESHOLD: f32 = 50.0;
 /// `eat_bite_fraction * prey.energy * (1 - prey.armor)` per bite.
 /// Live-tunable via DevSliders.eat_bite_fraction (P3b adds slider).
 pub const EAT_BITE_FRACTION_DEFAULT: f32 = 0.5;
+#[allow(dead_code)] // D9 re-activates this when scavenge action is restored
 pub const SCAVENGE_GAIN_COEFF: f32 = 1.5;
 pub const DIGESTION_COOLDOWN_TICKS: u32 = 50;
-
-// ---- Death + carrion (v5 §8) ----
-pub const CARRION_POOL_COEFF: f32 = 0.3; // pool = coeff × cumulative_upkeep
-pub const CARRION_POOL_CAP: f32 = 60.0;
-pub const CARRION_MAX_AGE: u32 = 100;
 
 // ---- Past-lifespan penalty (v5 §7) ----
 pub const PAST_LIFESPAN_MULT: f32 = 4.0; // per 1000 ticks past max_age
@@ -120,14 +116,7 @@ pub const SPECIES_W_BRAIN: f32 = 1.0;
 pub const SPECIES_THRESHOLD: f32 = 4.0; // v6 §H default; v1.1 raised to 6.0 for sun-driven fast drift, v1.2 reverts (slower grass-driven drift won't trigger 6.0 in 10k ticks). See DECISIONS v1.2 PR-1 regen.
 pub const SPECIES_EYE_JUMP_COST: f32 = 1.5;
 
-// ---- NN input normalization (v6 §E, §3; see DECISIONS for unspecified bases) ----
-/// Normalization base for carrion_overlap_norm NN input (v6 §3; no canonical base in spec).
-/// 4 overlapping corpses ≈ "corpse-rich zone". DECISIONS: carrion_overlap_norm base.
-pub const CARRION_OVERLAP_NORM_BASE: f32 = 4.0;
-
 // ---- Vision (v5 §10, v6 §E, Milestone C.12) ----
-/// Fixed radius used when a ray hits a carrion blob (not in spec — DECISIONS).
-pub const CARRION_RADIUS_FOR_VISION: f32 = 1.5;
 /// Maximum grid cells walked per ray; bounds worst-case DDA cost (v5 §3.6).
 /// vision_range_max = 80u; HASH_CELL = 5u → ~16 cells along a ray axis.
 /// Worst diagonal ≈ 32; double for slack.

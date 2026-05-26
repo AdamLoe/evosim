@@ -4,7 +4,6 @@
 //! in this module; World re-exports via to_save_v1 / from_save_v1 helpers.
 
 use crate::brain::Brain;
-use crate::carrion::Carrion;
 use crate::creature::Action;
 use crate::events::{Event, EventLog};
 use crate::genome::Genome;
@@ -36,7 +35,6 @@ pub struct SaveV1 {
 
     // Maps.
     pub grass: GrassGridSnapshot,
-    pub carrion: Vec<Carrion>,
 
     // Bookkeeping.
     pub species: SpeciesSnapshot,
@@ -174,7 +172,6 @@ impl SaveV1 {
             grass: GrassGridSnapshot {
                 density: w.grass.density.clone(),
             },
-            carrion: w.carrion.clone(),
             species: SpeciesSnapshot {
                 list: w.species.list.clone(),
             },

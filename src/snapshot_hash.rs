@@ -2,7 +2,7 @@
 //! ordering of world state per v6 §M. Stable across runs given identical
 //! state — regression catch on the golden value.
 //!
-//! Hash input order (v6 §M, extended by S7+S8 audit; updated P1b+P1f; P2g adds move_bias):
+//! Hash input order (v6 §M, extended by S7+S8 audit; updated P1b+P1f; P2g adds move_bias; D2 removes carrion):
 //! 1. tick (u32)
 //! 2. creature SoA — per-creature: id, position, velocity, energy, age,
 //!    genome floats in struct-declaration order, NN weight slice,
@@ -10,11 +10,10 @@
 //!    parent_species_id, last_action, action_this_tick, max_size_reached,
 //!    distance_travelled, birth_tick, move_bias_x, move_bias_y, move_bias_reroll_at
 //! 3. grass map — per-cell density in linear cell-index order (replaces sun map)
-//! 4. carrion list — per-corpse: x, y, pool, age, id
-//! 5. species list — per-species: id, anchor-genome sub-hash, parent_id,
+//! 4. species list — per-species: id, anchor-genome sub-hash, parent_id,
 //!    name, born_tick, died_tick, child_count, depth, anchor_brain_weights
 //!    + top-level registry next_id
-//! 6. RNG state — 4 u64s of xoshiro256++ internal state, native-endian
+//! 5. RNG state — 4 u64s of xoshiro256++ internal state, native-endian
 //!    (LE on both real targets: x86_64-linux, wasm32-unknown) via write_u64.
 //!    Replaces serde_json byte stream (v1.0 approach; see DECISIONS audit v1.1).
 
@@ -71,18 +70,7 @@ pub fn snapshot_hash(w: &World) -> u64 {
         write_f32(&mut h, w.grass.density[k]);
     }
 
-    // (4) carrion list — positional fingerprint + S7 id
-    let nc = w.carrion.len();
-    h.write_u32(nc as u32);
-    for cc in &w.carrion {
-        write_f32(&mut h, cc.x);
-        write_f32(&mut h, cc.y);
-        write_f32(&mut h, cc.pool);
-        h.write_u32(cc.age);
-        h.write_u64(cc.id);
-    }
-
-    // (5) species list — id + anchor genome sub-hash + S7 fields (#12–#17) + next_id (#18)
+    // (4) species list — id + anchor genome sub-hash + S7 fields (#12–#17) + next_id (#18)
     let ns = w.species.list.len();
     h.write_u32(ns as u32);
     for sp in &w.species.list {

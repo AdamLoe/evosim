@@ -3,7 +3,6 @@
 #![allow(clippy::needless_range_loop)]
 
 pub(crate) mod brain;
-pub(crate) mod carrion;
 pub(crate) mod constants;
 pub(crate) mod creature;
 pub(crate) mod events;

@@ -1,52 +1,13 @@
 //! NN forward pass and action-decode helpers. Both sequential and threaded paths live here.
 
 use super::World;
-use crate::carrion::Carrion;
 use crate::constants::*;
 use crate::creature::{Action, CreatureSoA};
 use crate::genome::Genome;
 use crate::grass::GrassGrid;
-use crate::vision::{CarrionIndex, VisionBuf};
+use crate::vision::VisionBuf;
 #[cfg(feature = "threads")]
 use rayon::prelude::*;
-
-/// Count the number of carrion blobs overlapping creature `i`'s body circle.
-/// Uses the cached per-cell carrion index (rebuilt before the vision pass).
-/// Used by BOTH the sequential and threaded NN paths (audit S11).
-pub(crate) fn count_carrion_overlap(
-    creatures: &CreatureSoA,
-    carrion: &[Carrion],
-    cell_to_carrion: &CarrionIndex,
-    i: usize,
-) -> u32 {
-    let xi = creatures.x[i];
-    let yi = creatures.y[i];
-    let ri = creatures.g_size[i] * BODY_RADIUS_PER_SIZE; // perf-5: mirror
-    let r2 = ri * ri;
-    let cx = (xi / HASH_CELL).floor() as i32;
-    let cy = (yi / HASH_CELL).floor() as i32;
-    let dim = HASH_DIM as i32;
-    let mut count = 0u32;
-    for dy in -1i32..=1 {
-        for dx in -1i32..=1 {
-            let nx = cx + dx;
-            let ny = cy + dy;
-            if nx < 0 || ny < 0 || nx >= dim || ny >= dim {
-                continue;
-            }
-            let cell_idx = ny as usize * HASH_DIM + nx as usize;
-            for &ci in cell_to_carrion.cell_slice(cell_idx) {
-                let c = &carrion[ci as usize];
-                let ddx = c.x - xi;
-                let ddy = c.y - yi;
-                if ddx * ddx + ddy * ddy <= r2 {
-                    count += 1;
-                }
-            }
-        }
-    }
-    count
-}
 
 impl World {
     /// Run the NN forward pass for all creatures across fixed chunks (v6 §J).
@@ -74,8 +35,6 @@ impl World {
                 // no longer conflict — they live on the stack, not inside self.creatures.
                 let creatures_ref = &self.creatures;
                 let vision_ref = &self.vision[..n];
-                let carrion_ref = &self.carrion;
-                let cell_to_carrion_ref = &self.cell_to_carrion;
                 let grass_ref = &self.grass;
 
                 // Compute chunk_size identically to chunk_ranges (N_CHUNKS = 8).
@@ -105,12 +64,6 @@ impl World {
                             // the end-of-last-tick velocity at this point (S23).
                             let prev_vx = vx_sub[k];
                             let prev_vy = vy_sub[k];
-                            let overlap = count_carrion_overlap(
-                                creatures_ref,
-                                carrion_ref,
-                                cell_to_carrion_ref,
-                                i,
-                            );
                             let (vx, vy, action) = pick_action_d(
                                 i,
                                 &mut input_buf,
@@ -119,7 +72,6 @@ impl World {
                                 creatures_ref,
                                 &vision_ref[i],
                                 grass_ref,
-                                overlap,
                                 prev_vx,
                                 prev_vy,
                             );
@@ -149,8 +101,6 @@ impl World {
             let mut hidden_buf = [0.0f32; NN_HIDDEN];
             let mut output_buf = [0.0f32; NN_OUTPUTS];
             for i in lo..hi {
-                let overlap =
-                    count_carrion_overlap(&self.creatures, &self.carrion, &self.cell_to_carrion, i);
                 let prev_vx = self.creatures.vx[i];
                 let prev_vy = self.creatures.vy[i];
                 let (vx, vy, action) = pick_action_d(
@@ -161,7 +111,6 @@ impl World {
                     &self.creatures,
                     &self.vision[i],
                     &self.grass,
-                    overlap,
                     prev_vx,
                     prev_vy,
                 );
@@ -230,7 +179,7 @@ pub(crate) fn chunk_ranges(n: usize) -> [(usize, usize); N_CHUNKS] {
 ///
 /// Layout (160 slots total):
 /// - `[0..9]` self-state (energy_frac, age_frac, size_norm, vx, vy, cooldown_frac,
-///   carrion_overlap_norm, reserved×2)
+///   reserved×3 — slot 6 was carrion_overlap_norm, freed by D2)
 /// - `[9..129]` vision passthrough (120 floats, raw world units)
 /// - `[129..135]` last_action one-hot (6 actions)
 /// - `[135..160]` grass-patch 5×5 bilinear samples (dy outer, dx inner;
@@ -240,7 +189,6 @@ pub(crate) fn build_nn_input(
     creatures: &CreatureSoA,
     vision: &VisionBuf,
     grass: &GrassGrid,
-    carrion_overlap_count: u32,
     prev_vx: f32,
     prev_vy: f32,
 ) -> [f32; NN_INPUTS] {
@@ -263,8 +211,8 @@ pub(crate) fn build_nn_input(
     buf[3] = prev_vx / MOVE_SPEED_MAX; // vx (previous-tick post-clip)
     buf[4] = prev_vy / MOVE_SPEED_MAX; // vy
     buf[5] = cooldown as f32 / DIGESTION_COOLDOWN_TICKS as f32; // cooldown_frac
-    buf[6] = (carrion_overlap_count as f32 / CARRION_OVERLAP_NORM_BASE).min(1.0); // carrion_overlap_norm
-                                                                                  // buf[7], buf[8]: reserved zero (v5 §5.1).
+                                                                // buf[6]: reserved zero (was carrion_overlap_norm; freed by D2; D9 reshapes slot)
+                                                                // buf[7], buf[8]: reserved zero (v5 §5.1).
 
     // 9..129: vision passthrough (raw world units, C.12 contract).
     buf[NN_VISION_OFFSET..NN_VISION_OFFSET + 120].copy_from_slice(vision);
@@ -357,19 +305,10 @@ pub(crate) fn pick_action_d(
     creatures: &CreatureSoA,
     vision: &VisionBuf,
     grass: &GrassGrid,
-    carrion_overlap_count: u32,
     prev_vx: f32,
     prev_vy: f32,
 ) -> (f32, f32, Action) {
-    *input_buf = build_nn_input(
-        i,
-        creatures,
-        vision,
-        grass,
-        carrion_overlap_count,
-        prev_vx,
-        prev_vy,
-    );
+    *input_buf = build_nn_input(i, creatures, vision, grass, prev_vx, prev_vy);
     creatures.brains[i].forward(input_buf, output_buf, hidden_buf);
 
     // Velocity: tanh(out[0..2]) × move_speed (v6 §E).
@@ -436,7 +375,7 @@ mod tests {
         let prev_vx = w.creatures.vx[0];
         let prev_vy = w.creatures.vy[0];
         let grass = GrassGrid::new(&mut crate::rng::SimRng::from_u64(0), 0);
-        let inp = build_nn_input(0, &w.creatures, &vision, &grass, 2, prev_vx, prev_vy);
+        let inp = build_nn_input(0, &w.creatures, &vision, &grass, prev_vx, prev_vy);
         // energy_frac
         assert!((inp[0] - 0.5).abs() < 1e-5, "energy_frac = {}", inp[0]);
         // age_frac
@@ -447,11 +386,11 @@ mod tests {
         assert!((inp[3] - 0.5).abs() < 1e-5, "vx_norm = {}", inp[3]);
         // vy: -5.0/5.0 = -1.0
         assert!((inp[4] - (-1.0)).abs() < 1e-5, "vy_norm = {}", inp[4]);
-        // cooldown_frac (shifted from slot 6 to slot 5 after is_at_wall deletion)
+        // cooldown_frac
         assert!((inp[5] - 0.5).abs() < 1e-5, "cooldown_frac = {}", inp[5]);
-        // carrion_overlap: 2/4 = 0.5 (shifted from slot 7 to slot 6)
-        assert!((inp[6] - 0.5).abs() < 1e-5, "carrion_norm = {}", inp[6]);
-        // reserved zeros (shifted from slots 8,9 to slots 7,8)
+        // slot 6: reserved-zero (was carrion_overlap_norm; freed by D2)
+        assert_eq!(inp[6], 0.0, "slot 6 must be reserved-zero after D2");
+        // reserved zeros
         assert_eq!(inp[7], 0.0);
         assert_eq!(inp[8], 0.0);
     }
@@ -469,7 +408,7 @@ mod tests {
         let prev_vx = w.creatures.vx[0];
         let prev_vy = w.creatures.vy[0];
         let grass = GrassGrid::new(&mut crate::rng::SimRng::from_u64(0), 0);
-        let inp = build_nn_input(0, &w.creatures, &vis, &grass, 0, prev_vx, prev_vy);
+        let inp = build_nn_input(0, &w.creatures, &vis, &grass, prev_vx, prev_vy);
         assert_eq!(
             &inp[9..129],
             &vis[..],
@@ -487,7 +426,7 @@ mod tests {
         let prev_vx = w.creatures.vx[0];
         let prev_vy = w.creatures.vy[0];
         let grass = GrassGrid::new(&mut crate::rng::SimRng::from_u64(0), 0);
-        let inp = build_nn_input(0, &w.creatures, &vision, &grass, 0, prev_vx, prev_vy);
+        let inp = build_nn_input(0, &w.creatures, &vision, &grass, prev_vx, prev_vy);
         let eat_idx = Action::Eat.one_hot_index(); // should be 2
         for k in 0..6 {
             let expected = if k == eat_idx { 1.0 } else { 0.0 };
@@ -815,11 +754,6 @@ mod tests {
         assert_eq!(w_seq.creatures.len(), n, "seq world population mismatch");
         assert_eq!(w_par.creatures.len(), n, "par world population mismatch");
 
-        // Rebuild the carrion spatial index (normally done in run_vision_pass;
-        // from_save_v1 leaves cell_to_carrion empty).
-        crate::vision::build_cell_to_carrion(&w_seq.carrion, &mut w_seq.cell_to_carrion);
-        crate::vision::build_cell_to_carrion(&w_par.carrion, &mut w_par.cell_to_carrion);
-
         let ranges = chunk_ranges(n);
 
         // Sequential run.
@@ -868,7 +802,7 @@ mod tests {
         let vision = [0.0f32; VISION_LEN];
         let prev_vx = w.creatures.vx[0];
         let prev_vy = w.creatures.vy[0];
-        let inp = build_nn_input(0, &w.creatures, &vision, &grass, 0, prev_vx, prev_vy);
+        let inp = build_nn_input(0, &w.creatures, &vision, &grass, prev_vx, prev_vy);
         for k in 0..25 {
             assert!(
                 (inp[NN_GRASS_PATCH_OFFSET + k] - 1.0).abs() < 1e-5,
@@ -911,7 +845,7 @@ mod tests {
         let vision = [0.0f32; VISION_LEN];
         let prev_vx = w.creatures.vx[0];
         let prev_vy = w.creatures.vy[0];
-        let inp = build_nn_input(0, &w.creatures, &vision, &grass, 0, prev_vx, prev_vy);
+        let inp = build_nn_input(0, &w.creatures, &vision, &grass, prev_vx, prev_vy);
         // Center slot 147 must be the seeded value exactly.
         assert!(
             (inp[NN_GRASS_PATCH_CENTER_SLOT] - 0.5).abs() < 1e-5,
@@ -970,7 +904,7 @@ mod tests {
         let vision = [0.0f32; VISION_LEN];
         let prev_vx = w.creatures.vx[0];
         let prev_vy = w.creatures.vy[0];
-        let inp = build_nn_input(0, &w.creatures, &vision, &grass, 0, prev_vx, prev_vy);
+        let inp = build_nn_input(0, &w.creatures, &vision, &grass, prev_vx, prev_vy);
         // Slot 135 = NN_GRASS_PATCH_OFFSET + 0 = dx=-2, dy=-2 sample.
         let slot135 = inp[NN_GRASS_PATCH_OFFSET];
         assert!(
@@ -1025,9 +959,6 @@ mod tests {
         w_seq.grass.density.fill(1.0);
         w_par.grass.density.fill(1.0);
 
-        crate::vision::build_cell_to_carrion(&w_seq.carrion, &mut w_seq.cell_to_carrion);
-        crate::vision::build_cell_to_carrion(&w_par.carrion, &mut w_par.cell_to_carrion);
-
         let ranges = chunk_ranges(n);
         w_seq.force_sequential_nn = true;
         w_seq.nn_forward_all_chunks(&ranges, n);
@@ -1041,24 +972,10 @@ mod tests {
             let vision = [0.0f32; VISION_LEN];
             let prev_vx = w_seq.creatures.vx[i];
             let prev_vy = w_seq.creatures.vy[i];
-            let inp_seq = build_nn_input(
-                i,
-                &w_seq.creatures,
-                &vision,
-                &w_seq.grass,
-                0,
-                prev_vx,
-                prev_vy,
-            );
-            let inp_par = build_nn_input(
-                i,
-                &w_par.creatures,
-                &vision,
-                &w_par.grass,
-                0,
-                prev_vx,
-                prev_vy,
-            );
+            let inp_seq =
+                build_nn_input(i, &w_seq.creatures, &vision, &w_seq.grass, prev_vx, prev_vy);
+            let inp_par =
+                build_nn_input(i, &w_par.creatures, &vision, &w_par.grass, prev_vx, prev_vy);
             for k in 0..25 {
                 let slot = NN_GRASS_PATCH_OFFSET + k;
                 assert_eq!(
@@ -1092,7 +1009,7 @@ mod tests {
         let vision = [0.0f32; VISION_LEN];
         let prev_vx = w.creatures.vx[0];
         let prev_vy = w.creatures.vy[0];
-        let inp = build_nn_input(0, &w.creatures, &vision, &grass, 0, prev_vx, prev_vy);
+        let inp = build_nn_input(0, &w.creatures, &vision, &grass, prev_vx, prev_vy);
         for slot in NN_GRASS_PATCH_OFFSET..(NN_GRASS_PATCH_OFFSET + 25) {
             assert_eq!(
                 inp[slot], 0.0,
@@ -1111,7 +1028,7 @@ mod tests {
         let prev_vx2 = w2.creatures.vx[0];
         let prev_vy2 = w2.creatures.vy[0];
         // Reuse the same all-density-1.0 grass grid.
-        let inp2 = build_nn_input(0, &w2.creatures, &vision, &grass, 0, prev_vx2, prev_vy2);
+        let inp2 = build_nn_input(0, &w2.creatures, &vision, &grass, prev_vx2, prev_vy2);
         for slot in NN_GRASS_PATCH_OFFSET..(NN_GRASS_PATCH_OFFSET + 25) {
             assert!(
                 inp2[slot] > 0.99,

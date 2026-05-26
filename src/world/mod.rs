@@ -1,4 +1,4 @@
-//! World — owns SoA + grass + carrion + species + RNG + tick orchestration.
+//! World — owns SoA + grass + species + RNG + tick orchestration.
 //!
 //! Within-tick ordering follows v5 §3.5 exactly. Milestone B stubs vision
 //! and NN forward (no inputs needed yet) and uses a hardcoded action
@@ -11,7 +11,6 @@ pub(crate) mod tick;
 
 use self::nn::chunk_ranges;
 use crate::brain::Brain;
-use crate::carrion::Carrion;
 use crate::constants::*;
 use crate::creature::{Action, CreatureSoA};
 use crate::events::{Event, EventKind, EventLog};
@@ -22,7 +21,7 @@ use crate::hof::HallOfFame;
 use crate::rng::SimRng;
 use crate::species::{species_distance, SpeciesRegistry};
 use crate::torus::wrap_pos;
-use crate::vision::{build_cell_to_carrion, CarrionIndex, VisionBuf, VisionPass, VISION_LEN};
+use crate::vision::{VisionBuf, VisionPass, VISION_LEN};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -64,7 +63,6 @@ pub struct World {
     pub grass: GrassGrid,
     pub grid: SpatialGrid,
     pub creatures: CreatureSoA,
-    pub carrion: Vec<Carrion>,
     pub species: SpeciesRegistry,
     pub events: EventLog,
     /// When false (default), `self.events.push(...)` calls are suppressed.
@@ -103,8 +101,6 @@ pub struct World {
     pub founder_brain_anchor: Vec<f32>,
     /// Per-creature vision cache (index-aligned with CreatureSoA). Milestone C.12.
     pub vision: Vec<VisionBuf>,
-    /// Per-cell carrion lookup, rebuilt each tick before vision pass (S26: CSR layout).
-    pub(crate) cell_to_carrion: CarrionIndex,
     /// Species ids that lost a creature this tick; checked after removals to
     /// emit extinction events. Drained each `finalize_extinctions`.
     pub(crate) pending_extinction_check: Vec<u32>,
@@ -196,7 +192,6 @@ impl World {
             grass,
             grid,
             creatures,
-            carrion: Vec::new(),
             species,
             events: EventLog::new(),
             events_enabled: false,
@@ -219,7 +214,6 @@ impl World {
             founder_genome_anchor,
             founder_brain_anchor,
             vision: vec![[0.0f32; VISION_LEN]], // 1 for the founder
-            cell_to_carrion: CarrionIndex::new(),
             pending_extinction_check: Vec::new(),
             profile: crate::profiler::Profiler::new(),
             scratch_fx: Vec::new(),
@@ -336,13 +330,7 @@ impl World {
             }
         }
 
-        // 10. Carrion decay.
-        {
-            crate::profile_span!(&self.profile, "tick.decay_carrion");
-            self.decay_carrion();
-        }
-
-        // 11. Births.
+        // 10. Births.
         {
             crate::profile_span!(&self.profile, "tick.handle_births");
             self.handle_births();
@@ -558,7 +546,7 @@ impl World {
         alive
     }
 
-    /// Rebuild the per-cell carrion index and run the vision pass.
+    /// Run the vision pass.
     /// Ensures self.vision is index-aligned with self.creatures.
     pub(crate) fn run_vision_pass(&mut self) {
         let n = self.creatures.len();
@@ -566,13 +554,9 @@ impl World {
         if self.vision.len() < n {
             self.vision.resize(n, [0.0f32; VISION_LEN]);
         }
-        // Rebuild per-cell carrion index (O(N+C), reuses cached Vec<Vec<u32>>).
-        build_cell_to_carrion(&self.carrion, &mut self.cell_to_carrion);
         let pass = VisionPass {
             creatures: &self.creatures,
-            carrion: &self.carrion,
             grid: &self.grid,
-            cell_to_carrion: &self.cell_to_carrion,
         };
         pass.run(&mut self.vision[..n]);
     }
@@ -710,9 +694,7 @@ mod tests {
 
         // (b) total energy stayed bounded. Grass regen is bounded; use a loose
         //     per-tick bound of 1000 energy units added (generous slack for 1k ticks).
-        let energy_after: f32 = w.creatures.energy.iter().sum();
-        let carrion_after: f32 = w.carrion.iter().map(|c| c.pool).sum();
-        let total_energy_after = energy_after + carrion_after;
+        let total_energy_after: f32 = w.creatures.energy.iter().sum();
         assert!(
             total_energy_after.is_finite(),
             "total energy must be finite"
