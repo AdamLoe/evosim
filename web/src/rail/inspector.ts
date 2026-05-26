@@ -44,23 +44,13 @@ function set(id: string, text: string): void {
 }
 
 function renderInspector(data: CreatureInspectJson): void {
+  set("ins-id", `${data.id}`);
+  set("ins-pos", `(${data.x.toFixed(1)}, ${data.y.toFixed(1)})`);
   set("ins-action", data.current_action);
-  set("ins-age", `${data.age} / ${data.max_age}`);
+  set("ins-age", `${data.age}`);
   set("ins-energy", `${data.energy.toFixed(1)} (${(data.energy_frac * 100).toFixed(0)}%)`);
-  set("ins-size", data.size.toFixed(2));
-  set("ins-photo", data.graze_efficiency.toFixed(2));
-  set("ins-eat", data.eat_efficiency.toFixed(2));
-  set("ins-scav", data.scavenge_efficiency.toFixed(2));
-  set("ins-move", data.move_speed.toFixed(2));
-  set("ins-eyes", `${data.eye_count}`);
-  set("ins-vision", data.vision_range.toFixed(1));
-  set("ins-armor", data.armor.toFixed(2));
-  set("ins-bite", data.bite_reach.toFixed(2));
-  const [r, g, b] = data.pigment;
-  set(
-    "ins-pigment",
-    `(${(r * 255).toFixed(0)}, ${(g * 255).toFixed(0)}, ${(b * 255).toFixed(0)})`,
-  );
+  set("ins-nn-weights", data.nn_weight_count !== undefined ? `${data.nn_weight_count}` : "—");
+  set("ins-color-hash", data.color_hash !== undefined ? `#${data.color_hash.toString(16).padStart(6, "0")}` : "—");
 }
 
 export interface CreatureInspectJson {
@@ -69,20 +59,12 @@ export interface CreatureInspectJson {
   x: number;
   y: number;
   age: number;
-  max_age: number;
   energy: number;
   energy_frac: number;
-  size: number;
   current_action: string;
-  graze_efficiency: number;
-  eat_efficiency: number;
-  scavenge_efficiency: number;
-  move_speed: number;
-  vision_range: number;
-  eye_count: number;
-  armor: number;
-  bite_reach: number;
-  pigment: [number, number, number];
+  // M5 will populate these fields; placeholders show "—" until then.
+  nn_weight_count?: number;
+  color_hash?: number;
 }
 
 function openInspector(data: CreatureInspectJson, rail: RailState): void {

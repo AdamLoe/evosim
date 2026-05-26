@@ -1,10 +1,11 @@
-// P3b: dev panel overlay with 7 sliders. Toggle with ~ hotkey or ⚙ button.
+// P3b: dev panel overlay with 6 sliders. Toggle with ~ hotkey or ⚙ button.
 // Defaults below must match src/constants.rs — keep in sync (v1.3 follow-up: build-time assertion).
 //   GRASS_PROPAGATION_RATE_K_DEFAULT = 0.1
 //   GRASS_IN_CELL_GROWTH_R_DEFAULT   = 0.05
 //   GRASS_INITIAL_SEED_COUNT_DEFAULT = 100
 //   EAT_BITE_FRACTION_DEFAULT        = 0.5
-//   NN_MUT_SIGMA_DEFAULT and UPKEEP_MOUTH_DEFAULT resolved at Rust side.
+//   NN_MUT_SIGMA_DEFAULT resolved at Rust side.
+// M4: dropped mouth_tax slider (no per-creature eat_efficiency anchor in v1.3).
 
 import type { WorldHandle } from "../../wasm/evosim";
 
@@ -98,14 +99,6 @@ export function installDevPanel(world: WorldHandle): void {
       step: 0.05,
       default: 1.0, // mutation_rate_multiplier default
       onChange: (v) => world.set_mutation_rate_multiplier(v),
-    },
-    {
-      label: "mouth tax",
-      min: 0,
-      max: 0.05,
-      step: 0.001,
-      default: 0.01, // UPKEEP_MOUTH_DEFAULT — keep in sync with constants.rs
-      onChange: (v) => world.set_mouth_tax(v),
     },
     {
       label: "nn σ",
