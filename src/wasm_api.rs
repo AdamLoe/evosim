@@ -3,6 +3,7 @@
 
 use crate::constants::*;
 use crate::save::{LoadError, SaveV1};
+use crate::torus::torus_dist_sq;
 use crate::world::World;
 use wasm_bindgen::prelude::*;
 
@@ -362,11 +363,16 @@ impl WorldHandle {
                 if found.is_some() {
                     return;
                 }
-                let dx = self.inner.creatures.x[i] - world_x;
-                let dy = self.inner.creatures.y[i] - world_y;
                 let body_r = self.inner.creatures.g_size[i] * BODY_RADIUS_PER_SIZE;
                 let r = body_r + tolerance_world;
-                if dx * dx + dy * dy <= r * r {
+                // Toroidal: use torus_dist_sq so creatures across the seam are found.
+                let d2 = torus_dist_sq(
+                    world_x,
+                    world_y,
+                    self.inner.creatures.x[i],
+                    self.inner.creatures.y[i],
+                );
+                if d2 <= r * r {
                     // S18: return stable id (f64) instead of SoA index.
                     found = Some(self.inner.creatures.id[i] as f64);
                 }

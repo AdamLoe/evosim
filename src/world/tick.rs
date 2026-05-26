@@ -882,12 +882,12 @@ mod tests {
         // No panic across 500 ticks of growth confirms resize handles growth.
     }
 
-    /// S31: a creature far from walls with no overlapping neighbors should NOT
-    /// trigger a grid rebuild (any_wall = false AND any_repulsion = false).
+    /// S31: a creature not crossing a seam with no overlapping neighbors should NOT
+    /// trigger a grid rebuild (any_wrap = false AND any_repulsion = false).
     /// We verify correctness by running a tick and confirming the grid is still
     /// valid (correct creature positions) even when the rebuild was skipped.
     #[test]
-    fn s31_no_wall_no_repulsion_grid_still_valid() {
+    fn s31_no_wrap_no_repulsion_grid_still_valid() {
         let mut w = World::new("s31-wall-skip");
         // Place the founder at the center with zero velocity so it doesn't move.
         w.creatures.x[0] = WORLD_SIZE * 0.5;

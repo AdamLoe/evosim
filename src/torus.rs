@@ -43,8 +43,6 @@ pub fn wrap_pos(p: f32) -> f32 {
 /// Map a single displacement component to the shortest-path value on the torus.
 ///
 /// Returns `d` adjusted to `(-WORLD_HALF, WORLD_HALF]`.
-// Used by torus_delta (below), which is called from Commit B and Commit C callers.
-#[allow(dead_code)]
 #[inline]
 pub fn torus_delta_component(d: f32) -> f32 {
     let mut r = d;
@@ -57,16 +55,12 @@ pub fn torus_delta_component(d: f32) -> f32 {
 }
 
 /// Map a 2-D displacement vector `(dx, dy)` to the shortest-path vector on the torus.
-// Used from Commit B (raycast, creature_at) and Commit C (repulsion, eat, scavenge).
-#[allow(dead_code)]
 #[inline]
 pub fn torus_delta(dx: f32, dy: f32) -> (f32, f32) {
     (torus_delta_component(dx), torus_delta_component(dy))
 }
 
 /// Squared toroidal distance between two world-space points.
-// Used from Commit B (creature_at in wasm_api.rs).
-#[allow(dead_code)]
 #[inline]
 pub fn torus_dist_sq(x1: f32, y1: f32, x2: f32, y2: f32) -> f32 {
     let (dx, dy) = torus_delta(x2 - x1, y2 - y1);

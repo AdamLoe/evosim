@@ -85,16 +85,30 @@ impl SpatialGrid {
 
     /// Iterate creature indices in cells inside a bounding box around
     /// `(x, y)` with the given radius. Caller must filter by exact distance.
+    ///
+    /// Toroidal: the bounding box may cross the world seam on either axis.
+    /// Cell indices are wrapped with `rem_euclid(HASH_DIM)` so every candidate
+    /// cell is visited correctly even when the query box spans the seam.
+    ///
+    /// Contract: `radius < WORLD_SIZE * 0.5` (half-world). All callers
+    /// satisfy this constraint (max vision range 80u << 300u). See v1.2
+    /// grass mechanic brief §F #4.
     pub fn for_each_in_radius(&self, x: f32, y: f32, radius: f32, mut f: impl FnMut(usize)) {
-        let lo_x = (((x - radius) / HASH_CELL).floor() as i32).max(0) as usize;
-        let hi_x =
-            (((x + radius) / HASH_CELL).floor() as i32).clamp(0, HASH_DIM as i32 - 1) as usize;
-        let lo_y = (((y - radius) / HASH_CELL).floor() as i32).max(0) as usize;
-        let hi_y =
-            (((y + radius) / HASH_CELL).floor() as i32).clamp(0, HASH_DIM as i32 - 1) as usize;
+        debug_assert!(
+            radius < crate::torus::WORLD_HALF,
+            "for_each_in_radius requires radius < half-world (300u); got {radius}"
+        );
+        let dim = HASH_DIM as i32;
+        let lo_x = ((x - radius) / HASH_CELL).floor() as i32;
+        let hi_x = ((x + radius) / HASH_CELL).floor() as i32;
+        let lo_y = ((y - radius) / HASH_CELL).floor() as i32;
+        let hi_y = ((y + radius) / HASH_CELL).floor() as i32;
         for iy in lo_y..=hi_y {
+            let wy = iy.rem_euclid(dim) as usize;
+            let row = wy * HASH_DIM;
             for ix in lo_x..=hi_x {
-                let c = iy * HASH_DIM + ix;
+                let wx = ix.rem_euclid(dim) as usize;
+                let c = row + wx;
                 let s = self.starts[c] as usize;
                 let e = self.starts[c + 1] as usize;
                 for &idx in &self.indices[s..e] {
@@ -221,6 +235,76 @@ mod tests {
             far,
             vec![0, 1, 2],
             "far-corner cell should contain all three creatures after the second rebuild"
+        );
+    }
+
+    /// Toroidal: a creature near x=595 should be visible from a query centered
+    /// at x=5 with radius 15 (wrapping across the seam). Without toroidal wrap
+    /// the old code would clamp and miss the creature.
+    #[test]
+    fn for_each_in_radius_finds_across_seam() {
+        // Place creature A at (5, 300) and B at (595, 300).
+        // A query at (5, 300) with radius 15 should find B via the seam (10 units away).
+        let xs = vec![5.0, 595.0];
+        let ys = vec![300.0, 300.0];
+        let mut g = SpatialGrid::new();
+        g.rebuild(&xs, &ys);
+
+        let mut found_b = false;
+        g.for_each_in_radius(5.0, 300.0, 15.0, |i| {
+            if i == 1 {
+                found_b = true;
+            }
+        });
+        assert!(
+            found_b,
+            "creature at x=595 should be found by query at x=5 r=15 via seam"
+        );
+    }
+
+    /// Toroidal: a query that wraps across BOTH axes should find creatures in
+    /// all four corners simultaneously.
+    #[test]
+    fn for_each_in_radius_seam_both_axes() {
+        // Four creatures: one near each corner.
+        let xs = vec![3.0, 597.0, 3.0, 597.0];
+        let ys = vec![3.0, 3.0, 597.0, 597.0];
+        let mut g = SpatialGrid::new();
+        g.rebuild(&xs, &ys);
+
+        // Query at (0, 0) with radius 10 — wraps in both axes.
+        let mut found = vec![];
+        g.for_each_in_radius(0.0, 0.0, 10.0, |i| found.push(i));
+        found.sort();
+        assert_eq!(
+            found,
+            vec![0, 1, 2, 3],
+            "all four corner creatures should be reachable from (0,0) r=10; got {found:?}"
+        );
+    }
+
+    /// Toroidal: no creature index should be visited twice even when the query
+    /// box straddles the seam and wraps to cells on both sides.
+    #[test]
+    fn for_each_in_radius_no_duplicate_visits() {
+        // Place one creature right at the seam area, one in the middle.
+        let xs = vec![1.0, 599.0, 300.0];
+        let ys = vec![300.0, 300.0, 300.0];
+        let mut g = SpatialGrid::new();
+        g.rebuild(&xs, &ys);
+
+        // Query at (0, 300) with small radius — wraps across x-seam.
+        let mut visits: Vec<usize> = vec![];
+        g.for_each_in_radius(0.0, 300.0, 8.0, |i| visits.push(i));
+        let len = visits.len();
+        visits.dedup(); // won't remove non-consecutive dups; sort first
+        let mut sorted = visits.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            len,
+            "no creature should be visited twice; got visits={visits:?}"
         );
     }
 }

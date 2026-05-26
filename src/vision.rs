@@ -14,6 +14,7 @@ use crate::carrion::Carrion;
 use crate::constants::*;
 use crate::creature::CreatureSoA;
 use crate::grid::SpatialGrid;
+use crate::torus::torus_delta;
 
 pub use crate::constants::{EYE_STRIDE, SECTORS};
 pub const FEATURES_PER_SECTOR: usize = 5; // dist, size, r, g, b
@@ -216,6 +217,14 @@ impl<'a> VisionPass<'a> {
     }
 
     /// DDA along the spatial grid. Returns the closest hit within max_dist.
+    ///
+    /// Toroidal: cell coordinates are wrapped via `rem_euclid(HASH_DIM)` on
+    /// every step, so rays traverse seamlessly across world edges. Targets are
+    /// re-anchored via `torus_delta` so `ray_circle_hit` always sees the
+    /// shortest-path vector to each candidate. The old out-of-bounds break is
+    /// removed; `MAX_CELLS_PER_RAY` already bounds the walk.
+    ///
+    /// See v1.2 grass mechanic brief (P1a §2.3).
     fn raycast(
         &self,
         self_idx: usize,
@@ -225,9 +234,12 @@ impl<'a> VisionPass<'a> {
         dy: f32,
         max_dist: f32,
     ) -> Option<RayHit> {
-        // Start cell (clamped to grid bounds).
-        let mut cx = ((ox / HASH_CELL) as i32).clamp(0, HASH_DIM as i32 - 1);
-        let mut cy = ((oy / HASH_CELL) as i32).clamp(0, HASH_DIM as i32 - 1);
+        let dim = HASH_DIM as i32;
+
+        // Start cell — wrap with rem_euclid instead of clamp so the DDA
+        // begins in the correct toroidal cell even for out-of-range positions.
+        let mut cx = (ox / HASH_CELL).floor() as i32;
+        let mut cy = (oy / HASH_CELL).floor() as i32;
 
         // Step directions (+1 or -1 per axis).
         let step_x: i32 = if dx >= 0.0 { 1 } else { -1 };
@@ -276,7 +288,10 @@ impl<'a> VisionPass<'a> {
         let mut cells_walked: usize = 0;
 
         loop {
-            let cell_idx = cy as usize * HASH_DIM + cx as usize;
+            // Toroidal: wrap the raw cell coordinate before indexing.
+            let wcx = cx.rem_euclid(dim) as usize;
+            let wcy = cy.rem_euclid(dim) as usize;
+            let cell_idx = wcy * HASH_DIM + wcx;
 
             // Test creatures in this cell.
             {
@@ -288,9 +303,13 @@ impl<'a> VisionPass<'a> {
                         continue;
                     }
                     let rj = self.creatures.g_size[j] * BODY_RADIUS_PER_SIZE; // perf-5: mirror
-                    if let Some(t) =
-                        ray_circle_hit(ox, oy, dx, dy, self.creatures.x[j], self.creatures.y[j], rj)
-                    {
+                                                                              // Re-anchor target to the shortest-path position relative to the ray origin.
+                    let tx_raw = self.creatures.x[j];
+                    let ty_raw = self.creatures.y[j];
+                    let (ddx, ddy) = torus_delta(tx_raw - ox, ty_raw - oy);
+                    let tx = ox + ddx;
+                    let ty = oy + ddy;
+                    if let Some(t) = ray_circle_hit(ox, oy, dx, dy, tx, ty, rj) {
                         if t <= best_dist {
                             best_dist = t;
                             best = Some(RayHit::Creature(j, t));
@@ -302,8 +321,11 @@ impl<'a> VisionPass<'a> {
             // Test carrion in this cell.
             for &ci in self.cell_to_carrion.cell_slice(cell_idx) {
                 let c = &self.carrion[ci as usize];
-                if let Some(t) = ray_circle_hit(ox, oy, dx, dy, c.x, c.y, CARRION_RADIUS_FOR_VISION)
-                {
+                // Re-anchor carrion position to shortest-path.
+                let (ddx, ddy) = torus_delta(c.x - ox, c.y - oy);
+                let tx = ox + ddx;
+                let ty = oy + ddy;
+                if let Some(t) = ray_circle_hit(ox, oy, dx, dy, tx, ty, CARRION_RADIUS_FOR_VISION) {
                     if t <= best_dist {
                         best_dist = t;
                         best = Some(RayHit::Carrion(ci as usize, t));
@@ -317,6 +339,10 @@ impl<'a> VisionPass<'a> {
                 return best;
             }
 
+            // Exceeded range.
+            if t_max_x.min(t_max_y) > max_dist {
+                break;
+            }
             // Advance to next cell.
             if t_max_x < t_max_y {
                 cx += step_x;
@@ -325,15 +351,7 @@ impl<'a> VisionPass<'a> {
                 cy += step_y;
                 t_max_y += t_delta_y;
             }
-
-            // Bounds check.
-            if cx < 0 || cx >= HASH_DIM as i32 || cy < 0 || cy >= HASH_DIM as i32 {
-                break;
-            }
-            // Exceeded range.
-            if t_max_x.min(t_max_y) > max_dist {
-                break;
-            }
+            // Toroidal: no out-of-bounds break; MAX_CELLS_PER_RAY bounds the walk.
             cells_walked += 1;
             if cells_walked >= MAX_CELLS_PER_RAY {
                 break;
@@ -601,6 +619,49 @@ mod tests {
         assert_eq!(
             vision[0][slot], 0.0,
             "target out of range must yield zero distance"
+        );
+    }
+
+    // ---- Toroidal raycast tests ----
+
+    /// P1a: A creature looking east from near the right seam (x=595) should
+    /// see a target at x=5 via wrap-around (10 world units away via torus).
+    #[test]
+    fn raycast_sees_across_seam() {
+        let mut creatures = CreatureSoA::with_capacity(4);
+        // Creature A at (595, 300): facing east (sector 0, eye_count=24 so all sectors active).
+        let ga = genome_with_eyes(24, 80.0);
+        simple_creature(&mut creatures, 0, 595.0, 300.0, ga);
+        // Creature B at (5, 300): 10 world units east via torus seam.
+        let mut gb = Genome::founder();
+        gb.size = 1.0;
+        gb.eye_count = 0;
+        simple_creature(&mut creatures, 1, 5.0, 300.0, gb);
+
+        let grid = make_grid(&creatures);
+        let carrion = vec![];
+        let cell_to_carrion = make_carrion_index(&carrion);
+        let pass = VisionPass {
+            creatures: &creatures,
+            carrion: &carrion,
+            grid: &grid,
+            cell_to_carrion: &cell_to_carrion,
+        };
+        let mut vision = vec![[0.0f32; VISION_LEN]; 2];
+        pass.run(&mut vision);
+
+        // Sector 0 (east) should see creature B. Distance = 10 - 1 (A radius) - 1 (B radius) = 8.
+        let slot = 0;
+        let dist = vision[0][slot];
+        assert!(
+            dist > 0.0,
+            "sector 0 should see creature across the seam; dist = {dist}"
+        );
+        // ray_circle_hit returns t measured from the ray origin (center of A).
+        // With centers 10u apart via torus, B's radius = 1 → t = 10 - 1 = 9.
+        assert!(
+            (dist - 9.0).abs() < 0.5,
+            "expected dist ≈ 9 (across seam), got {dist}"
         );
     }
 
