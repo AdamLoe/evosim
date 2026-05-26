@@ -3,7 +3,6 @@
 use super::World;
 use crate::constants::*;
 use crate::creature::Action;
-use crate::events::{Event, EventKind};
 use crate::torus::{torus_delta, wrap_pos};
 
 impl World {
@@ -104,14 +103,6 @@ impl World {
                 && self.creatures.distance_travelled[i] >= 5.0
             {
                 self.first_move_fired = true;
-                if self.events_enabled {
-                    self.events.push(Event {
-                        tick: self.tick,
-                        kind: EventKind::FirstToMove {
-                            creature_id: self.creatures.id[i],
-                        },
-                    });
-                }
             }
         }
 
@@ -295,14 +286,6 @@ impl World {
                 }
                 if self.scratch_got_a_bite[i] && !self.first_eat_fired {
                     self.first_eat_fired = true;
-                    if self.events_enabled {
-                        self.events.push(Event {
-                            tick: self.tick,
-                            kind: EventKind::FirstToEat {
-                                creature_id: self.creatures.id[i],
-                            },
-                        });
-                    }
                 }
             }
             if self.scratch_attempted_scavenge[i] {
@@ -391,54 +374,6 @@ impl World {
 mod tests {
     use super::super::*;
 
-    // ---- E.25.b test ----
-
-    /// E.25.b: FirstToMove fires inside apply_movement_and_repulsion when
-    /// distance_travelled crosses 5.0 (v6 §L: "actually traveled ≥ 5u in lifetime").
-    #[test]
-    fn e25b_first_to_move_fires_on_movement_step() {
-        let mut w = World::new("e25b-move");
-        w.events_enabled = true; // enable logging so we can assert event contents
-                                 // Give founder move_speed so movement cost applies.
-        w.creatures.genomes[0].move_speed = 5.0;
-        w.creatures.resync_hot_mirrors_at(0); // perf-5: keep mirrors in sync after genome patch
-                                              // Set velocity directly so movement fires deterministically.
-        w.creatures.vx[0] = 5.0;
-        w.creatures.vy[0] = 0.0;
-        // P2f: zero move_bias so the ADD is a no-op for this deterministic test.
-        w.creatures.move_bias_x[0] = 0.0;
-        w.creatures.move_bias_y[0] = 0.0;
-        w.creatures.move_bias_reroll_at[0] = u32::MAX;
-        // Pre-condition: distance_travelled starts at 0, event not fired.
-        assert!(!w.first_move_fired);
-        assert_eq!(w.creatures.distance_travelled[0], 0.0);
-        let creature_id = w.creatures.id[0];
-
-        // Run the movement step directly.
-        w.apply_movement_and_repulsion();
-
-        // After movement, distance_travelled should be >= 5.0 and event should fire.
-        assert!(
-            w.creatures.distance_travelled[0] >= 5.0,
-            "distance_travelled = {}",
-            w.creatures.distance_travelled[0]
-        );
-        assert!(
-            w.first_move_fired,
-            "first_move_fired must be true after crossing 5.0"
-        );
-        let ev = w
-            .events
-            .all
-            .iter()
-            .find(|e| matches!(e.kind, EventKind::FirstToMove { .. }));
-        assert!(ev.is_some(), "FirstToMove event must be in log");
-        if let Some(ev) = ev {
-            if let EventKind::FirstToMove { creature_id: cid } = &ev.kind {
-                assert_eq!(*cid, creature_id, "FirstToMove creature_id must match");
-            }
-        }
-    }
 
     // ---- perf-2 tests ----
 

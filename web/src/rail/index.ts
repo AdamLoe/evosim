@@ -7,7 +7,6 @@
 import type { WorldHandle } from "../../wasm/evosim";
 import { maybeSampleStats } from "./stats";
 import { refreshInspector } from "./inspector";
-import { tickToasts } from "./toast";
 import { addHighlight, pruneHighlights, highlights } from "./highlight";
 
 // ---- Species list (inlined from former events.ts, S14) ----
@@ -134,8 +133,7 @@ export function pollRail(
   // 4. Inspector refresh (E.24). S18: no longer needs idsBuffer (uses creature_idx_by_id).
   refreshInspector(world, rail);
 
-  // 5. Toast tick + highlight prune.
-  tickToasts(now);
+  // 5. Highlight prune.
   pruneHighlights(now);
 }
 
