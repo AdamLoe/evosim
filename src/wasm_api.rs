@@ -181,12 +181,13 @@ impl WorldHandle {
             self.creature_buf[off] = self.inner.creatures.x[i];
             self.creature_buf[off + 1] = self.inner.creatures.y[i];
             self.creature_buf[off + 2] = body_r;
-            // D3: pigment is placeholder gray (M5 owns color hot-mirror).
-            self.creature_buf[off + 3] = crate::vision::CREATURE_PIGMENT;
-            self.creature_buf[off + 4] = crate::vision::CREATURE_PIGMENT;
-            self.creature_buf[off + 5] = crate::vision::CREATURE_PIGMENT;
-            // Feature ring flags (v6 §B, ring order: eye→move→scav→mouth→armor).
-            // D3: eye_count=24 (>0), move_speed=MOVE_SPEED_MAX (>0), scav/eat_eff=1.0 (>0), armor=0.
+            // M5: unpack per-creature color from NN-weight hash hot-mirror.
+            let c = self.inner.creatures.color_rgb[i];
+            self.creature_buf[off + 3] = ((c >> 16) & 0xFF) as f32 / 255.0; // R
+            self.creature_buf[off + 4] = ((c >> 8) & 0xFF) as f32 / 255.0; // G
+            self.creature_buf[off + 5] = (c & 0xFF) as f32 / 255.0; // B
+                                                                    // Feature ring flags (v6 §B, ring order: eye→move→scav→mouth→armor).
+                                                                    // D3: eye_count=24 (>0), move_speed=MOVE_SPEED_MAX (>0), scav/eat_eff=1.0 (>0), armor=0.
             self.creature_buf[off + 6] = 1.0; // eye_count=24 always > 0
             self.creature_buf[off + 7] = 1.0; // move_speed=MOVE_SPEED_MAX always > 0
             self.creature_buf[off + 8] = 1.0; // scav_eff=1.0 constant
@@ -396,6 +397,7 @@ impl WorldHandle {
             return None;
         }
         let action_name = format!("{:?}", self.inner.creatures.action_this_tick[i]);
+        let brain = &self.inner.creatures.brains[i];
         let json = serde_json::json!({
             "index": idx,
             "id": self.inner.creatures.id[i],
@@ -416,7 +418,11 @@ impl WorldHandle {
             "nose_count": 0_u8,
             "armor": 0.0_f32,
             "bite_reach": BITE_REACH_MIN,
-            "pigment": [0.5_f32, 0.5_f32, 0.5_f32],
+            // M5: NN-weight hash color replaces placeholder pigment.
+            "color_rgb": format!("#{:06X}", brain.color_rgb),
+            "weight_hash": format!("{:016X}", brain.weight_hash),
+            "nn_mutation_rate": brain.nn_mutation_rate,
+            "nn_weight_count": brain.weights.len(),
         });
         Some(serde_json::to_string(&json).unwrap_or_else(|_| "{}".into()))
     }

@@ -3,7 +3,7 @@
 //!
 //! D3: All creatures use a fixed 24-sector layout at VISION_RANGE_MAX.
 //! Eye count variation removed. Size slot uses constant FOUNDER_SIZE.
-//! Pigment slots use placeholder 0.5 gray (M5 owns NN-hash color hot-mirror).
+//! M5: Creature RGB is read from the CreatureSoA.color_rgb hot-mirror (NN-weight hash).
 //!
 //! D7: Walled world — rays that exit world bounds return a wall-sentinel gray.
 //! Wall sentinel RGB = (0.5, 0.5, 0.5) per Q-D7-4.
@@ -16,8 +16,14 @@ pub use crate::constants::SECTORS;
 pub const FEATURES_PER_SECTOR: usize = 5; // dist, size, r, g, b (D9 owns shrinking to 3)
 pub const VISION_LEN: usize = SECTORS * FEATURES_PER_SECTOR; // 120
 
-/// D3: placeholder pigment for live creatures. M5 owns NN-hash color hot-mirror.
-pub(crate) const CREATURE_PIGMENT: f32 = 0.5;
+/// Unpack a packed 0x00RRGGBB u32 into (R, G, B) floats in [0, 1].
+#[inline]
+fn unpack_rgb(c: u32) -> (f32, f32, f32) {
+    let r = ((c >> 16) & 0xFF) as f32 / 255.0;
+    let g = ((c >> 8) & 0xFF) as f32 / 255.0;
+    let b = (c & 0xFF) as f32 / 255.0;
+    (r, g, b)
+}
 
 /// Fixed per-creature vision buffer. World owns Vec<VisionBuf>.
 pub type VisionBuf = [f32; VISION_LEN];
@@ -89,14 +95,15 @@ impl<'a> VisionPass<'a> {
             if let Some(hit) = self.raycast(i, ox, oy, dx, dy, max_dist) {
                 let slot = s * FEATURES_PER_SECTOR;
                 match hit {
-                    RayHit::Creature(_j, dist) => {
-                        // D3: size is constant; pigment is placeholder gray.
+                    RayHit::Creature(j, dist) => {
+                        // M5: use per-creature color_rgb from hot-mirror.
                         let d = dist.max(1e-4);
+                        let (cr, cg, cb) = unpack_rgb(self.creatures.color_rgb[j]);
                         buf[slot] = d;
                         buf[slot + 1] = FOUNDER_SIZE; // constant body size
-                        buf[slot + 2] = CREATURE_PIGMENT;
-                        buf[slot + 3] = CREATURE_PIGMENT;
-                        buf[slot + 4] = CREATURE_PIGMENT;
+                        buf[slot + 2] = cr;
+                        buf[slot + 3] = cg;
+                        buf[slot + 4] = cb;
                     }
                     RayHit::Wall(dist) => {
                         // D7: wall sentinel — write gray RGB. Distance is the wall hit t.
@@ -325,8 +332,9 @@ mod tests {
     }
 
     #[test]
-    fn ray_hits_creature_returns_distance_and_constant_pigment() {
-        // D3: pigment is constant CREATURE_PIGMENT (0.5); size is FOUNDER_SIZE.
+    fn ray_hits_creature_returns_distance_and_color_rgb() {
+        // M5: RGB comes from creature's color_rgb hot-mirror (NN-weight hash).
+        // Size remains FOUNDER_SIZE constant.
         let mut creatures = CreatureSoA::with_capacity(4);
         simple_creature(&mut creatures, 0, 100.0, 100.0);
         simple_creature(&mut creatures, 1, 110.0, 100.0);
@@ -347,18 +355,19 @@ mod tests {
             (vision[0][slot + 1] - FOUNDER_SIZE).abs() < 1e-5,
             "size should be FOUNDER_SIZE={FOUNDER_SIZE}"
         );
-        // D3: pigment is placeholder gray.
+        // M5: RGB must match the hit creature's color_rgb unpacked.
+        let (exp_r, exp_g, exp_b) = unpack_rgb(creatures.color_rgb[1]);
         assert!(
-            (vision[0][slot + 2] - CREATURE_PIGMENT).abs() < 1e-5,
-            "r should be CREATURE_PIGMENT"
+            (vision[0][slot + 2] - exp_r).abs() < 1e-5,
+            "r should match creature color_rgb r={exp_r}"
         );
         assert!(
-            (vision[0][slot + 3] - CREATURE_PIGMENT).abs() < 1e-5,
-            "g should be CREATURE_PIGMENT"
+            (vision[0][slot + 3] - exp_g).abs() < 1e-5,
+            "g should match creature color_rgb g={exp_g}"
         );
         assert!(
-            (vision[0][slot + 4] - CREATURE_PIGMENT).abs() < 1e-5,
-            "b should be CREATURE_PIGMENT"
+            (vision[0][slot + 4] - exp_b).abs() < 1e-5,
+            "b should match creature color_rgb b={exp_b}"
         );
     }
 
@@ -447,7 +456,7 @@ mod tests {
         pass.run(&mut vision);
 
         // Sector 0 (east) should see the wall sentinel or zero, NOT creature B (no wraparound).
-        // D3: all creatures share the same CREATURE_PIGMENT; we verify distance only.
+        // M5: creature color is per-creature; we verify distance only.
         // Creature B is 590u away on the east side (past wall). It should not appear.
         let slot = 0;
         let dist_a = vision[0][slot]; // creature A (at 595,300) sees wall ~5u east

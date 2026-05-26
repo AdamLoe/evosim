@@ -47,6 +47,9 @@ pub struct CreatureSoA {
     /// Tick at which this creature was born (for lifespan stats).
     pub birth_tick: Vec<u32>,
     pub brains: Vec<Brain>,
+    /// M5: packed 0x00RRGGBB derived from NN weight hash. Hot-mirror of Brain.color_rgb.
+    /// Length invariant: == x.len().
+    pub(crate) color_rgb: Vec<u32>,
     /// Pre-computed (dx, dy) per sector per creature; interleaved as
     /// [s0_dx, s0_dy, s1_dx, s1_dy, …, s23_dx, s23_dy] per creature.
     /// Length invariant: == x.len() * SECTORS * 2.
@@ -72,6 +75,7 @@ impl CreatureSoA {
             distance_travelled: Vec::with_capacity(cap),
             birth_tick: Vec::with_capacity(cap),
             brains: Vec::with_capacity(cap),
+            color_rgb: Vec::with_capacity(cap),
             eye_trig: Vec::with_capacity(cap * SECTORS * 2),
         }
     }
@@ -110,6 +114,7 @@ impl CreatureSoA {
         self.action_this_tick.push(Action::Graze);
         self.distance_travelled.push(0.0);
         self.birth_tick.push(birth_tick);
+        self.color_rgb.push(brain.color_rgb); // M5: hot-mirror from Brain
         self.brains.push(brain);
         // Extend trig buffer by one chunk of zeros, then populate.
         debug_assert_eq!(
@@ -141,6 +146,7 @@ impl CreatureSoA {
             self.action_this_tick.swap_remove(k);
             self.distance_travelled.swap_remove(k);
             self.birth_tick.swap_remove(k);
+            self.color_rgb.swap_remove(k);
             self.brains.swap_remove(k);
             swap_remove_chunk(&mut self.eye_trig, k, SECTORS * 2);
         }
