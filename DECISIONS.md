@@ -226,3 +226,35 @@ audit v1.1 — snapshot_hash coverage extended (S7: 18 new fields: digestion_coo
   - DECISIONS.md PR-3 entry by the implementer present, lists both new hashes correctly.
 
 
+## v1.2 grass mechanic (pass-open, 2026-05-25)
+
+Baseline: HEAD = `9700dcc`. Orchestrator brief: `docs/plans/v1.2-grass-mechanic-brief.md`. This section captures the spec deviations the v1.2 pass deliberately introduces against `docs/archive/PITCH-v5.md` + `PITCH-v6.md`. The archive specs are NOT being edited; deviations live here.
+
+Spec deviations (all locked by the user; not to be re-litigated mid-pass):
+- v5/v6 §3.3 sun mechanic deleted entirely. `src/sun.rs` + `SunMap` field + sun render layer removed. Photosynth replaced by Graze acting on a new `GrassGrid`.
+- v5 §3.5 walls deleted. World becomes toroidal: wrap-around on all four edges. All distance / raycast / repulsion / `for_each_in_radius` math wraps; `SpatialGrid::cell_of` becomes modular.
+- `is_at_wall` NN input removed (one fewer extras slot).
+- v5/v6 §F.30 founder NN hardwiring rewritten to be minimal: hidden-0 = on-grass detector (weight from the center grass-patch input), Output Graze += large positive from hidden-0, Output Move += baseline + ~20-tick re-roll direction persistence, Output Split += energy_frac. Removed: `NN_FOUNDER_ENERGY_SENSOR_STRENGTH` (Photosynth path), `NN_FOUNDER_PHOTO_BIAS`.
+- NN input dimension: 136 → 160 (120 vision unchanged; 16 extras → 15 extras after `is_at_wall` removal; +25 grass-patch inputs from bilinear-sampled 5×5 around the creature at 2.5u step). Brain weight matrix `136×24` → `160×24`; hidden=24, output=8 unchanged.
+- New genome trait `nose_count: u8 ∈ [0,5]`, mirrors `eye_count`. Founder `nose_count = 0` → grass-patch inputs zeroed (creature blind to grass) until a descendant mutates ≥ 1.
+- Genome trait rename `photosynth_efficiency` → `graze_efficiency` (pure rename; range, mutation, hash bytes preserved).
+- Founders have `eye_count = 0` AND `nose_count = 0` at init — honestly-dumb Brownian-motion grazers; world seed places enough initial grass for lineage survival.
+- Action set unchanged at 8: Rest, Move, Eat, Scavenge, Split, Armor, Pigment, **Graze** (slot replaces Photosynth in the same enum index).
+- Eat redesign: per-bite mechanic, predator gains `eat_bite_fraction * prey.energy`, prey loses same. Default `eat_bite_fraction = 0.5`; dev-panel slider. `eat_efficiency` genome trait survives as a multiplier.
+- Save schema: version bump required (NN shape change + new `GrassGrid` field + `nose_count` field + SunMap removed). Load path on mismatch shows modal "Save format updated. Starting fresh.", clears IDB record, reboots into fresh world.
+- Pass shape: 3 PRs, each ends with a golden regen (sequential AND threaded together). Each regen logged here with one-line reason.
+
+Out of scope for v1.2 (explicitly deferred — listed in case the orchestrator/implementers feel tempted): NEAT, sparse-substrate NN, capability traits as NN inputs beyond `nose_count`, sexual reproduction, signaling, lineage/NN/trait viz, WebGL2/WebGPU renderer, quadtree, deterministic replay, Tauri, brain weight transpose / SIMD reshape.
+
+Orchestrator decision (kicked off without user clarification per user instruction "go go go, put any questions in closeout doc"): any blocking ambiguity surfaced during planning gets aggregated into `docs/research/v1.2-final-report.md` § Questions for the user — no mid-pass interruptions.
+
+Post-cross-review locks (see `docs/plans/v1.2-cross-review.md` + `docs/plans/v1.2-amendments.md`):
+- `GRAZE_MAX_PER_TICK = 0.1` (was contested 0.25 vs 0.1 between p1c/p1e plans; cross-reviewer locked 0.1 based on founder survival math vs UPKEEP_BASE).
+- Constant names locked: `GRASS_GRID_DIM`, `GRASS_CELL_SIZE`, `GRASS_CELL_COUNT`, `NN_GRASS_PATCH_CENTER_SLOT = 147`, etc. — see amendments doc.
+- PR-1 commit sequence: master §E #5 (p1b sun-deletion) and #8 (p1f schema bump) **collapsed into one atomic commit** to eliminate the autosave-incompatible inter-commit window.
+- Move-bias `move_bias_*` semantics: **ADD** (additive on NN output), not SET. Reason: SET would permanently disable NN-driven motion in all descendants; the brief reads "Move += baseline" literally. User-confirm item for closeout — revertible in one line if user prefers founder Brownian-walk to override evolved motion.
+- Schema-version bumps: three total. v1 → v2 (PR-1 close, p1f), v2 → v3 (PR-2 close, p2g), v3 → v4 (PR-3 close, p3a addendum — adds DevSliders.eat_bite_fraction).
+- Intra-PR-2 acceptance policy: master §D.6 "every commit must pass §16 acceptance" amended for PR-2 only. Brain-shape change makes goldens undefined between p2a and p2h regen; §16 gate runs at PR boundaries only.
+- P3e founder-survival tuning ladder (raise `grass_initial_seed_count` 8 → 50 → 100; then `grass_in_cell_growth_r` 0.005 → 0.01; then `MOVE_BIAS_REROLL_INTERVAL` 20 → 60; then escalate to user). Documented in amendments §A.8.
+
+P1a (toroidal arithmetic) landed: src/torus.rs (wrap_pos, torus_delta, torus_dist_sq, WORLD_HALF) + modular SpatialGrid::cell_of + toroidal for_each_in_radius + toroidal raycast DDA + torus_delta repulsion/eat/scavenge + wrap_pos wall-clamp→wrap + wrap_pos split-jitter; 3 atomic commits (695c10a, 3c7f122, 6732797); 127→149 tests all pass (sequential + threaded). Minor deviation: #[allow(dead_code)] attrs used on torus functions in Commit A (stripped in B and C as callers landed) to satisfy clippy -D warnings between commits; no semantic impact.
