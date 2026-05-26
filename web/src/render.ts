@@ -5,6 +5,10 @@ import type { WorldHandle } from "../wasm/evosim";
 
 /// Ring colors per v6 §B: eye=white, move=yellow, scav=brown, mouth=red, armor=silver.
 /// Used by drawCreatures (SoA path).
+// v1.3 M2: uniform-green grass. Painted for any cell with density > 0.
+// Density no longer modulates alpha. See docs/plans/v1.3-M2-grass-alpha.md.
+export const GRASS_FILL = "rgba(60, 180, 60, 0.55)";
+
 export const RING_COLORS = {
   eye: "rgba(255,255,255,0.85)",
   move: "rgba(240,220, 80,0.85)",
@@ -146,9 +150,10 @@ export function drawGrassMap(
   grassCellSize: number,
   density: Float32Array,
 ): void {
-  // Per brief §Render layer: rgba(60, 180, 60, 0.4*density) per cell.
-  // Single-pass over all cells; off-screen cells are culled below.
+  // v1.3 M2: cells with density > 0 paint GRASS_FILL (uniform green, fixed alpha).
+  // Density no longer modulates alpha. Single-pass; off-screen cells culled below.
   const cellPx = grassCellSize * cam.zoom;
+  ctx.fillStyle = GRASS_FILL;
   for (let iy = 0; iy < grassDim; iy++) {
     for (let ix = 0; ix < grassDim; ix++) {
       const d = density[iy * grassDim + ix];
@@ -159,7 +164,6 @@ export function drawGrassMap(
       const sy = (wy - cam.cy) * cam.zoom + viewH / 2;
       // Cull cells fully off-screen.
       if (sx + cellPx < 0 || sx > viewW || sy + cellPx < 0 || sy > viewH) continue;
-      ctx.fillStyle = `rgba(60,180,60,${(0.4 * d).toFixed(3)})`;
       ctx.fillRect(sx, sy, cellPx + 1, cellPx + 1);
     }
   }
