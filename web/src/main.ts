@@ -203,6 +203,8 @@ async function main(): Promise<void> {
               console.warn("load failed (treating as unusable save):", msg);
               await showSchemaMismatchModal();
             }
+            // Clear stale IDB record so the next boot goes straight to fresh.
+            await persistence.deleteCurrent();
             // Fall through to fresh world.
           }
         }

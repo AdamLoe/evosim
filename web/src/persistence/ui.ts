@@ -42,10 +42,10 @@ export async function showSchemaMismatchModal(): Promise<void> {
     const card = document.createElement("div");
     card.className = "modal-card";
     card.innerHTML = `
-      <h2>Save incompatible</h2>
-      <p>This save is from a different build.</p>
+      <h2>Save format updated</h2>
+      <p>Save format updated. Starting fresh.</p>
       <div class="modal-actions">
-        <button data-action="new" class="primary">New World</button>
+        <button data-action="new" class="primary">OK</button>
       </div>
     `;
     backdrop.appendChild(card);
