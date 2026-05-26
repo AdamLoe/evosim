@@ -275,22 +275,27 @@ pub(crate) fn build_nn_input(
 
     // 135..160: 25 grass-patch inputs (5x5 bilinear, dy outer, dx inner; v1.2 P2d).
     // Slot offset within block: (dy+2)*5 + (dx+2). Center (dx=dy=0) -> global slot 147.
-    // P2e (next piece) gates this block on creatures.g_nose_count[i] >= 1.
-    // Until then, all creatures see the patch.
-    let cx = creatures.x[i];
-    let cy = creatures.y[i];
-    debug_assert!(
-        cx.is_finite() && cy.is_finite(),
-        "non-finite position for creature {i}"
-    );
-    for dy in -2i32..=2 {
-        for dx in -2i32..=2 {
-            let sx = cx + (dx as f32) * GRASS_CELL_SIZE;
-            let sy = cy + (dy as f32) * GRASS_CELL_SIZE;
-            let off = ((dy + 2) as usize) * 5 + ((dx + 2) as usize);
-            buf[NN_GRASS_PATCH_OFFSET + off] = grass.bilinear_sample(sx, sy);
+    // P2e gate: only creatures with nose_count >= 1 see grass. Founders default
+    // nose_count=0 → grass-blind; slots 135..160 stay at the [0.0; 160] init value.
+    // Skipping the bilinear math entirely for nose_count=0 is a micro-perf win for
+    // the founder lineage which dominates early ticks.
+    if creatures.g_nose_count[i] >= 1 {
+        let cx = creatures.x[i];
+        let cy = creatures.y[i];
+        debug_assert!(
+            cx.is_finite() && cy.is_finite(),
+            "non-finite position for creature {i}"
+        );
+        for dy in -2i32..=2 {
+            for dx in -2i32..=2 {
+                let sx = cx + (dx as f32) * GRASS_CELL_SIZE;
+                let sy = cy + (dy as f32) * GRASS_CELL_SIZE;
+                let off = ((dy + 2) as usize) * 5 + ((dx + 2) as usize);
+                buf[NN_GRASS_PATCH_OFFSET + off] = grass.bilinear_sample(sx, sy);
+            }
         }
     }
+    // else: buf[135..160] remain at their [0.0; NN_INPUTS] initialized values.
 
     buf
 }
@@ -851,7 +856,10 @@ mod tests {
     #[test]
     fn nn_input_patch_layout_basic() {
         use crate::vision::VISION_LEN;
-        let w = World::new("p2d-basic");
+        let mut w = World::new("p2d-basic");
+        // P2e: nose_count must be >= 1 for the creature to see grass.
+        w.creatures.genomes[0].nose_count = 1;
+        w.creatures.resync_hot_mirrors_at(0);
         // Seed all cells at GRASS_MAX (1.0); bilinear sample anywhere returns 1.0.
         let mut grass = GrassGrid::new(&mut crate::rng::SimRng::from_u64(0), 0);
         for d in grass.density.iter_mut() {
@@ -892,6 +900,9 @@ mod tests {
         let cy = (cell_iy as f32 + 0.5) * GRASS_CELL_SIZE;
         w.creatures.x[0] = cx;
         w.creatures.y[0] = cy;
+        // P2e: nose_count must be >= 1 for the creature to see grass.
+        w.creatures.genomes[0].nose_count = 1;
+        w.creatures.resync_hot_mirrors_at(0);
         // Seed ONLY this cell. The 24 offset sample points (dx/dy ∈ {-2,-1,+1,+2})
         // land on adjacent cells which remain zero, so all non-center slots stay 0.0.
         let center_cell = cell_iy * crate::constants::GRASS_GRID_DIM + cell_ix;
@@ -942,6 +953,9 @@ mod tests {
         // Move founder to (1.0, 1.0) — close to the west/north seam.
         w.creatures.x[0] = 1.0;
         w.creatures.y[0] = 1.0;
+        // P2e: nose_count must be >= 1 for the creature to see grass.
+        w.creatures.genomes[0].nose_count = 1;
+        w.creatures.resync_hot_mirrors_at(0);
 
         // The dx=-2, dy=-2 sample point is at:
         //   sx = 1.0 + (-2) * GRASS_CELL_SIZE = 1.0 - 5.0 = -4.0 → wraps to ~596.0
@@ -999,6 +1013,18 @@ mod tests {
         let mut w_seq = World::from_save_v1(snap.clone()).expect("seq load");
         let mut w_par = World::from_save_v1(snap).expect("par load");
 
+        // P2e: set nose_count=1 for all creatures in both worlds so the bilinear
+        // sampling path is exercised (not short-circuited by the nose_count=0 gate).
+        for i in 0..n {
+            w_seq.creatures.genomes[i].nose_count = 1;
+            w_seq.creatures.resync_hot_mirrors_at(i);
+            w_par.creatures.genomes[i].nose_count = 1;
+            w_par.creatures.resync_hot_mirrors_at(i);
+        }
+        // Seed grass so grass-patch slots are non-trivially non-zero.
+        w_seq.grass.density.fill(1.0);
+        w_par.grass.density.fill(1.0);
+
         crate::vision::build_cell_to_carrion(&w_seq.carrion, &mut w_seq.cell_to_carrion);
         crate::vision::build_cell_to_carrion(&w_par.carrion, &mut w_par.cell_to_carrion);
 
@@ -1043,6 +1069,55 @@ mod tests {
                     inp_par[slot]
                 );
             }
+        }
+    }
+
+    /// P2e test: nose_count=0 gate — grass-blind creatures see all-zero patch slots.
+    /// Founder defaults nose_count=0; patch slots 135..160 must stay 0.0 even when
+    /// grass density > 0. After mutating nose_count to 1 and resyncing, the same
+    /// slots must become ~1.0 (since grass is seeded to max density everywhere).
+    #[test]
+    fn nn_input_patch_gated_by_nose_count() {
+        use crate::vision::VISION_LEN;
+
+        // --- Part 1: nose_count = 0 → grass-blind ---
+        let w = World::new("p2e-gate");
+        assert_eq!(
+            w.creatures.g_nose_count[0], 0,
+            "founder default nose_count must be 0"
+        );
+        let mut grass = GrassGrid::new(&mut crate::rng::SimRng::from_u64(0), 0);
+        // Seed grass at max density everywhere.
+        grass.density.fill(1.0);
+        let vision = [0.0f32; VISION_LEN];
+        let prev_vx = w.creatures.vx[0];
+        let prev_vy = w.creatures.vy[0];
+        let inp = build_nn_input(0, &w.creatures, &vision, &grass, 0, prev_vx, prev_vy);
+        for slot in NN_GRASS_PATCH_OFFSET..(NN_GRASS_PATCH_OFFSET + 25) {
+            assert_eq!(
+                inp[slot], 0.0,
+                "slot {slot} must be 0.0 when nose_count=0 (grass-blind)"
+            );
+        }
+
+        // --- Part 2: nose_count = 1 → grass-sighted, slots become ~1.0 ---
+        let mut w2 = World::new("p2e-gate-sighted");
+        w2.creatures.genomes[0].nose_count = 1;
+        w2.creatures.resync_hot_mirrors_at(0);
+        assert_eq!(
+            w2.creatures.g_nose_count[0], 1,
+            "mirror must reflect nose_count=1"
+        );
+        let prev_vx2 = w2.creatures.vx[0];
+        let prev_vy2 = w2.creatures.vy[0];
+        // Reuse the same all-density-1.0 grass grid.
+        let inp2 = build_nn_input(0, &w2.creatures, &vision, &grass, 0, prev_vx2, prev_vy2);
+        for slot in NN_GRASS_PATCH_OFFSET..(NN_GRASS_PATCH_OFFSET + 25) {
+            assert!(
+                inp2[slot] > 0.99,
+                "slot {slot} = {} (expected ~1.0 when nose_count=1 and grass=max)",
+                inp2[slot]
+            );
         }
     }
 }
