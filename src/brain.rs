@@ -1,7 +1,5 @@
 //! Brain — fixed-shape NN: 112 inputs → 24 hidden (ReLU) → 5 outputs (v1.3 D9).
 //!
-//! Milestone B: holds zero-weight stubs so we can carry a Brain field on
-//! Creature and not retrofit everything later.
 //! Milestone D: SIMD forward pass (`wide::f32x8`) + geometric-skip mutation
 //! per v5 §5.3 / v6 §E. Weight layout: row-major, hidden-unit-contiguous
 //! (see D.15 spec and DECISIONS).

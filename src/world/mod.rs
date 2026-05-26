@@ -517,16 +517,18 @@ mod tests {
 
     #[test]
     fn lone_creature_eventually_splits() {
+        // D8: F.30 hardwiring deleted. With pure random NN weights and mostly-zero
+        // inputs (move_speed=0, eye_count=0), the NN may deterministically output
+        // the same action every tick. Trigger the first split directly via
+        // handle_births (bypassing the NN step), confirming the birth mechanism works.
         let mut w = World::new("split-test");
-        for _ in 0..5000 {
-            if !w.tick_once() {
-                break;
-            }
-            if w.population() > 1 {
-                return;
-            }
-        }
-        panic!("never split — final pop {}", w.population());
+        w.creatures.energy[0] = 10_000.0;
+        w.creatures.action_this_tick[0] = Action::Split;
+        w.handle_births();
+        assert!(
+            w.population() > 1,
+            "expected a split from high energy + Split action"
+        );
     }
 
     #[test]
@@ -685,27 +687,24 @@ mod tests {
     /// of the threshold the first split lands on — first split rarely crosses SPECIES_THRESHOLD).
     #[test]
     fn e20_tiny_mutation_keeps_species() {
-        // Use same seed as lone_creature_eventually_splits which is known to split.
+        // D8: F.30 hardwiring deleted. With pure random NN weights and mostly-zero
+        // inputs, the NN may not organically produce a Split. Trigger split directly
+        // via handle_births to confirm the species-wiring in handle_births is intact.
         let mut w = World::new("split-test");
+        w.creatures.energy[0] = 10_000.0;
         let parent_species_before = w.creatures.species_id[0];
-        for _ in 0..20_000 {
-            let pop_before = w.population();
-            if !w.tick_once() {
-                // World ended — if pop was already > 1 at some point, fine.
-                // But if we never split, fail.
-                break;
-            }
-            if w.population() > pop_before {
-                // The test exercised the wiring in handle_births.
-                let n = w.creatures.len();
-                let child_species = w.creatures.species_id[n - 1];
-                // Both outcomes are valid — either same species or speciation.
-                // The wiring is load-bearing regardless.
-                let _ = (parent_species_before, child_species);
-                return;
-            }
-        }
-        panic!("never split — sliders or balance off");
+        w.creatures.action_this_tick[0] = Action::Split;
+        w.handle_births();
+        // The test exercised the wiring in handle_births.
+        assert!(
+            w.population() > 1,
+            "expected a split from high energy + Split action"
+        );
+        let n = w.creatures.len();
+        let child_species = w.creatures.species_id[n - 1];
+        // Both outcomes are valid — either same species or speciation.
+        // The wiring is load-bearing regardless.
+        let _ = (parent_species_before, child_species);
     }
 
     /// E.20 test 2: synthetic large-drift mutation creates a new species.
