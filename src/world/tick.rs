@@ -304,10 +304,12 @@ impl World {
                     // S25: restore the pooled buffer (high-water-mark allocation preserved).
                     self.scratch_eat_candidates = candidates;
                     if let Some((j, _)) = best {
-                        let dmg = EAT_DAMAGE_COEFF * size_i;
                         let armor = self.creatures.genomes[j].armor.clamp(0.0, 1.0); // COLD field; stays AoS
-                        self.scratch_damage[j] += dmg * (1.0 - armor);
-                        self.scratch_gain[i] += EAT_GAIN_COEFF * eat_eff_i;
+                        let bite_frac = self.sliders.eat_bite_fraction;
+                        let prey_energy = self.creatures.energy[j];
+                        let transfer = bite_frac * prey_energy * (1.0 - armor);
+                        self.scratch_damage[j] += transfer;
+                        self.scratch_gain[i] += transfer * eat_eff_i;
                         self.scratch_cooldown_set[i] = true;
                         self.scratch_got_a_bite[i] = true;
                     }
@@ -1372,6 +1374,211 @@ mod tests {
         assert!(
             dy < 0.0,
             "y must decrease (bias_y < 0 → upward motion); dy = {dy}"
+        );
+    }
+
+    // ---- P3a tests ----
+
+    /// P3a test: default eat_bite_fraction is 0.5.
+    /// P3e may revise this; update in lockstep.
+    #[test]
+    fn p3a_dev_slider_eat_bite_fraction_default() {
+        let w = World::new("p3a-default");
+        assert!(
+            (w.sliders.eat_bite_fraction - 0.5).abs() < f32::EPSILON,
+            "eat_bite_fraction default must be 0.5; got {}",
+            w.sliders.eat_bite_fraction
+        );
+    }
+
+    /// P3a test: basic bite transfer — adjacent predator/prey, armor=0, eff=1.0, bite_frac=0.5.
+    /// Prey loses 50, predator gains 50 - COST_EAT_ATTEMPT = 49.7.
+    #[test]
+    fn p3a_eat_bite_basic_transfer() {
+        use crate::brain::Brain;
+        use crate::genome::Genome;
+        use crate::vision::{build_cell_to_carrion, VISION_LEN};
+
+        let mut w = World::new("p3a-basic");
+        // Set predator (creature 0) properties.
+        w.creatures.energy[0] = 100.0;
+        w.creatures.genomes[0].eat_efficiency = 1.0;
+        w.creatures.genomes[0].armor = 0.0;
+        w.creatures.genomes[0].size = 1.0;
+        w.creatures.genomes[0].bite_reach = 3.0; // generous reach
+        w.creatures.resync_hot_mirrors_at(0);
+        w.creatures.digestion_cooldown[0] = 0;
+        w.creatures.action_this_tick[0] = Action::Eat;
+        w.sliders.eat_bite_fraction = 0.5;
+
+        // Add prey (creature 1) adjacent.
+        let mut rng = SimRng::from_u64(42);
+        let mut prey_genome = Genome::founder();
+        prey_genome.armor = 0.0;
+        prey_genome.size = 1.0;
+        let prey_brain = Brain::founder(&mut rng);
+        let pred_x = w.creatures.x[0];
+        let pred_y = w.creatures.y[0];
+        // Place prey within bite reach.
+        w.creatures.push(
+            1,
+            pred_x + 1.5,
+            pred_y,
+            100.0,
+            0,
+            0,
+            0,
+            prey_genome,
+            prey_brain,
+        );
+        w.vision.push([0.0f32; VISION_LEN]);
+
+        w.grid.rebuild(&w.creatures.x, &w.creatures.y);
+        build_cell_to_carrion(&w.carrion, &mut w.cell_to_carrion);
+
+        let pred_energy_before = w.creatures.energy[0];
+        let prey_energy_before = w.creatures.energy[1];
+
+        w.eat_and_scavenge();
+
+        let pred_energy_after = w.creatures.energy[0];
+        let prey_energy_after = w.creatures.energy[1];
+
+        // transfer = 0.5 * 100.0 * (1.0 - 0.0) = 50.0
+        // predator gain = 50.0 * 1.0 = 50.0; net = 50.0 - COST_EAT_ATTEMPT (0.3) = 49.7
+        // prey loss = 50.0
+        let prey_loss = prey_energy_before - prey_energy_after;
+        let pred_gain = pred_energy_after - pred_energy_before;
+
+        assert!(
+            (prey_loss - 50.0).abs() < 1e-4,
+            "prey should lose 50.0; lost {prey_loss}"
+        );
+        assert!(
+            (pred_gain - 49.7).abs() < 1e-3,
+            "predator should gain 49.7 (50 - 0.3 cost); gained {pred_gain}"
+        );
+    }
+
+    /// P3a test: bite with armor attenuation — armor=0.3, eff=0.8, bite_frac=0.5, prey energy=100.
+    /// transfer = 0.5 * 100 * 0.7 = 35; prey loses 35, predator gains 35 * 0.8 = 28.
+    #[test]
+    fn p3a_eat_bite_with_armor() {
+        use crate::brain::Brain;
+        use crate::genome::Genome;
+        use crate::vision::{build_cell_to_carrion, VISION_LEN};
+
+        let mut w = World::new("p3a-armor");
+        w.creatures.energy[0] = 100.0;
+        w.creatures.genomes[0].eat_efficiency = 0.8;
+        w.creatures.genomes[0].armor = 0.0;
+        w.creatures.genomes[0].size = 1.0;
+        w.creatures.genomes[0].bite_reach = 3.0;
+        w.creatures.resync_hot_mirrors_at(0);
+        w.creatures.digestion_cooldown[0] = 0;
+        w.creatures.action_this_tick[0] = Action::Eat;
+        w.sliders.eat_bite_fraction = 0.5;
+
+        let mut rng = SimRng::from_u64(99);
+        let mut prey_genome = Genome::founder();
+        prey_genome.armor = 0.3;
+        prey_genome.size = 1.0;
+        let prey_brain = Brain::founder(&mut rng);
+        let pred_x = w.creatures.x[0];
+        let pred_y = w.creatures.y[0];
+        w.creatures.push(
+            1,
+            pred_x + 1.5,
+            pred_y,
+            100.0,
+            0,
+            0,
+            0,
+            prey_genome,
+            prey_brain,
+        );
+        w.vision.push([0.0f32; VISION_LEN]);
+
+        w.grid.rebuild(&w.creatures.x, &w.creatures.y);
+        build_cell_to_carrion(&w.carrion, &mut w.cell_to_carrion);
+
+        let prey_energy_before = w.creatures.energy[1];
+        let pred_energy_before = w.creatures.energy[0];
+
+        w.eat_and_scavenge();
+
+        let prey_loss = prey_energy_before - w.creatures.energy[1];
+        // predator net = gain - COST_EAT_ATTEMPT; compute gain from total change
+        let pred_net = w.creatures.energy[0] - pred_energy_before;
+
+        // transfer = 0.5 * 100 * (1 - 0.3) = 35
+        // prey loss = 35; predator gain = 35 * 0.8 = 28; net = 28 - 0.3 = 27.7
+        assert!(
+            (prey_loss - 35.0).abs() < 1e-4,
+            "prey should lose 35.0; lost {prey_loss}"
+        );
+        assert!(
+            (pred_net - 27.7).abs() < 1e-3,
+            "predator net should be 27.7 (28 - 0.3 cost); got {pred_net}"
+        );
+    }
+
+    /// P3a test: digestion cooldown still gates bites — only attempt cost charged, no bite.
+    #[test]
+    fn p3a_eat_cooldown_still_gates() {
+        use crate::brain::Brain;
+        use crate::genome::Genome;
+        use crate::vision::{build_cell_to_carrion, VISION_LEN};
+
+        let mut w = World::new("p3a-cooldown");
+        w.creatures.energy[0] = 100.0;
+        w.creatures.genomes[0].eat_efficiency = 1.0;
+        w.creatures.genomes[0].size = 1.0;
+        w.creatures.genomes[0].bite_reach = 3.0;
+        w.creatures.resync_hot_mirrors_at(0);
+        // Set active cooldown so bite is gated.
+        w.creatures.digestion_cooldown[0] = 10;
+        w.creatures.action_this_tick[0] = Action::Eat;
+        w.sliders.eat_bite_fraction = 0.5;
+
+        let mut rng = SimRng::from_u64(7);
+        let prey_genome = Genome::founder();
+        let prey_brain = Brain::founder(&mut rng);
+        let pred_x = w.creatures.x[0];
+        let pred_y = w.creatures.y[0];
+        w.creatures.push(
+            1,
+            pred_x + 1.5,
+            pred_y,
+            100.0,
+            0,
+            0,
+            0,
+            prey_genome,
+            prey_brain,
+        );
+        w.vision.push([0.0f32; VISION_LEN]);
+
+        w.grid.rebuild(&w.creatures.x, &w.creatures.y);
+        build_cell_to_carrion(&w.carrion, &mut w.cell_to_carrion);
+
+        let prey_energy_before = w.creatures.energy[1];
+        let pred_energy_before = w.creatures.energy[0];
+
+        w.eat_and_scavenge();
+
+        let prey_change = (w.creatures.energy[1] - prey_energy_before).abs();
+        let pred_change = pred_energy_before - w.creatures.energy[0];
+
+        // Prey must be unchanged (no bite landed due to cooldown).
+        assert!(
+            prey_change < 1e-6,
+            "prey energy must be unchanged when predator is in cooldown; change = {prey_change}"
+        );
+        // Predator should only lose the attempt cost (0.3).
+        assert!(
+            (pred_change - COST_EAT_ATTEMPT).abs() < 1e-4,
+            "predator should only lose COST_EAT_ATTEMPT ({COST_EAT_ATTEMPT}); lost {pred_change}"
         );
     }
 }

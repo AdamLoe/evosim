@@ -33,8 +33,10 @@ pub const SPLIT_GIFT_MAX: f32 = 30.0;
 pub const SPLIT_THRESHOLD: f32 = 50.0;
 
 // ---- Eat / scavenge (v5 §3.5) ----
-pub const EAT_DAMAGE_COEFF: f32 = 1.0; // damage = coeff × attacker.size
-pub const EAT_GAIN_COEFF: f32 = 1.5; // gain = coeff × eat_efficiency
+/// Default per-bite energy transfer fraction. Predator removes
+/// `eat_bite_fraction * prey.energy * (1 - prey.armor)` per bite.
+/// Live-tunable via DevSliders.eat_bite_fraction (P3b adds slider).
+pub const EAT_BITE_FRACTION_DEFAULT: f32 = 0.5;
 pub const SCAVENGE_GAIN_COEFF: f32 = 1.5;
 pub const DIGESTION_COOLDOWN_TICKS: u32 = 50;
 

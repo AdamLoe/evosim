@@ -36,6 +36,10 @@ pub struct DevSliders {
     pub grass_in_cell_growth_r: f32,
     /// Number of cells seeded at world init (affects next world creation only). See v1.2 amendments §A.4.
     pub grass_initial_seed_count: u32,
+    /// Per-bite energy transfer fraction. Predator removes
+    /// `eat_bite_fraction * prey.energy * (1 - prey.armor)` per successful bite.
+    /// Live-tunable via set_eat_bite_fraction. See v1.2 P3a.
+    pub eat_bite_fraction: f32,
 }
 
 impl Default for DevSliders {
@@ -47,6 +51,7 @@ impl Default for DevSliders {
             grass_propagation_rate_k: GRASS_PROPAGATION_RATE_K_DEFAULT,
             grass_in_cell_growth_r: GRASS_IN_CELL_GROWTH_R_DEFAULT,
             grass_initial_seed_count: GRASS_INITIAL_SEED_COUNT_DEFAULT,
+            eat_bite_fraction: EAT_BITE_FRACTION_DEFAULT,
         }
     }
 }

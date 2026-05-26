@@ -1,4 +1,4 @@
-//! Save/load support for v1. Schema version: 3. JSON via serde_json.
+//! Save/load support for v1. Schema version: 4. JSON via serde_json.
 //! v5 §13, v6 §I. Snapshot structs are explicit so future versions can add
 //! SaveV2 alongside without disturbing SaveV1. From<&World> conversions kept
 //! in this module; World re-exports via to_save_v1 / from_save_v1 helpers.
@@ -17,7 +17,8 @@ use serde::{Deserialize, Serialize};
 /// Current schema version. Bump on any save-shape change that breaks compatibility.
 /// v1 → v2 (P1b+P1f): dropped SunMapSnapshot; added GrassGridSnapshot; dropped Carrion.sun_cell.
 /// v2 → v3 (P2g): added nose_count + move_bias_x/y/reroll_at columns; NN weight count now 4032.
-pub const SCHEMA_VERSION: u32 = 3;
+/// v3 → v4 (P3a): added eat_bite_fraction to DevSliders.
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// Wire shape on disk. Camera / UI state lives on the JS side.
 /// All fields are owned Vecs so we can serialize without referencing &World.
@@ -373,6 +374,7 @@ pub fn validate_save(save: &SaveV1) -> Result<usize, LoadError> {
         ("nn_mutation_sigma", s.nn_mutation_sigma),
         ("grass_propagation_rate_k", s.grass_propagation_rate_k),
         ("grass_in_cell_growth_r", s.grass_in_cell_growth_r),
+        ("eat_bite_fraction", s.eat_bite_fraction),
     ] {
         if !val.is_finite() {
             return Err(LoadError::StructuralError(format!(
@@ -391,6 +393,13 @@ pub fn validate_save(save: &SaveV1) -> Result<usize, LoadError> {
         return Err(LoadError::StructuralError(format!(
             "slider 'grass_in_cell_growth_r' out of range [0, 0.05]: {}",
             s.grass_in_cell_growth_r
+        )));
+    }
+    // 9c. eat_bite_fraction range check (P3a).
+    if !(0.0..=1.0).contains(&s.eat_bite_fraction) {
+        return Err(LoadError::StructuralError(format!(
+            "slider 'eat_bite_fraction' out of range [0, 1]: {}",
+            s.eat_bite_fraction
         )));
     }
 
@@ -562,7 +571,7 @@ mod tests {
         match result {
             Err(LoadError::SchemaVersionMismatch {
                 found: 999,
-                expected: 3,
+                expected: 4,
             }) => {}
             Err(e) => panic!("expected SchemaVersionMismatch, got: {e}"),
             Ok(_) => panic!("expected Err, got Ok"),
@@ -696,21 +705,21 @@ mod tests {
         );
     }
 
-    /// P2g: old-schema version 2 returns SchemaVersionMismatch { found: 2, expected: 3 }.
+    /// P3a: old-schema version 3 returns SchemaVersionMismatch { found: 3, expected: 4 }.
     #[test]
     fn load_old_schema_returns_version_mismatch_error() {
         let mut w = World::new("p2g-old-schema");
         w.tick_once();
         let mut save = SaveV1::from_world(&w);
-        save.schema_version = 2;
+        save.schema_version = 3;
         match World::from_save_v1(save) {
             Err(LoadError::SchemaVersionMismatch {
-                found: 2,
-                expected: 3,
+                found: 3,
+                expected: 4,
             }) => {}
             Ok(_) => panic!("expected SchemaVersionMismatch but got Ok"),
             Err(e) => {
-                panic!("expected SchemaVersionMismatch {{ found: 2, expected: 3 }} but got {e:?}")
+                panic!("expected SchemaVersionMismatch {{ found: 3, expected: 4 }} but got {e:?}")
             }
         }
     }

@@ -252,6 +252,9 @@ impl WorldHandle {
     fn apply_nn_mutation_sigma(&mut self, value: f32) {
         self.inner.sliders.nn_mutation_sigma = value;
     }
+    fn apply_eat_bite_fraction(&mut self, value: f32) {
+        self.inner.sliders.eat_bite_fraction = value;
+    }
 
     /// Typed setter — per-birth mutation rate multiplier.
     #[wasm_bindgen]
@@ -269,6 +272,12 @@ impl WorldHandle {
     #[wasm_bindgen]
     pub fn set_nn_mutation_sigma(&mut self, value: f32) {
         self.apply_nn_mutation_sigma(value);
+    }
+
+    /// Typed setter — per-bite energy transfer fraction.
+    #[wasm_bindgen]
+    pub fn set_eat_bite_fraction(&mut self, value: f32) {
+        self.apply_eat_bite_fraction(value);
     }
 
     /// Apply a dev-panel slider live by name. JS console workflow
@@ -293,6 +302,7 @@ impl WorldHandle {
             "mutation_rate_multiplier" => self.apply_mutation_rate_multiplier(value),
             "mouth_tax" => self.apply_mouth_tax(value),
             "nn_mutation_sigma" => self.apply_nn_mutation_sigma(value),
+            "eat_bite_fraction" => self.apply_eat_bite_fraction(value),
             _ => return false,
         }
         true
@@ -809,7 +819,7 @@ mod tests {
         let mut handle = WorldHandle::new("f26-schema-err");
         handle.step();
         let json = handle.snapshot_json();
-        let patched = json.replace("\"schema_version\":3", "\"schema_version\":999");
+        let patched = json.replace("\"schema_version\":4", "\"schema_version\":999");
         // We can test the underlying save/load path without going through JsValue
         // (JsValue::as_string() panics in native test context outside wasm32).
         use crate::save::SaveV1;
