@@ -162,6 +162,11 @@ impl GrassGrid {
     /// Invokes `f(cell_idx)` once per hit. Used by P1e to find graze-overlap cells.
     /// Deterministic: row-major, left-to-right iteration order.
     /// Contract: `r` must be finite and non-negative.
+    ///
+    /// Uses circle-vs-AABB overlap (nearest point on the cell bounding box to the
+    /// circle centre must be ≤ r). This is the correct test for "does a creature's
+    /// body circle touch this grass cell" and avoids the old centre-to-centre test
+    /// that could miss cells when `GRASS_CELL_SIZE >> r` (M1 regression fix).
     pub fn for_each_cell_overlapping_circle(
         &self,
         cx: f32,
@@ -171,7 +176,10 @@ impl GrassGrid {
     ) {
         debug_assert!(r.is_finite() && r >= 0.0);
 
-        let r_cells = (r / GRASS_CELL_SIZE).ceil() as i32 + 1;
+        // Search radius expanded by half cell size so the candidate window includes
+        // every cell whose bounding box could intersect the circle.
+        let search_r = r + GRASS_CELL_SIZE * 0.5;
+        let r_cells = (search_r / GRASS_CELL_SIZE).ceil() as i32 + 1;
         let cx_cell = (cx / GRASS_CELL_SIZE).floor() as i32;
         let cy_cell = (cy / GRASS_CELL_SIZE).floor() as i32;
         let dim = GRASS_GRID_DIM as i32;
@@ -187,11 +195,16 @@ impl GrassGrid {
                     continue;
                 }
                 let ix = jx as usize;
-                // Euclidean distance from query center to cell center.
-                let world_x = (jx as f32 + 0.5) * GRASS_CELL_SIZE;
-                let world_y = (jy as f32 + 0.5) * GRASS_CELL_SIZE;
-                let dx = world_x - cx;
-                let dy = world_y - cy;
+                // Circle-vs-AABB: find nearest point on the cell box to (cx, cy),
+                // then check if that distance is ≤ r.
+                let box_x_min = jx as f32 * GRASS_CELL_SIZE;
+                let box_x_max = box_x_min + GRASS_CELL_SIZE;
+                let box_y_min = jy as f32 * GRASS_CELL_SIZE;
+                let box_y_max = box_y_min + GRASS_CELL_SIZE;
+                let nearest_x = cx.clamp(box_x_min, box_x_max);
+                let nearest_y = cy.clamp(box_y_min, box_y_max);
+                let dx = nearest_x - cx;
+                let dy = nearest_y - cy;
 
                 if dx * dx + dy * dy <= r2 {
                     f(iy * GRASS_GRID_DIM + ix);
@@ -453,7 +466,9 @@ mod tests {
         );
     }
 
-    /// Test 13: for_each_cell_overlapping_circle matches brute-force Euclidean distance scan.
+    /// Test 13: for_each_cell_overlapping_circle matches brute-force circle-vs-AABB scan.
+    /// The overlap test uses the nearest-point-on-cell-box distance (not center-to-center)
+    /// so that a creature circle touching a cell's edge or corner still counts as overlapping.
     #[test]
     fn cells_overlapping_circle_count_matches_brute_force() {
         let g = fresh_grid();
@@ -468,14 +483,18 @@ mod tests {
             method_hits.insert(idx);
         });
 
-        // Brute-force: iterate all cells, compute Euclidean center distance.
+        // Brute-force: iterate all cells, compute circle-vs-AABB (nearest point on cell box).
         let mut brute_hits = std::collections::BTreeSet::new();
         for iy in 0..GRASS_GRID_DIM {
             for ix in 0..GRASS_GRID_DIM {
-                let world_x = (ix as f32 + 0.5) * GRASS_CELL_SIZE;
-                let world_y = (iy as f32 + 0.5) * GRASS_CELL_SIZE;
-                let dx = world_x - cx;
-                let dy = world_y - cy;
+                let box_x_min = ix as f32 * GRASS_CELL_SIZE;
+                let box_x_max = box_x_min + GRASS_CELL_SIZE;
+                let box_y_min = iy as f32 * GRASS_CELL_SIZE;
+                let box_y_max = box_y_min + GRASS_CELL_SIZE;
+                let nearest_x = cx.clamp(box_x_min, box_x_max);
+                let nearest_y = cy.clamp(box_y_min, box_y_max);
+                let dx = nearest_x - cx;
+                let dy = nearest_y - cy;
                 if dx * dx + dy * dy <= r * r {
                     brute_hits.insert(iy * GRASS_GRID_DIM + ix);
                 }
@@ -484,7 +503,7 @@ mod tests {
 
         assert_eq!(
             method_hits, brute_hits,
-            "for_each_cell_overlapping_circle must match brute-force scan"
+            "for_each_cell_overlapping_circle must match brute-force circle-vs-AABB scan"
         );
     }
 

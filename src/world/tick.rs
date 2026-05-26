@@ -644,24 +644,16 @@ mod tests {
 
         w.graze();
 
-        // Check whether radius is sufficient (FOUNDER_SIZE=1.0, BODY_RADIUS_PER_SIZE=1.0 → radius=1.0 < 2.5)
-        // If not, this test is a no-op but must not panic.
-        let ri = FOUNDER_SIZE * BODY_RADIUS_PER_SIZE;
-        if ri >= 2.5 {
-            let east_drained = w.grass.density[east_cell] < GRASS_MAX - 1e-6;
-            let west_drained = w.grass.density[west_cell] < GRASS_MAX - 1e-6;
-            assert!(
-                east_drained,
-                "east seam cell (ix=119) must be grazed when radius >= 2.5; density={}",
-                w.grass.density[east_cell]
-            );
-            assert!(
-                west_drained,
-                "west seam cell (ix=0) must be grazed when radius >= 2.5; density={}",
-                w.grass.density[west_cell]
-            );
-        }
-        // If ri < 2.5, the seam cells are not reached — test passes (no panic).
+        // With the AABB overlap fix, a creature at cx=0 always touches west_cell (ix=0)
+        // because its box [0, 5] contains the creature position (nearest point = 0, dist = 0).
+        // The east_cell (ix=119) is at x=[595,600], dist=595 >> ri → not reached (walled world).
+        // West cell must be drained regardless of body radius (AABB check).
+        let west_drained = w.grass.density[west_cell] < GRASS_MAX - 1e-6;
+        assert!(
+            west_drained,
+            "west seam cell (ix=0) must be grazed; creature at x=0 is inside cell box [0,5]; density={}",
+            w.grass.density[west_cell]
+        );
     }
 
     /// P1e test 4: single cell at density 1.0 with constant eff → gain == GRAZE_MAX_PER_TICK.
