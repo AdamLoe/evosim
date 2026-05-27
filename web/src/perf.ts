@@ -36,17 +36,17 @@ const stack: Array<{ nodeId: NodeId; t0: number }> = [];
 
 let enabled = false;
 let epochMs = performance.now();
-let world: WorldHandle | null = null;
+let getWorld: (() => WorldHandle) | null = null;
 
 // ─── Public API ───────────────────────────────────────────────────────────
 
-export function attachProfiler(w: WorldHandle): void {
-  world = w;
+export function attachProfiler(g: () => WorldHandle): void {
+  getWorld = g;
 }
 
 export function setProfilerEnabled(on: boolean): void {
   enabled = on;
-  if (world) world.profile_enable(on);
+  if (getWorld) getWorld().profile_enable(on);
   if (on) {
     // Reset epoch on enable so first sample is at t≈0.
     epochMs = performance.now();

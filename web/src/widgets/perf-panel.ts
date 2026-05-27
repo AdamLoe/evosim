@@ -29,7 +29,7 @@ interface ProfReport {
 }
 
 /** Install the profiler checkbox + table. Call once after world is ready. */
-export function installProfilerPanel(world: WorldHandle): void {
+export function installProfilerPanel(getWorld: () => WorldHandle): void {
   const checkbox = document.getElementById("profiler-enable") as HTMLInputElement | null;
   if (!checkbox) return;
 
@@ -37,22 +37,22 @@ export function installProfilerPanel(world: WorldHandle): void {
   checkbox.checked = false;
   // D5: initial paint of "enable to record" hint so tbody isn't visually blank.
   clearTable();
-  renderTpsJank(world);
-  renderObsCounters(world);
+  renderTpsJank(getWorld());
+  renderObsCounters(getWorld());
 
   // TPS + jank are always visible (independent of profiler enable).
   // Poll at 1 Hz continuously so numbers stay fresh even when profiler is off.
   // P3d: observability counters share the same 1 Hz cadence.
   window.setInterval(() => {
-    renderTpsJank(world);
-    renderObsCounters(world);
+    renderTpsJank(getWorld());
+    renderObsCounters(getWorld());
   }, POLL_INTERVAL_MS);
 
   checkbox.addEventListener("change", () => {
     const on = checkbox.checked;
     setProfilerEnabled(on);
     if (on) {
-      startPolling(world);
+      startPolling(getWorld);
     } else {
       stopPolling();
       clearTable();
@@ -63,20 +63,23 @@ export function installProfilerPanel(world: WorldHandle): void {
   const jankReset = document.getElementById("jank-reset") as HTMLButtonElement | null;
   if (jankReset) {
     jankReset.addEventListener("click", () => {
+      const world = getWorld();
       world.reset_jank();
       renderTpsJank(world);
     });
   }
 }
 
-function startPolling(world: WorldHandle): void {
+function startPolling(getWorld: () => WorldHandle): void {
   if (profilerPollHandle !== 0) return; // already running
   profilerPollHandle = window.setInterval(() => {
+    const world = getWorld();
     pollAndRender(world);
     renderTpsJank(world);
     renderObsCounters(world);
   }, POLL_INTERVAL_MS);
   // Render once immediately so the table isn't blank for 1s.
+  const world = getWorld();
   pollAndRender(world);
   renderTpsJank(world);
   renderObsCounters(world);

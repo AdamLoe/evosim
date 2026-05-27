@@ -186,7 +186,7 @@ export function installCanvasClickHandler(
   canvas: HTMLCanvasElement,
   cam: Camera,
   getView: () => { w: number; h: number },
-  world: WorldHandle,
+  getWorld: () => WorldHandle,
   rail: RailState,
 ): void {
   const closeBtn = getInspectorClose();
@@ -214,6 +214,7 @@ export function installCanvasClickHandler(
     // Tap detection: < 10 px movement, < 500 ms elapsed.
     if (dist >= 10 || elapsed >= 500) return;
 
+    const world = getWorld();
     const { w, h } = getView();
     const rect = canvas.getBoundingClientRect();
     const sx = e.clientX - rect.left;
@@ -241,4 +242,10 @@ export function installCanvasClickHandler(
       }
     }
   });
+}
+
+/** Close the inspector and clear its selection. Used by world-restart so
+ * the stale creature id from the previous world doesn't linger. */
+export function resetInspectorSelection(rail: RailState): void {
+  clearSelection(rail);
 }

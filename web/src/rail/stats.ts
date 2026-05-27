@@ -21,6 +21,12 @@ function getCanvas(): HTMLCanvasElement | null {
   return popCanvas;
 }
 
+/** Drop all recorded samples so the chart starts fresh after a world restart. */
+export function resetStats(): void {
+  samples.length = 0;
+  lastSampledTick = -1;
+}
+
 export function maybeSampleStats(world: WorldHandle): void {
   const tick = world.tick;
   if (tick === lastSampledTick) return;

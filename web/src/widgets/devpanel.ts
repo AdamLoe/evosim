@@ -51,8 +51,29 @@ function makeSlider(spec: SliderSpec): HTMLDivElement {
   return row;
 }
 
+/** Slider settings applied to the live world. Tracked so restart can
+ * re-apply user-tweaked values to a freshly-constructed world. */
+const sliderState = {
+  eatBiteFrac: 0.5,
+  grassPropagK: 0.1,
+  grassGrowthR: 0.05,
+  mutRate: 1.0,
+  nnSigma: 0.02,
+};
+
+/** Re-apply all dev-slider values to `world`. Call after restart so the
+ * user's tweaks persist across world recreation. `initialGrassSeedCount`
+ * is already baked into world construction via `newWithGrassSeed`. */
+export function reapplyDevSliders(world: WorldHandle): void {
+  world.set_eat_bite_fraction(sliderState.eatBiteFrac);
+  world.set_grass_propagation_rate_k(sliderState.grassPropagK);
+  world.set_grass_in_cell_growth_r(sliderState.grassGrowthR);
+  world.set_mutation_rate_multiplier(sliderState.mutRate);
+  world.set_nn_mutation_sigma(sliderState.nnSigma);
+}
+
 /** Install the dev-panel overlay. Call once after WorldHandle is ready. */
-export function installDevPanel(world: WorldHandle): void {
+export function installDevPanel(getWorld: () => WorldHandle): void {
   const box = document.getElementById("devpanel-box") as HTMLDivElement | null;
   if (!box) return;
 
@@ -63,7 +84,10 @@ export function installDevPanel(world: WorldHandle): void {
       max: 1,
       step: 0.01,
       default: 0.5, // EAT_BITE_FRACTION_DEFAULT
-      onChange: (v) => world.set_eat_bite_fraction(v),
+      onChange: (v) => {
+        sliderState.eatBiteFrac = v;
+        getWorld().set_eat_bite_fraction(v);
+      },
     },
     {
       label: "grass propag k",
@@ -71,7 +95,10 @@ export function installDevPanel(world: WorldHandle): void {
       max: 0.2,
       step: 0.005,
       default: 0.1, // GRASS_PROPAGATION_RATE_K_DEFAULT
-      onChange: (v) => world.set_grass_propagation_rate_k(v),
+      onChange: (v) => {
+        sliderState.grassPropagK = v;
+        getWorld().set_grass_propagation_rate_k(v);
+      },
     },
     {
       label: "grass growth r",
@@ -79,7 +106,10 @@ export function installDevPanel(world: WorldHandle): void {
       max: 0.05,
       step: 0.001,
       default: 0.05, // GRASS_IN_CELL_GROWTH_R_DEFAULT
-      onChange: (v) => world.set_grass_in_cell_growth_r(v),
+      onChange: (v) => {
+        sliderState.grassGrowthR = v;
+        getWorld().set_grass_in_cell_growth_r(v);
+      },
     },
     {
       label: "initial seed N",
@@ -98,7 +128,10 @@ export function installDevPanel(world: WorldHandle): void {
       max: 5,
       step: 0.05,
       default: 1.0, // mutation_rate_multiplier default
-      onChange: (v) => world.set_mutation_rate_multiplier(v),
+      onChange: (v) => {
+        sliderState.mutRate = v;
+        getWorld().set_mutation_rate_multiplier(v);
+      },
     },
     {
       label: "nn σ",
@@ -106,7 +139,10 @@ export function installDevPanel(world: WorldHandle): void {
       max: 0.2,
       step: 0.005,
       default: 0.02, // NN_MUT_SIGMA_DEFAULT — keep in sync with constants.rs
-      onChange: (v) => world.set_nn_mutation_sigma(v),
+      onChange: (v) => {
+        sliderState.nnSigma = v;
+        getWorld().set_nn_mutation_sigma(v);
+      },
     },
   ];
 
