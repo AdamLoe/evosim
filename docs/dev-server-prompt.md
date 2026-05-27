@@ -25,9 +25,17 @@ curl -sf http://localhost:47821/ -o /dev/null && echo "up" || echo "down"
 
 ## 3. How to start it
 
-> Before starting, make sure the wasm artifact exists. If
-> `web/wasm/evosim_bg.wasm` is missing or stale, build it first (see
-> section 7).
+> **Always rebuild wasm after any Rust change.** `web/wasm/` is gitignored
+> and not auto-rebuilt by `pnpm dev`. If you skip this, the TS layer will
+> hit ABI errors against a stale bundle (e.g. `stride !== 10` if a recent
+> commit changed `creature_stride()`).
+>
+> ```bash
+> cd /home/adamg/evosim && wasm-pack build --target web --out-dir web/wasm --dev
+> ```
+>
+> If the wasm artifact is missing entirely, build it first. See
+> section 7 for variants (release build, threads feature).
 
 ```bash
 cd /home/adamg/evosim/web && rm -f /tmp/vite.log && \
@@ -117,15 +125,31 @@ kill <PID>
 
 ### Wasm not built / out of sync
 
-If the browser console shows a fetch error for `evosim_bg.wasm`, or the file
-is missing, rebuild from the repo root:
+The wasm bundle in `web/wasm/` is gitignored and **not auto-rebuilt by
+`pnpm dev`**. Any Rust change requires a manual rebuild. Symptoms of a
+stale bundle:
+
+- Browser console: fetch error for `evosim_bg.wasm`, or the file is missing
+- Runtime crash with `stride !== N` or "X is not a function" type errors
+  when TS calls a wasm-bindgen export whose signature changed
+- `pnpm typecheck` errors against `web/wasm/evosim.d.ts` after Rust edits
+
+Rebuild from the repo root:
 
 ```bash
-cd /home/adamg/evosim
-wasm-pack build --target web --out-dir web/wasm --dev
+# Standard dev build (fast, debug symbols):
+cd /home/adamg/evosim && wasm-pack build --target web --out-dir web/wasm --dev
+
+# Release build (optimized; required for perf measurements):
+cd /home/adamg/evosim && wasm-pack build --target web --out-dir web/wasm --release
+
+# Threads feature (rayon parallel NN — needs COOP/COEP, which dev server provides):
+cd /home/adamg/evosim && wasm-pack build --target web --out-dir web/wasm --dev -- --features threads
 ```
 
-Then restart the dev server (section 5) so Vite picks up the new artifact.
+Then hard-reload the browser (Ctrl+Shift+R). Vite's HMR picks up the new
+`.js` glue automatically; the `.wasm` is fetched fresh on reload. Restart
+the dev server (section 5) only if HMR doesn't pick it up.
 
 ### pnpm not on PATH
 
@@ -169,15 +193,38 @@ rm -rf /home/adamg/evosim/web/node_modules/.vite
 | Symptom | File(s) to look at |
 |---------|-------------------|
 | Canvas / rendering wrong | `web/src/render.ts` |
-| Rail UI (speed, controls) | `web/src/rail/*.ts` |
-| Eulogy / end-of-run overlay | `web/src/eulogy/*` |
-| Persistence / save-load | `web/src/persistence/*` |
-| Simulation logic (Rust) | `src/*.rs` |
+| Speed controls, RAF loop, boot | `web/src/main.ts` |
+| Rail layout / tabs | `web/src/rail/index.ts` |
+| Inspector contents | `web/src/rail/inspector.ts` |
+| Pop chart | `web/src/rail/stats.ts` |
+| Dev panel sliders | `web/src/widgets/devpanel.ts` |
+| Perf panel | `web/src/widgets/perf-panel.ts` |
+| Simulation logic (Rust) | `src/world/tick.rs`, `src/world/mod.rs` |
+| NN forward pass / weight layout / color hash | `src/brain.rs` |
+| Vision raycast | `src/vision.rs` |
+| Grass mechanic | `src/grass.rs` |
 | Wasm API surface | `src/wasm_api.rs` (`WorldHandle`) |
 
 Hot-reload is active: edit a `.ts` file and the browser refreshes
-automatically. Rust changes require a `wasm-pack build …` followed by a
-manual browser reload (or server restart).
+automatically. Rust changes require a `wasm-pack build …` (see section 7)
+followed by a hard browser reload. If a Rust commit changed a wasm-bindgen
+signature (e.g. added/removed/renamed a `WorldHandle` method, or changed
+`creature_stride()`), you MUST rebuild — `pnpm dev` will happily serve a
+stale wasm against new TS code, producing confusing runtime errors.
+
+### v1.3 deletions (no longer in the codebase)
+
+The following surfaces were removed in v1.3 and have NO source files —
+don't go looking for them:
+
+- `web/src/eulogy/*`, `src/hof.rs` — Hall of Fame + eulogy modal (D5)
+- `web/src/persistence/*`, `src/save.rs` — save/load (D1); reload = fresh world
+- Toast stack — `web/src/rail/toast.ts` (D4)
+- Species panel / chart, `src/species.rs` (D10)
+- `src/carrion.rs`, scavenge action (D2)
+- `src/genome.rs` — creatures are now structurally identical (D3)
+- `src/torus.rs` — world is walled (D7)
+- `src/snapshot_hash.rs` + `tests/acceptance.rs` + goldens (D6)
 
 ---
 
