@@ -105,6 +105,17 @@ pub const FOUNDER_SPLIT_JITTER: f32 = 50.0;
 /// Default number of founders seeded at world init (multi-founder v1.5).
 pub const FOUNDER_COUNT_DEFAULT: u32 = 8;
 
+/// v1.6 SAB snapshot creature cap. The two-slot snapshot SAB allocates
+/// `MAX_POP_FOR_SAB × 32 B` per slot for the creature SoA; population that
+/// would overflow is log-warned + truncated (the frame still renders).
+///
+/// The compile-assert below pins this above `FOUNDER_COUNT_DEFAULT × 32`,
+/// guaranteeing the cap is never tighter than the founder seeding ceiling.
+/// The single source of truth lives here; `web/src/sim-bridge.ts` mirrors
+/// the same value and the worker handshake-asserts they agree.
+pub const MAX_POP_FOR_SAB: usize = 8000;
+const _: () = assert!(MAX_POP_FOR_SAB >= FOUNDER_COUNT_DEFAULT as usize * 32);
+
 // ---- Deterministic chunking (v6 §J) ----
 /// Chunk-count clamps. Per-tick count = `clamp(pop/32, MIN, min(MAX, workers))`.
 pub const MIN_CHUNKS: usize = 4;
