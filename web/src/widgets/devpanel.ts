@@ -36,22 +36,46 @@ function makeSlider(spec: SliderSpec): { row: HTMLDivElement; readout: HTMLSpanE
   row.className = "devpanel-row";
   const labelEl = document.createElement("label");
   labelEl.textContent = spec.label;
-  const input = document.createElement("input");
-  input.type = "range";
-  input.min = String(spec.min);
-  input.max = String(spec.max);
-  input.step = String(spec.step);
-  input.value = String(spec.default);
+
+  const slider = document.createElement("input");
+  slider.type = "range";
+  slider.min = String(spec.min);
+  slider.max = String(spec.max);
+  slider.step = String(spec.step);
+  slider.value = String(spec.default);
+
+  // Paired numeric input — no min/max so the user can type values outside the
+  // slider's range. The slider visually pins to its endpoint when that happens.
+  const numInput = document.createElement("input");
+  numInput.type = "number";
+  numInput.step = String(spec.step);
+  numInput.value = String(spec.default);
+  numInput.className = "devpanel-numinput";
+
   const readout = document.createElement("span");
   readout.className = "devpanel-readout";
   const fmt = spec.formatValue ?? ((v: number) => v.toFixed(3));
   readout.textContent = fmt(spec.default);
-  input.addEventListener("input", () => {
-    const v = Number(input.value);
+
+  const apply = (v: number, source: "slider" | "num") => {
     readout.textContent = fmt(v);
+    if (source === "slider") {
+      numInput.value = String(v);
+    } else {
+      // Slider can't render out-of-range values; pin it to the nearest endpoint
+      // while letting the underlying value pass through to onChange unmodified.
+      slider.value = String(Math.max(spec.min, Math.min(spec.max, v)));
+    }
     spec.onChange(v);
+  };
+
+  slider.addEventListener("input", () => apply(Number(slider.value), "slider"));
+  numInput.addEventListener("input", () => {
+    const v = Number(numInput.value);
+    if (Number.isFinite(v)) apply(v, "num");
   });
-  row.append(labelEl, input, readout);
+
+  row.append(labelEl, slider, numInput, readout);
   return { row, readout };
 }
 
@@ -69,12 +93,12 @@ function makeToggle(spec: ToggleSpec): HTMLDivElement {
   const input = document.createElement("input");
   input.type = "checkbox";
   input.checked = spec.default;
-  // Push the checkbox to the far right by stretching label + an empty spacer.
-  const spacer = document.createElement("span");
-  spacer.className = "devpanel-readout";
-  spacer.textContent = "";
+  // The 4-cell grid expects [label, range, num, readout]; toggles fill the
+  // middle two with empty spans so the checkbox lands in the readout column.
+  const spacer1 = document.createElement("span");
+  const spacer2 = document.createElement("span");
   input.addEventListener("change", () => spec.onChange(input.checked));
-  row.append(labelEl, spacer, input);
+  row.append(labelEl, spacer1, spacer2, input);
   // Apply the default state immediately so the UI matches the toggle's
   // initial value without waiting for the user's first click.
   spec.onChange(spec.default);
@@ -264,7 +288,7 @@ export function installDevPanel(getWorld: () => WorldHandle): void {
     {
       label: "grass propag k",
       min: 0,
-      max: 0.004,
+      max: 0.005,
       step: 0.0001,
       default: persisted.grassPropagK,
       formatValue: (v) => v.toFixed(4),
@@ -286,7 +310,7 @@ export function installDevPanel(getWorld: () => WorldHandle): void {
     },
     {
       label: "energy per bite",
-      min: 5,
+      min: 1,
       max: 100,
       step: 1,
       default: persisted.grassEnergyPerBite,

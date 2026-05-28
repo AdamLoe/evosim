@@ -130,11 +130,15 @@ impl GrassGrid {
                 let cs = row_s.map(|r| r + ix);
                 let v = d[c];
                 let logistic = r_in_cell * v * (1.0 - v * inv_max);
-                let prop = k_propagate
-                    * (cn.map_or(0.0, |i| d[i])
-                        + cs.map_or(0.0, |i| d[i])
-                        + ce.map_or(0.0, |i| d[i])
-                        + cw.map_or(0.0, |i| d[i]));
+                // Max-of-neighbors spill: 1 ripe neighbor already grants the max
+                // propagation boost; additional neighbors don't stack. Avoids the
+                // "every cell next to a saturated patch quickly fills" cascade.
+                let max_neighbor = cn
+                    .map_or(0.0, |i| d[i])
+                    .max(cs.map_or(0.0, |i| d[i]))
+                    .max(ce.map_or(0.0, |i| d[i]))
+                    .max(cw.map_or(0.0, |i| d[i]));
+                let prop = k_propagate * max_neighbor;
                 s_row[ix] = (v + logistic + prop).clamp(0.0, GRASS_MAX);
             }
         };
@@ -209,18 +213,20 @@ impl GrassGrid {
         a * (1.0 - ty) + b * ty
     }
 
-    /// Discrete-bite consume. If the cell has at least `density_chunk` of
-    /// density, drains it by exactly that amount and returns `energy_per_bite`
-    /// (the fixed energy reward — never proportional to remaining density).
-    /// Returns `0.0` if the cell is under-threshold (inedible until it regrows).
+    /// Partial-bite consume. Drains `min(density, density_chunk)` and awards
+    /// `energy_per_bite * taken / density_chunk` energy (proportional to what was
+    /// actually consumed). A ripe cell (density ≥ chunk) still yields the full
+    /// `energy_per_bite`; an under-threshold cell yields a fraction.
+    /// Returns `0.0` only when the cell is fully empty.
     #[inline]
     pub fn consume(&mut self, cell_idx: usize, density_chunk: f32, energy_per_bite: f32) -> f32 {
         let cur = self.density[cell_idx];
-        if cur < density_chunk {
+        if cur <= 0.0 || density_chunk <= 0.0 {
             return 0.0;
         }
-        self.density[cell_idx] = cur - density_chunk;
-        energy_per_bite
+        let taken = cur.min(density_chunk);
+        self.density[cell_idx] = cur - taken;
+        energy_per_bite * (taken / density_chunk)
     }
 
     /// Iterate every cell whose center is within Euclidean distance `r` of `(cx, cy)`.
@@ -440,16 +446,21 @@ mod tests {
         );
     }
 
-    /// Below-threshold cell is inedible — consume returns 0 and density is unchanged.
+    /// Below-threshold cell yields a partial bite. Density is drained to zero and
+    /// energy is proportional (`energy_per_bite * taken / density_chunk`).
     #[test]
-    fn consume_below_chunk_threshold_is_inedible() {
+    fn consume_below_chunk_yields_partial_bite() {
         let mut g = fresh_grid();
         g.density[10] = 0.4;
         let taken = g.consume(10, 0.5, 10.0);
-        assert_eq!(taken, 0.0, "below-threshold cell must not be eaten");
+        let expected = 10.0 * (0.4 / 0.5);
         assert!(
-            (g.density[10] - 0.4).abs() < 1e-6,
-            "density must be unchanged when below threshold; got {}",
+            (taken - expected).abs() < 1e-5,
+            "partial bite must scale energy; expected {expected}, got {taken}"
+        );
+        assert!(
+            g.density[10].abs() < 1e-6,
+            "density must drain to 0; got {}",
             g.density[10]
         );
     }

@@ -388,7 +388,7 @@ select option {
 }
 .devpanel-row {
   display: grid;
-  grid-template-columns: 110px 1fr 56px;
+  grid-template-columns: 110px 1fr 60px 56px;
   gap: 6px;
   align-items: center;
   font-size: 11px;
@@ -396,6 +396,20 @@ select option {
 }
 .devpanel-row label { opacity: 0.7; }
 .devpanel-row input[type=range] { width: 100%; }
+.devpanel-numinput {
+  width: 100%;
+  font-size: 11px;
+  font-family: ui-monospace, monospace;
+  background: #1a1a1a;
+  color: #eee;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  padding: 1px 4px;
+  border-radius: 2px;
+}
+/* Hide the spinner buttons on the number input — they're noisy at this size. */
+.devpanel-numinput::-webkit-outer-spin-button,
+.devpanel-numinput::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.devpanel-numinput { -moz-appearance: textfield; }
 .devpanel-readout {
   text-align: right;
   font-variant-numeric: tabular-nums;

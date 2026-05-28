@@ -306,24 +306,20 @@ impl World {
             .min(self.scratch_got_a_bite.len());
         for i in 0..m {
             let dg = if self.scratch_argmax_pre[i] == Action::Graze as u8 {
-                0.01
+                0.5
             } else {
-                -0.01
+                -0.05
             };
             self.creatures.color_g[i] = (self.creatures.color_g[i] + dg).clamp(0.0, 1.0);
 
             let db = if self.creatures.action_this_tick[i] == Action::Split {
-                0.5
+                1.0
             } else {
-                -0.005
+                -0.01
             };
             self.creatures.color_b[i] = (self.creatures.color_b[i] + db).clamp(0.0, 1.0);
 
-            let dr = if self.scratch_got_a_bite[i] {
-                0.1
-            } else {
-                -0.001
-            };
+            let dr = if self.scratch_got_a_bite[i] { 1.0 } else { -0.01 };
             self.creatures.color_r[i] = (self.creatures.color_r[i] + dr).clamp(0.0, 1.0);
         }
     }
@@ -894,8 +890,8 @@ mod tests {
         w.color_ema_update();
 
         assert!(
-            (w.creatures.color_g[0] - 0.01).abs() < 1e-6,
-            "green expected 0.01 got {}",
+            (w.creatures.color_g[0] - 0.5).abs() < 1e-6,
+            "green expected 0.5 got {}",
             w.creatures.color_g[0]
         );
         assert_eq!(w.creatures.color_b[0], 0.0, "blue clamped at 0");
@@ -908,18 +904,22 @@ mod tests {
 
         w.color_ema_update();
 
-        // green: was 0.01, argmax-pre != Graze → -0.01 → back to 0.
-        assert_eq!(w.creatures.color_g[0], 0.0, "green back to 0");
-        // blue: was 0.0, +0.5 (Split tick) → 0.5.
+        // green: was 0.5, argmax-pre != Graze → -0.05 → 0.45.
         assert!(
-            (w.creatures.color_b[0] - 0.5).abs() < 1e-6,
-            "blue expected 0.5 got {}",
+            (w.creatures.color_g[0] - 0.45).abs() < 1e-6,
+            "green expected 0.45 got {}",
+            w.creatures.color_g[0]
+        );
+        // blue: was 0.0, +1.0 (Split tick) → clamps to 1.0.
+        assert!(
+            (w.creatures.color_b[0] - 1.0).abs() < 1e-6,
+            "blue expected 1.0 got {}",
             w.creatures.color_b[0]
         );
-        // red: was 0.0, +0.1 (bite) → 0.1.
+        // red: was 0.0, +1.0 (bite) → clamps to 1.0.
         assert!(
-            (w.creatures.color_r[0] - 0.1).abs() < 1e-6,
-            "red expected 0.1 got {}",
+            (w.creatures.color_r[0] - 1.0).abs() < 1e-6,
+            "red expected 1.0 got {}",
             w.creatures.color_r[0]
         );
     }
