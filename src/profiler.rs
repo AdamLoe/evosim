@@ -417,16 +417,26 @@ fn push_f64(out: &mut String, v: f64) {
 
 // ─── Clock abstraction ───────────────────────────────────────────────────────
 
-/// Current time in milliseconds. On wasm32, uses `web_sys::Performance::now()`
-/// (monotonic, sub-microsecond resolution). On native (tests), uses a
-/// monotonic Instant against a static epoch.
+/// Direct binding to `performance.now()`. Resolves against whichever global
+/// the caller is in (Window or WorkerGlobalScope), so this works on the main
+/// thread AND inside the sim worker AND from rayon worker threads — none of
+/// which can see `web_sys::window()`.
+#[cfg(target_arch = "wasm32")]
+mod ts_perf {
+    use wasm_bindgen::prelude::*;
+    #[wasm_bindgen]
+    extern "C" {
+        #[wasm_bindgen(js_namespace = performance, js_name = now)]
+        pub fn now() -> f64;
+    }
+}
+
+/// Current time in milliseconds. On wasm32, uses `performance.now()` via the
+/// scope-agnostic binding above. On native (tests), uses a monotonic Instant
+/// against a static epoch.
 #[cfg(target_arch = "wasm32")]
 fn clock_now_ms() -> f64 {
-    web_sys::window()
-        .expect("no window")
-        .performance()
-        .expect("no performance")
-        .now()
+    ts_perf::now()
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -448,31 +458,12 @@ fn clock_now_ms() -> f64 {
     epoch.elapsed().as_secs_f64() * 1000.0
 }
 
-/// Current time in microseconds (u64). On wasm32, uses `Performance::now()`
-/// which returns fractional milliseconds — multiply by 1000 for µs resolution.
+/// Current time in microseconds (u64). On wasm32, uses `performance.now()`
+/// via the scope-agnostic binding above (works in window AND worker scopes).
 /// Non-monotonic risk eliminated: `Performance::now()` is monotonic by spec.
 #[cfg(target_arch = "wasm32")]
 fn clock_now_us() -> u64 {
-    let ms = web_sys::window()
-        .expect("no window")
-        .performance()
-        .expect("no performance")
-        .now();
-    (ms * 1000.0) as u64
-}
-
-/// Thread-safe clock readable from rayon workers. On wasm32, binds directly to
-/// the global `performance.now()` which exists in both Window and Worker scopes
-/// (avoids `web_sys::window()` which is main-thread-only). On native, falls
-/// through to `clock_now_us()`.
-#[cfg(target_arch = "wasm32")]
-mod ts_perf {
-    use wasm_bindgen::prelude::*;
-    #[wasm_bindgen]
-    extern "C" {
-        #[wasm_bindgen(js_namespace = performance, js_name = now)]
-        pub fn now() -> f64;
-    }
+    (ts_perf::now() * 1000.0) as u64
 }
 
 #[cfg(target_arch = "wasm32")]
