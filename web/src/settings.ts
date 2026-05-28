@@ -33,6 +33,11 @@ export interface Settings {
   splitThreshold: number;
   splitGift: number;
   founderCount: number;
+  // Curriculum (v1.5 Step 4)
+  curriculumMinPop: number;
+  curriculumMaxPop: number;
+  curriculumMinFactor: number;
+  autoCurriculum: boolean;
 }
 
 const DEFAULTS: Settings = {
@@ -58,6 +63,10 @@ const DEFAULTS: Settings = {
   splitThreshold: 50,
   splitGift: 30,
   founderCount: 8,
+  curriculumMinPop: 1000,
+  curriculumMaxPop: 2000,
+  curriculumMinFactor: 0.0,
+  autoCurriculum: true,
 };
 
 function readFromStorage(): Partial<Settings> | null {

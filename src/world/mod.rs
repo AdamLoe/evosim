@@ -54,6 +54,14 @@ pub struct DevSliders {
     pub split_gift: f32,
     /// Number of founders seeded at world init (clamped to [1, 32]).
     pub founder_count: u32,
+    /// Curriculum: population at/below which the cost factor equals `curriculum_min_factor`.
+    pub curriculum_min_pop: u32,
+    /// Curriculum: population at/above which the cost factor equals 1.0.
+    pub curriculum_max_pop: u32,
+    /// Curriculum: floor for the cost factor. 0.0 = costs vanish below `min_pop`.
+    pub curriculum_min_factor: f32,
+    /// Curriculum master switch. When false the factor is pinned to 1.0.
+    pub auto_curriculum: bool,
 }
 
 impl Default for DevSliders {
@@ -76,6 +84,10 @@ impl Default for DevSliders {
             split_threshold: SPLIT_THRESHOLD,
             split_gift: SPLIT_GIFT_MAX,
             founder_count: FOUNDER_COUNT_DEFAULT,
+            curriculum_min_pop: CURRICULUM_MIN_POP_DEFAULT,
+            curriculum_max_pop: CURRICULUM_MAX_POP_DEFAULT,
+            curriculum_min_factor: CURRICULUM_MIN_FACTOR_DEFAULT,
+            auto_curriculum: true,
         }
     }
 }
@@ -134,6 +146,9 @@ pub struct World {
     /// S27: promoted dead-indices buffer from collect_deaths.
     /// Cleared and refilled each call; caller reads it via &self.scratch_dead.
     pub(crate) scratch_dead: Vec<usize>,
+    /// Curriculum factor recomputed at the top of each `step()` and applied to
+    /// move/eat/upkeep costs. Init 1.0 so pre-tick reads (tests) see "normal".
+    pub current_curriculum_factor: f32,
 }
 
 impl World {
@@ -201,6 +216,7 @@ impl World {
             scratch_got_a_bite: Vec::new(),
             scratch_eat_candidates: Vec::new(),
             scratch_dead: Vec::new(),
+            current_curriculum_factor: 1.0,
         }
     }
 
@@ -219,6 +235,22 @@ impl World {
         // Each sub-span is brace-scoped so its guard drops before the next
         // sibling span pushes (required for correct parent attribution).
         crate::profile_span!(&self.profile, "tick");
+
+        // Curriculum: population-feedback cost scaler. Smoothstep ramps the
+        // factor from `min_factor` (at pop ≤ min_pop) to 1.0 (at pop ≥ max_pop)
+        // so selection pressure is fully present only once the population is
+        // robust enough to survive it.
+        let factor = if !self.sliders.auto_curriculum {
+            1.0
+        } else {
+            let pop = self.creatures.len() as f32;
+            let lo = self.sliders.curriculum_min_pop as f32;
+            let hi = self.sliders.curriculum_max_pop as f32;
+            let t = ((pop - lo) / (hi - lo).max(1.0)).clamp(0.0, 1.0);
+            let s = t * t * (3.0 - 2.0 * t);
+            self.sliders.curriculum_min_factor + (1.0 - self.sliders.curriculum_min_factor) * s
+        };
+        self.current_curriculum_factor = factor;
 
         // 1. Rebuild spatial hash grid from start-of-tick positions.
         {
@@ -470,6 +502,7 @@ impl World {
             scratch_got_a_bite: Vec::new(),
             scratch_eat_candidates: Vec::new(),
             scratch_dead: Vec::new(),
+            current_curriculum_factor: self.current_curriculum_factor,
         }
     }
 }
@@ -643,6 +676,116 @@ mod tests {
                 w.tick
             );
         }
+    }
+
+    // ---- v1.5 Step 4: curriculum factor ----
+
+    /// Default floor is 0.0; with pop=0 the factor must collapse to 0.0 so
+    /// fragile early generations bleed no costs.
+    #[test]
+    fn curriculum_factor_floor_at_zero_pop_default_zero() {
+        let mut w = World::new("curriculum-floor-zero");
+        // Drain to zero population; tick() short-circuits when world_ended, so
+        // poke creatures.len() to 0 directly and force-recompute via step path.
+        w.creatures.energy[0] = -1.0;
+        w.collect_deaths();
+        let dead = std::mem::take(&mut w.scratch_dead);
+        w.creatures.remove_indices(&dead);
+        w.vision.clear();
+        assert_eq!(w.creatures.len(), 0);
+        // Manual recompute (step() returns false immediately when empty).
+        let pop = w.creatures.len() as f32;
+        let lo = w.sliders.curriculum_min_pop as f32;
+        let hi = w.sliders.curriculum_max_pop as f32;
+        let t = ((pop - lo) / (hi - lo).max(1.0)).clamp(0.0, 1.0);
+        let s = t * t * (3.0 - 2.0 * t);
+        let factor = w.sliders.curriculum_min_factor + (1.0 - w.sliders.curriculum_min_factor) * s;
+        assert!(
+            factor.abs() < 1e-6,
+            "default floor 0.0 must yield factor 0.0 at pop=0; got {factor}"
+        );
+    }
+
+    /// At pop ≥ max_pop the factor must equal 1.0 (full selection pressure).
+    #[test]
+    fn curriculum_factor_one_at_max_pop() {
+        let mut w = World::new("curriculum-max");
+        // Pad population beyond max_pop without bothering with brains: clone
+        // the founder's brain count via push for each additional slot.
+        let max = w.sliders.curriculum_max_pop as usize;
+        use crate::brain::Brain;
+        let mut rng = SimRng::from_string("pad");
+        while w.creatures.len() < max + 5 {
+            let b = Brain::founder(&mut rng);
+            let id = w.next_creature_id;
+            w.next_creature_id += 1;
+            w.creatures.push(id, 1.0, 1.0, 10.0, 0, b);
+            w.vision.push([0.0f32; VISION_LEN]);
+        }
+        // Drive one tick so step() runs the factor compute.
+        w.tick_once();
+        assert!(
+            (w.current_curriculum_factor - 1.0).abs() < 1e-6,
+            "factor at pop > max_pop must be 1.0; got {}",
+            w.current_curriculum_factor
+        );
+    }
+
+    /// Smoothstep at the midpoint (t=0.5) must give s=0.5; factor = min + 0.5*(1-min).
+    /// With default min_factor=0.0, midpoint factor must equal 0.5.
+    #[test]
+    fn curriculum_factor_smoothstep_midpoint() {
+        let mut w = World::new("curriculum-midpoint");
+        let mid_pop = ((w.sliders.curriculum_min_pop + w.sliders.curriculum_max_pop) / 2) as usize;
+        use crate::brain::Brain;
+        let mut rng = SimRng::from_string("pad");
+        while w.creatures.len() < mid_pop {
+            let b = Brain::founder(&mut rng);
+            let id = w.next_creature_id;
+            w.next_creature_id += 1;
+            w.creatures.push(id, 1.0, 1.0, 10.0, 0, b);
+            w.vision.push([0.0f32; VISION_LEN]);
+        }
+        w.tick_once();
+        // At t=0.5 → s = 0.5*0.5*(3 - 1.0) = 0.5
+        assert!(
+            (w.current_curriculum_factor - 0.5).abs() < 1e-4,
+            "midpoint factor must be 0.5 with min_factor=0; got {}",
+            w.current_curriculum_factor
+        );
+    }
+
+    /// Custom floor: setting min_factor=0.5 must keep the factor >= 0.5 at any population.
+    #[test]
+    fn curriculum_factor_respects_custom_floor() {
+        let mut w = World::new("curriculum-custom-floor");
+        w.sliders.curriculum_min_factor = 0.5;
+        // pop=1 ≪ min_pop ⇒ smoothstep returns 0 ⇒ factor = 0.5
+        w.tick_once();
+        assert!(
+            w.current_curriculum_factor >= 0.5 - 1e-6,
+            "factor must respect floor 0.5; got {}",
+            w.current_curriculum_factor
+        );
+        assert!(
+            (w.current_curriculum_factor - 0.5).abs() < 1e-6,
+            "at pop=1 (well below min_pop) factor must equal floor 0.5; got {}",
+            w.current_curriculum_factor
+        );
+    }
+
+    /// `auto_curriculum=false` pins factor to 1.0 regardless of population.
+    #[test]
+    fn auto_curriculum_off_yields_factor_one() {
+        let mut w = World::new("curriculum-off");
+        w.sliders.auto_curriculum = false;
+        // pop=1: would otherwise yield factor=0.0 with default floor.
+        w.tick_once();
+        assert!(
+            (w.current_curriculum_factor - 1.0).abs() < 1e-6,
+            "auto_curriculum=false must pin factor to 1.0; got {}",
+            w.current_curriculum_factor
+        );
     }
 
     /// perf-1 T2: child's trig cache is populated on birth; parent's is unchanged.

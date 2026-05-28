@@ -32,6 +32,15 @@ pub const DIGESTION_COOLDOWN_TICKS: u32 = 50;
 // ---- Past-lifespan penalty (v5 §7) ----
 pub const PAST_LIFESPAN_MULT: f32 = 4.0; // per 1000 ticks past max_age
 
+// ---- Curriculum (v1.5 Step 4) ----
+// Cost factor = MIN_FACTOR + (1 - MIN_FACTOR) * smoothstep(min_pop, max_pop, pop).
+// Floor defaults to 0.0 (user-tunable up to 1.0); below min_pop costs vanish so
+// fragile early populations stop bleeding upkeep before selection has anything
+// to grip. User-exposed slider lets us crank floor toward 1.0 once a regime stabilises.
+pub const CURRICULUM_MIN_FACTOR_DEFAULT: f32 = 0.0;
+pub const CURRICULUM_MIN_POP_DEFAULT: u32 = 1000;
+pub const CURRICULUM_MAX_POP_DEFAULT: u32 = 2000;
+
 // ---- Brain (v1.3 §D9) ----
 // Layout: [0..5) self-state, [5..77) vision 24×3, [77..80) last_action 3,
 //         [80..105) grass-patch 5×5, [105..112) padding zeros.

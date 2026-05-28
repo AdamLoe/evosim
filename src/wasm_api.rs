@@ -373,6 +373,18 @@ impl WorldHandle {
         // Stored for next world construction (active world keeps its current population).
         self.inner.sliders.founder_count = value.clamp(1, 32);
     }
+    fn apply_curriculum_min_pop(&mut self, value: u32) {
+        self.inner.sliders.curriculum_min_pop = value;
+    }
+    fn apply_curriculum_max_pop(&mut self, value: u32) {
+        self.inner.sliders.curriculum_max_pop = value;
+    }
+    fn apply_curriculum_min_factor(&mut self, value: f32) {
+        self.inner.sliders.curriculum_min_factor = value.clamp(0.0, 1.0);
+    }
+    fn apply_auto_curriculum(&mut self, value: bool) {
+        self.inner.sliders.auto_curriculum = value;
+    }
 
     /// Typed setter — per-birth mutation rate multiplier.
     #[wasm_bindgen]
@@ -464,6 +476,31 @@ impl WorldHandle {
         self.apply_founder_count(value);
     }
 
+    /// Typed setter — curriculum lower-pop knee.
+    #[wasm_bindgen]
+    pub fn set_curriculum_min_pop(&mut self, value: u32) {
+        self.apply_curriculum_min_pop(value);
+    }
+
+    /// Typed setter — curriculum upper-pop knee.
+    #[wasm_bindgen]
+    pub fn set_curriculum_max_pop(&mut self, value: u32) {
+        self.apply_curriculum_max_pop(value);
+    }
+
+    /// Typed setter — curriculum floor (clamped to [0, 1]).
+    #[wasm_bindgen]
+    pub fn set_curriculum_min_factor(&mut self, value: f32) {
+        self.apply_curriculum_min_factor(value);
+    }
+
+    /// Typed setter — curriculum master switch. Separate setter (not in
+    /// `try_set_slider`) because the value is a bool, not an f32.
+    #[wasm_bindgen]
+    pub fn set_auto_curriculum(&mut self, value: bool) {
+        self.apply_auto_curriculum(value);
+    }
+
     /// Apply a dev-panel slider live by name. JS console workflow
     /// (BUILD-REPORT Known Issue #4). Returns `Err` on unknown name so a
     /// console typo is visible instead of silently ignored.
@@ -500,6 +537,9 @@ impl WorldHandle {
             "split_threshold" => self.apply_split_threshold(value),
             "split_gift" => self.apply_split_gift(value),
             "founder_count" => self.apply_founder_count(value.max(0.0) as u32),
+            "curriculum_min_pop" => self.apply_curriculum_min_pop(value.max(0.0) as u32),
+            "curriculum_max_pop" => self.apply_curriculum_max_pop(value.max(0.0) as u32),
+            "curriculum_min_factor" => self.apply_curriculum_min_factor(value),
             _ => return false,
         }
         true

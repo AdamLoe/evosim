@@ -69,7 +69,7 @@ impl World {
 
         // D3: speed_cap = MOVE_SPEED_MAX for all creatures (constant).
         let speed_cap = MOVE_SPEED_MAX;
-        let move_mult = self.sliders.move_cost_multiplier;
+        let move_mult = self.sliders.move_cost_multiplier * self.current_curriculum_factor;
         for i in 0..n {
             let vx = self.creatures.vx[i];
             let vy = self.creatures.vy[i];
@@ -251,7 +251,7 @@ impl World {
             }
         }
 
-        let eat_mult = self.sliders.eat_cost_multiplier;
+        let eat_mult = self.sliders.eat_cost_multiplier * self.current_curriculum_factor;
         for i in 0..n {
             if self.scratch_attempted_eat[i] {
                 self.creatures.energy[i] -= COST_EAT_ATTEMPT * eat_mult;
@@ -273,7 +273,7 @@ impl World {
         // (UPKEEP_GUT for gut always present, mouth_tax for eat_eff always > 0)
         let mouth_tax = self.sliders.mouth_tax;
         let up_base = UPKEEP_BASE + UPKEEP_NN_FIXED + UPKEEP_GUT + mouth_tax;
-        let mult = self.sliders.upkeep_multiplier;
+        let mult = self.sliders.upkeep_multiplier * self.current_curriculum_factor;
         let energy_cap = self.sliders.energy_max;
         let max_age = self.sliders.max_age;
         for i in 0..self.creatures.len() {

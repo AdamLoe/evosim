@@ -101,6 +101,10 @@ export function reapplyDevSliders(world: WorldHandle): void {
   world.set_split_threshold(s.splitThreshold);
   world.set_split_gift(s.splitGift);
   world.set_founder_count(s.founderCount);
+  world.set_curriculum_min_pop(s.curriculumMinPop);
+  world.set_curriculum_max_pop(s.curriculumMaxPop);
+  world.set_curriculum_min_factor(s.curriculumMinFactor);
+  world.set_auto_curriculum(s.autoCurriculum);
 }
 
 // Default per-tick upkeep at multiplier=1: must match the Rust sum
@@ -405,6 +409,59 @@ export function installDevPanel(getWorld: () => WorldHandle): void {
   for (const spec of lifecycleSliders) {
     box.appendChild(makeSlider(spec).row);
   }
+
+  // ── Curriculum ────────────────────────────────────────────────────
+  box.appendChild(header("curriculum"));
+
+  box.appendChild(makeToggle({
+    label: "auto curriculum",
+    default: persisted.autoCurriculum,
+    onChange: (v) => {
+      setSetting("autoCurriculum", v);
+      getWorld().set_auto_curriculum(v);
+    },
+  }));
+
+  box.appendChild(makeSlider({
+    label: "min pop",
+    min: 0,
+    max: 5000,
+    step: 50,
+    default: persisted.curriculumMinPop,
+    formatValue: (v) => String(Math.round(v)),
+    onChange: (v) => {
+      const rounded = Math.round(v);
+      setSetting("curriculumMinPop", rounded);
+      getWorld().set_curriculum_min_pop(rounded);
+    },
+  }).row);
+
+  box.appendChild(makeSlider({
+    label: "max pop",
+    min: 0,
+    max: 5000,
+    step: 50,
+    default: persisted.curriculumMaxPop,
+    formatValue: (v) => String(Math.round(v)),
+    onChange: (v) => {
+      const rounded = Math.round(v);
+      setSetting("curriculumMaxPop", rounded);
+      getWorld().set_curriculum_max_pop(rounded);
+    },
+  }).row);
+
+  box.appendChild(makeSlider({
+    label: "min factor",
+    min: 0,
+    max: 1,
+    step: 0.05,
+    default: persisted.curriculumMinFactor,
+    formatValue: (v) => v.toFixed(2),
+    onChange: (v) => {
+      setSetting("curriculumMinFactor", v);
+      getWorld().set_curriculum_min_factor(v);
+    },
+  }).row);
 
   // ── Reset ─────────────────────────────────────────────────────────
   const resetWrap = document.createElement("div");
