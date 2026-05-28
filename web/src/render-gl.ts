@@ -348,7 +348,7 @@ export function renderWorld(
 
   // ─── Grass ───
   // Skipping the upload + draw entirely when the user toggles grass off is
-  // a real perf win at high cell counts (230_400 cells = 230 KB R8 upload
+  // a real perf win at high cell counts (921_600 cells = 921 KB R8 upload
   // per frame + a fullscreen-discard fragment pass).
   if (getSettings().showGrass) {
     const dim = world.grass_dim;

@@ -17,7 +17,7 @@ pub struct WorldHandle {
     /// Reusable serialization buffer for `creatures_buffer` — one f32 vec
     /// shared across calls so JS can read a stable typed-array view.
     creature_buf: Vec<f32>,
-    /// Reusable buffer for `grass_buffer` — avoids re-allocating 230_400 f32s each frame.
+    /// Reusable buffer for `grass_buffer` — avoids re-allocating 921_600 f32s each frame.
     grass_buf: Vec<f32>,
     /// Reusable u8-quantized buffer for `grass_buffer_u8` — backs the R8 GPU upload (v1.5 S6).
     grass_buf_u8: Vec<u8>,
@@ -327,7 +327,7 @@ impl WorldHandle {
         GRASS_CELL_SIZE
     }
 
-    /// Copy the current grass density field (230_400 f32s) into a cached Vec
+    /// Copy the current grass density field (921_600 f32s) into a cached Vec
     /// and return a Float32Array view over it. Retained for callers that need
     /// raw f32 density (debug / tests); the WebGL2 R8 path uses
     /// `grass_buffer_u8` instead. The view is valid only until the next Rust
@@ -339,7 +339,7 @@ impl WorldHandle {
         unsafe { js_sys::Float32Array::view(&self.grass_buf) }
     }
 
-    /// v1.5 S6: u8-quantized density for the R8 GPU upload (230_400 bytes/frame
+    /// v1.5 S6: u8-quantized density for the R8 GPU upload (921_600 bytes/frame
     /// at the current grid dim). Returns a fresh `Uint8Array` copy — safe across
     /// subsequent Rust calls. `(d * 255.0).clamp(0, 255) as u8`.
     #[wasm_bindgen]
@@ -790,7 +790,7 @@ impl WorldHandle {
 
     // ─── P3d observability counters ──────────────────────────────────────────
 
-    /// Count of grass cells where density > 0. O(230_400) — negligible at v1 scale.
+    /// Count of grass cells where density > 0. O(921_600) — negligible at v1 scale.
     #[wasm_bindgen]
     pub fn live_grass_cell_count(&self) -> u32 {
         self.inner
@@ -801,7 +801,7 @@ impl WorldHandle {
             .count() as u32
     }
 
-    /// Sum of all grass cell densities. O(230_400) — negligible at v1 scale.
+    /// Sum of all grass cell densities. O(921_600) — negligible at v1 scale.
     #[wasm_bindgen]
     pub fn total_grass_density(&self) -> f32 {
         self.inner.grass.density.iter().sum()

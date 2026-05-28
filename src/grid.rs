@@ -1,5 +1,5 @@
-//! Spatial hash grid for neighbor queries. 5u cells over a 600×600 world
-//! → 120×120 = 14,400 cells. Single shared structure for raycasts and
+//! Spatial hash grid for neighbor queries. 5u cells over a 1200×1200 world
+//! → 240×240 = 57,600 cells. Single shared structure for raycasts and
 //! repulsion (v5 §3.3).
 
 use crate::constants::*;
@@ -11,10 +11,10 @@ pub struct SpatialGrid {
     pub(crate) starts: Vec<u32>,
     pub(crate) indices: Vec<u32>,
     /// Scratch cursors for the scatter pass of `rebuild`.
-    /// Length matches `starts` (HASH_DIM * HASH_DIM + 1 = 14 401).
+    /// Length matches `starts` (HASH_DIM * HASH_DIM + 1 = 57 601).
     /// Reused across rebuilds via `copy_from_slice(&starts)` to
     /// avoid the per-tick allocation that `starts.clone()` would
-    /// otherwise cost (~57 kB × 3 rebuilds/tick = ~173 kB/tick).
+    /// otherwise cost (~230 kB × 3 rebuilds/tick = ~691 kB/tick).
     /// Must always be the same length as `starts`; resize both in lockstep.
     cursors: Vec<u32>,
     /// Per-creature cached cell index, computed once in `rebuild`.
@@ -134,7 +134,7 @@ mod tests {
     /// Walled world: cell_of with x/y >= WORLD_SIZE clamps to last cell.
     #[test]
     fn cell_of_clamps_above() {
-        // x = WORLD_SIZE = 600.0 → floor(120) = 120 → clamp(119) → column 119.
+        // x = WORLD_SIZE = 1200.0 → floor(240) = 240 → clamp(239) → column 239.
         let c = SpatialGrid::cell_of(WORLD_SIZE, 0.0);
         assert_eq!(
             c,

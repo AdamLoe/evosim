@@ -2,13 +2,13 @@
 //! section number so future readers can audit against the pitch.
 
 // ---- World shape (v5 §3.3, v6 §D) ----
-pub const WORLD_SIZE: f32 = 600.0;
+pub const WORLD_SIZE: f32 = 1200.0;
 /// Creature body radius scale in world-units (D3: constant; S3 — moved from world/mod.rs).
 pub const BODY_RADIUS_PER_SIZE: f32 = 1.0;
 
 // ---- Spatial hash (v5 §3.3) ----
 pub const HASH_CELL: f32 = 5.0;
-pub const HASH_DIM: usize = (WORLD_SIZE / HASH_CELL) as usize; // 120
+pub const HASH_DIM: usize = (WORLD_SIZE / HASH_CELL) as usize; // 240
 
 // ---- Energy economy upkeep (v5 §7; D3: per-trait terms removed) ----
 pub const UPKEEP_BASE: f32 = 0.05;
@@ -122,12 +122,12 @@ pub const MIN_CHUNKS: usize = 4;
 pub const MAX_CHUNKS: usize = 16;
 
 // ---- Grass grid ----
-/// Cell size in world-units. World is 600u → 480 cells per axis (v1.5 S6).
+/// Cell size in world-units. World is 1200u → 960 cells per axis (v1.5 S6).
 pub const GRASS_CELL_SIZE: f32 = 1.25;
-/// Number of grass cells per axis (480).
-pub const GRASS_GRID_DIM: usize = (WORLD_SIZE / GRASS_CELL_SIZE) as usize; // 480
-/// Total grass cells (230_400).
-pub const GRASS_CELL_COUNT: usize = GRASS_GRID_DIM * GRASS_GRID_DIM; // 230_400
+/// Number of grass cells per axis (960).
+pub const GRASS_GRID_DIM: usize = (WORLD_SIZE / GRASS_CELL_SIZE) as usize; // 960
+/// Total grass cells (921_600).
+pub const GRASS_CELL_COUNT: usize = GRASS_GRID_DIM * GRASS_GRID_DIM; // 921_600
 /// Maximum density per cell (clamped post-step).
 pub const GRASS_MAX: f32 = 1.0;
 /// Default in-cell logistic growth rate slider.

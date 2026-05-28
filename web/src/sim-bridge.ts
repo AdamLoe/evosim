@@ -57,7 +57,7 @@ export const SNAPSHOT_HEADER_BYTES = 32;
 export const CREATURE_SOA_BYTES = MAX_POP_FOR_SAB * CREATURE_STRIDE * 4;
 
 /** Bytes per grass density region in one snapshot slot. Matches `GRASS_CELL_COUNT`. */
-export const GRASS_BYTES = 230_400;
+export const GRASS_BYTES = 921_600;
 
 /** Bytes per snapshot slot (header + creatures + grass). */
 export const SLOT_BYTES = SNAPSHOT_HEADER_BYTES + CREATURE_SOA_BYTES + GRASS_BYTES;
