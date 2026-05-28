@@ -17,8 +17,10 @@ pub struct WorldHandle {
     /// Reusable serialization buffer for `creatures_buffer` — one f32 vec
     /// shared across calls so JS can read a stable typed-array view.
     creature_buf: Vec<f32>,
-    /// Reusable buffer for `grass_buffer` — avoids re-allocating 3_600 f32s each frame.
+    /// Reusable buffer for `grass_buffer` — avoids re-allocating 230_400 f32s each frame.
     grass_buf: Vec<f32>,
+    /// Reusable u8-quantized buffer for `grass_buffer_u8` — backs the R8 GPU upload (v1.5 S6).
+    grass_buf_u8: Vec<u8>,
     /// Reusable f64 buffer for `creature_ids_buffer` — index-aligned with creatures_buffer.
     id_buf: Vec<f64>,
     /// Reusable buffer for `pack_render_buffer` — already in GPU instance layout
@@ -51,6 +53,7 @@ impl WorldHandle {
             inner,
             creature_buf: Vec::new(),
             grass_buf: Vec::new(),
+            grass_buf_u8: Vec::new(),
             id_buf: Vec::new(),
             render_buf: Vec::new(),
             tick_durations_ms: std::collections::VecDeque::new(),
@@ -100,6 +103,7 @@ impl WorldHandle {
             inner,
             creature_buf: Vec::new(),
             grass_buf: Vec::new(),
+            grass_buf_u8: Vec::new(),
             id_buf: Vec::new(),
             render_buf: Vec::new(),
             tick_durations_ms: std::collections::VecDeque::new(),
@@ -291,29 +295,45 @@ impl WorldHandle {
 
     // ─── Grass render API (P1g) ──────────────────────────────────────────────
 
-    /// Grass grid dimension (120). Constant accessor; called per frame by the
-    /// Canvas2D render layer to avoid hard-coding the value in TS.
+    /// Grass grid dimension (480). Constant accessor; called per frame by the
+    /// renderer to avoid hard-coding the value in TS.
     #[wasm_bindgen(getter)]
     pub fn grass_dim(&self) -> u32 {
         GRASS_GRID_DIM as u32
     }
 
-    /// Grass cell size in world-units (5.0). Constant accessor; used by the
-    /// Canvas2D render layer for world→screen coordinate conversion.
+    /// Grass cell size in world-units (1.25). Constant accessor; used by the
+    /// render layer for world→screen coordinate conversion.
     #[wasm_bindgen(getter)]
     pub fn grass_cell_size(&self) -> f32 {
         GRASS_CELL_SIZE
     }
 
-    /// Copy the current grass density field (3_600 f32s) into a cached Vec
-    /// and return a Float32Array view over it. Called once per frame by the
-    /// Canvas2D render layer. The view is valid only until the next Rust call
-    /// that moves `self.grass_buf` (safe for single-frame use).
+    /// Copy the current grass density field (230_400 f32s) into a cached Vec
+    /// and return a Float32Array view over it. Retained for callers that need
+    /// raw f32 density (debug / tests); the WebGL2 R8 path uses
+    /// `grass_buffer_u8` instead. The view is valid only until the next Rust
+    /// call that moves `self.grass_buf` (safe for single-frame use).
     #[wasm_bindgen]
     pub fn grass_buffer(&mut self) -> js_sys::Float32Array {
         self.grass_buf.clear();
         self.grass_buf.extend_from_slice(&self.inner.grass.density);
         unsafe { js_sys::Float32Array::view(&self.grass_buf) }
+    }
+
+    /// v1.5 S6: u8-quantized density for the R8 GPU upload (230_400 bytes/frame
+    /// at the current grid dim). Returns a fresh `Uint8Array` copy — safe across
+    /// subsequent Rust calls. `(d * 255.0).clamp(0, 255) as u8`.
+    #[wasm_bindgen]
+    pub fn grass_buffer_u8(&mut self) -> js_sys::Uint8Array {
+        let density = &self.inner.grass.density;
+        self.grass_buf_u8.clear();
+        self.grass_buf_u8.reserve(density.len());
+        for d in density {
+            let q = (d * 255.0).clamp(0.0, 255.0) as u8;
+            self.grass_buf_u8.push(q);
+        }
+        js_sys::Uint8Array::from(&self.grass_buf_u8[..])
     }
 
     // ─── Per-slider typed setters (S17) ─────────────────────────────────────
@@ -664,7 +684,7 @@ impl WorldHandle {
 
     // ─── P3d observability counters ──────────────────────────────────────────
 
-    /// Count of grass cells where density > 0. O(3_600) — negligible at v1 scale.
+    /// Count of grass cells where density > 0. O(230_400) — negligible at v1 scale.
     #[wasm_bindgen]
     pub fn live_grass_cell_count(&self) -> u32 {
         self.inner
@@ -675,7 +695,7 @@ impl WorldHandle {
             .count() as u32
     }
 
-    /// Sum of all grass cell densities. O(3_600) — negligible at v1 scale.
+    /// Sum of all grass cell densities. O(230_400) — negligible at v1 scale.
     #[wasm_bindgen]
     pub fn total_grass_density(&self) -> f32 {
         self.inner.grass.density.iter().sum()

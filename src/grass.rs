@@ -1,22 +1,25 @@
-//! GrassGrid — 120×120 = 14_400 flat-Vec<f32> density field over the
-//! 600u walled world. Each cell is 5u square. Independent of SpatialGrid
-//! (5u, body queries). v1.2 grass-mechanic-brief §Grass storage / §Grass
-//! dynamics per tick / §Initial grass seed / §Bilinear sampling.
+//! GrassGrid — 480×480 = 230_400 flat-Vec<f32> density field over the
+//! 600u walled world. Each cell is 1.25u square (v1.5 S6 — 16× density bump
+//! from the 5u/120-dim v1.2 layout). Independent of SpatialGrid (5u, body
+//! queries). v1.2 grass-mechanic-brief §Grass storage / §Grass dynamics per
+//! tick / §Initial grass seed / §Bilinear sampling.
 
 use crate::constants::{GRASS_CELL_COUNT, GRASS_CELL_SIZE, GRASS_GRID_DIM, GRASS_MAX, WORLD_SIZE};
 use crate::rng::SimRng;
+#[cfg(feature = "threads")]
+use rayon::prelude::*;
 
 // Compile-time invariant checks.
-const _: () = assert!(GRASS_CELL_COUNT == 14_400);
-const _: () = assert!(GRASS_GRID_DIM == 120);
+const _: () = assert!(GRASS_CELL_COUNT == 230_400);
+const _: () = assert!(GRASS_GRID_DIM == 480);
 
-/// 120×120 grass density field over the 600u walled world.
+/// 480×480 grass density field over the 600u walled world.
 ///
 /// Row-major layout: cell (ix, iy) is at index `iy * GRASS_GRID_DIM + ix`.
 /// Density values are clamped to `[0.0, GRASS_MAX]` after each `step` call.
 #[derive(Clone, Debug)]
 pub struct GrassGrid {
-    /// Row-major density, length GRASS_CELL_COUNT (= 14_400).
+    /// Row-major density, length GRASS_CELL_COUNT (= 230_400).
     pub density: Vec<f32>,
     /// Double-buffer scratch. Same length as `density`. Recomputed every
     /// `step` call; never read between ticks.
@@ -100,21 +103,19 @@ impl GrassGrid {
         let dim = GRASS_GRID_DIM;
         let inv_max = 1.0 / GRASS_MAX;
         let d = &self.density;
-        let s = &mut self.scratch;
 
-        for iy in 0..dim {
+        // Single-row body: writes into `s_row` (one dim-long slice of scratch)
+        // by reading the (iy-1, iy, iy+1) rows from `d`. Ghost-zero N/S/E/W.
+        let row_body = |iy: usize, s_row: &mut [f32]| {
             let row_self = iy * dim;
-            // Ghost-zero at boundary: north neighbor is 0 at iy==0, south is 0 at iy==dim-1.
             let row_n = if iy == 0 { None } else { Some((iy - 1) * dim) };
             let row_s = if iy + 1 == dim {
                 None
             } else {
                 Some((iy + 1) * dim)
             };
-
             for ix in 0..dim {
                 let c = row_self + ix;
-                // Ghost-zero at boundary for east/west.
                 let ce = if ix + 1 == dim {
                     None
                 } else {
@@ -127,7 +128,6 @@ impl GrassGrid {
                 };
                 let cn = row_n.map(|r| r + ix);
                 let cs = row_s.map(|r| r + ix);
-
                 let v = d[c];
                 let logistic = r_in_cell * v * (1.0 - v * inv_max);
                 let prop = k_propagate
@@ -135,7 +135,29 @@ impl GrassGrid {
                         + cs.map_or(0.0, |i| d[i])
                         + ce.map_or(0.0, |i| d[i])
                         + cw.map_or(0.0, |i| d[i]));
-                s[c] = (v + logistic + prop).clamp(0.0, GRASS_MAX);
+                s_row[ix] = (v + logistic + prop).clamp(0.0, GRASS_MAX);
+            }
+        };
+
+        #[cfg(feature = "threads")]
+        {
+            // Split scratch into contiguous row-chunks. ~30 rows/chunk at 480
+            // dims keeps the per-chunk cost meaty enough to outweigh dispatch.
+            let chunk_rows = (dim / 16).max(1);
+            self.scratch
+                .par_chunks_mut(chunk_rows * dim)
+                .enumerate()
+                .for_each(|(ci, s_chunk)| {
+                    let iy0 = ci * chunk_rows;
+                    for (k, s_row) in s_chunk.chunks_mut(dim).enumerate() {
+                        row_body(iy0 + k, s_row);
+                    }
+                });
+        }
+        #[cfg(not(feature = "threads"))]
+        {
+            for (iy, s_row) in self.scratch.chunks_mut(dim).enumerate() {
+                row_body(iy, s_row);
             }
         }
 

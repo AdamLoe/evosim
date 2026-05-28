@@ -110,12 +110,12 @@ pub const MIN_CHUNKS: usize = 4;
 pub const MAX_CHUNKS: usize = 16;
 
 // ---- Grass grid ----
-/// Cell size in world-units. World is 600u → 120 cells per axis.
-pub const GRASS_CELL_SIZE: f32 = 5.0;
-/// Number of grass cells per axis (120).
-pub const GRASS_GRID_DIM: usize = (WORLD_SIZE / GRASS_CELL_SIZE) as usize; // 120
-/// Total grass cells (14_400).
-pub const GRASS_CELL_COUNT: usize = GRASS_GRID_DIM * GRASS_GRID_DIM; // 14_400
+/// Cell size in world-units. World is 600u → 480 cells per axis (v1.5 S6).
+pub const GRASS_CELL_SIZE: f32 = 1.25;
+/// Number of grass cells per axis (480).
+pub const GRASS_GRID_DIM: usize = (WORLD_SIZE / GRASS_CELL_SIZE) as usize; // 480
+/// Total grass cells (230_400).
+pub const GRASS_CELL_COUNT: usize = GRASS_GRID_DIM * GRASS_GRID_DIM; // 230_400
 /// Maximum density per cell (clamped post-step).
 pub const GRASS_MAX: f32 = 1.0;
 /// Default in-cell logistic growth rate slider.

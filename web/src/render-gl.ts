@@ -1,6 +1,6 @@
 // WebGL2 renderer. Replaces the Canvas2D path with one instanced "disc"
 // draw call covering all creature bodies, trait rings, and highlights, plus
-// one fullscreen quad that samples an R32F grass-density texture and one
+// one fullscreen quad that samples an R8 grass-density texture and one
 // LINES draw for the world-bounds frame.
 //
 // Why: at pop ≈ 2000+, Canvas2D's per-`arc` path overhead (5+ arcs per
@@ -57,9 +57,10 @@ void main() {
   out_color = v_color;
 }`;
 
-// Grass: one quad spanning the world, samples an R32F density texture and
-// emits uniform green wherever density > 0. (M2 dropped per-cell alpha
-// modulation; cells are binary on/off.)
+// Grass: one quad spanning the world, samples an R8 density texture
+// (v1.5 S6 — was R32F) and fades green by density. Quantization to u8 happens
+// Rust-side via `grass_buffer_u8`; the shader treats `.r` as a normalized
+// f32 in [0, 1] either way.
 const GRASS_VS = `#version 300 es
 precision highp float;
 layout(location = 0) in vec2 a_corner;   // unit quad [0, 1]
@@ -337,18 +338,18 @@ export function renderWorld(
 
   // ─── Grass ───
   // Skipping the upload + draw entirely when the user toggles grass off is
-  // a real perf win at high cell counts (14_400 cells = 56 KB R32F upload
+  // a real perf win at high cell counts (230_400 cells = 230 KB R8 upload
   // per frame + a fullscreen-discard fragment pass).
   if (getSettings().showGrass) {
     const dim = world.grass_dim;
-    const density = world.grass_buffer() as unknown as Float32Array;
+    const density = world.grass_buffer_u8() as unknown as Uint8Array;
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, s.grassTex);
     if (dim !== s.grassTexDim) {
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, dim, dim, 0, gl.RED, gl.FLOAT, density);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, dim, dim, 0, gl.RED, gl.UNSIGNED_BYTE, density);
       s.grassTexDim = dim;
     } else {
-      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, dim, dim, gl.RED, gl.FLOAT, density);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, dim, dim, gl.RED, gl.UNSIGNED_BYTE, density);
     }
     gl.useProgram(s.grassProgram);
     gl.uniform2f(s.grassU.viewport, viewW, viewH);

@@ -26,10 +26,9 @@ use crate::grass::GrassGrid;
 use crate::grid::SpatialGrid;
 
 /// Half-cell offset window used by `build_sector_lut`. The LUT covers integer
-/// cell offsets in `-LUT_RADIUS..=+LUT_RADIUS` along each axis. At the current
-/// `GRASS_CELL_SIZE = 5` this comfortably covers `PROXIMITY_RANGE = 20` (4
-/// cells); a 16-cell pad leaves headroom for the Wave D drop to 1.25u (16
-/// cells exactly).
+/// cell offsets in `-LUT_RADIUS..=+LUT_RADIUS` along each axis. At v1.5 S6's
+/// `GRASS_CELL_SIZE = 1.25` this covers `PROXIMITY_RANGE = 20` exactly
+/// (20 / 1.25 = 16 cells).
 pub(crate) const LUT_RADIUS: i32 = 16;
 /// LUT side length (`2*LUT_RADIUS + 1 = 33`).
 pub(crate) const LUT_DIM: usize = (LUT_RADIUS as usize) * 2 + 1;
