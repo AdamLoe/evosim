@@ -96,6 +96,11 @@ impl GrassGrid {
     /// ```
     /// Out-of-bounds neighbors are treated as zero density (ghost-zero boundary).
     /// Empty cells with all-zero neighbors remain zero (no spontaneous spawn).
+    ///
+    /// Production callers in `World::tick_once` now invoke the split
+    /// `compute_propagation` + `rebuild_row_bitset` directly so the profiler
+    /// can break the two phases apart; this convenience wrapper survives for
+    /// the grass-only unit tests in this module.
     #[cfg(test)]
     pub fn step(&mut self, r_in_cell: f32, k_propagate: f32) {
         self.compute_propagation(r_in_cell, k_propagate);

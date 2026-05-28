@@ -70,8 +70,7 @@ impl World {
                             // Always-on: 2 clock reads/chunk. Records which
                             // worker ran this chunk + how many creatures it
                             // processed, regardless of profiler state.
-                            let chunk_start_us =
-                                crate::profiler::clock_now_us_threadsafe();
+                            let chunk_start_us = crate::profiler::clock_now_us_threadsafe();
                             let mut chunk_pick = PickTimings::default();
 
                             for k in 0..vx_sub.len() {
@@ -103,8 +102,7 @@ impl World {
                                 arg_sub[k] = argmax_pre;
                             }
 
-                            let chunk_end_us =
-                                crate::profiler::clock_now_us_threadsafe();
+                            let chunk_end_us = crate::profiler::clock_now_us_threadsafe();
                             let worker_idx = rayon::current_thread_index().unwrap_or(0);
                             stats_ref.record_chunk_lite(
                                 worker_idx,

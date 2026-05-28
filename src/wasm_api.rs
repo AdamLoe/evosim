@@ -31,6 +31,10 @@ pub struct WorldHandle {
     tick_durations_ms: std::collections::VecDeque<f64>,
     /// Count of ticks whose wall-clock duration exceeded JANK_BUDGET_MS.
     jank_count: u32,
+    /// One-shot guard for the `write_snapshot_to` truncation warning. Latches
+    /// `true` the first time population exceeds `MAX_POP_FOR_SAB` so we don't
+    /// flood the console at every snapshot write.
+    snapshot_truncation_warned: bool,
 }
 
 #[wasm_bindgen]
@@ -58,6 +62,7 @@ impl WorldHandle {
             render_buf: Vec::new(),
             tick_durations_ms: std::collections::VecDeque::new(),
             jank_count: 0,
+            snapshot_truncation_warned: false,
         }
     }
 
@@ -108,6 +113,7 @@ impl WorldHandle {
             render_buf: Vec::new(),
             tick_durations_ms: std::collections::VecDeque::new(),
             jank_count: 0,
+            snapshot_truncation_warned: false,
         }
     }
 
@@ -193,10 +199,13 @@ impl WorldHandle {
     }
 
     /// Repack creature SoA into a contiguous Float32Array. Layout per creature
-    /// (6 floats, stride = [`creature_stride`]):
-    /// `[x, y, radius_world, r, g, b]`.
+    /// (8 floats, stride = [`creature_stride`]):
+    /// `[x, y, radius_world, r, g, b, id_lo, id_hi]`.
     /// v1.5 S3: color is per-creature action-EMA with a 0.15 display floor so
     /// fresh-born creatures (EMA=(0,0,0)) stay visible against the dark BG.
+    /// v1.6 S A1: id_lo/id_hi carry the stable creature id as two `u32`s
+    /// reinterpreted via `f32::from_bits`. JS reads them as a `Uint32Array`
+    /// view over the same memory — no float→u32 round-tripping.
     #[wasm_bindgen]
     pub fn creatures_buffer(&mut self) -> js_sys::Float32Array {
         let n = self.inner.creatures.len();
@@ -214,6 +223,15 @@ impl WorldHandle {
             self.creature_buf[off + 3] = self.inner.creatures.color_r[i].max(0.15);
             self.creature_buf[off + 4] = self.inner.creatures.color_g[i].max(0.15);
             self.creature_buf[off + 5] = self.inner.creatures.color_b[i].max(0.15);
+            // v1.6 S A1: id column — split u64 into two u32 halves, reinterpret
+            // each as f32 via `from_bits`. JS undoes this with
+            // `new Uint32Array(buf.buffer, byteOffset + 24, 2)` over the same
+            // 8 bytes (no conversion cost; both sides see the raw bit pattern).
+            let id = self.inner.creatures.id[i];
+            let id_lo = id as u32;
+            let id_hi = (id >> 32) as u32;
+            self.creature_buf[off + 6] = f32::from_bits(id_lo);
+            self.creature_buf[off + 7] = f32::from_bits(id_hi);
         }
         unsafe { js_sys::Float32Array::view(&self.creature_buf) }
     }
@@ -334,6 +352,72 @@ impl WorldHandle {
             self.grass_buf_u8.push(q);
         }
         js_sys::Uint8Array::from(&self.grass_buf_u8[..])
+    }
+
+    // ─── v1.6 S A1: SAB snapshot writer ─────────────────────────────────────
+
+    /// Write a full snapshot (stats header + creature SoA + grass density)
+    /// into three caller-provided `Uint8Array` views over a SharedArrayBuffer.
+    /// Wave C wires this from the sim worker after each `step_n(batch)`.
+    ///
+    /// Layout — all little-endian, all packed:
+    ///
+    /// `stats_dst` (≥ 20 bytes):
+    ///   - `[0..4)`   `tick: u32`
+    ///   - `[4..8)`   `pop: u32` (post-truncation count actually written)
+    ///   - `[8..12)`  `world_ended: u32` (0/1)
+    ///   - `[12..16)` `tps_bits: u32` = `self.tps().to_bits()` — reader does
+    ///                 `new Float32Array(buf, off + 12, 1)[0]`. f32 round-trip,
+    ///                 no encoding decision (plan-review I4).
+    ///   - `[16..20)` `jank_count: u32`
+    ///
+    /// `creatures_dst` (≥ `MAX_POP_FOR_SAB × 32` bytes):
+    ///   Creature SoA at 32-byte stride, identical layout to `creatures_buffer`:
+    ///   `[x, y, body_r, r, g, b, f32::from_bits(id_lo), f32::from_bits(id_hi)]`.
+    ///   Up to `MAX_POP_FOR_SAB` creatures; the first overflow is `log::warn`ed.
+    ///
+    /// `grass_dst` (≥ `GRASS_CELL_COUNT` bytes):
+    ///   Quantized density `(d * 255.0).clamp(0, 255) as u8` per cell.
+    ///
+    /// **No Rust-side profile span.** The corresponding TS-side span
+    /// `worker.snapshot.write` lands in Wave C (called from JS, no Rust RAII
+    /// parent — opening a Rust span here would orphan at root level).
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen]
+    pub fn write_snapshot_to(
+        &mut self,
+        creatures_dst: js_sys::Uint8Array,
+        grass_dst: js_sys::Uint8Array,
+        stats_dst: js_sys::Uint8Array,
+    ) {
+        let pop_written = self.write_creatures_each(|i, buf32| {
+            // copy_from on a fresh subarray view — cheap (single memcpy).
+            creatures_dst
+                .subarray((i * 32) as u32, ((i + 1) * 32) as u32)
+                .copy_from(buf32);
+        });
+
+        // Stats header — 20 bytes LE at offset 0.
+        let mut header = [0u8; 20];
+        header[0..4].copy_from_slice(&self.inner.tick.to_le_bytes());
+        header[4..8].copy_from_slice(&(pop_written as u32).to_le_bytes());
+        header[8..12]
+            .copy_from_slice(&(if self.inner.world_ended { 1u32 } else { 0u32 }).to_le_bytes());
+        header[12..16].copy_from_slice(&self.tps().to_bits().to_le_bytes());
+        header[16..20].copy_from_slice(&self.jank_count.to_le_bytes());
+        stats_dst.subarray(0, 20).copy_from(&header);
+
+        // Grass — quantized to u8.
+        let density = &self.inner.grass.density;
+        self.grass_buf_u8.clear();
+        self.grass_buf_u8.reserve(density.len());
+        for d in density {
+            let q = (d * 255.0).clamp(0.0, 255.0) as u8;
+            self.grass_buf_u8.push(q);
+        }
+        grass_dst
+            .subarray(0, self.grass_buf_u8.len() as u32)
+            .copy_from(&self.grass_buf_u8);
     }
 
     // ─── Per-slider typed setters (S17) ─────────────────────────────────────
@@ -784,6 +868,99 @@ impl WorldHandle {
     }
 }
 
+// ─── v1.6 S A1: shared snapshot byte writer ─────────────────────────────────
+//
+// Target-agnostic helpers used by both the wasm `write_snapshot_to` (which
+// streams each creature's 32 bytes into a `js_sys::Uint8Array`) and the
+// native `write_snapshot_to_native` test (which streams into a `Vec<u8>`).
+
+impl WorldHandle {
+    /// Per-creature 32-byte serializer. Invokes `sink(i, &buf)` for each
+    /// creature in `[0, min(pop, MAX_POP_FOR_SAB))`, then returns the number
+    /// of creatures actually written. Logs once per `WorldHandle` lifetime
+    /// the first time population exceeds the SAB cap.
+    fn write_creatures_each<F>(&mut self, mut sink: F) -> usize
+    where
+        F: FnMut(usize, &[u8]),
+    {
+        let pop = self.inner.creatures.len();
+        let n = pop.min(MAX_POP_FOR_SAB);
+        if pop > MAX_POP_FOR_SAB && !self.snapshot_truncation_warned {
+            self.snapshot_truncation_warned = true;
+            let msg = format!(
+                "write_snapshot_to: pop={pop} exceeds MAX_POP_FOR_SAB={MAX_POP_FOR_SAB}; truncating (first {n} creatures rendered, remainder dropped this frame and going forward)"
+            );
+            #[cfg(target_arch = "wasm32")]
+            web_sys::console::warn_1(&JsValue::from_str(&msg));
+            #[cfg(not(target_arch = "wasm32"))]
+            eprintln!("{msg}");
+        }
+        let body_r = FOUNDER_SIZE * BODY_RADIUS_PER_SIZE;
+        let mut buf = [0u8; 32];
+        for i in 0..n {
+            let x = self.inner.creatures.x[i];
+            let y = self.inner.creatures.y[i];
+            // v1.5 S3: action-EMA color with 0.15 display floor.
+            let r = self.inner.creatures.color_r[i].max(0.15);
+            let g = self.inner.creatures.color_g[i].max(0.15);
+            let b = self.inner.creatures.color_b[i].max(0.15);
+            let id = self.inner.creatures.id[i];
+            let id_lo = id as u32;
+            let id_hi = (id >> 32) as u32;
+            buf[0..4].copy_from_slice(&x.to_le_bytes());
+            buf[4..8].copy_from_slice(&y.to_le_bytes());
+            buf[8..12].copy_from_slice(&body_r.to_le_bytes());
+            buf[12..16].copy_from_slice(&r.to_le_bytes());
+            buf[16..20].copy_from_slice(&g.to_le_bytes());
+            buf[20..24].copy_from_slice(&b.to_le_bytes());
+            // id_lo/id_hi as raw u32 bits — reader builds a Uint32Array view
+            // over the same 8 bytes; no float→int conversion either side.
+            buf[24..28].copy_from_slice(&id_lo.to_le_bytes());
+            buf[28..32].copy_from_slice(&id_hi.to_le_bytes());
+            sink(i, &buf);
+        }
+        n
+    }
+
+    /// Native (non-wasm32) twin of `write_snapshot_to` used by tests. Writes
+    /// the same byte layout into three caller-provided `&mut Vec<u8>`s — the
+    /// vecs are cleared and then filled to exactly the sizes the wasm path
+    /// would have written into the SAB-backed `Uint8Array`s.
+    ///
+    /// Kept off the wasm path because `js_sys::Uint8Array` is the only thing
+    /// the worker ever passes in; mirroring the bytes here is purely so the
+    /// layout is testable without wasm-bindgen.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn write_snapshot_to_native(
+        &mut self,
+        creatures_dst: &mut Vec<u8>,
+        grass_dst: &mut Vec<u8>,
+        stats_dst: &mut Vec<u8>,
+    ) -> usize {
+        creatures_dst.clear();
+        let pop_written = self.write_creatures_each(|_i, buf32| {
+            creatures_dst.extend_from_slice(buf32);
+        });
+
+        stats_dst.clear();
+        stats_dst.extend_from_slice(&self.inner.tick.to_le_bytes());
+        stats_dst.extend_from_slice(&(pop_written as u32).to_le_bytes());
+        stats_dst
+            .extend_from_slice(&(if self.inner.world_ended { 1u32 } else { 0u32 }).to_le_bytes());
+        stats_dst.extend_from_slice(&self.tps().to_bits().to_le_bytes());
+        stats_dst.extend_from_slice(&self.jank_count.to_le_bytes());
+
+        grass_dst.clear();
+        grass_dst.reserve(self.inner.grass.density.len());
+        for d in &self.inner.grass.density {
+            let q = (d * 255.0).clamp(0.0, 255.0) as u8;
+            grass_dst.push(q);
+        }
+
+        pop_written
+    }
+}
+
 // ─── Clock helper ─────────────────────────────────────────────────────────────
 
 /// Current wall-clock time in milliseconds. On wasm32 uses `Performance::now()`;
@@ -806,38 +983,51 @@ fn wasm_now_ms() -> f64 {
     epoch.elapsed().as_secs_f64() * 1000.0
 }
 
-/// Per-creature float count in [`WorldHandle::creatures_buffer`].
-/// v1.5 S3 layout: 6 floats (dropped flag_eye/move/mouth/armor — all-constant
-/// post-D3; replaced color_rgb hash with action-EMA r/g/b columns).
-/// Layout: `[x, y, radius_world, r, g, b]`.
+/// Per-creature float count in [`WorldHandle::creatures_buffer`] and in the
+/// SAB-backed snapshot SoA produced by [`WorldHandle::write_snapshot_to`].
+///
+/// v1.6 S A1 layout: 8 floats (stride bumped 6 → 8). The trailing two slots
+/// carry the stable creature id split as `(id_lo, id_hi)` and reinterpreted
+/// from `u32` via `f32::from_bits`; readers undo the encoding with
+/// `new Uint32Array(buf.buffer, byteOffset + 24, 2)` over the same memory.
+/// Layout: `[x, y, radius_world, r, g, b, id_lo, id_hi]`.
 #[wasm_bindgen]
 pub fn creature_stride() -> u32 {
-    6
+    8
+}
+
+/// v1.6 SAB snapshot creature cap, mirrored from `constants::MAX_POP_FOR_SAB`.
+/// Sourced from Rust so the worker can pass it to main in `boot_ready`; main
+/// asserts it matches the TS `MAX_POP_FOR_SAB` constant (rebuild-wasm guard).
+#[wasm_bindgen]
+pub fn max_pop_for_sab() -> u32 {
+    MAX_POP_FOR_SAB as u32
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// v1.5 S3: creature_stride() == 6 (flag_* slots dropped, color is EMA RGB).
+    /// v1.6 S A1: creature_stride() == 8 (id_lo/id_hi columns appended).
     /// We can't call creatures_buffer() in native tests (js_sys::Float32Array
     /// requires wasm32), so we test the stride constant and fill-math directly.
     #[test]
-    fn creature_stride_is_6() {
-        assert_eq!(creature_stride(), 6);
+    fn creature_stride_is_8() {
+        assert_eq!(creature_stride(), 8);
         let n: usize = 3;
         let expected = n * creature_stride() as usize;
-        assert_eq!(expected, 18);
+        assert_eq!(expected, 24);
     }
 
-    /// v1.5 S3: fill-math test. Manually resize the creature_buf as the wasm
-    /// path would and assert the length matches population * stride.
+    /// v1.6 S A1: fill-math test. Manually resize the creature_buf as the wasm
+    /// path would and assert the length matches population * stride (8).
     #[test]
     fn creature_buf_length_matches_population_times_stride() {
         let mut handle = WorldHandle::new("s21-stride");
         // Founder population at boot = FOUNDER_COUNT_DEFAULT (v1.5 multi-founder).
         let n = handle.inner.creatures.len();
         let stride = creature_stride() as usize;
+        assert_eq!(stride, 8);
         handle.creature_buf.clear();
         handle.creature_buf.resize(n * stride, 0.0);
         assert_eq!(handle.creature_buf.len(), n * stride);
@@ -845,6 +1035,61 @@ mod tests {
             handle.creature_buf.len(),
             FOUNDER_COUNT_DEFAULT as usize * stride
         );
+    }
+
+    /// v1.6 S A1: `write_snapshot_to_native` produces bytes that match the
+    /// documented stride-8 layout. Exercises the same writer the wasm path
+    /// drives so the SAB layout is testable off-wasm.
+    #[test]
+    fn write_snapshot_to_layout_matches_stride() {
+        let mut handle = WorldHandle::new_with_founder_count("a1-snapshot", 0, 100.0, 3);
+        let mut creatures = Vec::new();
+        let mut grass = Vec::new();
+        let mut stats = Vec::new();
+        let pop_written = handle.write_snapshot_to_native(&mut creatures, &mut grass, &mut stats);
+
+        // Stats header: 5 × 4 bytes.
+        assert_eq!(stats.len(), 20);
+        let read_u32 =
+            |off: usize| -> u32 { u32::from_le_bytes(stats[off..off + 4].try_into().unwrap()) };
+        assert_eq!(read_u32(0), handle.inner.tick);
+        assert_eq!(read_u32(4), pop_written as u32);
+        assert_eq!(read_u32(8), if handle.inner.world_ended { 1 } else { 0 });
+        let tps_bits = read_u32(12);
+        assert_eq!(tps_bits, handle.tps().to_bits());
+        assert_eq!(read_u32(16), handle.jank_count);
+
+        // Creature SoA: 32-byte stride, one record per founder (3 here).
+        assert_eq!(pop_written, 3);
+        assert_eq!(creatures.len(), 3 * 32);
+        for i in 0..3 {
+            let base = i * 32;
+            let x = f32::from_le_bytes(creatures[base..base + 4].try_into().unwrap());
+            let y = f32::from_le_bytes(creatures[base + 4..base + 8].try_into().unwrap());
+            let body = f32::from_le_bytes(creatures[base + 8..base + 12].try_into().unwrap());
+            assert_eq!(x, handle.inner.creatures.x[i]);
+            assert_eq!(y, handle.inner.creatures.y[i]);
+            assert_eq!(body, FOUNDER_SIZE * BODY_RADIUS_PER_SIZE);
+            // Id round-trips via u32-halves.
+            let id_lo = u32::from_le_bytes(creatures[base + 24..base + 28].try_into().unwrap());
+            let id_hi = u32::from_le_bytes(creatures[base + 28..base + 32].try_into().unwrap());
+            let id = ((id_hi as u64) << 32) | (id_lo as u64);
+            assert_eq!(id, handle.inner.creatures.id[i]);
+        }
+
+        // Grass: one byte per cell, quantized.
+        assert_eq!(grass.len(), crate::constants::GRASS_CELL_COUNT);
+        for (i, &q) in grass.iter().enumerate() {
+            let d = handle.inner.grass.density[i];
+            let expected = (d * 255.0).clamp(0.0, 255.0) as u8;
+            assert_eq!(q, expected, "cell {i} quantization mismatch");
+        }
+    }
+
+    /// v1.6 S A1: `max_pop_for_sab()` mirrors the Rust constant.
+    #[test]
+    fn max_pop_for_sab_matches_constant() {
+        assert_eq!(max_pop_for_sab(), MAX_POP_FOR_SAB as u32);
     }
 
     /// E.21: creature_inspect_json returns None for out-of-range idx.

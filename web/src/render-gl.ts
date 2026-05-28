@@ -327,9 +327,13 @@ export function renderWorld(
   nowMs: number,
 ): void {
   // Mandatory stride guard: mismatch corrupts the instance pack loop.
-  if (stride !== 6) {
+  // v1.6 S A1: tolerant of 6 or 8 during the A1→B window. A1 lands the Rust
+  // stride bump 6→8 in isolation; without this fork a dev-server boot in
+  // that window would throw on the first highlight pass. Wave B tightens to
+  // `!== 8` after the sim worker lands.
+  if (stride !== 6 && stride !== 8) {
     throw new Error(
-      `creature_stride mismatch: expected 6, got ${stride} ` +
+      `creature_stride mismatch: expected 6 or 8, got ${stride} ` +
       `(Rust wasm_api.rs::creature_stride and web/src/render-gl.ts must agree)`,
     );
   }
@@ -415,7 +419,7 @@ export function renderWorld(
   // Reading creatures_buffer here is cheap and only happens when needed.
   if (highlightMap.size > 0) {
     const data = world.creatures_buffer() as unknown as Float32Array;
-    if (stride !== 6) throw new Error(`creature_stride mismatch: ${stride}`);
+    if (stride !== 6 && stride !== 8) throw new Error(`creature_stride mismatch: ${stride}`);
     const scratch = s.instanceScratch;
     let off = 0;
     for (let k = 0; k < ids.length; k++) {
