@@ -967,15 +967,13 @@ impl WorldHandle {
 
 // ─── Clock helper ─────────────────────────────────────────────────────────────
 
-/// Current wall-clock time in milliseconds. On wasm32 uses `Performance::now()`;
-/// on native (tests) uses a monotonic `Instant` against a per-process epoch.
+/// Current wall-clock time in milliseconds. On wasm32 uses `Performance::now()`
+/// via the profiler's scope-agnostic binding so this works on main thread AND
+/// inside the sim worker (where `web_sys::window()` is `None`); on native
+/// (tests) uses a monotonic `Instant` against a per-process epoch.
 #[cfg(target_arch = "wasm32")]
 fn wasm_now_ms() -> f64 {
-    web_sys::window()
-        .expect("no window")
-        .performance()
-        .expect("no performance")
-        .now()
+    crate::profiler::clock_now_us_threadsafe() as f64 / 1000.0
 }
 
 #[cfg(not(target_arch = "wasm32"))]
