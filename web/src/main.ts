@@ -84,14 +84,28 @@ async function main(): Promise<void> {
   // browsers without SharedArrayBuffer skip initThreadPool — the wasm
   // still works, just sequentially (rayon falls back to the calling
   // thread when no workers are registered). See docs/plans/perf-4-threads.md.
-  if (typeof SharedArrayBuffer !== "undefined" && initThreadPool) {
+  //
+  // Logging: print a single line summary so the user can see at a glance
+  // whether threads spun up. `crossOriginIsolated` is the canonical
+  // "SAB actually works here" signal — COOP/COEP headers must reach the
+  // top-level document for it to be true.
+  const hwConc = navigator.hardwareConcurrency;
+  const sabAvail = typeof SharedArrayBuffer !== "undefined";
+  const isolated =
+    (globalThis as unknown as { crossOriginIsolated?: boolean }).crossOriginIsolated ?? false;
+  if (sabAvail && initThreadPool) {
     try {
-      await initThreadPool(navigator.hardwareConcurrency);
+      await initThreadPool(hwConc);
+      console.log(
+        `[threads] pool ready: hardwareConcurrency=${hwConc} crossOriginIsolated=${isolated}`,
+      );
     } catch (e) {
-      console.warn("initThreadPool failed; continuing single-threaded:", e);
+      console.warn("[threads] initThreadPool failed; continuing single-threaded:", e);
     }
   } else {
-    console.warn("SharedArrayBuffer not available; running single-threaded");
+    console.warn(
+      `[threads] not spawned. SharedArrayBuffer=${sabAvail} initThreadPool=${!!initThreadPool} crossOriginIsolated=${isolated}`,
+    );
   }
 
   const params = new URLSearchParams(window.location.search);
