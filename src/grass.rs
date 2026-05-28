@@ -96,6 +96,7 @@ impl GrassGrid {
     /// ```
     /// Out-of-bounds neighbors are treated as zero density (ghost-zero boundary).
     /// Empty cells with all-zero neighbors remain zero (no spontaneous spawn).
+    #[cfg(test)]
     pub fn step(&mut self, r_in_cell: f32, k_propagate: f32) {
         self.compute_propagation(r_in_cell, k_propagate);
         self.rebuild_row_bitset();
