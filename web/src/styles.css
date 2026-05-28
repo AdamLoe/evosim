@@ -416,6 +416,47 @@ select option {
   opacity: 0.4;
   margin-top: 4px;
 }
+
+/* NN worker-stats panel (top of settings overlay). */
+.worker-stats-summary,
+.worker-stats-subphase,
+.worker-stats-pool {
+  font: 11px ui-monospace, monospace;
+  opacity: 0.8;
+  margin: 2px 0;
+}
+.worker-stats-subphase { opacity: 0.6; }
+.worker-stats-pool { opacity: 0.45; font-size: 10px; }
+.worker-stats-profile-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font: 11px ui-monospace, monospace;
+  opacity: 0.7;
+  margin: 2px 0 4px;
+  cursor: pointer;
+  user-select: none;
+}
+.worker-stats-table {
+  width: 100%;
+  border-collapse: collapse;
+  font: 10px ui-monospace, monospace;
+  margin-bottom: 6px;
+}
+.worker-stats-table th {
+  text-align: right;
+  font-weight: normal;
+  opacity: 0.5;
+  padding: 1px 3px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.worker-stats-table th:first-child { text-align: left; }
+.worker-stats-table td {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  padding: 1px 3px;
+}
+.worker-stats-table td:first-child { text-align: left; opacity: 0.6; }
 #devpanel-toggle {
   background: rgba(255,255,255,0.08);
   color: var(--fg);

@@ -67,11 +67,11 @@ impl World {
                             let mut output_buf = [0.0f32; NN_OUTPUTS];
                             let lo = chunk_idx * chunk_size;
 
-                            let chunk_start_us = if timed {
-                                crate::profiler::clock_now_us_threadsafe()
-                            } else {
-                                0
-                            };
+                            // Always-on: 2 clock reads/chunk. Records which
+                            // worker ran this chunk + how many creatures it
+                            // processed, regardless of profiler state.
+                            let chunk_start_us =
+                                crate::profiler::clock_now_us_threadsafe();
                             let mut chunk_pick = PickTimings::default();
 
                             for k in 0..vx_sub.len() {
@@ -103,14 +103,17 @@ impl World {
                                 arg_sub[k] = argmax_pre;
                             }
 
+                            let chunk_end_us =
+                                crate::profiler::clock_now_us_threadsafe();
+                            let worker_idx = rayon::current_thread_index().unwrap_or(0);
+                            stats_ref.record_chunk_lite(
+                                worker_idx,
+                                chunk_start_us,
+                                chunk_end_us,
+                                vx_sub.len() as u64,
+                            );
                             if timed {
-                                let chunk_end_us = crate::profiler::clock_now_us_threadsafe();
-                                let worker_idx = rayon::current_thread_index().unwrap_or(0);
-                                stats_ref.record_chunk(
-                                    worker_idx,
-                                    chunk_start_us,
-                                    chunk_end_us,
-                                    vx_sub.len() as u64,
+                                stats_ref.record_chunk_subphases(
                                     chunk_pick.build.other_us,
                                     chunk_pick.build.creature_sectors_us,
                                     chunk_pick.build.grass_sectors_us,
@@ -140,11 +143,8 @@ impl World {
                 let mut hidden_buf_1 = [0.0f32; NN_HIDDEN_1];
                 let mut hidden_buf_2 = [0.0f32; NN_HIDDEN_2];
                 let mut output_buf = [0.0f32; NN_OUTPUTS];
-                let chunk_start_us = if timed {
-                    crate::profiler::clock_now_us_threadsafe()
-                } else {
-                    0
-                };
+                // Always-on chunk telemetry (single virtual worker = idx 0).
+                let chunk_start_us = crate::profiler::clock_now_us_threadsafe();
                 let mut chunk_pick = PickTimings::default();
                 for i in lo..hi {
                     let prev_vx = self.creatures.vx[i];
@@ -173,13 +173,11 @@ impl World {
                     self.creatures.action_this_tick[i] = action;
                     self.scratch_argmax_pre[i] = argmax_pre;
                 }
+                let chunk_end_us = crate::profiler::clock_now_us_threadsafe();
+                self.nn_stats
+                    .record_chunk_lite(0, chunk_start_us, chunk_end_us, (hi - lo) as u64);
                 if timed {
-                    let chunk_end_us = crate::profiler::clock_now_us_threadsafe();
-                    self.nn_stats.record_chunk(
-                        0, // sequential build: a single virtual worker.
-                        chunk_start_us,
-                        chunk_end_us,
-                        (hi - lo) as u64,
+                    self.nn_stats.record_chunk_subphases(
                         chunk_pick.build.other_us,
                         chunk_pick.build.creature_sectors_us,
                         chunk_pick.build.grass_sectors_us,

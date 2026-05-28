@@ -88,19 +88,17 @@ impl NnStats {
         self.tick_workers_used_bitset.store(0, Ordering::Relaxed);
     }
 
-    /// Record one chunk's worth of work. Called by every worker thread on every
-    /// chunk; uses `Relaxed` atomics so the contention is fetch_add-only.
-    #[allow(clippy::too_many_arguments)]
-    pub fn record_chunk(
+    /// Always-on per-chunk telemetry — 2 clock reads per chunk (start + end)
+    /// totalling ~30 reads/tick at max chunk count. Cheap enough to leave on
+    /// unconditionally; the UI panel reads this without enabling the profiler.
+    /// Tracks: which workers ran, how many chunks/creatures each handled,
+    /// total busy time, first/last-seen wall clock.
+    pub fn record_chunk_lite(
         &self,
         worker_idx: usize,
         chunk_start_us: u64,
         chunk_end_us: u64,
         creatures_in_chunk: u64,
-        build_input_other_us: u64,
-        proximity_creatures_us: u64,
-        proximity_grass_us: u64,
-        forward_us: u64,
     ) {
         let w = worker_idx.min(MAX_TRACKED_WORKERS - 1);
         let chunk_us = chunk_end_us.saturating_sub(chunk_start_us);
@@ -116,7 +114,24 @@ impl NnStats {
         self.worker_chunks[w].fetch_add(1, Ordering::Relaxed);
         self.worker_creatures[w].fetch_add(creatures_in_chunk, Ordering::Relaxed);
         self.worker_busy_us[w].fetch_add(chunk_us, Ordering::Relaxed);
+        self.tick_chunk_wall_us
+            .fetch_add(chunk_us, Ordering::Relaxed);
 
+        if w < 64 {
+            self.tick_workers_used_bitset
+                .fetch_or(1u64 << w, Ordering::Relaxed);
+        }
+    }
+
+    /// Add per-creature sub-phase timings to this tick's aggregates. Called in
+    /// addition to `record_chunk_lite` when the profiler is enabled.
+    pub fn record_chunk_subphases(
+        &self,
+        build_input_other_us: u64,
+        proximity_creatures_us: u64,
+        proximity_grass_us: u64,
+        forward_us: u64,
+    ) {
         self.tick_build_input_other_us
             .fetch_add(build_input_other_us, Ordering::Relaxed);
         self.tick_proximity_creatures_us
@@ -125,13 +140,6 @@ impl NnStats {
             .fetch_add(proximity_grass_us, Ordering::Relaxed);
         self.tick_forward_us
             .fetch_add(forward_us, Ordering::Relaxed);
-        self.tick_chunk_wall_us
-            .fetch_add(chunk_us, Ordering::Relaxed);
-
-        if w < 64 {
-            self.tick_workers_used_bitset
-                .fetch_or(1u64 << w, Ordering::Relaxed);
-        }
     }
 
     /// JSON snapshot for the dev panel / inspector. One object with a
@@ -220,9 +228,12 @@ mod tests {
     #[test]
     fn record_chunk_accumulates_per_worker() {
         let s = NnStats::new(0);
-        s.record_chunk(0, 100, 250, 50, 30, 40, 50, 20);
-        s.record_chunk(0, 300, 500, 80, 60, 70, 50, 40);
-        s.record_chunk(2, 110, 180, 30, 10, 20, 30, 15);
+        s.record_chunk_lite(0, 100, 250, 50);
+        s.record_chunk_subphases(30, 40, 50, 20);
+        s.record_chunk_lite(0, 300, 500, 80);
+        s.record_chunk_subphases(60, 70, 50, 40);
+        s.record_chunk_lite(2, 110, 180, 30);
+        s.record_chunk_subphases(10, 20, 30, 15);
 
         assert_eq!(s.worker_chunks[0].load(Ordering::Relaxed), 2);
         assert_eq!(s.worker_creatures[0].load(Ordering::Relaxed), 130);
@@ -238,9 +249,24 @@ mod tests {
     }
 
     #[test]
+    fn record_chunk_lite_works_without_subphases() {
+        let s = NnStats::new(0);
+        // Lite-only path: per-worker counts accumulate without any sub-phase data.
+        s.record_chunk_lite(1, 0, 100, 25);
+        s.record_chunk_lite(1, 100, 200, 25);
+        assert_eq!(s.worker_chunks[1].load(Ordering::Relaxed), 2);
+        assert_eq!(s.worker_creatures[1].load(Ordering::Relaxed), 50);
+        // Sub-phase aggregates remain zero — UI panel can render worker
+        // health even when the profiler is off.
+        assert_eq!(s.tick_forward_us.load(Ordering::Relaxed), 0);
+        assert_eq!(s.tick_chunk_wall_us.load(Ordering::Relaxed), 200);
+    }
+
+    #[test]
     fn reset_tick_clears_per_tick_only() {
         let s = NnStats::new(0);
-        s.record_chunk(0, 100, 200, 50, 10, 20, 30, 40);
+        s.record_chunk_lite(0, 100, 200, 50);
+        s.record_chunk_subphases(10, 20, 30, 40);
         s.reset_tick();
         assert_eq!(s.worker_chunks[0].load(Ordering::Relaxed), 1); // preserved
         assert_eq!(s.tick_forward_us.load(Ordering::Relaxed), 0); // cleared
@@ -250,8 +276,8 @@ mod tests {
     #[test]
     fn first_seen_only_set_once() {
         let s = NnStats::new(0);
-        s.record_chunk(3, 500, 700, 10, 0, 0, 0, 0);
-        s.record_chunk(3, 800, 900, 10, 0, 0, 0, 0);
+        s.record_chunk_lite(3, 500, 700, 10);
+        s.record_chunk_lite(3, 800, 900, 10);
         assert_eq!(s.worker_first_seen_us[3].load(Ordering::Relaxed), 500);
         assert_eq!(s.worker_last_seen_us[3].load(Ordering::Relaxed), 900);
     }

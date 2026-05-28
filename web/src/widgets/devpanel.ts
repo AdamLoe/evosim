@@ -4,6 +4,7 @@
 import type { WorldHandle } from "../../wasm/evosim";
 import { getTargetTPS, setTpsChangeListener, setSettingsOpen, isSettingsOpen } from "../main";
 import { getSettings, setSetting, resetSettings } from "../settings";
+import { installWorkerStatsPanel } from "./worker-stats";
 
 /** Returns the current initial-grass-seed-count for use by world construction. */
 export function getInitialGrassSeedCount(): number {
@@ -154,6 +155,9 @@ export function installDevPanel(getWorld: () => WorldHandle): void {
   }
 
   const persisted = getSettings();
+
+  // ── Thread health (live poller; cheap by default) ─────────────────
+  installWorkerStatsPanel(getWorld, box);
 
   // ── Sim run controls ──────────────────────────────────────────────
   box.appendChild(header("run"));
