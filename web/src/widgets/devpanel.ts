@@ -1,20 +1,19 @@
-// P3b: dev panel overlay with 6 sliders. Toggle with ~ hotkey or ⚙ button.
-// Defaults below must match src/constants.rs — keep in sync (v1.3 follow-up: build-time assertion).
-//   GRASS_PROPAGATION_RATE_K_DEFAULT = 0.1
-//   GRASS_IN_CELL_GROWTH_R_DEFAULT   = 0.05
-//   GRASS_INITIAL_SEED_COUNT_DEFAULT = 100
-//   EAT_BITE_FRACTION_DEFAULT        = 0.5
-//   NN_MUT_SIGMA_DEFAULT resolved at Rust side.
-// M4: dropped mouth_tax slider (no per-creature eat_efficiency anchor in v1.3).
+// Dev-panel overlay: sliders + toggles for live-tuning the sim. Toggle the
+// panel itself with the ~ hotkey or the ⚙ top-bar button.
 
 import type { WorldHandle } from "../../wasm/evosim";
-
-/** Module-local state: passed to WorldHandle.newWithGrassSeed on world creation. */
-let initialGrassSeedCount = 100; // keep in sync with GRASS_INITIAL_SEED_COUNT_DEFAULT
+import { getTargetTPS, setTpsChangeListener } from "../main";
+import { getSettings, setSetting, resetSettings } from "../settings";
 
 /** Returns the current initial-grass-seed-count for use by world construction. */
 export function getInitialGrassSeedCount(): number {
-  return initialGrassSeedCount;
+  return getSettings().initialGrassSeedCount;
+}
+
+/** Returns the current energy-max slider value so it can be plumbed into
+ * world construction (so the founder spawns under the user's chosen cap). */
+export function getEnergyMax(): number {
+  return getSettings().energyMax;
 }
 
 interface SliderSpec {
@@ -27,7 +26,7 @@ interface SliderSpec {
   formatValue?: (v: number) => string;
 }
 
-function makeSlider(spec: SliderSpec): HTMLDivElement {
+function makeSlider(spec: SliderSpec): { row: HTMLDivElement; readout: HTMLSpanElement } {
   const row = document.createElement("div");
   row.className = "devpanel-row";
   const labelEl = document.createElement("label");
@@ -48,34 +47,194 @@ function makeSlider(spec: SliderSpec): HTMLDivElement {
     spec.onChange(v);
   });
   row.append(labelEl, input, readout);
-  return row;
+  return { row, readout };
 }
 
-/** Slider settings applied to the live world. Tracked so restart can
- * re-apply user-tweaked values to a freshly-constructed world. */
-const sliderState = {
-  eatBiteFrac: 0.5,
-  grassPropagK: 0.1,
-  grassGrowthR: 0.05,
-  mutRate: 1.0,
-  nnSigma: 0.02,
-};
+interface ToggleSpec {
+  label: string;
+  default: boolean;
+  onChange: (v: boolean) => void;
+}
+
+function makeToggle(spec: ToggleSpec): HTMLDivElement {
+  const row = document.createElement("div");
+  row.className = "devpanel-row";
+  const labelEl = document.createElement("label");
+  labelEl.textContent = spec.label;
+  const input = document.createElement("input");
+  input.type = "checkbox";
+  input.checked = spec.default;
+  // Push the checkbox to the far right by stretching label + an empty spacer.
+  const spacer = document.createElement("span");
+  spacer.className = "devpanel-readout";
+  spacer.textContent = "";
+  input.addEventListener("change", () => spec.onChange(input.checked));
+  row.append(labelEl, spacer, input);
+  // Apply the default state immediately so the UI matches the toggle's
+  // initial value without waiting for the user's first click.
+  spec.onChange(spec.default);
+  return row;
+}
 
 /** Re-apply all dev-slider values to `world`. Call after restart so the
  * user's tweaks persist across world recreation. `initialGrassSeedCount`
  * is already baked into world construction via `newWithGrassSeed`. */
 export function reapplyDevSliders(world: WorldHandle): void {
-  world.set_eat_bite_fraction(sliderState.eatBiteFrac);
-  world.set_grass_propagation_rate_k(sliderState.grassPropagK);
-  world.set_grass_in_cell_growth_r(sliderState.grassGrowthR);
-  world.set_mutation_rate_multiplier(sliderState.mutRate);
-  world.set_nn_mutation_sigma(sliderState.nnSigma);
+  const s = getSettings();
+  world.set_eat_bite_fraction(s.eatBiteFrac);
+  world.set_grass_propagation_rate_k(s.grassPropagK);
+  world.set_grass_in_cell_growth_r(s.grassGrowthR);
+  world.set_mutation_rate_multiplier(s.mutRate);
+  world.set_nn_mutation_sigma(s.nnSigma);
+  world.set_upkeep_multiplier(s.upkeepMultiplier);
+  world.set_move_cost_multiplier(s.moveCostMultiplier);
+  world.set_eat_cost_multiplier(s.eatCostMultiplier);
+  world.set_energy_max(s.energyMax);
+  world.set_grass_energy_per_bite(s.grassEnergyPerBite);
+  world.set_grass_bites_per_block(s.grassBitesPerBlock);
 }
+
+// Default per-tick upkeep at multiplier=1: must match the Rust sum
+// UPKEEP_BASE + UPKEEP_NN_FIXED + UPKEEP_GUT + UPKEEP_MOUTH_DEFAULT = 0.17.
+// Used to display the per-second drain in the dev panel.
+const UPKEEP_PER_TICK_DEFAULT = 0.17;
 
 /** Install the dev-panel overlay. Call once after WorldHandle is ready. */
 export function installDevPanel(getWorld: () => WorldHandle): void {
   const box = document.getElementById("devpanel-box") as HTMLDivElement | null;
   if (!box) return;
+
+  // Section header helper — keeps the panel scannable when more rows show up.
+  function header(text: string): HTMLDivElement {
+    const h = document.createElement("div");
+    h.textContent = text;
+    h.style.marginTop = "6px";
+    h.style.opacity = "0.65";
+    h.style.fontSize = "11px";
+    h.style.textTransform = "uppercase";
+    h.style.letterSpacing = "0.05em";
+    return h;
+  }
+
+  const persisted = getSettings();
+
+  // ── Sim run controls ──────────────────────────────────────────────
+  box.appendChild(header("run"));
+
+  box.appendChild(makeToggle({
+    label: "auto run",
+    default: persisted.autoRun,
+    onChange: (v) => setSetting("autoRun", v),
+  }));
+
+  // ── Display toggles ───────────────────────────────────────────────
+  box.appendChild(header("display"));
+
+  box.appendChild(makeToggle({
+    label: "show profiler",
+    default: persisted.showProfiler,
+    onChange: (v) => {
+      setSetting("showProfiler", v);
+      const el = document.getElementById("perf-box");
+      if (el) el.style.display = v ? "" : "none";
+    },
+  }));
+
+  box.appendChild(makeToggle({
+    label: "show pop graph",
+    default: persisted.showPopGraph,
+    onChange: (v) => {
+      setSetting("showPopGraph", v);
+      const el = document.getElementById("stats-box");
+      if (el) el.style.display = v ? "" : "none";
+    },
+  }));
+
+  // The grass shader can be skipped entirely (no draw call) — useful when
+  // perf is tight and you only want to watch creatures.
+  box.appendChild(makeToggle({
+    label: "show grass",
+    default: persisted.showGrass,
+    onChange: (v) => setSetting("showGrass", v),
+  }));
+
+  // ── Energy economy ────────────────────────────────────────────────
+  box.appendChild(header("energy"));
+
+  // Basic upkeep multiplier 0 → 2 (default 1 = current). Readout in energy /sec
+  // at the current target TPS; updates when either slider or TPS changes.
+  let upkeepReadout: HTMLSpanElement | null = null;
+  const formatUpkeep = (mult: number): string => {
+    const perSec = mult * UPKEEP_PER_TICK_DEFAULT * getTargetTPS();
+    return `${perSec.toFixed(1)} /s`;
+  };
+  const upkeepRow = makeSlider({
+    label: "basic upkeep",
+    min: 0,
+    max: 2,
+    step: 0.01,
+    default: persisted.upkeepMultiplier,
+    formatValue: formatUpkeep,
+    onChange: (v) => {
+      setSetting("upkeepMultiplier", v);
+      getWorld().set_upkeep_multiplier(v);
+    },
+  });
+  upkeepReadout = upkeepRow.readout;
+  box.appendChild(upkeepRow.row);
+
+  // TPS changes update the upkeep /s readout (without firing the sim setter).
+  setTpsChangeListener(() => {
+    if (upkeepReadout) {
+      upkeepReadout.textContent = formatUpkeep(getSettings().upkeepMultiplier);
+    }
+  });
+
+  // Move cost multiplier — applied to `dist * COST_MOVE_PER_DIST` each tick.
+  // Formatted as a plain Nx multiplier since the per-second value depends on
+  // how much the creature actually moves (not a clean wall-clock rate).
+  box.appendChild(makeSlider({
+    label: "move cost",
+    min: 0,
+    max: 2,
+    step: 0.01,
+    default: persisted.moveCostMultiplier,
+    formatValue: (v) => `${v.toFixed(2)}×`,
+    onChange: (v) => {
+      setSetting("moveCostMultiplier", v);
+      getWorld().set_move_cost_multiplier(v);
+    },
+  }).row);
+
+  // Eat-attempt cost multiplier — applied to COST_EAT_ATTEMPT per attempted bite.
+  box.appendChild(makeSlider({
+    label: "eat cost",
+    min: 0,
+    max: 2,
+    step: 0.01,
+    default: persisted.eatCostMultiplier,
+    formatValue: (v) => `${v.toFixed(2)}×`,
+    onChange: (v) => {
+      setSetting("eatCostMultiplier", v);
+      getWorld().set_eat_cost_multiplier(v);
+    },
+  }).row);
+
+  box.appendChild(makeSlider({
+    label: "energy max",
+    min: 50,
+    max: 400,
+    step: 1,
+    default: persisted.energyMax,
+    formatValue: (v) => String(Math.round(v)),
+    onChange: (v) => {
+      setSetting("energyMax", v);
+      getWorld().set_energy_max(v);
+    },
+  }).row);
+
+  // ── Existing sim sliders ──────────────────────────────────────────
+  box.appendChild(header("sim"));
 
   const sliders: SliderSpec[] = [
     {
@@ -83,20 +242,21 @@ export function installDevPanel(getWorld: () => WorldHandle): void {
       min: 0,
       max: 1,
       step: 0.01,
-      default: 0.5, // EAT_BITE_FRACTION_DEFAULT
+      default: persisted.eatBiteFrac,
       onChange: (v) => {
-        sliderState.eatBiteFrac = v;
+        setSetting("eatBiteFrac", v);
         getWorld().set_eat_bite_fraction(v);
       },
     },
     {
       label: "grass propag k",
       min: 0,
-      max: 0.2,
-      step: 0.005,
-      default: 0.1, // GRASS_PROPAGATION_RATE_K_DEFAULT
+      max: 0.004,
+      step: 0.0001,
+      default: persisted.grassPropagK,
+      formatValue: (v) => v.toFixed(4),
       onChange: (v) => {
-        sliderState.grassPropagK = v;
+        setSetting("grassPropagK", v);
         getWorld().set_grass_propagation_rate_k(v);
       },
     },
@@ -105,21 +265,47 @@ export function installDevPanel(getWorld: () => WorldHandle): void {
       min: 0,
       max: 0.05,
       step: 0.001,
-      default: 0.05, // GRASS_IN_CELL_GROWTH_R_DEFAULT
+      default: persisted.grassGrowthR,
       onChange: (v) => {
-        sliderState.grassGrowthR = v;
+        setSetting("grassGrowthR", v);
         getWorld().set_grass_in_cell_growth_r(v);
       },
     },
     {
-      label: "initial seed N",
-      min: 1,
+      label: "energy per bite",
+      min: 5,
       max: 100,
       step: 1,
-      default: 100, // GRASS_INITIAL_SEED_COUNT_DEFAULT
+      default: persisted.grassEnergyPerBite,
       formatValue: (v) => String(Math.round(v)),
       onChange: (v) => {
-        initialGrassSeedCount = Math.round(v);
+        const rounded = Math.round(v);
+        setSetting("grassEnergyPerBite", rounded);
+        getWorld().set_grass_energy_per_bite(rounded);
+      },
+    },
+    {
+      label: "bites per block",
+      min: 1,
+      max: 10,
+      step: 1,
+      default: persisted.grassBitesPerBlock,
+      formatValue: (v) => String(Math.round(v)),
+      onChange: (v) => {
+        const rounded = Math.round(v);
+        setSetting("grassBitesPerBlock", rounded);
+        getWorld().set_grass_bites_per_block(rounded);
+      },
+    },
+    {
+      label: "initial seed N",
+      min: 0,
+      max: 800,
+      step: 1,
+      default: persisted.initialGrassSeedCount,
+      formatValue: (v) => String(Math.round(v)),
+      onChange: (v) => {
+        setSetting("initialGrassSeedCount", Math.round(v));
       },
     },
     {
@@ -127,9 +313,9 @@ export function installDevPanel(getWorld: () => WorldHandle): void {
       min: 0,
       max: 5,
       step: 0.05,
-      default: 1.0, // mutation_rate_multiplier default
+      default: persisted.mutRate,
       onChange: (v) => {
-        sliderState.mutRate = v;
+        setSetting("mutRate", v);
         getWorld().set_mutation_rate_multiplier(v);
       },
     },
@@ -137,18 +323,40 @@ export function installDevPanel(getWorld: () => WorldHandle): void {
       label: "nn σ",
       min: 0,
       max: 0.2,
-      step: 0.005,
-      default: 0.02, // NN_MUT_SIGMA_DEFAULT — keep in sync with constants.rs
+      step: 0.001,
+      default: persisted.nnSigma,
       onChange: (v) => {
-        sliderState.nnSigma = v;
+        setSetting("nnSigma", v);
         getWorld().set_nn_mutation_sigma(v);
       },
     },
   ];
-
   for (const spec of sliders) {
-    box.appendChild(makeSlider(spec));
+    box.appendChild(makeSlider(spec).row);
   }
+
+  // ── Reset ─────────────────────────────────────────────────────────
+  const resetWrap = document.createElement("div");
+  resetWrap.style.marginTop = "8px";
+  resetWrap.style.display = "flex";
+  resetWrap.style.justifyContent = "flex-end";
+  const resetBtn = document.createElement("button");
+  resetBtn.textContent = "reset to defaults";
+  resetBtn.style.background = "rgba(255,255,255,0.08)";
+  resetBtn.style.color = "var(--fg)";
+  resetBtn.style.border = "1px solid rgba(255,255,255,0.15)";
+  resetBtn.style.padding = "3px 10px";
+  resetBtn.style.borderRadius = "3px";
+  resetBtn.style.cursor = "pointer";
+  resetBtn.style.font = "inherit";
+  resetBtn.addEventListener("click", () => {
+    resetSettings();
+    // Easiest way to re-sync every slider, toggle, and input to the new
+    // defaults and start the world fresh under them: reload the page.
+    window.location.reload();
+  });
+  resetWrap.appendChild(resetBtn);
+  box.appendChild(resetWrap);
 
   // ~ hotkey toggle (skip if focus is in an input/textarea).
   window.addEventListener("keydown", (e) => {

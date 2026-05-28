@@ -12,25 +12,25 @@ use crate::creature::Action;
 
 impl World {
     /// Multi-cell graze: for every creature that chose `Action::Graze` this tick,
-    /// consume grass density from every `GrassGrid` cell whose center overlaps the
-    /// creature's body circle (toroidal distance ≤ body radius).
+    /// consume grass density from every `GrassGrid` cell whose box overlaps the
+    /// creature's body circle.
     ///
-    /// Per-cell delta = `min(grass[cell], GRAZE_MAX_PER_TICK * 1.0)`.
-    /// Total energy gained = sum of deltas across all overlapping cells.
-    /// Energy gained equals exactly the grass density consumed (conservation property).
-    ///
-    /// D3: graze_efficiency is always 1.0 (constant). size is FOUNDER_SIZE (constant).
+    /// Per-cell delta is discrete: a cell with density ≥ one chunk yields
+    /// exactly one bite of `grass_energy_per_bite` energy; under-threshold
+    /// cells yield zero. Energy is independent of remaining density.
     ///
     /// Runs SEQUENTIALLY regardless of `--features threads` (two creatures may overlap
-    /// the same grass cell; parallel writes would race on `density[cell]`). See p1e §3.
+    /// the same grass cell; parallel writes would race on `density[cell]`).
     pub(crate) fn graze(&mut self) {
         let n = self.creatures.len();
         if n == 0 {
             return;
         }
 
-        let max_per_cell = GRAZE_MAX_PER_TICK; // D3: graze_eff = 1.0 always
         let ri = FOUNDER_SIZE * BODY_RADIUS_PER_SIZE; // D3: size = FOUNDER_SIZE always
+        let bites_per_block = self.sliders.grass_bites_per_block.max(1) as f32;
+        let density_chunk = GRASS_MAX / bites_per_block;
+        let energy_per_bite = self.sliders.grass_energy_per_bite;
 
         for i in 0..n {
             if self.creatures.action_this_tick[i] != Action::Graze {
@@ -50,8 +50,7 @@ impl World {
             // Phase 2: consume from each cell (mutable borrow of grass).
             let mut total_gain = 0.0_f32;
             for &cell_idx in &cells {
-                let delta = self.grass.consume(cell_idx, max_per_cell);
-                total_gain += delta;
+                total_gain += self.grass.consume(cell_idx, density_chunk, energy_per_bite);
             }
             self.creatures.energy[i] += total_gain;
 
@@ -70,6 +69,7 @@ impl World {
 
         // D3: speed_cap = MOVE_SPEED_MAX for all creatures (constant).
         let speed_cap = MOVE_SPEED_MAX;
+        let move_mult = self.sliders.move_cost_multiplier;
         for i in 0..n {
             let vx = self.creatures.vx[i];
             let vy = self.creatures.vy[i];
@@ -81,7 +81,7 @@ impl World {
                 (vx, vy)
             };
             let dist = (cvx * cvx + cvy * cvy).sqrt();
-            self.creatures.energy[i] -= dist * COST_MOVE_PER_DIST;
+            self.creatures.energy[i] -= dist * COST_MOVE_PER_DIST * move_mult;
             self.creatures.distance_travelled[i] += dist;
             self.creatures.x[i] += cvx;
             self.creatures.y[i] += cvy;
@@ -251,9 +251,10 @@ impl World {
             }
         }
 
+        let eat_mult = self.sliders.eat_cost_multiplier;
         for i in 0..n {
             if self.scratch_attempted_eat[i] {
-                self.creatures.energy[i] -= COST_EAT_ATTEMPT;
+                self.creatures.energy[i] -= COST_EAT_ATTEMPT * eat_mult;
                 if self.scratch_cooldown_set[i] {
                     self.creatures.digestion_cooldown[i] = DIGESTION_COOLDOWN_TICKS;
                 }
@@ -272,18 +273,24 @@ impl World {
         // (UPKEEP_GUT for gut always present, mouth_tax for eat_eff always > 0)
         let mouth_tax = self.sliders.mouth_tax;
         let up_base = UPKEEP_BASE + UPKEEP_NN_FIXED + UPKEEP_GUT + mouth_tax;
+        let mult = self.sliders.upkeep_multiplier;
+        let energy_cap = self.sliders.energy_max;
         for i in 0..self.creatures.len() {
-            let mut up = up_base;
+            let mut up = up_base * mult;
             // D3: max_age is FOUNDER_MAX_AGE (constant).
             let age = self.creatures.age[i];
             if age > FOUNDER_MAX_AGE {
                 let excess = (age - FOUNDER_MAX_AGE) as f32;
-                let mult = PAST_LIFESPAN_MULT.powf(excess / 1000.0);
-                up *= mult.min(1e6);
+                let age_mult = PAST_LIFESPAN_MULT.powf(excess / 1000.0);
+                up *= age_mult.min(1e6);
             }
 
             // D3: max_size_reached removed (was always FOUNDER_SIZE anyway).
             self.creatures.energy[i] -= up;
+            // Live-tunable energy cap (clamp gains at end of tick).
+            if self.creatures.energy[i] > energy_cap {
+                self.creatures.energy[i] = energy_cap;
+            }
             self.creatures.cumulative_upkeep[i] += up;
             if self.creatures.digestion_cooldown[i] > 0 {
                 self.creatures.digestion_cooldown[i] -= 1;
@@ -567,17 +574,19 @@ mod tests {
 
     /// P1e test 2: creature overlapping seeded cells sums deltas correctly.
     /// D3: FOUNDER_SIZE=1.0, BODY_RADIUS_PER_SIZE=1.0 → body radius=1.0.
-    /// GRASS_CELL_SIZE=5.0 so a circle of r=1.0 must be placed at a cell center
-    /// to overlap that cell. We position the creature exactly at cell (60,60)'s
-    /// center so it overlaps at least one cell.
+    /// We position the creature exactly at cell (30,30)'s center so it
+    /// overlaps at least one cell.
     #[test]
     fn graze_n_cell_overlap_sums_capped_deltas() {
-        use crate::constants::{GRASS_CELL_SIZE, GRASS_GRID_DIM, GRASS_MAX, GRAZE_MAX_PER_TICK};
+        use crate::constants::{
+            GRASS_BITES_PER_BLOCK_DEFAULT, GRASS_CELL_SIZE, GRASS_ENERGY_PER_BITE_DEFAULT,
+            GRASS_GRID_DIM, GRASS_MAX,
+        };
 
         let mut w = World::new("graze-patch");
-        // D3: size = FOUNDER_SIZE always. Position creature at cell (60,60) center.
-        let cell_ix: usize = 60;
-        let cell_iy: usize = 60;
+        // D3: size = FOUNDER_SIZE always. Position creature at cell (30,30) center.
+        let cell_ix: usize = 30;
+        let cell_iy: usize = 30;
         let cx = (cell_ix as f32 + 0.5) * GRASS_CELL_SIZE;
         let cy = (cell_iy as f32 + 0.5) * GRASS_CELL_SIZE;
         w.creatures.x[0] = cx;
@@ -602,22 +611,23 @@ mod tests {
         let energy_before = w.creatures.energy[0];
         w.graze();
         let energy_after = w.creatures.energy[0];
-        let expected_gain = overlap_count as f32 * GRAZE_MAX_PER_TICK;
+        let expected_gain = overlap_count as f32 * GRASS_ENERGY_PER_BITE_DEFAULT;
 
         assert!(
             (energy_after - energy_before - expected_gain).abs() < 1e-4,
-            "energy gain={} expected={} (overlap_count={}, cap={})",
+            "energy gain={} expected={} (overlap_count={}, per_bite={})",
             energy_after - energy_before,
             expected_gain,
             overlap_count,
-            GRAZE_MAX_PER_TICK
+            GRASS_ENERGY_PER_BITE_DEFAULT
         );
         // Confirm grass density actually decreased at the center cell.
-        let expected_density = GRASS_MAX - GRAZE_MAX_PER_TICK;
+        let density_chunk = GRASS_MAX / GRASS_BITES_PER_BLOCK_DEFAULT as f32;
+        let expected_density = GRASS_MAX - density_chunk;
         let center_cell = cell_iy * GRASS_GRID_DIM + cell_ix;
         assert!(
             (w.grass.density[center_cell] - expected_density).abs() < 1e-5,
-            "center cell density should have dropped by GRAZE_MAX_PER_TICK; got {}",
+            "center cell density should have dropped by one chunk ({density_chunk}); got {}",
             w.grass.density[center_cell]
         );
     }
@@ -634,8 +644,7 @@ mod tests {
         w.creatures.y[0] = cy;
         w.creatures.action_this_tick[0] = Action::Graze;
 
-        // Use FOUNDER_SIZE for body; need radius >= 2.5 to hit both seam cells.
-        // FOUNDER_SIZE * BODY_RADIUS_PER_SIZE must be >= 2.5 (GRASS_CELL_SIZE/2 = 2.5).
+        // Walled world: a creature at x=0 cannot reach the east seam.
         let iy = ((cy / GRASS_CELL_SIZE).floor() as usize).min(GRASS_GRID_DIM - 1);
         let east_cell = iy * GRASS_GRID_DIM + (GRASS_GRID_DIM - 1);
         let west_cell = iy * GRASS_GRID_DIM;
@@ -645,9 +654,9 @@ mod tests {
         w.graze();
 
         // With the AABB overlap fix, a creature at cx=0 always touches west_cell (ix=0)
-        // because its box [0, 5] contains the creature position (nearest point = 0, dist = 0).
-        // The east_cell (ix=119) is at x=[595,600], dist=595 >> ri → not reached (walled world).
-        // West cell must be drained regardless of body radius (AABB check).
+        // because its box [0, GRASS_CELL_SIZE] contains the creature position
+        // (nearest point = 0, dist = 0). The east cell (ix=dim-1) is far away and
+        // not reached (walled world). West cell must be drained.
         let west_drained = w.grass.density[west_cell] < GRASS_MAX - 1e-6;
         assert!(
             west_drained,
@@ -656,10 +665,13 @@ mod tests {
         );
     }
 
-    /// P1e test 4: single cell at density 1.0 with constant eff → gain == GRAZE_MAX_PER_TICK.
+    /// P1e test 4: single cell at density 1.0 → gain == GRASS_ENERGY_PER_BITE_DEFAULT.
     #[test]
     fn graze_per_cell_cap_holds() {
-        use crate::constants::{GRASS_CELL_SIZE, GRASS_GRID_DIM, GRASS_MAX, GRAZE_MAX_PER_TICK};
+        use crate::constants::{
+            GRASS_BITES_PER_BLOCK_DEFAULT, GRASS_CELL_SIZE, GRASS_ENERGY_PER_BITE_DEFAULT,
+            GRASS_GRID_DIM, GRASS_MAX,
+        };
 
         let mut w = World::new("graze-cap");
         let ix = 2usize;
@@ -668,8 +680,6 @@ mod tests {
         let cy = (iy as f32 + 0.5) * GRASS_CELL_SIZE;
         w.creatures.x[0] = cx;
         w.creatures.y[0] = cy;
-        // D3: size is FOUNDER_SIZE (1.0); if radius < GRASS_CELL_SIZE/2 = 2.5 only center cell hit.
-        // FOUNDER_SIZE=1.0, BODY_RADIUS_PER_SIZE=1.0 → ri=1.0 < 2.5 → single cell overlap.
         w.creatures.action_this_tick[0] = Action::Graze;
 
         let cell_idx = iy * GRASS_GRID_DIM + ix;
@@ -680,21 +690,23 @@ mod tests {
         let gained = w.creatures.energy[0] - energy_before;
 
         assert!(
-            (gained - GRAZE_MAX_PER_TICK).abs() < 1e-5,
-            "gained={gained} expected={GRAZE_MAX_PER_TICK}"
+            (gained - GRASS_ENERGY_PER_BITE_DEFAULT).abs() < 1e-4,
+            "gained={gained} expected={GRASS_ENERGY_PER_BITE_DEFAULT}"
         );
+        let density_chunk = GRASS_MAX / GRASS_BITES_PER_BLOCK_DEFAULT as f32;
         assert!(
-            (w.grass.density[cell_idx] - (GRASS_MAX - GRAZE_MAX_PER_TICK)).abs() < 1e-5,
-            "density should drop by cap; got {}",
+            (w.grass.density[cell_idx] - (GRASS_MAX - density_chunk)).abs() < 1e-5,
+            "density should drop by one chunk ({density_chunk}); got {}",
             w.grass.density[cell_idx]
         );
     }
 
-    /// P1e test 5: graze_efficiency = constant 1.0 — energy gained == GRAZE_MAX_PER_TICK.
-    /// D3: no zero-efficiency path; founder always grazes at full efficiency.
+    /// P1e test 5: single ripe cell → gain == GRASS_ENERGY_PER_BITE_DEFAULT.
     #[test]
     fn graze_constant_efficiency_produces_correct_gain() {
-        use crate::constants::{GRASS_CELL_SIZE, GRASS_GRID_DIM, GRASS_MAX, GRAZE_MAX_PER_TICK};
+        use crate::constants::{
+            GRASS_CELL_SIZE, GRASS_ENERGY_PER_BITE_DEFAULT, GRASS_GRID_DIM, GRASS_MAX,
+        };
 
         let mut w = World::new("graze-const-eff");
         let ix = 5usize;
@@ -711,17 +723,19 @@ mod tests {
         let energy_before = w.creatures.energy[0];
         w.graze();
         let gained = w.creatures.energy[0] - energy_before;
-        // D3: constant eff=1.0, single cell → gain = GRAZE_MAX_PER_TICK.
         assert!(
-            (gained - GRAZE_MAX_PER_TICK).abs() < 1e-5,
-            "gained={gained} expected={GRAZE_MAX_PER_TICK}"
+            (gained - GRASS_ENERGY_PER_BITE_DEFAULT).abs() < 1e-4,
+            "gained={gained} expected={GRASS_ENERGY_PER_BITE_DEFAULT}"
         );
     }
 
-    /// P1e test 6: energy gained == grass density consumed (conservation property).
+    /// P1e test 6: bite-count invariant — energy gained and density consumed
+    /// agree on the same successful-bite count: gain/per_bite == consumed/chunk.
     #[test]
-    fn graze_conserves_energy_with_grass_drain() {
-        use crate::constants::{GRASS_MAX, GRAZE_MAX_PER_TICK};
+    fn graze_conserves_bite_count_invariant() {
+        use crate::constants::{
+            GRASS_BITES_PER_BLOCK_DEFAULT, GRASS_ENERGY_PER_BITE_DEFAULT, GRASS_MAX,
+        };
 
         let mut w = World::new("graze-conserve");
         w.grass.density.fill(GRASS_MAX);
@@ -742,20 +756,23 @@ mod tests {
 
         let density_consumed = density_before - density_after;
         let energy_gained = energy_after - energy_before;
-
+        let density_chunk = GRASS_MAX / GRASS_BITES_PER_BLOCK_DEFAULT as f32;
+        let bites_from_energy = energy_gained / GRASS_ENERGY_PER_BITE_DEFAULT;
+        let bites_from_density = density_consumed / density_chunk;
         assert!(
-            (energy_gained - density_consumed).abs() < 1e-2,
-            "conservation violated: gained={energy_gained} consumed={density_consumed}"
+            (bites_from_energy - bites_from_density).abs() < 1e-3,
+            "bite count from energy ({bites_from_energy}) must match density side ({bites_from_density})"
         );
-        // Sanity: creature should have gained something.
+
+        // Sanity: creature should have gained at least one bite's worth.
         let ri = FOUNDER_SIZE * BODY_RADIUS_PER_SIZE;
         let mut overlap_count = 0usize;
         w.grass
             .for_each_cell_overlapping_circle(cx, cy, ri, |_| overlap_count += 1);
-        let expected_gain = overlap_count as f32 * GRAZE_MAX_PER_TICK.min(GRASS_MAX);
+        let expected_gain = overlap_count as f32 * GRASS_ENERGY_PER_BITE_DEFAULT;
         assert!(
             (energy_gained - expected_gain).abs() < 1e-3,
-            "energy_gained={energy_gained} expected={expected_gain}"
+            "energy_gained={energy_gained} expected={expected_gain} (overlap={overlap_count})"
         );
     }
 
@@ -806,8 +823,9 @@ mod tests {
         let prey_energy_after = w.creatures.energy[1];
 
         // transfer = 0.5 * 100.0 * (1.0 - 0.0) = 50.0
-        // predator gain = 50.0 * 1.0 = 50.0; net = 50.0 - COST_EAT_ATTEMPT (0.3) = 49.7
-        // prey loss = 50.0
+        // predator gain = transfer * eat_eff - COST_EAT_ATTEMPT
+        // prey loss = transfer
+        let expected_gain = 50.0 - COST_EAT_ATTEMPT;
         let prey_loss = prey_energy_before - prey_energy_after;
         let pred_gain = pred_energy_after - pred_energy_before;
 
@@ -816,8 +834,8 @@ mod tests {
             "prey should lose 50.0; lost {prey_loss}"
         );
         assert!(
-            (pred_gain - 49.7).abs() < 1e-3,
-            "predator should gain 49.7 (50 - 0.3 cost); gained {pred_gain}"
+            (pred_gain - expected_gain).abs() < 1e-3,
+            "predator should gain {expected_gain} (50 - COST_EAT_ATTEMPT={COST_EAT_ATTEMPT}); gained {pred_gain}"
         );
     }
 

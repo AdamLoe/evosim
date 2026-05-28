@@ -14,7 +14,12 @@
       "Bash(pkill -f node)",
       "Bash(pkill -f vite)",
       "Bash(pkill -f pnpm)",
-      "Bash(rm -f /tmp/vite.log)"
+      "Bash(rm -f /tmp/vite.log)",
+      "Bash(curl -sf http://localhost:47821/ -o /dev/null)",
+      "Bash(pkill -f 'vite.*47821')",
+      "Bash(curl -sf http://localhost:47821/wasm/evosim.js -o /dev/null)",
+      "Read(//tmp/**)",
+      "Bash(wasm-pack build *)"
     ]
   }
 }

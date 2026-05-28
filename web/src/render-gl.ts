@@ -11,6 +11,7 @@
 
 import type { WorldHandle } from "../wasm/evosim";
 import { type Camera, PX_PER_SIZE } from "./render";
+import { getSettings } from "./settings";
 
 // ─── Shader sources ──────────────────────────────────────────────────────
 
@@ -85,10 +86,14 @@ in vec2 v_uv;
 uniform sampler2D u_grass;
 out vec4 out_color;
 
+// Fade from green at density=1.0 to the dark background as density → 0.
+// Alpha tracks density so under-blend leaves the (near-black) clear color
+// showing through where grass is thin; at full density it's solid green.
 void main() {
-  float d = texture(u_grass, v_uv).r;
+  float d = clamp(texture(u_grass, v_uv).r, 0.0, 1.0);
   if (d <= 0.0) discard;
-  out_color = vec4(60.0/255.0, 180.0/255.0, 60.0/255.0, 0.55);
+  vec3 green = vec3(60.0/255.0, 180.0/255.0, 60.0/255.0);
+  out_color = vec4(green, d);
 }`;
 
 // World-bounds frame: 4 lines (one per edge).
@@ -117,15 +122,6 @@ void main() {
 const FLOATS_PER_INSTANCE = 8; // cx, cy, outer_px, inner_px, r, g, b, a
 const INSTANCE_STRIDE_BYTES = FLOATS_PER_INSTANCE * 4;
 
-// Ring drawing order (innermost → outermost) and colors. Match the v6 §B
-// spec previously encoded in RING_COLORS in render.ts.
-const RING_EYE = [1.0, 1.0, 1.0, 0.85] as const;
-const RING_MOVE = [240 / 255, 220 / 255, 80 / 255, 0.85] as const;
-const RING_MOUTH = [255 / 255, 80 / 255, 80 / 255, 0.85] as const;
-const RING_ARMOR = [200 / 255, 200 / 255, 210 / 255, 0.85] as const;
-const RING_STEP = 1.5;
-// LOD threshold: below this on-screen body radius (px), skip trait rings.
-const RING_LOD_RADIUS_PX = 6;
 // Permanent-highlight sentinel; matches HIGHLIGHT_PERMANENT in highlight.ts.
 const PERMANENT_EXP = Number.MAX_SAFE_INTEGER;
 const HIGHLIGHT_FADE_MS = 1500;
@@ -340,7 +336,10 @@ export function renderWorld(
   gl.clear(gl.COLOR_BUFFER_BIT);
 
   // ─── Grass ───
-  {
+  // Skipping the upload + draw entirely when the user toggles grass off is
+  // a real perf win at high cell counts (14_400 cells = 56 KB R32F upload
+  // per frame + a fullscreen-discard fragment pass).
+  if (getSettings().showGrass) {
     const dim = world.grass_dim;
     const density = world.grass_buffer() as unknown as Float32Array;
     gl.activeTexture(gl.TEXTURE0);
@@ -377,124 +376,65 @@ export function renderWorld(
     gl.drawArrays(gl.LINE_LOOP, 0, 4);
   }
 
-  // ─── Creatures (bodies + rings + highlights) ───
-  const data = world.creatures_buffer() as unknown as Float32Array;
-  const creatureCount = (data.length / stride) | 0;
-  if (creatureCount === 0) return;
-
-  // Worst case: 1 body + 4 rings + 1 highlight = 6 instances per creature.
-  const maxFloats = creatureCount * 6 * FLOATS_PER_INSTANCE;
-  if (s.instanceScratch.length < maxFloats) {
-    s.instanceScratch = new Float32Array(Math.max(maxFloats, s.instanceScratch.length * 2));
+  // ─── Creatures (bodies) ───
+  // Rust packs the instance buffer directly — no JS pack loop, no per-field
+  // typed-array reads across the wasm boundary. Trait rings have been
+  // removed entirely; highlights are drawn as a small second batch below.
+  const bodies = world.pack_render_buffer(
+    cam.cx, cam.cy, cam.zoom, viewW, viewH, PX_PER_SIZE,
+  ) as unknown as Float32Array;
+  const bodyCount = (bodies.length / FLOATS_PER_INSTANCE) | 0;
+  if (bodyCount > 0) {
+    gl.useProgram(s.discProgram);
+    gl.uniform2f(s.discU.viewport, viewW, viewH);
+    gl.uniform2f(s.discU.camPos, cam.cx, cam.cy);
+    gl.uniform1f(s.discU.zoom, cam.zoom);
+    gl.bindVertexArray(s.discVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, s.discInstanceBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, bodies, gl.DYNAMIC_DRAW);
+    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, bodyCount);
   }
-  const buf = s.instanceScratch;
-  let off = 0;
 
-  // Frustum cull bounds in world units (with margin for ring/highlight overhang).
-  const halfW = (viewW / cam.zoom) * 0.5;
-  const halfH = (viewH / cam.zoom) * 0.5;
-  const margin = 8;
-  const minX = cam.cx - halfW - margin;
-  const maxX = cam.cx + halfW + margin;
-  const minY = cam.cy - halfH - margin;
-  const maxY = cam.cy + halfH + margin;
-  const hasHighlights = highlightMap.size > 0;
-
-  for (let i = 0; i < data.length; i += stride) {
-    const x = data[i];
-    const y = data[i + 1];
-    if (x < minX || x > maxX || y < minY || y > maxY) continue;
-    const radiusWorld = data[i + 2];
-    const r = data[i + 3];
-    const g = data[i + 4];
-    const b = data[i + 5];
-    const flagEye   = data[i + 6] > 0.5;
-    const flagMove  = data[i + 7] > 0.5;
-    const flagMouth = data[i + 8] > 0.5;
-    const flagArmor = data[i + 9] > 0.5;
-
-    const radiusPx = Math.max(1, radiusWorld * PX_PER_SIZE * cam.zoom);
-
-    // Body
-    buf[off    ] = x;
-    buf[off + 1] = y;
-    buf[off + 2] = radiusPx;
-    buf[off + 3] = 0;
-    buf[off + 4] = r;
-    buf[off + 5] = g;
-    buf[off + 6] = b;
-    buf[off + 7] = 1.0;
-    off += FLOATS_PER_INSTANCE;
-
-    // Trait rings (LOD: skip when on-screen body is tiny).
-    if (radiusPx >= RING_LOD_RADIUS_PX) {
-      let ringR = radiusPx - 1;
-      // Inline ring packer; manual unrolling avoids a hot-path closure.
-      if (flagEye && ringR >= 1) {
-        buf[off    ] = x; buf[off + 1] = y;
-        buf[off + 2] = ringR + 0.5; buf[off + 3] = ringR - 0.5;
-        buf[off + 4] = RING_EYE[0]; buf[off + 5] = RING_EYE[1];
-        buf[off + 6] = RING_EYE[2]; buf[off + 7] = RING_EYE[3];
-        off += FLOATS_PER_INSTANCE;
-        ringR -= RING_STEP;
-      }
-      if (flagMove && ringR >= 1) {
-        buf[off    ] = x; buf[off + 1] = y;
-        buf[off + 2] = ringR + 0.5; buf[off + 3] = ringR - 0.5;
-        buf[off + 4] = RING_MOVE[0]; buf[off + 5] = RING_MOVE[1];
-        buf[off + 6] = RING_MOVE[2]; buf[off + 7] = RING_MOVE[3];
-        off += FLOATS_PER_INSTANCE;
-        ringR -= RING_STEP;
-      }
-      if (flagMouth && ringR >= 1) {
-        buf[off    ] = x; buf[off + 1] = y;
-        buf[off + 2] = ringR + 0.5; buf[off + 3] = ringR - 0.5;
-        buf[off + 4] = RING_MOUTH[0]; buf[off + 5] = RING_MOUTH[1];
-        buf[off + 6] = RING_MOUTH[2]; buf[off + 7] = RING_MOUTH[3];
-        off += FLOATS_PER_INSTANCE;
-        ringR -= RING_STEP;
-      }
-      if (flagArmor && ringR >= 1) {
-        buf[off    ] = x; buf[off + 1] = y;
-        buf[off + 2] = ringR + 0.5; buf[off + 3] = ringR - 0.5;
-        buf[off + 4] = RING_ARMOR[0]; buf[off + 5] = RING_ARMOR[1];
-        buf[off + 6] = RING_ARMOR[2]; buf[off + 7] = RING_ARMOR[3];
-        off += FLOATS_PER_INSTANCE;
-      }
-    }
-
-    // Highlight ring (always drawn regardless of LOD).
-    if (hasHighlights) {
-      const idx = (i / stride) | 0;
-      const cid = ids[idx];
+  // ─── Highlight rings (rare path, JS-side) ───
+  // Inspector selection + transient highlights produce ≤ 1–2 rings/frame.
+  // Reading creatures_buffer here is cheap and only happens when needed.
+  if (highlightMap.size > 0) {
+    const data = world.creatures_buffer() as unknown as Float32Array;
+    if (stride !== 10) throw new Error(`creature_stride mismatch: ${stride}`);
+    const scratch = s.instanceScratch;
+    let off = 0;
+    for (let k = 0; k < ids.length; k++) {
+      const cid = ids[k];
       const exp = highlightMap.get(cid);
-      if (exp !== undefined && nowMs < exp) {
-        const alpha = exp >= PERMANENT_EXP - 1
-          ? 1.0
-          : Math.min(1.0, (exp - nowMs) / HIGHLIGHT_FADE_MS);
-        buf[off    ] = x;
-        buf[off + 1] = y;
-        buf[off + 2] = radiusPx + 4;
-        buf[off + 3] = radiusPx + 2;
-        buf[off + 4] = 255 / 255;
-        buf[off + 5] = 200 / 255;
-        buf[off + 6] = 50 / 255;
-        buf[off + 7] = alpha;
-        off += FLOATS_PER_INSTANCE;
-      }
+      if (exp === undefined || nowMs >= exp) continue;
+      const i = k * stride;
+      const x = data[i];
+      const y = data[i + 1];
+      const radiusWorld = data[i + 2];
+      const radiusPx = Math.max(1, radiusWorld * PX_PER_SIZE * cam.zoom);
+      const alpha = exp >= PERMANENT_EXP - 1
+        ? 1.0
+        : Math.min(1.0, (exp - nowMs) / HIGHLIGHT_FADE_MS);
+      scratch[off    ] = x;
+      scratch[off + 1] = y;
+      scratch[off + 2] = radiusPx + 4;
+      scratch[off + 3] = radiusPx + 2;
+      scratch[off + 4] = 255 / 255;
+      scratch[off + 5] = 200 / 255;
+      scratch[off + 6] = 50 / 255;
+      scratch[off + 7] = alpha;
+      off += FLOATS_PER_INSTANCE;
+    }
+    const hCount = (off / FLOATS_PER_INSTANCE) | 0;
+    if (hCount > 0) {
+      gl.useProgram(s.discProgram);
+      gl.uniform2f(s.discU.viewport, viewW, viewH);
+      gl.uniform2f(s.discU.camPos, cam.cx, cam.cy);
+      gl.uniform1f(s.discU.zoom, cam.zoom);
+      gl.bindVertexArray(s.discVao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, s.discInstanceBuf);
+      gl.bufferData(gl.ARRAY_BUFFER, scratch.subarray(0, off), gl.DYNAMIC_DRAW);
+      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, hCount);
     }
   }
-
-  const instanceCount = (off / FLOATS_PER_INSTANCE) | 0;
-  if (instanceCount === 0) return;
-
-  gl.useProgram(s.discProgram);
-  gl.uniform2f(s.discU.viewport, viewW, viewH);
-  gl.uniform2f(s.discU.camPos, cam.cx, cam.cy);
-  gl.uniform1f(s.discU.zoom, cam.zoom);
-  gl.bindVertexArray(s.discVao);
-  gl.bindBuffer(gl.ARRAY_BUFFER, s.discInstanceBuf);
-  // Orphan + upload via bufferData to avoid stalling on the previous frame's draws.
-  gl.bufferData(gl.ARRAY_BUFFER, buf.subarray(0, off), gl.DYNAMIC_DRAW);
-  gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, instanceCount);
 }

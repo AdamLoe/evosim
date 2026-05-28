@@ -17,10 +17,13 @@ pub struct WorldHandle {
     /// Reusable serialization buffer for `creatures_buffer` — one f32 vec
     /// shared across calls so JS can read a stable typed-array view.
     creature_buf: Vec<f32>,
-    /// Reusable buffer for `grass_buffer` — avoids re-allocating 14_400 f32s each frame.
+    /// Reusable buffer for `grass_buffer` — avoids re-allocating 3_600 f32s each frame.
     grass_buf: Vec<f32>,
     /// Reusable f64 buffer for `creature_ids_buffer` — index-aligned with creatures_buffer.
     id_buf: Vec<f64>,
+    /// Reusable buffer for `pack_render_buffer` — already in GPU instance layout
+    /// (8 floats per visible creature: cx, cy, outer_px, inner_px, r, g, b, a).
+    render_buf: Vec<f32>,
     /// Rolling window of per-tick wall-clock durations in milliseconds (last TPS_WINDOW ticks).
     /// Used to compute TPS rolling average.
     tick_durations_ms: std::collections::VecDeque<f64>,
@@ -48,16 +51,21 @@ impl WorldHandle {
             creature_buf: Vec::new(),
             grass_buf: Vec::new(),
             id_buf: Vec::new(),
+            render_buf: Vec::new(),
             tick_durations_ms: std::collections::VecDeque::new(),
             jank_count: 0,
         }
     }
 
-    /// Construct from a string seed with an explicit initial grass seed count.
-    /// Overrides the `GRASS_INITIAL_SEED_COUNT_DEFAULT` constant for world creation.
-    /// Used by the dev panel's `grass_initial_seed_count` slider (P3b).
+    /// Construct from a string seed with explicit initial grass seed count
+    /// and energy-max cap. Both override the corresponding DevSliders defaults
+    /// for world creation; the founder spawns at `min(FOUNDER_ENERGY, energy_max)`.
     #[wasm_bindgen(js_name = newWithGrassSeed)]
-    pub fn new_with_grass_seed(seed: &str, initial_grass_seed_count: u32) -> Self {
+    pub fn new_with_grass_seed(
+        seed: &str,
+        initial_grass_seed_count: u32,
+        energy_max: f32,
+    ) -> Self {
         let actual_seed = if seed.is_empty() {
             let mut bytes = [0u8; 8];
             getrandom::getrandom(&mut bytes).ok();
@@ -68,6 +76,7 @@ impl WorldHandle {
         };
         let sliders = crate::world::DevSliders {
             grass_initial_seed_count: initial_grass_seed_count,
+            energy_max: energy_max.max(1.0),
             ..Default::default()
         };
         let inner = World::new_with_sliders(actual_seed, sliders);
@@ -76,6 +85,7 @@ impl WorldHandle {
             creature_buf: Vec::new(),
             grass_buf: Vec::new(),
             id_buf: Vec::new(),
+            render_buf: Vec::new(),
             tick_durations_ms: std::collections::VecDeque::new(),
             jank_count: 0,
         }
@@ -197,6 +207,79 @@ impl WorldHandle {
         unsafe { js_sys::Float32Array::view(&self.creature_buf) }
     }
 
+    /// Pack visible creatures directly into a GPU-ready instance buffer.
+    /// Frustum culls against the viewport in one pass and writes the same
+    /// 8-float instance layout that `render-gl.ts` consumes:
+    /// `[cx, cy, outer_px, inner_px, r, g, b, a]` per creature.
+    ///
+    /// `inner_px` and `a` are always `0.0` / `1.0` for bodies (no rings).
+    /// Highlights remain handled JS-side because they're rare (≤ 1–2 per frame).
+    ///
+    /// Why this lives in Rust: the JS pack loop was the main per-frame CPU
+    /// cost at high creature counts (every field read crossed the typed-array
+    /// boundary). Packing in Rust skips that boundary entirely and lets us
+    /// frustum cull cheaply against the SoA.
+    ///
+    /// `px_per_size` mirrors `PX_PER_SIZE` from `render.ts` so the screen
+    /// radius computation is identical on both sides.
+    #[wasm_bindgen]
+    pub fn pack_render_buffer(
+        &mut self,
+        cam_cx: f32,
+        cam_cy: f32,
+        zoom: f32,
+        viewport_w: f32,
+        viewport_h: f32,
+        px_per_size: f32,
+    ) -> js_sys::Float32Array {
+        let n = self.inner.creatures.len();
+        self.render_buf.clear();
+        if n == 0 || zoom <= 0.0 {
+            return unsafe { js_sys::Float32Array::view(&self.render_buf) };
+        }
+
+        // Frustum bounds in world units. `margin` covers the body radius so
+        // creatures straddling the edge still get drawn.
+        let body_r = FOUNDER_SIZE * BODY_RADIUS_PER_SIZE;
+        let half_w = viewport_w / zoom * 0.5;
+        let half_h = viewport_h / zoom * 0.5;
+        let margin = body_r + 2.0;
+        let min_x = cam_cx - half_w - margin;
+        let max_x = cam_cx + half_w + margin;
+        let min_y = cam_cy - half_h - margin;
+        let max_y = cam_cy + half_h + margin;
+
+        let radius_px = (body_r * px_per_size * zoom).max(1.0);
+
+        self.render_buf.reserve(n * 8);
+
+        let xs = &self.inner.creatures.x;
+        let ys = &self.inner.creatures.y;
+        let colors = &self.inner.creatures.color_rgb;
+
+        for i in 0..n {
+            let x = xs[i];
+            let y = ys[i];
+            if x < min_x || x > max_x || y < min_y || y > max_y {
+                continue;
+            }
+            let c = colors[i];
+            let r = ((c >> 16) & 0xFF) as f32 / 255.0;
+            let g = ((c >> 8) & 0xFF) as f32 / 255.0;
+            let b = (c & 0xFF) as f32 / 255.0;
+            self.render_buf.push(x);
+            self.render_buf.push(y);
+            self.render_buf.push(radius_px);
+            self.render_buf.push(0.0); // inner_px (filled disc)
+            self.render_buf.push(r);
+            self.render_buf.push(g);
+            self.render_buf.push(b);
+            self.render_buf.push(1.0); // alpha
+        }
+
+        unsafe { js_sys::Float32Array::view(&self.render_buf) }
+    }
+
     // ─── Grass render API (P1g) ──────────────────────────────────────────────
 
     /// Grass grid dimension (120). Constant accessor; called per frame by the
@@ -213,7 +296,7 @@ impl WorldHandle {
         GRASS_CELL_SIZE
     }
 
-    /// Copy the current grass density field (14_400 f32s) into a cached Vec
+    /// Copy the current grass density field (3_600 f32s) into a cached Vec
     /// and return a Float32Array view over it. Called once per frame by the
     /// Canvas2D render layer. The view is valid only until the next Rust call
     /// that moves `self.grass_buf` (safe for single-frame use).
@@ -241,6 +324,25 @@ impl WorldHandle {
     }
     fn apply_grass_in_cell_growth_r(&mut self, value: f32) {
         self.inner.sliders.grass_in_cell_growth_r = value;
+    }
+    fn apply_upkeep_multiplier(&mut self, value: f32) {
+        self.inner.sliders.upkeep_multiplier = value.max(0.0);
+    }
+    fn apply_move_cost_multiplier(&mut self, value: f32) {
+        self.inner.sliders.move_cost_multiplier = value.max(0.0);
+    }
+    fn apply_eat_cost_multiplier(&mut self, value: f32) {
+        self.inner.sliders.eat_cost_multiplier = value.max(0.0);
+    }
+    fn apply_energy_max(&mut self, value: f32) {
+        // Guard against pathological values; the slider UI already clamps to [50, 400].
+        self.inner.sliders.energy_max = value.max(1.0);
+    }
+    fn apply_grass_energy_per_bite(&mut self, value: f32) {
+        self.inner.sliders.grass_energy_per_bite = value.max(0.0);
+    }
+    fn apply_grass_bites_per_block(&mut self, value: u32) {
+        self.inner.sliders.grass_bites_per_block = value.max(1);
     }
 
     /// Typed setter — per-birth mutation rate multiplier.
@@ -273,6 +375,42 @@ impl WorldHandle {
         self.apply_grass_in_cell_growth_r(value);
     }
 
+    /// Typed setter — per-tick idle upkeep multiplier (0 = no drain, 1 = default).
+    #[wasm_bindgen]
+    pub fn set_upkeep_multiplier(&mut self, value: f32) {
+        self.apply_upkeep_multiplier(value);
+    }
+
+    /// Typed setter — multiplier on the per-distance movement cost.
+    #[wasm_bindgen]
+    pub fn set_move_cost_multiplier(&mut self, value: f32) {
+        self.apply_move_cost_multiplier(value);
+    }
+
+    /// Typed setter — multiplier on the per-attempt eat cost.
+    #[wasm_bindgen]
+    pub fn set_eat_cost_multiplier(&mut self, value: f32) {
+        self.apply_eat_cost_multiplier(value);
+    }
+
+    /// Typed setter — per-creature max energy cap.
+    #[wasm_bindgen]
+    pub fn set_energy_max(&mut self, value: f32) {
+        self.apply_energy_max(value);
+    }
+
+    /// Typed setter — energy gained per successful graze bite.
+    #[wasm_bindgen]
+    pub fn set_grass_energy_per_bite(&mut self, value: f32) {
+        self.apply_grass_energy_per_bite(value);
+    }
+
+    /// Typed setter — number of bites to drain a ripe grass cell.
+    #[wasm_bindgen]
+    pub fn set_grass_bites_per_block(&mut self, value: u32) {
+        self.apply_grass_bites_per_block(value);
+    }
+
     /// Apply a dev-panel slider live by name. JS console workflow
     /// (BUILD-REPORT Known Issue #4). Returns `Err` on unknown name so a
     /// console typo is visible instead of silently ignored.
@@ -297,6 +435,14 @@ impl WorldHandle {
             "eat_bite_fraction" => self.apply_eat_bite_fraction(value),
             "grass_propagation_rate_k" => self.apply_grass_propagation_rate_k(value),
             "grass_in_cell_growth_r" => self.apply_grass_in_cell_growth_r(value),
+            "upkeep_multiplier" => self.apply_upkeep_multiplier(value),
+            "move_cost_multiplier" => self.apply_move_cost_multiplier(value),
+            "eat_cost_multiplier" => self.apply_eat_cost_multiplier(value),
+            "energy_max" => self.apply_energy_max(value),
+            "grass_energy_per_bite" => self.apply_grass_energy_per_bite(value),
+            // grass_bites_per_block is u32; round the float input. Below-1
+            // values are clamped by the apply_ helper.
+            "grass_bites_per_block" => self.apply_grass_bites_per_block(value.max(0.0) as u32),
             _ => return false,
         }
         true
@@ -417,7 +563,7 @@ impl WorldHandle {
 
     // ─── P3d observability counters ──────────────────────────────────────────
 
-    /// Count of grass cells where density > 0. O(14_400) — negligible at v1 scale.
+    /// Count of grass cells where density > 0. O(3_600) — negligible at v1 scale.
     #[wasm_bindgen]
     pub fn live_grass_cell_count(&self) -> u32 {
         self.inner
@@ -428,7 +574,7 @@ impl WorldHandle {
             .count() as u32
     }
 
-    /// Sum of all grass cell densities. O(14_400) — negligible at v1 scale.
+    /// Sum of all grass cell densities. O(3_600) — negligible at v1 scale.
     #[wasm_bindgen]
     pub fn total_grass_density(&self) -> f32 {
         self.inner.grass.density.iter().sum()

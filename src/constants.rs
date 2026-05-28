@@ -17,7 +17,7 @@ pub const UPKEEP_GUT: f32 = 0.02;
 pub const UPKEEP_NN_FIXED: f32 = 0.05;
 
 // ---- One-time costs (v5 §7) ----
-pub const COST_EAT_ATTEMPT: f32 = 0.3;
+pub const COST_EAT_ATTEMPT: f32 = 0.0;
 pub const COST_MOVE_PER_DIST: f32 = 0.02;
 pub const SPLIT_GIFT_MAX: f32 = 30.0;
 pub const SPLIT_THRESHOLD: f32 = 50.0;
@@ -61,8 +61,8 @@ pub const REPULSION_MAX: f32 = 5.0;
 pub const FOUNDER_ENERGY: f32 = 200.0;
 pub const FOUNDER_SIZE: f32 = 1.0;
 pub const FOUNDER_MAX_AGE: u32 = 5000;
-pub const FOUNDER_GRAZE_EFF: f32 = 1.0;
-pub const FOUNDER_BITE_REACH: f32 = 1.0;
+pub const FOUNDER_GRAZE_EFF: f32 = 5.0;
+pub const FOUNDER_BITE_REACH: f32 = 0.0;
 pub const FOUNDER_SPLIT_JITTER: f32 = 50.0;
 
 // ---- Vision (v5 §10, v6 §E, Milestone C.12) ----
@@ -86,36 +86,29 @@ pub const POPULATION_MILESTONES: [u32; 6] = [10, 50, 100, 500, 1000, 2000];
 /// vision.rs (re-export) and constants.rs (source of truth for creature.rs).
 pub const SECTORS: usize = 24;
 
-// ---- Grass grid (v1.3 M1 — cell size doubled) ----
-/// Cell size in world-units. World is 600u → 120 cells per axis. See v1.3 M1
-/// (doubled from 2.5u; 4× fewer cells, 4× perf win on step + bilinear sample).
+// ---- Grass grid ----
+/// Cell size in world-units. World is 600u → 120 cells per axis.
 pub const GRASS_CELL_SIZE: f32 = 5.0;
-/// Number of grass cells per axis (120). See v1.3 M1.
+/// Number of grass cells per axis (120).
 pub const GRASS_GRID_DIM: usize = (WORLD_SIZE / GRASS_CELL_SIZE) as usize; // 120
-/// Total grass cells (14_400). See v1.3 M1.
+/// Total grass cells (14_400).
 pub const GRASS_CELL_COUNT: usize = GRASS_GRID_DIM * GRASS_GRID_DIM; // 14_400
-/// Maximum density per cell (clamped post-step). See v1.2 grass mechanic brief.
+/// Maximum density per cell (clamped post-step).
 pub const GRASS_MAX: f32 = 1.0;
-/// Default in-cell logistic growth rate slider. See v1.2 grass mechanic brief §Grass dynamics.
-/// Raised 0.005 → 0.01 (P1h lever 3) → 0.05 (P2h tuning) — PR-2 founders don't auto-Graze,
-/// so grass must spread fast enough that random-walking creatures encounter grass cells.
+/// Default in-cell logistic growth rate slider.
 pub const GRASS_IN_CELL_GROWTH_R_DEFAULT: f32 = 0.05;
-/// Default cross-kernel propagation rate slider. See v1.2 grass mechanic brief §Grass dynamics.
-/// Raised 0.05 → 0.1 (P2h tuning) for faster propagation across the world.
-pub const GRASS_PROPAGATION_RATE_K_DEFAULT: f32 = 0.1;
-/// Default number of cells seeded at world init. See v1.2 grass mechanic brief §Initial grass seed.
-/// Raised from 8 to 50 (P1h ladder lever 1) → 100 (P2h ladder lever 2) — PR-2 founders
-/// no longer benefit from the old NN_FOUNDER_PHOTO_BIAS-style Graze bias (F.30 rewrite),
-/// so the lineage needs proportionally more initial food to survive random-walk-to-grass.
+/// Default cross-kernel propagation rate slider. 100× slower than the
+/// earlier 0.1 default — grass now spreads slowly, so ripe cells are scarce.
+pub const GRASS_PROPAGATION_RATE_K_DEFAULT: f32 = 0.001;
+/// Default number of cells seeded at world init.
 pub const GRASS_INITIAL_SEED_COUNT_DEFAULT: u32 = 100;
-/// Per-cell, per-tick cap on the delta a single creature can drain from a single grass cell
-/// (before graze_efficiency multiplier). P1h regen iterations:
-///   - 0.1 (initial lock): extinct tick 358 (gain 0.10/tick < upkeep 0.15/tick).
-///   - 0.25 (§A.1 escape clause): extinct tick 5740 (sustainable until compound past-lifespan
-///     upkeep cliff hits and population can't replace through splits fast enough).
-///   - 0.5 (P1h iteration): targets pop>0 at T=10000 by giving splits enough buffer to
-///     outrun the past-lifespan upkeep cliff.
-pub const GRAZE_MAX_PER_TICK: f32 = 0.4;
+/// Default energy gained per successful graze bite. Live-tunable via
+/// DevSliders.grass_energy_per_bite.
+pub const GRASS_ENERGY_PER_BITE_DEFAULT: f32 = 10.0;
+/// Default number of bites required to fully drain a ripe (density == 1.0)
+/// grass cell. Density removed per bite = GRASS_MAX / bites_per_block.
+/// Live-tunable via DevSliders.grass_bites_per_block.
+pub const GRASS_BITES_PER_BLOCK_DEFAULT: u32 = 2;
 
 // ---- NN input layout offsets (v1.3 D9) ----
 /// Self-state block length: [energy_frac, age_frac, prev_vx, prev_vy, cooldown_frac].
@@ -135,6 +128,16 @@ pub const NN_GRASS_PATCH_OFFSET: usize = 80;
 /// Grass-patch block length. Used in layout tests; `#[allow(dead_code)]` because tests are cfg(test)-only.
 #[allow(dead_code)]
 pub const NN_GRASS_PATCH_LEN: usize = 25;
+/// One-hot for the action *two* ticks ago. Lets the brain see a 2-step action
+/// history (combined with the existing last-action slot at offset 77).
+/// Occupies former pad slots [105..108).
+pub const NN_LAST2_ACTION_OFFSET: usize = 105;
+#[allow(dead_code)]
+pub const NN_LAST2_ACTION_LEN: usize = 3;
+/// Normalized energy change since the previous NN forward pass:
+/// (energy_now - prev_energy) / energy_max. Range roughly [-1, 1].
+/// Occupies former pad slot [108..109).
+pub const NN_ENERGY_DELTA_OFFSET: usize = 108;
 /// Grass-patch center sample (dx=dy=0); 5×5 iteration is dy outer, dx inner,
 /// offset = (dy+2)*5 + (dx+2). Center: dy=0,dx=0 → 12; global slot 80+12 = 92.
 /// Used in tests to pin the center-slot index; `#[allow(dead_code)]` because tests are cfg(test)-only.

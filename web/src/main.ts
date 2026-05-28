@@ -10,10 +10,11 @@ import { renderWorld } from "./render-gl";
 import { attachCameraControls } from "./camera";
 import { installRail, pollRail, highlights } from "./rail/index";
 import { installProfilerPanel } from "./widgets/perf-panel";
-import { installDevPanel, getInitialGrassSeedCount, reapplyDevSliders } from "./widgets/devpanel";
+import { installDevPanel, getInitialGrassSeedCount, getEnergyMax, reapplyDevSliders } from "./widgets/devpanel";
 import { installCanvasClickHandler, resetInspectorSelection } from "./rail/inspector";
 import { resetStats } from "./rail/stats";
 import { attachProfiler, timed, span } from "./perf";
+import { getSettings, setSetting } from "./settings";
 
 const status = document.getElementById("status") as HTMLSpanElement;
 const canvas = document.getElementById("aquarium") as HTMLCanvasElement;
@@ -37,8 +38,25 @@ function resize(): void {
 window.addEventListener("resize", resize);
 resize();
 
-type Speed = 0 | 1 | 10 | 100;
-let speed: Speed = 1;
+// Sim pacing: a play/pause toggle plus a target ticks/sec input. The frame
+// loop accumulates a fractional tick budget so ticks are spread evenly
+// across rAF frames instead of bursting at the start of a wall-clock second.
+// targetTPS is hydrated from persisted settings so user choice survives reload.
+let paused = false;
+let targetTPS = getSettings().targetTPS;
+let tickBudget = 0;
+const MAX_TICKS_PER_FRAME = 2000;
+const MAX_FRAME_DELTA_MS = 100; // cap so tab-blur doesn't queue a tick tsunami.
+
+// The upkeep slider's /sec readout depends on the targetTPS, so the TPS
+// input notifies the dev panel to refresh that readout when it changes.
+let onTpsChange: ((tps: number) => void) | null = null;
+export function setTpsChangeListener(fn: (tps: number) => void): void {
+  onTpsChange = fn;
+}
+export function getTargetTPS(): number {
+  return targetTPS;
+}
 
 
 // F.27: seed display + copy button. The getter form lets the copy button
@@ -91,8 +109,15 @@ async function main(): Promise<void> {
   // without re-installing UI. All subsystems that need the current world
   // either get it as a parameter each frame (pollRail, renderWorld) or
   // capture the `getWorld` getter below (which always returns the latest).
-  let world: WorldHandle = WorldHandle.newWithGrassSeed(urlSeed ?? "", getInitialGrassSeedCount());
+  let world: WorldHandle = WorldHandle.newWithGrassSeed(
+    urlSeed ?? "",
+    getInitialGrassSeedCount(),
+    getEnergyMax(),
+  );
   const getWorld = (): WorldHandle => world;
+  // Debug hook: expose the live world on `window.__world` so headless probes
+  // (and the JS console) can poke at the sim state directly.
+  (window as unknown as { __world: WorldHandle }).__world = world;
 
   // S22: cache seed once per world lifetime (world.seed is a getter that
   // allocates a new String each call; no need to call it per frame).
@@ -113,8 +138,8 @@ async function main(): Promise<void> {
 
   status.textContent = `seed: ${cachedSeed}  ·  tick 0  ·  pop ${world.population}`;
 
-  // Speed buttons + restart in the top bar.
-  installSpeedControls();
+  // Top-bar pacing controls + restart.
+  installPacingControls();
   installRestartButton(() => restart());
 
   // E.21: install right rail.
@@ -136,7 +161,8 @@ async function main(): Promise<void> {
   function restart(): void {
     const oldWorld = world;
     // New random seed each restart (empty string → random per build).
-    world = WorldHandle.newWithGrassSeed("", getInitialGrassSeedCount());
+    world = WorldHandle.newWithGrassSeed("", getInitialGrassSeedCount(), getEnergyMax());
+    (window as unknown as { __world: WorldHandle }).__world = world;
     cachedSeed = world.seed;
     // Re-apply the user's current dev-slider tweaks; `initialGrassSeedCount`
     // is already baked into world construction above.
@@ -167,15 +193,39 @@ async function main(): Promise<void> {
   function frame(now: number): void {
     const frameSpan = span("frame");
     try {
-      const delta = now - lastRender;
+      const rawDelta = now - lastRender;
       lastRender = now;
-      const ticksThisFrame =
-        speed === 0 ? 0 : Math.min(200, Math.max(1, Math.round((speed * delta) / 16.66)));
+      // Clamp delta so a hidden/blurred tab doesn't queue thousands of ticks
+      // on resume. Drop any pent-up budget on resume from paused.
+      const delta = Math.min(rawDelta, MAX_FRAME_DELTA_MS);
 
       // S22: hoist world_ended once per RAF frame (was called 3× per frame).
-      const ended = world.world_ended;
+      let ended = world.world_ended;
 
-      if (ticksThisFrame > 0 && !ended) {
+      // Auto-restart: when the world has ended and the user has auto-run on,
+      // spawn a fresh world right away so the sim never stalls. The new
+      // world inherits the user's slider state (via reapplyDevSliders).
+      if (ended && !paused && getSettings().autoRun) {
+        restart();
+        ended = world.world_ended; // false on a fresh world
+      }
+
+      let ticksThisFrame = 0;
+      if (paused || ended) {
+        tickBudget = 0;
+      } else {
+        tickBudget += targetTPS * (delta / 1000);
+        if (tickBudget > MAX_TICKS_PER_FRAME) {
+          // Cap one frame's worth; the rest of the backlog is dropped (we
+          // don't try to "catch up" if the target rate exceeds what the
+          // browser can deliver in real time).
+          tickBudget = MAX_TICKS_PER_FRAME;
+        }
+        ticksThisFrame = Math.floor(tickBudget);
+        tickBudget -= ticksThisFrame;
+      }
+
+      if (ticksThisFrame > 0) {
         timed("step_n", () => world.step_n(ticksThisFrame));
       }
 
@@ -204,27 +254,90 @@ async function main(): Promise<void> {
   requestAnimationFrame(frame);
 }
 
-function installSpeedControls(): void {
+function installPacingControls(): void {
   const bar = document.getElementById("top-bar")!;
   const wrap = document.createElement("span");
   wrap.style.marginLeft = "auto";
-  for (const s of [0, 1, 10, 100] as const) {
-    const btn = document.createElement("button");
-    btn.textContent = s === 0 ? "pause" : `${s}x`;
-    btn.style.marginLeft = "4px";
-    btn.style.background = "rgba(255,255,255,0.08)";
-    btn.style.color = "var(--fg)";
-    btn.style.border = "1px solid rgba(255,255,255,0.15)";
-    btn.style.padding = "2px 8px";
-    btn.style.borderRadius = "3px";
-    btn.style.cursor = "pointer";
-    btn.style.font = "inherit";
-    btn.onclick = () => {
-      speed = s;
-    };
-    wrap.appendChild(btn);
+  wrap.style.display = "inline-flex";
+  wrap.style.alignItems = "center";
+  wrap.style.gap = "6px";
+
+  // Play/pause toggle.
+  const toggle = document.createElement("button");
+  toggle.id = "playpause-btn";
+  toggle.title = "Play / pause (space)";
+  applyTopbarBtnStyle(toggle);
+  const refreshToggleLabel = (): void => {
+    toggle.textContent = paused ? "▶ play" : "⏸ pause";
+  };
+  refreshToggleLabel();
+  toggle.onclick = () => {
+    paused = !paused;
+    tickBudget = 0;
+    refreshToggleLabel();
+  };
+  wrap.appendChild(toggle);
+
+  // Target TPS dropdown (fixed set of options for predictable pacing).
+  const tpsLabel = document.createElement("label");
+  tpsLabel.textContent = "target TPS";
+  tpsLabel.style.color = "var(--fg)";
+  tpsLabel.style.fontSize = "12px";
+  tpsLabel.style.opacity = "0.8";
+  const tpsSelect = document.createElement("select");
+  tpsSelect.id = "target-tps-input";
+  tpsSelect.style.background = "rgba(255,255,255,0.08)";
+  tpsSelect.style.color = "var(--fg)";
+  tpsSelect.style.border = "1px solid rgba(255,255,255,0.15)";
+  tpsSelect.style.padding = "2px 4px";
+  tpsSelect.style.borderRadius = "3px";
+  tpsSelect.style.font = "inherit";
+  const tpsOptions = [10, 30, 60, 180, 500, 1000];
+  for (const v of tpsOptions) {
+    const opt = document.createElement("option");
+    opt.value = String(v);
+    opt.textContent = String(v);
+    tpsSelect.appendChild(opt);
   }
+  // Snap initial value to the nearest option so persisted values from older
+  // schemas (or odd numbers) still match a dropdown choice.
+  const nearest = tpsOptions.reduce((best, v) =>
+    Math.abs(v - targetTPS) < Math.abs(best - targetTPS) ? v : best, tpsOptions[2]);
+  targetTPS = nearest;
+  tpsSelect.value = String(nearest);
+  tpsSelect.addEventListener("change", () => {
+    const v = Number(tpsSelect.value);
+    if (!Number.isFinite(v) || v < 1) return;
+    targetTPS = v;
+    tickBudget = 0;
+    setSetting("targetTPS", targetTPS);
+    if (onTpsChange) onTpsChange(targetTPS);
+  });
+  wrap.appendChild(tpsLabel);
+  wrap.appendChild(tpsSelect);
+
   bar.appendChild(wrap);
+
+  // Spacebar toggles play/pause (skip when typing in inputs).
+  window.addEventListener("keydown", (e) => {
+    if (e.key !== " " && e.code !== "Space") return;
+    if (e.target instanceof HTMLInputElement) return;
+    if (e.target instanceof HTMLTextAreaElement) return;
+    e.preventDefault();
+    paused = !paused;
+    tickBudget = 0;
+    refreshToggleLabel();
+  });
+}
+
+function applyTopbarBtnStyle(btn: HTMLButtonElement): void {
+  btn.style.background = "rgba(255,255,255,0.08)";
+  btn.style.color = "var(--fg)";
+  btn.style.border = "1px solid rgba(255,255,255,0.15)";
+  btn.style.padding = "2px 8px";
+  btn.style.borderRadius = "3px";
+  btn.style.cursor = "pointer";
+  btn.style.font = "inherit";
 }
 
 function installRestartButton(onClick: () => void): void {
@@ -234,13 +347,7 @@ function installRestartButton(onClick: () => void): void {
   btn.textContent = "↺ restart";
   btn.title = "Restart simulation with new seed (r)";
   btn.style.marginLeft = "8px";
-  btn.style.background = "rgba(255,255,255,0.08)";
-  btn.style.color = "var(--fg)";
-  btn.style.border = "1px solid rgba(255,255,255,0.15)";
-  btn.style.padding = "2px 8px";
-  btn.style.borderRadius = "3px";
-  btn.style.cursor = "pointer";
-  btn.style.font = "inherit";
+  applyTopbarBtnStyle(btn);
   btn.onclick = onClick;
   bar.appendChild(btn);
 }

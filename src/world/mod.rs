@@ -31,6 +31,21 @@ pub struct DevSliders {
     /// `eat_bite_fraction * prey.energy * (1 - prey.armor)` per successful bite.
     /// Live-tunable via set_eat_bite_fraction. See v1.2 P3a.
     pub eat_bite_fraction: f32,
+    /// Live-tunable multiplier on per-tick *idle* upkeep (the always-on
+    /// base + NN + gut + mouth-tax drain). 0 = no drain, 1 = default, 2 = double.
+    pub upkeep_multiplier: f32,
+    /// Live-tunable multiplier on per-tick *movement* cost. 0 = free move.
+    pub move_cost_multiplier: f32,
+    /// Live-tunable multiplier on the per-tick *eat-attempt* cost. 0 = free eat-tries.
+    pub eat_cost_multiplier: f32,
+    /// Live-tunable maximum energy per creature. Energy is clamped at the end of every
+    /// tick, and new creatures spawn capped at this value.
+    pub energy_max: f32,
+    /// Live-tunable energy gained per successful graze bite.
+    pub grass_energy_per_bite: f32,
+    /// Live-tunable number of bites to drain a ripe grass cell. Density removed
+    /// per bite = GRASS_MAX / bites_per_block.
+    pub grass_bites_per_block: u32,
 }
 
 impl Default for DevSliders {
@@ -43,6 +58,12 @@ impl Default for DevSliders {
             grass_in_cell_growth_r: GRASS_IN_CELL_GROWTH_R_DEFAULT,
             grass_initial_seed_count: GRASS_INITIAL_SEED_COUNT_DEFAULT,
             eat_bite_fraction: EAT_BITE_FRACTION_DEFAULT,
+            upkeep_multiplier: 1.0,
+            move_cost_multiplier: 1.0,
+            eat_cost_multiplier: 1.0,
+            energy_max: 100.0,
+            grass_energy_per_bite: GRASS_ENERGY_PER_BITE_DEFAULT,
+            grass_bites_per_block: GRASS_BITES_PER_BLOCK_DEFAULT,
         }
     }
 }
@@ -103,7 +124,8 @@ impl World {
         let founder_brain = Brain::founder(&mut rng);
         let cx = WORLD_SIZE * 0.5;
         let cy = WORLD_SIZE * 0.5;
-        creatures.push(0, cx, cy, FOUNDER_ENERGY, 0, founder_brain);
+        let founder_energy = FOUNDER_ENERGY.min(sliders.energy_max);
+        creatures.push(0, cx, cy, founder_energy, 0, founder_brain);
         let mut grid = SpatialGrid::new();
         grid.rebuild(&creatures.x, &creatures.y);
         Self {
@@ -170,6 +192,11 @@ impl World {
             let n = self.creatures.len();
             let ranges = chunk_ranges(n);
             self.nn_forward_all_chunks(&ranges, n);
+            // Snapshot energy *now* (immediately after NN forward — tick body
+            // hasn't run yet, so energy still equals its value at NN input
+            // time). Next tick's NN forward subtracts this to get the delta
+            // covering "what happened during this tick".
+            self.creatures.prev_energy[..n].copy_from_slice(&self.creatures.energy[..n]);
         }
 
         // 4. Apply velocities + soft repulsion + wall clamp; rebuild grid.
@@ -245,9 +272,13 @@ impl World {
         {
             crate::profile_span!(&self.profile, "tick.bookkeeping_tail");
 
-            // Promote this-tick action → next-tick last_action (v6 §1 / §E).
-            // S30: copy the slice in one bulk memcpy instead of a per-element loop.
+            // Promote action chain by one tick:
+            //   last2_action ← last_action  (the one-tick-older slot)
+            //   last_action  ← action_this_tick  (this tick's choice)
+            // Bulk memcpy in two passes (S30 pattern). Order matters: snapshot
+            // last_action into last2_action *before* overwriting last_action.
             let n = self.creatures.len();
+            self.creatures.last2_action[..n].copy_from_slice(&self.creatures.last_action[..n]);
             self.creatures.last_action[..n].copy_from_slice(&self.creatures.action_this_tick[..n]);
 
             self.tick = self.tick.saturating_add(1);

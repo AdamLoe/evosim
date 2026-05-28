@@ -42,7 +42,14 @@ pub struct CreatureSoA {
     pub digestion_cooldown: Vec<u32>,
     pub cumulative_upkeep: Vec<f32>,
     pub last_action: Vec<Action>,
+    /// Action from two ticks ago (one tick older than `last_action`). Powers
+    /// the `prev_prev_action` NN input slots so the brain can see the recent
+    /// action sequence, not just the immediate previous action.
+    pub last2_action: Vec<Action>,
     pub action_this_tick: Vec<Action>,
+    /// Energy at the start of the previous NN forward pass — used to compute
+    /// the `energy_delta` NN input slot (`energy[i] - prev_energy[i]`).
+    pub prev_energy: Vec<f32>,
     pub distance_travelled: Vec<f32>,
     /// Tick at which this creature was born (for lifespan stats).
     pub birth_tick: Vec<u32>,
@@ -71,7 +78,9 @@ impl CreatureSoA {
             digestion_cooldown: Vec::with_capacity(cap),
             cumulative_upkeep: Vec::with_capacity(cap),
             last_action: Vec::with_capacity(cap),
+            last2_action: Vec::with_capacity(cap),
             action_this_tick: Vec::with_capacity(cap),
+            prev_energy: Vec::with_capacity(cap),
             distance_travelled: Vec::with_capacity(cap),
             birth_tick: Vec::with_capacity(cap),
             brains: Vec::with_capacity(cap),
@@ -111,7 +120,11 @@ impl CreatureSoA {
         self.digestion_cooldown.push(0);
         self.cumulative_upkeep.push(0.0);
         self.last_action.push(Action::Graze);
+        self.last2_action.push(Action::Graze);
         self.action_this_tick.push(Action::Graze);
+        // Initialize prev_energy to current energy so the first delta is 0
+        // (the brain shouldn't see a phantom jump on the birth tick).
+        self.prev_energy.push(energy);
         self.distance_travelled.push(0.0);
         self.birth_tick.push(birth_tick);
         self.color_rgb.push(brain.color_rgb); // M5: hot-mirror from Brain
@@ -143,7 +156,9 @@ impl CreatureSoA {
             self.digestion_cooldown.swap_remove(k);
             self.cumulative_upkeep.swap_remove(k);
             self.last_action.swap_remove(k);
+            self.last2_action.swap_remove(k);
             self.action_this_tick.swap_remove(k);
+            self.prev_energy.swap_remove(k);
             self.distance_travelled.swap_remove(k);
             self.birth_tick.swap_remove(k);
             self.color_rgb.swap_remove(k);

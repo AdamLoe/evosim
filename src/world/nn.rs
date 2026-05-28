@@ -37,6 +37,7 @@ impl World {
                 let creatures_ref = &self.creatures;
                 let vision_ref = &self.vision[..n];
                 let grass_ref = &self.grass;
+                let energy_max = self.sliders.energy_max;
 
                 // Compute chunk_size identically to chunk_ranges (N_CHUNKS = 8).
                 let chunk_size = chunk_base_size(n);
@@ -75,6 +76,7 @@ impl World {
                                 grass_ref,
                                 prev_vx,
                                 prev_vy,
+                                energy_max,
                             );
                             vx_sub[k] = vx;
                             vy_sub[k] = vy;
@@ -97,6 +99,7 @@ impl World {
         #[cfg(not(feature = "threads"))]
         {
             let _ = n; // unused in the sequential path
+            let energy_max = self.sliders.energy_max;
             for &(lo, hi) in ranges {
                 let mut input_buf = [0.0f32; NN_INPUTS];
                 let mut hidden_buf = [0.0f32; NN_HIDDEN];
@@ -114,6 +117,7 @@ impl World {
                         &self.grass,
                         prev_vx,
                         prev_vy,
+                        energy_max,
                     );
                     self.creatures.vx[i] = vx;
                     self.creatures.vy[i] = vy;
@@ -186,7 +190,9 @@ pub(crate) fn chunk_ranges(n: usize) -> [(usize, usize); N_CHUNKS] {
 /// - `[5..77]`  vision (72 floats = 24 sectors × 3 RGB)
 /// - `[77..80]` last_action one-hot (3 actions: Graze/Eat/Split)
 /// - `[80..105]` grass-patch 5×5 bilinear samples
-/// - `[105..112]` SIMD padding zeros
+/// - `[105..108]` last2_action one-hot (action *two* ticks ago)
+/// - `[108..109]` energy delta since previous NN forward (normalized)
+/// - `[109..112]` SIMD padding zeros
 pub(crate) fn build_nn_input(
     i: usize,
     creatures: &CreatureSoA,
@@ -194,6 +200,7 @@ pub(crate) fn build_nn_input(
     grass: &GrassGrid,
     prev_vx: f32,
     prev_vy: f32,
+    energy_max: f32,
 ) -> [f32; NN_INPUTS] {
     // D3: body traits are constants; no genome reads needed.
     let mut buf = [0.0f32; NN_INPUTS];
@@ -218,6 +225,16 @@ pub(crate) fn build_nn_input(
     if la < NN_LAST_ACTION_LEN {
         buf[NN_LAST_ACTION_OFFSET + la] = 1.0;
     }
+    // Last2-action one-hot: the action chosen *two* ticks ago.
+    let la2 = creatures.last2_action[i].one_hot_index();
+    if la2 < NN_LAST2_ACTION_LEN {
+        buf[NN_LAST2_ACTION_OFFSET + la2] = 1.0;
+    }
+    // Energy delta since the previous NN forward — normalized to [-1, 1]
+    // by dividing by the current energy_max cap (which is also live-tunable).
+    let denom = energy_max.max(1.0);
+    let raw_delta = (energy - creatures.prev_energy[i]) / denom;
+    buf[NN_ENERGY_DELTA_OFFSET] = raw_delta.clamp(-1.0, 1.0);
 
     // Grass-patch 5×5 bilinear samples.
     // D3: nose_count gate removed — all creatures always see grass.
@@ -297,8 +314,9 @@ pub(crate) fn pick_action_d(
     grass: &GrassGrid,
     prev_vx: f32,
     prev_vy: f32,
+    energy_max: f32,
 ) -> (f32, f32, Action) {
-    *input_buf = build_nn_input(i, creatures, vision, grass, prev_vx, prev_vy);
+    *input_buf = build_nn_input(i, creatures, vision, grass, prev_vx, prev_vy, energy_max);
     creatures.brains[i].forward(input_buf, output_buf, hidden_buf);
 
     // Velocity: tanh(out[0..2]) × MOVE_SPEED_MAX (v6 §E).
@@ -371,7 +389,7 @@ mod tests {
         let prev_vx = w.creatures.vx[0];
         let prev_vy = w.creatures.vy[0];
         let grass = GrassGrid::new(&mut crate::rng::SimRng::from_u64(0), 0);
-        let inp = build_nn_input(0, &w.creatures, &vision, &grass, prev_vx, prev_vy);
+        let inp = build_nn_input(0, &w.creatures, &vision, &grass, prev_vx, prev_vy, 100.0);
         // D3 self-state layout: [0]=energy_frac, [1]=age_frac, [2]=vx, [3]=vy, [4]=cooldown.
         assert!((inp[0] - 0.5).abs() < 1e-5, "energy_frac = {}", inp[0]);
         assert!((inp[1] - 0.5).abs() < 1e-5, "age_frac = {}", inp[1]);
@@ -394,7 +412,7 @@ mod tests {
         let prev_vx = w.creatures.vx[0];
         let prev_vy = w.creatures.vy[0];
         let grass = GrassGrid::new(&mut crate::rng::SimRng::from_u64(0), 0);
-        let inp = build_nn_input(0, &w.creatures, &vis, &grass, prev_vx, prev_vy);
+        let inp = build_nn_input(0, &w.creatures, &vis, &grass, prev_vx, prev_vy, 100.0);
         // D3: NN_VISION_OFFSET=5, NN_VISION_LEN=72.
         assert_eq!(
             &inp[NN_VISION_OFFSET..NN_VISION_OFFSET + NN_VISION_LEN],
@@ -413,7 +431,7 @@ mod tests {
         let prev_vx = w.creatures.vx[0];
         let prev_vy = w.creatures.vy[0];
         let grass = GrassGrid::new(&mut crate::rng::SimRng::from_u64(0), 0);
-        let inp = build_nn_input(0, &w.creatures, &vision, &grass, prev_vx, prev_vy);
+        let inp = build_nn_input(0, &w.creatures, &vision, &grass, prev_vx, prev_vy, 100.0);
         let eat_idx = Action::Eat.one_hot_index(); // Eat=2
                                                    // D3: NN_LAST_ACTION_OFFSET=77, NN_LAST_ACTION_LEN=3.
         for k in 0..NN_LAST_ACTION_LEN {
@@ -693,7 +711,7 @@ mod tests {
         let vision = [0.0f32; VISION_LEN];
         let prev_vx = w.creatures.vx[0];
         let prev_vy = w.creatures.vy[0];
-        let inp = build_nn_input(0, &w.creatures, &vision, &grass, prev_vx, prev_vy);
+        let inp = build_nn_input(0, &w.creatures, &vision, &grass, prev_vx, prev_vy, 100.0);
         for k in 0..25 {
             assert!(
                 (inp[NN_GRASS_PATCH_OFFSET + k] - 1.0).abs() < 1e-5,
@@ -711,8 +729,8 @@ mod tests {
     fn nn_input_patch_iteration_order_locked() {
         use crate::vision::VISION_LEN;
         let mut w = World::new("p2d-center");
-        let cell_ix: usize = 60;
-        let cell_iy: usize = 60;
+        let cell_ix: usize = 30;
+        let cell_iy: usize = 30;
         let cx = (cell_ix as f32 + 0.5) * GRASS_CELL_SIZE;
         let cy = (cell_iy as f32 + 0.5) * GRASS_CELL_SIZE;
         w.creatures.x[0] = cx;
@@ -724,7 +742,7 @@ mod tests {
         let vision = [0.0f32; VISION_LEN];
         let prev_vx = w.creatures.vx[0];
         let prev_vy = w.creatures.vy[0];
-        let inp = build_nn_input(0, &w.creatures, &vision, &grass, prev_vx, prev_vy);
+        let inp = build_nn_input(0, &w.creatures, &vision, &grass, prev_vx, prev_vy, 100.0);
         assert!(
             (inp[NN_GRASS_PATCH_CENTER_SLOT] - 0.5).abs() < 1e-5,
             "center slot {} = {} (expected 0.5)",
@@ -758,7 +776,7 @@ mod tests {
         let prev_vx = w.creatures.vx[0];
         let prev_vy = w.creatures.vy[0];
         // Must not panic.
-        let inp = build_nn_input(0, &w.creatures, &vision, &grass, prev_vx, prev_vy);
+        let inp = build_nn_input(0, &w.creatures, &vision, &grass, prev_vx, prev_vy, 100.0);
         // All samples into empty grass grid must be 0.0 or clamped-valid.
         for k in 0..25 {
             assert!(
@@ -781,7 +799,7 @@ mod tests {
         let vision = [0.0f32; VISION_LEN];
         let prev_vx = w.creatures.vx[0];
         let prev_vy = w.creatures.vy[0];
-        let inp = build_nn_input(0, &w.creatures, &vision, &grass, prev_vx, prev_vy);
+        let inp = build_nn_input(0, &w.creatures, &vision, &grass, prev_vx, prev_vy, 100.0);
         for slot in NN_GRASS_PATCH_OFFSET..(NN_GRASS_PATCH_OFFSET + 25) {
             assert!(
                 inp[slot] > 0.99,
