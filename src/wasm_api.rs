@@ -728,6 +728,38 @@ impl WorldHandle {
     pub fn profile_report_json(&self) -> String {
         self.inner.profile.report_json()
     }
+
+    /// Per-worker + per-sub-phase health snapshot for the parallel NN pass.
+    /// Shape:
+    /// ```text
+    /// {
+    ///   "world_uptime_us": <u64>,
+    ///   "tick": {
+    ///     "build_input_other_us": <u64>,
+    ///     "proximity_creatures_us": <u64>,
+    ///     "proximity_grass_us": <u64>,
+    ///     "forward_us": <u64>,
+    ///     "chunk_wall_us": <u64>,    // sum across all chunks (parallel total)
+    ///     "workers_used": <u64>      // distinct workers that ran chunks
+    ///   },
+    ///   "workers": [
+    ///     {
+    ///       "idx": <usize>,
+    ///       "first_seen_us": <u64>, "last_seen_us": <u64>, "uptime_us": <u64>,
+    ///       "chunks": <u64>, "creatures": <u64>, "busy_us": <u64>,
+    ///       "creatures_per_chunk": <u64>
+    ///     }, ...
+    ///   ]
+    /// }
+    /// ```
+    /// `tick.*` values reflect the most recent tick only. Per-worker counters
+    /// are cumulative since world construction. Requires the profiler to be
+    /// enabled (`profile_enable(true)`) for any timing to accumulate.
+    #[wasm_bindgen]
+    pub fn nn_worker_stats_json(&self) -> String {
+        let now = crate::profiler::clock_now_us_threadsafe();
+        self.inner.nn_stats.to_json(now)
+    }
 }
 
 // ─── Clock helper ─────────────────────────────────────────────────────────────

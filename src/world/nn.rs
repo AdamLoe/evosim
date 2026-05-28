@@ -17,6 +17,9 @@ impl World {
     /// Sequential by default; rayon-parallel behind `cfg(feature = "threads")`.
     /// Results are bit-identical because the forward pass contains no RNG.
     pub(crate) fn nn_forward_all_chunks(&mut self, ranges: &[(usize, usize)], n: usize) {
+        let timed = self.profile.enabled();
+        // Reset the per-tick aggregates so this tick's chunks accumulate from 0.
+        self.nn_stats.reset_tick();
         // Threaded path: runs when compiled with --features threads.
         // Returns early so the sequential fallthrough below does not run.
         #[cfg(feature = "threads")]
@@ -40,6 +43,7 @@ impl World {
                 let energy_max = self.sliders.energy_max;
                 let split_threshold = self.sliders.split_threshold;
                 let max_age = self.sliders.max_age;
+                let stats_ref = std::sync::Arc::clone(&self.nn_stats);
 
                 let chunk_size = chunk_base_size_from_ranges(ranges, n);
 
@@ -63,10 +67,18 @@ impl World {
                             let mut output_buf = [0.0f32; NN_OUTPUTS];
                             let lo = chunk_idx * chunk_size;
 
+                            let chunk_start_us = if timed {
+                                crate::profiler::clock_now_us_threadsafe()
+                            } else {
+                                0
+                            };
+                            let mut chunk_pick = PickTimings::default();
+
                             for k in 0..vx_sub.len() {
                                 let i = lo + k;
                                 let prev_vx = vx_sub[k];
                                 let prev_vy = vy_sub[k];
+                                let pick_t = if timed { Some(&mut chunk_pick) } else { None };
                                 let (vx, vy, action, argmax_pre) = pick_action_d(
                                     i,
                                     &mut input_buf,
@@ -83,11 +95,27 @@ impl World {
                                     energy_max,
                                     split_threshold,
                                     max_age,
+                                    pick_t,
                                 );
                                 vx_sub[k] = vx;
                                 vy_sub[k] = vy;
                                 act_sub[k] = action;
                                 arg_sub[k] = argmax_pre;
+                            }
+
+                            if timed {
+                                let chunk_end_us = crate::profiler::clock_now_us_threadsafe();
+                                let worker_idx = rayon::current_thread_index().unwrap_or(0);
+                                stats_ref.record_chunk(
+                                    worker_idx,
+                                    chunk_start_us,
+                                    chunk_end_us,
+                                    vx_sub.len() as u64,
+                                    chunk_pick.build.other_us,
+                                    chunk_pick.build.creature_sectors_us,
+                                    chunk_pick.build.grass_sectors_us,
+                                    chunk_pick.forward_us,
+                                );
                             }
                         },
                     );
@@ -112,9 +140,16 @@ impl World {
                 let mut hidden_buf_1 = [0.0f32; NN_HIDDEN_1];
                 let mut hidden_buf_2 = [0.0f32; NN_HIDDEN_2];
                 let mut output_buf = [0.0f32; NN_OUTPUTS];
+                let chunk_start_us = if timed {
+                    crate::profiler::clock_now_us_threadsafe()
+                } else {
+                    0
+                };
+                let mut chunk_pick = PickTimings::default();
                 for i in lo..hi {
                     let prev_vx = self.creatures.vx[i];
                     let prev_vy = self.creatures.vy[i];
+                    let pick_t = if timed { Some(&mut chunk_pick) } else { None };
                     let (vx, vy, action, argmax_pre) = pick_action_d(
                         i,
                         &mut input_buf,
@@ -131,14 +166,56 @@ impl World {
                         energy_max,
                         split_threshold,
                         max_age,
+                        pick_t,
                     );
                     self.creatures.vx[i] = vx;
                     self.creatures.vy[i] = vy;
                     self.creatures.action_this_tick[i] = action;
                     self.scratch_argmax_pre[i] = argmax_pre;
                 }
+                if timed {
+                    let chunk_end_us = crate::profiler::clock_now_us_threadsafe();
+                    self.nn_stats.record_chunk(
+                        0, // sequential build: a single virtual worker.
+                        chunk_start_us,
+                        chunk_end_us,
+                        (hi - lo) as u64,
+                        chunk_pick.build.other_us,
+                        chunk_pick.build.creature_sectors_us,
+                        chunk_pick.build.grass_sectors_us,
+                        chunk_pick.forward_us,
+                    );
+                }
             }
         } // end #[cfg(not(feature = "threads"))]
+
+        // Drain per-tick aggregates into the profiler tree as siblings under
+        // `tick.nn`. Skipped when the profiler is off (record_under_tick no-ops).
+        if timed {
+            use std::sync::atomic::Ordering;
+            self.profile.record_under_tick(
+                "nn.build_input.other",
+                self.nn_stats
+                    .tick_build_input_other_us
+                    .load(Ordering::Relaxed) as u32,
+            );
+            self.profile.record_under_tick(
+                "nn.proximity.creatures",
+                self.nn_stats
+                    .tick_proximity_creatures_us
+                    .load(Ordering::Relaxed) as u32,
+            );
+            self.profile.record_under_tick(
+                "nn.proximity.grass",
+                self.nn_stats
+                    .tick_proximity_grass_us
+                    .load(Ordering::Relaxed) as u32,
+            );
+            self.profile.record_under_tick(
+                "nn.forward",
+                self.nn_stats.tick_forward_us.load(Ordering::Relaxed) as u32,
+            );
+        }
     }
 }
 
@@ -186,6 +263,19 @@ pub(crate) fn chunk_ranges(n: usize, chunks: usize) -> Vec<(usize, usize)> {
     out
 }
 
+/// Sub-phase timings collected by `build_nn_input` when a `BuildTimings` is supplied.
+///
+/// All durations are in microseconds. The `other` bucket covers everything that
+/// isn't a creature- or grass-sector scan: self/memory slots, wall arithmetic,
+/// bilinear sampling, bias slot, padding. The two proximity scans are the
+/// expensive parts and get their own buckets.
+#[derive(Default)]
+pub(crate) struct BuildTimings {
+    pub other_us: u64,
+    pub creature_sectors_us: u64,
+    pub grass_sectors_us: u64,
+}
+
 /// Build the 32-input NN input vector for creature `i` (v1.5 S5b).
 ///
 /// Layout (NN_INPUTS=32):
@@ -217,13 +307,22 @@ pub(crate) fn build_nn_input(
     prev_vy: f32,
     energy_max: f32,
     max_age: u32,
+    timings: Option<&mut BuildTimings>,
 ) -> [f32; NN_INPUTS] {
+    use crate::profiler::clock_now_us_threadsafe;
     let mut buf = [0.0f32; NN_INPUTS];
     let energy = creatures.energy[i];
     let age = creatures.age[i];
     let cooldown = creatures.digestion_cooldown[i];
     let x = creatures.x[i];
     let y = creatures.y[i];
+
+    // t0: start of "other" work (self/memory + walls).
+    let t0 = if timings.is_some() {
+        clock_now_us_threadsafe()
+    } else {
+        0
+    };
 
     // --- [0..8) self/memory ---
     let energy_frac = (energy / energy_max.max(1.0)).clamp(0.0, 1.0);
@@ -249,15 +348,34 @@ pub(crate) fn build_nn_input(
     buf[NN_WALL_OFFSET + 2] = walls[2];
     buf[NN_WALL_OFFSET + 3] = walls[3];
 
+    // t1: handoff to creature-sector scan.
+    let t1 = if timings.is_some() {
+        clock_now_us_threadsafe()
+    } else {
+        0
+    };
+
     // --- [12..20) creature_proximity sectors ---
     proximity::compute_creature_proximity_sectors(x, y, i, grid, creatures, sector_scratch);
     buf[NN_CREATURE_SECTOR_OFFSET..NN_CREATURE_SECTOR_OFFSET + NN_SECTORS]
         .copy_from_slice(&sector_scratch[..NN_SECTORS]);
 
+    let t2 = if timings.is_some() {
+        clock_now_us_threadsafe()
+    } else {
+        0
+    };
+
     // --- [20..28) grass_density sectors ---
     proximity::compute_grass_density_sectors(x, y, grass, sector_lut, sector_scratch);
     buf[NN_GRASS_SECTOR_OFFSET..NN_GRASS_SECTOR_OFFSET + NN_SECTORS]
         .copy_from_slice(&sector_scratch[..NN_SECTORS]);
+
+    let t3 = if timings.is_some() {
+        clock_now_us_threadsafe()
+    } else {
+        0
+    };
 
     // --- [28] padding ---
     buf[28] = 0.0;
@@ -270,6 +388,20 @@ pub(crate) fn build_nn_input(
 
     // --- [31] padding ---
     buf[31] = 0.0;
+
+    let t4 = if timings.is_some() {
+        clock_now_us_threadsafe()
+    } else {
+        0
+    };
+
+    if let Some(t) = timings {
+        // "other" = pre-proximity setup + post-proximity assembly (bilinear sample + bias + padding).
+        t.other_us = t.other_us.saturating_add(t1.saturating_sub(t0));
+        t.creature_sectors_us = t.creature_sectors_us.saturating_add(t2.saturating_sub(t1));
+        t.grass_sectors_us = t.grass_sectors_us.saturating_add(t3.saturating_sub(t2));
+        t.other_us = t.other_us.saturating_add(t4.saturating_sub(t3));
+    }
 
     buf
 }
@@ -325,6 +457,17 @@ pub(crate) fn decode_action(
 ///
 /// Returns `(vx, vy, action, argmax_pre)`. `argmax_pre` is the index (0/1/2)
 /// of the highest action logit BEFORE the validity-fallthrough step.
+/// Aggregated sub-phase timings produced by `pick_action_d` when a
+/// `PickTimings` is supplied. `build` covers the input-build phases;
+/// `forward_us` covers the NN forward pass. Per-creature accumulators
+/// are summed into a chunk-level total before being merged into the
+/// world's `NnStats`.
+#[derive(Default)]
+pub(crate) struct PickTimings {
+    pub build: BuildTimings,
+    pub forward_us: u64,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn pick_action_d(
     i: usize,
@@ -342,7 +485,11 @@ pub(crate) fn pick_action_d(
     energy_max: f32,
     split_threshold: f32,
     max_age: u32,
+    mut timings: Option<&mut PickTimings>,
 ) -> (f32, f32, Action, u8) {
+    use crate::profiler::clock_now_us_threadsafe;
+    let timed = timings.is_some();
+    let build_arg = timings.as_deref_mut().map(|t| &mut t.build);
     *input_buf = build_nn_input(
         i,
         creatures,
@@ -354,8 +501,16 @@ pub(crate) fn pick_action_d(
         prev_vy,
         energy_max,
         max_age,
+        build_arg,
     );
+    let t_fwd_start = if timed { clock_now_us_threadsafe() } else { 0 };
     creatures.brains[i].forward(input_buf, output_buf, hidden_buf_1, hidden_buf_2);
+    let t_fwd_end = if timed { clock_now_us_threadsafe() } else { 0 };
+    if let Some(t) = timings {
+        t.forward_us = t
+            .forward_us
+            .saturating_add(t_fwd_end.saturating_sub(t_fwd_start));
+    }
 
     // Velocity: out[0..2] are tanh-activated in Brain::forward.
     let vx = output_buf[0] * MOVE_SPEED_MAX;
@@ -424,6 +579,7 @@ mod tests {
             prev_vy,
             energy_max,
             max_age,
+            None,
         )
     }
 

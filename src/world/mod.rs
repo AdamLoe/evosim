@@ -4,6 +4,7 @@
 //! D3: genome removed; D9: Action enum collapsed to {Graze, Eat, Split}.
 
 pub(crate) mod nn;
+pub(crate) mod nn_stats;
 pub(crate) mod proximity;
 pub(crate) mod tick;
 
@@ -153,6 +154,10 @@ pub struct World {
     /// v1.5 S5b: per-creature 8-accumulator scratch reused across the NN input
     /// build. Resized in `step()` before the chunked input phase.
     pub(crate) scratch_sector_accum: Vec<[f32; 8]>,
+    /// Per-worker + per-sub-phase counters for the parallel NN forward pass.
+    /// Wrapped in Arc so the parallel block can hold a thread-safe handle while
+    /// `&mut self.creatures` is being mutated next to it. See `nn_stats.rs`.
+    pub(crate) nn_stats: std::sync::Arc<nn_stats::NnStats>,
 }
 
 impl World {
@@ -219,6 +224,9 @@ impl World {
             scratch_argmax_pre: Vec::new(),
             sector_lut,
             scratch_sector_accum: Vec::new(),
+            nn_stats: std::sync::Arc::new(nn_stats::NnStats::new(
+                crate::profiler::clock_now_us_threadsafe(),
+            )),
         }
     }
 
@@ -493,6 +501,7 @@ impl World {
             scratch_argmax_pre: Vec::new(),
             sector_lut,
             scratch_sector_accum: Vec::new(),
+            nn_stats: std::sync::Arc::new(nn_stats::NnStats::new(0)),
         }
     }
 }

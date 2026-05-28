@@ -152,6 +152,34 @@ impl Profiler {
     }
 
     /// Record an externally-timed span (called from TS via wasm_api).
+    /// Record an externally-timed sample under the `tick` root, addressed by a
+    /// dotted path. Used by aggregating callers (the parallel NN pass) that
+    /// compute their own duration outside the RAII span machinery (because the
+    /// Profiler isn't Send/Sync and can't be touched from worker threads).
+    ///
+    /// `path` is a dotted ancestor chain under ROOT_TICK, e.g.
+    /// `"nn.proximity.creatures"`. The leaf node is created lazily.
+    /// Silently no-ops when the profiler is disabled.
+    pub fn record_under_tick(&self, path: &str, dur_us: u32) {
+        if !self.enabled() {
+            return;
+        }
+        let mut inner = self.inner.borrow_mut();
+        let now_ms = inner.now_ms_relative();
+        let mut current = ROOT_TICK;
+        for part in path.split('.') {
+            if part.is_empty() {
+                continue;
+            }
+            current = inner.ensure_child(current, part);
+        }
+        let samples = &mut inner.nodes[current as usize].samples;
+        if samples.len() == SAMPLES_PER_NODE {
+            samples.pop_front();
+        }
+        samples.push_back((now_ms, dur_us));
+    }
+
     /// `path` is a dotted ancestor chain under ROOT_FRAME, e.g.
     /// "renderWorld.drawCreatures". The leaf node is created lazily.
     /// Silently no-ops if the profiler is disabled (fast path in wasm_api).
@@ -431,6 +459,30 @@ fn clock_now_us() -> u64 {
         .expect("no performance")
         .now();
     (ms * 1000.0) as u64
+}
+
+/// Thread-safe clock readable from rayon workers. On wasm32, binds directly to
+/// the global `performance.now()` which exists in both Window and Worker scopes
+/// (avoids `web_sys::window()` which is main-thread-only). On native, falls
+/// through to `clock_now_us()`.
+#[cfg(target_arch = "wasm32")]
+mod ts_perf {
+    use wasm_bindgen::prelude::*;
+    #[wasm_bindgen]
+    extern "C" {
+        #[wasm_bindgen(js_namespace = performance, js_name = now)]
+        pub fn now() -> f64;
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn clock_now_us_threadsafe() -> u64 {
+    (ts_perf::now() * 1000.0) as u64
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn clock_now_us_threadsafe() -> u64 {
+    clock_now_us()
 }
 
 #[cfg(not(target_arch = "wasm32"))]
