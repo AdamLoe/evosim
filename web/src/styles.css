@@ -3,6 +3,13 @@
   --bg: #0b0f14;
   --fg: #e6edf3;
   --rail-bg: rgba(15, 22, 32, 0.85);
+  /* Width of the settings overlay when open. Right-anchored UI (top-bar,
+     aquarium canvas, inspector) reserves this much room on the right edge so
+     the overlay never paints over the game. Set to 0 when overlay is closed. */
+  --settings-w: 0px;
+}
+body.settings-open {
+  --settings-w: 320px;
 }
 
 html,
@@ -23,8 +30,9 @@ body {
 
 #aquarium {
   position: fixed;
-  inset: 0;
-  width: 100vw;
+  top: 0;
+  left: 0;
+  width: calc(100vw - var(--settings-w));
   height: 100vh;
   display: block;
   touch-action: none;
@@ -34,7 +42,7 @@ body {
   position: fixed;
   top: 0;
   left: 0;
-  right: 0;
+  right: var(--settings-w);
   padding: 8px 12px;
   font-size: 13px;
   display: flex;
@@ -153,7 +161,7 @@ body {
 /* ui-inspector: top-right overlay widget (content evicted from #rail-inspector). */
 #inspector-box {
   top: 8px;
-  right: 8px;
+  right: calc(8px + var(--settings-w));
   max-width: 280px;       /* mirrors current rail width */
   max-height: calc(100vh - 16px);
   overflow-y: auto;

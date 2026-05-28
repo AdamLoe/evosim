@@ -27,16 +27,33 @@ function resize(): void {
   // S22: cap DPR at 2 to avoid 3× pixel overdraw on 3× displays.
   // WebGL2 uses gl.viewport against canvas.width/.height (physical px);
   // viewW/viewH stay in CSS px so camera/cursor math is consistent.
+  // Read clientWidth/Height (not window.inner*) so we honor the CSS-applied
+  // width — when the settings overlay is open it pushes the canvas to the
+  // left of the reserved overlay column.
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  viewW = window.innerWidth;
-  viewH = window.innerHeight;
+  viewW = canvas.clientWidth || window.innerWidth;
+  viewH = canvas.clientHeight || window.innerHeight;
   canvas.width = Math.floor(viewW * dpr);
   canvas.height = Math.floor(viewH * dpr);
-  canvas.style.width = `${viewW}px`;
-  canvas.style.height = `${viewH}px`;
 }
 window.addEventListener("resize", resize);
 resize();
+
+/** Open or close the right-edge settings overlay. Shifts the game canvas to
+ *  the left of the reserved column (no overlap with the simulation view)
+ *  and re-runs `resize()` so the WebGL backbuffer matches the new client size. */
+export function setSettingsOpen(open: boolean): void {
+  const overlay = document.getElementById("settings-overlay") as HTMLElement | null;
+  if (!overlay) return;
+  overlay.style.display = open ? "block" : "none";
+  document.body.classList.toggle("settings-open", open);
+  // Defer to next frame so the layout change is committed before we sample
+  // canvas.clientWidth.
+  requestAnimationFrame(resize);
+}
+export function isSettingsOpen(): boolean {
+  return document.body.classList.contains("settings-open");
+}
 
 // Sim pacing: a play/pause toggle plus a target ticks/sec input. The frame
 // loop accumulates a fractional tick budget so ticks are spread evenly
@@ -355,16 +372,12 @@ function installSettingsToggle(): void {
     btn.title = "Settings (~ hotkey)";
     applyTopbarBtnStyle(btn);
     btn.style.marginLeft = "4px";
-    btn.addEventListener("click", () => {
-      overlay.style.display = overlay.style.display === "none" ? "block" : "none";
-    });
+    btn.addEventListener("click", () => setSettingsOpen(!isSettingsOpen()));
     bar.appendChild(btn);
   }
   const close = document.getElementById("settings-close") as HTMLButtonElement | null;
   if (close) {
-    close.addEventListener("click", () => {
-      overlay.style.display = "none";
-    });
+    close.addEventListener("click", () => setSettingsOpen(false));
   }
 }
 

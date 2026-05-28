@@ -2,7 +2,7 @@
 // panel itself with the ~ hotkey or the ⚙ top-bar button.
 
 import type { WorldHandle } from "../../wasm/evosim";
-import { getTargetTPS, setTpsChangeListener } from "../main";
+import { getTargetTPS, setTpsChangeListener, setSettingsOpen, isSettingsOpen } from "../main";
 import { getSettings, setSetting, resetSettings } from "../settings";
 
 /** Returns the current initial-grass-seed-count for use by world construction. */
@@ -510,14 +510,15 @@ export function installDevPanel(getWorld: () => WorldHandle): void {
   resetWrap.appendChild(resetBtn);
   box.appendChild(resetWrap);
 
-  // ~ hotkey toggle (skip if focus is in an input/textarea). Targets the
-  // settings overlay that wraps the dev panel (v1.5).
-  const overlay = document.getElementById("settings-overlay") as HTMLElement | null;
-  if (overlay) {
-    window.addEventListener("keydown", (e) => {
-      if (e.key === "~" && !(e.target instanceof HTMLInputElement) && !(e.target instanceof HTMLTextAreaElement)) {
-        overlay.style.display = overlay.style.display === "none" ? "block" : "none";
-      }
-    });
-  }
+  // ~ hotkey toggle (skip if focus is in an input/textarea). Routes through
+  // setSettingsOpen so the body class flips and the canvas resizes too.
+  window.addEventListener("keydown", (e) => {
+    if (
+      e.key === "~" &&
+      !(e.target instanceof HTMLInputElement) &&
+      !(e.target instanceof HTMLTextAreaElement)
+    ) {
+      setSettingsOpen(!isSettingsOpen());
+    }
+  });
 }
