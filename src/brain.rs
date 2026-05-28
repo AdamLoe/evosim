@@ -1,4 +1,4 @@
-//! Brain — fixed-shape NN: 112 inputs → 48 → 24 (Leaky ReLU) → 5 outputs (v1.5 S5a).
+//! Brain — fixed-shape NN: 32 inputs → 48 → 24 (Leaky ReLU) → 5 outputs (v1.5 S5b).
 //!
 //! 3-matmul pyramid, SIMD forward pass (`wide::f32x8`), geometric-skip mutation
 //! per v5 §5.3 / v6 §E. Weight layout: row-major, hidden-unit-contiguous.
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use wide::f32x8;
 
 // Compile-time layout assertions.
-const _: () = assert!(NN_INPUTS == 112);
+const _: () = assert!(NN_INPUTS == 32);
 const _: () = assert!(NN_HIDDEN_1 == 48);
 const _: () = assert!(NN_HIDDEN_2 == 24);
 const _: () = assert!(NN_OUTPUTS == 5);
@@ -33,12 +33,12 @@ const _: () = assert!(
         == NN_INPUTS * NN_HIDDEN_1 + NN_HIDDEN_1 * NN_HIDDEN_2 + NN_HIDDEN_2 * NN_OUTPUTS
 );
 const _: () = assert!(
-    NN_WEIGHT_COUNT == 6648,
-    "v1.5 S5a: NN_WEIGHT_COUNT must be 6648 (112*48 + 48*24 + 24*5)"
+    NN_WEIGHT_COUNT == 2808,
+    "v1.5 S5b: NN_WEIGHT_COUNT must be 2808 (32*48 + 48*24 + 24*5)"
 );
 
-/// Number of 8-wide SIMD chunks in the input vector (14).
-const INPUT_CHUNKS: usize = NN_INPUTS / 8; // 112/8 = 14
+/// Number of 8-wide SIMD chunks in the input vector (4).
+const INPUT_CHUNKS: usize = NN_INPUTS / 8; // 32/8 = 4
 /// Number of 8-wide SIMD chunks in hidden_1 (6).
 const HIDDEN1_CHUNKS: usize = NN_HIDDEN_1 / 8; // 48/8 = 6
 /// Number of 8-wide SIMD chunks in hidden_2 (3).
@@ -220,12 +220,12 @@ mod tests {
         assert!(b.weights.iter().any(|w| *w != 0.0));
     }
 
-    /// v1.5 S5a: pyramid topology weight count = 112*48 + 48*24 + 24*5 = 6648.
+    /// v1.5 S5b: pyramid topology weight count = 32*48 + 48*24 + 24*5 = 2808.
     #[test]
     fn nn_weight_count_topology_pyramid() {
         assert_eq!(
-            NN_WEIGHT_COUNT, 6648,
-            "NN_WEIGHT_COUNT must be 112*48 + 48*24 + 24*5 = 6648"
+            NN_WEIGHT_COUNT, 2808,
+            "NN_WEIGHT_COUNT must be 32*48 + 48*24 + 24*5 = 2808"
         );
     }
 
@@ -260,8 +260,8 @@ mod tests {
             .zip(child.weights.iter())
             .filter(|(a, b)| a != b)
             .count();
-        // Expected ≈ 0.1 × 6648 ≈ 665. Just confirm "some but not all".
-        assert!(diffs > 200 && diffs < 1200, "diffs = {diffs}");
+        // Expected ≈ 0.1 × 2808 ≈ 281. Just confirm "some but not all".
+        assert!(diffs > 100 && diffs < 600, "diffs = {diffs}");
     }
 
     #[test]
@@ -367,8 +367,8 @@ mod tests {
     #[test]
     fn forward_pass_lrelu_preserves_negative_with_small_slope() {
         // Craft hidden_1 unit 0 with strongly negative pre-activation.
-        // Row 0 of w1: all -1.0; input = all +1.0 → pre-activation = -NN_INPUTS = -112.
-        // After lrelu: 0.01 * -112 = -1.12.
+        // Row 0 of w1: all -1.0; input = all +1.0 → pre-activation = -NN_INPUTS.
+        // After lrelu: 0.01 * -NN_INPUTS.
         let mut brain = Brain::zero();
         for i in 0..NN_INPUTS {
             brain.weights[i] = -1.0;

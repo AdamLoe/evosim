@@ -2,7 +2,7 @@
 //!
 //! D3: Genome removed. All body trait reads replaced with constants:
 //!   g_graze_eff → 1.0, g_size → FOUNDER_SIZE,
-//!   g_move_speed → MOVE_SPEED_MAX, g_eye_count/g_vision_range → constant 24/VISION_RANGE_MAX,
+//!   g_move_speed → MOVE_SPEED_MAX,
 //!   g_eat_eff → 1.0 (always enabled), armor/bite_reach → 0.0/FOUNDER_BITE_REACH.
 //! D9: Scavenge action removed; eat_and_scavenge renamed to eat.
 
@@ -85,11 +85,6 @@ impl World {
             self.creatures.distance_travelled[i] += dist;
             self.creatures.x[i] += cvx;
             self.creatures.y[i] += cvy;
-            // E.25.b: FirstToMove fires here (on the actual crossing tick) per v6 §L.
-            // D3: move_speed is always MOVE_SPEED_MAX > 0 for all creatures.
-            if !self.first_move_fired && self.creatures.distance_travelled[i] >= 5.0 {
-                self.first_move_fired = true;
-            }
         }
 
         self.grid.rebuild(&self.creatures.x, &self.creatures.y);
@@ -258,9 +253,6 @@ impl World {
                 if self.scratch_cooldown_set[i] {
                     self.creatures.digestion_cooldown[i] = DIGESTION_COOLDOWN_TICKS;
                 }
-                if self.scratch_got_a_bite[i] && !self.first_eat_fired {
-                    self.first_eat_fired = true;
-                }
             }
             self.creatures.energy[i] += self.scratch_gain[i];
             self.creatures.energy[i] -= self.scratch_damage[i];
@@ -351,35 +343,6 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::super::*;
-
-    // ---- E.25.b test ----
-
-    /// E.25.b: first_move_fired flips after distance_travelled crosses 5.0.
-    /// D3: move_speed is always MOVE_SPEED_MAX; events system deleted by D4.
-    #[test]
-    fn e25b_first_to_move_fires_on_movement_step() {
-        let mut w = World::new("e25b-move");
-        // Set velocity directly so movement fires deterministically.
-        w.creatures.vx[0] = 5.0;
-        w.creatures.vy[0] = 0.0;
-        // Pre-condition: distance_travelled starts at 0, flag not set.
-        assert!(!w.first_move_fired);
-        assert_eq!(w.creatures.distance_travelled[0], 0.0);
-
-        // Run the movement step directly.
-        w.apply_movement_and_repulsion();
-
-        // After movement, distance_travelled should be >= 5.0 and flag should flip.
-        assert!(
-            w.creatures.distance_travelled[0] >= 5.0,
-            "distance_travelled = {}",
-            w.creatures.distance_travelled[0]
-        );
-        assert!(
-            w.first_move_fired,
-            "first_move_fired must be true after crossing 5.0"
-        );
-    }
 
     // ---- E.25.d tests ----
     // NOTE: HallOfFame fields (biggest_ever, weirdest, longest_lived, last_survivor)
@@ -568,10 +531,8 @@ mod tests {
         let mut rng = SimRng::from_u64(123);
         let b2 = Brain::founder(&mut rng);
         let n_before = w.creatures.len();
-        use crate::vision::VISION_LEN;
         w.creatures
             .push(1, 598.0, WORLD_SIZE * 0.5, FOUNDER_ENERGY, 0, b2);
-        w.vision.push([0.0f32; VISION_LEN]);
         w.creatures.vx[n_before] = 0.0;
         w.creatures.vy[n_before] = 0.0;
 
@@ -831,7 +792,6 @@ mod tests {
     #[test]
     fn p3a_eat_bite_basic_transfer() {
         use crate::brain::Brain;
-        use crate::vision::VISION_LEN;
 
         let mut w = World::new("p3a-basic");
         w.creatures.energy[0] = 100.0;
@@ -847,7 +807,6 @@ mod tests {
         // Place prey within bite reach (FOUNDER_BITE_REACH * FOUNDER_SIZE).
         w.creatures
             .push(1, pred_x + 1.5, pred_y, 100.0, 0, prey_brain);
-        w.vision.push([0.0f32; VISION_LEN]);
 
         w.grid.rebuild(&w.creatures.x, &w.creatures.y);
 
@@ -880,7 +839,6 @@ mod tests {
     #[test]
     fn p3a_eat_cooldown_still_gates() {
         use crate::brain::Brain;
-        use crate::vision::VISION_LEN;
 
         let mut w = World::new("p3a-cooldown");
         w.creatures.energy[0] = 100.0;
@@ -895,7 +853,6 @@ mod tests {
         let pred_y = w.creatures.y[0];
         w.creatures
             .push(1, pred_x + 1.5, pred_y, 100.0, 0, prey_brain);
-        w.vision.push([0.0f32; VISION_LEN]);
 
         w.grid.rebuild(&w.creatures.x, &w.creatures.y);
 

@@ -4,6 +4,7 @@
 //! D3: genome removed; D9: Action enum collapsed to {Graze, Eat, Split}.
 
 pub(crate) mod nn;
+pub(crate) mod proximity;
 pub(crate) mod tick;
 
 use self::nn::{chunk_ranges, dynamic_chunks};
@@ -13,7 +14,6 @@ use crate::creature::{Action, CreatureSoA};
 use crate::grass::GrassGrid;
 use crate::grid::SpatialGrid;
 use crate::rng::SimRng;
-use crate::vision::{VisionBuf, VisionPass, VISION_LEN};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -109,21 +109,13 @@ pub struct World {
     pub tick: u32,
     pub seed: String,
     pub rng: SimRng,
-    /// Grass density field (v1.2 grass mechanic). 240×240 cells, 2.5u each.
+    /// Grass density field (v1.2 grass mechanic).
     pub grass: GrassGrid,
     pub grid: SpatialGrid,
     pub creatures: CreatureSoA,
     pub sliders: DevSliders,
     pub next_creature_id: u64,
-    pub peak_population: u32,
     pub world_ended: bool,
-    pub first_move_fired: bool,
-    pub first_eat_fired: bool,
-    /// Bitset of population milestone thresholds that have fired (v5 §11, E.25.a).
-    /// Bit k = POPULATION_MILESTONES[k] was crossed. One-shot: never cleared.
-    pub population_milestones_fired: u32,
-    /// Per-creature vision cache (index-aligned with CreatureSoA). Milestone C.12.
-    pub vision: Vec<VisionBuf>,
     /// In-app hierarchical profiler. Runtime-toggleable, default OFF.
     /// Excluded from SaveV1 and from the §16 snapshot hash (D10).
     /// See docs/plans/perf-timing.md for the full design.
@@ -131,7 +123,7 @@ pub struct World {
     // Per-tick scratch buffers, promoted from in-function `vec!` to long-lived
     // fields to eliminate ~300 KB/tick allocator pressure (perf-final-report
     // §3 item 2). Excluded from SaveV1 by omission —
-    // mirrors the `vision` / `profile` pattern.
+    // mirrors the `profile` pattern.
     pub(crate) scratch_fx: Vec<f32>,
     pub(crate) scratch_fy: Vec<f32>,
     pub(crate) scratch_neighbors: Vec<usize>,
@@ -154,6 +146,13 @@ pub struct World {
     /// color-EMA bookkeeping pass to credit Graze intent even when fallthrough
     /// landed on a different action.
     pub(crate) scratch_argmax_pre: Vec<u8>,
+    /// v1.5 S5b: precomputed (sector_id, weight) for each integer cell offset.
+    /// 33×33 LUT (`proximity::LUT_DIM²`) eliminates `atan2` in the per-creature
+    /// grass-density scan. Built once at `new_with_sliders`.
+    pub(crate) sector_lut: Vec<(u8, f32)>,
+    /// v1.5 S5b: per-creature 8-accumulator scratch reused across the NN input
+    /// build. Resized in `step()` before the chunked input phase.
+    pub(crate) scratch_sector_accum: Vec<[f32; 8]>,
 }
 
 impl World {
@@ -194,7 +193,7 @@ impl World {
         }
         let mut grid = SpatialGrid::new();
         grid.rebuild(&creatures.x, &creatures.y);
-        let vision = vec![[0.0f32; VISION_LEN]; founder_count as usize];
+        let sector_lut = proximity::build_sector_lut();
         Self {
             tick: 0,
             seed: seed_string,
@@ -204,12 +203,7 @@ impl World {
             creatures,
             sliders,
             next_creature_id: founder_count as u64,
-            peak_population: founder_count,
             world_ended: false,
-            first_move_fired: false,
-            first_eat_fired: false,
-            population_milestones_fired: 0,
-            vision,
             profile: crate::profiler::Profiler::new(),
             scratch_fx: Vec::new(),
             scratch_fy: Vec::new(),
@@ -223,6 +217,8 @@ impl World {
             scratch_dead: Vec::new(),
             current_curriculum_factor: 1.0,
             scratch_argmax_pre: Vec::new(),
+            sector_lut,
+            scratch_sector_accum: Vec::new(),
         }
     }
 
@@ -264,14 +260,11 @@ impl World {
             self.grid.rebuild(&self.creatures.x, &self.creatures.y);
         }
 
-        // 2. Vision pass (Milestone C.12).
-        {
-            crate::profile_span!(&self.profile, "tick.vision");
-            self.run_vision_pass();
-        }
-
-        // 3. NN forward pass + action decode (Milestone D).
+        // 2. NN forward pass + action decode (Milestone D).
         // Chunked per v6 §J; sequential by default, parallel behind `threads` feature.
+        // The new 32-input sensors (wall/creature/grass proximity) live inside
+        // `build_nn_input`; the `tick.proximity.*` parent spans cover the
+        // per-creature sensor work.
         {
             crate::profile_span!(&self.profile, "tick.nn");
             let n = self.creatures.len();
@@ -283,12 +276,8 @@ impl World {
             // v1.5 S3: argmax-pre buffer mirrors per-creature output; sized to
             // match population before the chunked NN pass writes into it.
             self.scratch_argmax_pre.resize(n, 0);
+            self.scratch_sector_accum.resize(n, [0.0f32; 8]);
             self.nn_forward_all_chunks(&ranges, n);
-            // Snapshot energy *now* (immediately after NN forward — tick body
-            // hasn't run yet, so energy still equals its value at NN input
-            // time). Next tick's NN forward subtracts this to get the delta
-            // covering "what happened during this tick".
-            self.creatures.prev_energy[..n].copy_from_slice(&self.creatures.energy[..n]);
         }
 
         // 4. Apply velocities + soft repulsion + wall clamp; rebuild grid.
@@ -337,18 +326,18 @@ impl World {
             // S27: collect_deaths writes into self.scratch_dead (promoted pool).
             self.collect_deaths();
             if !self.scratch_dead.is_empty() {
-                // Mirror swap_remove on parallel buffers (vision + S3 scratch
-                // columns that need to stay index-aligned through bookkeeping).
+                // Mirror swap_remove on parallel buffers (S3/S5b scratch columns
+                // that need to stay index-aligned through bookkeeping).
                 // Walk from back just like remove_indices does.
                 for &k in self.scratch_dead.iter().rev() {
-                    if k < self.vision.len() {
-                        self.vision.swap_remove(k);
-                    }
                     if k < self.scratch_argmax_pre.len() {
                         self.scratch_argmax_pre.swap_remove(k);
                     }
                     if k < self.scratch_got_a_bite.len() {
                         self.scratch_got_a_bite.swap_remove(k);
+                    }
+                    if k < self.scratch_sector_accum.len() {
+                        self.scratch_sector_accum.swap_remove(k);
                     }
                 }
                 // Use mem::take to avoid borrow conflict: remove_indices takes
@@ -367,7 +356,7 @@ impl World {
         }
 
         // 12. Step-12 tail: last_action promotion, color-EMA update, tick bump,
-        //     milestone events, world-end check.
+        //     world-end check.
         {
             crate::profile_span!(&self.profile, "tick.bookkeeping_tail");
 
@@ -377,29 +366,23 @@ impl World {
                 self.color_ema_update();
             }
 
-            // Promote action chain by one tick:
-            //   last2_action ← last_action  (the one-tick-older slot)
-            //   last_action  ← action_this_tick  (this tick's choice)
-            // Bulk memcpy in two passes (S30 pattern). Order matters: snapshot
-            // last_action into last2_action *before* overwriting last_action.
+            // Promote action chain by one tick: last_action ← action_this_tick.
+            // Bulk memcpy (S30 pattern).
             let n = self.creatures.len();
-            self.creatures.last2_action[..n].copy_from_slice(&self.creatures.last_action[..n]);
             self.creatures.last_action[..n].copy_from_slice(&self.creatures.action_this_tick[..n]);
 
-            self.tick = self.tick.saturating_add(1);
-            let pop = self.creatures.len() as u32;
-            if pop > self.peak_population {
-                self.peak_population = pop;
-            }
-
-            // E.25.a: PopulationMilestone threshold tracking (once per threshold ever).
-            // Events no longer emitted (D4); bitset kept for potential D5 HoF use.
-            for (k, &threshold) in POPULATION_MILESTONES.iter().enumerate() {
-                let bit = 1u32 << k;
-                if pop >= threshold && (self.population_milestones_fired & bit) == 0 {
-                    self.population_milestones_fired |= bit;
+            // v1.5 S5b: bump ticks_since_split; reset for any creature that
+            // performed a Split this tick. Single pass over the SoA.
+            for i in 0..n {
+                if self.creatures.action_this_tick[i] == Action::Split {
+                    self.creatures.ticks_since_split[i] = 0;
+                } else {
+                    self.creatures.ticks_since_split[i] =
+                        self.creatures.ticks_since_split[i].saturating_add(1);
                 }
             }
+
+            self.tick = self.tick.saturating_add(1);
 
             if self.creatures.is_empty() {
                 self.world_ended = true;
@@ -455,23 +438,8 @@ impl World {
         self.step()
     }
 
-    /// Run the vision pass.
-    /// Ensures self.vision is index-aligned with self.creatures.
-    pub(crate) fn run_vision_pass(&mut self) {
-        let n = self.creatures.len();
-        // Ensure vision buffer is large enough.
-        if self.vision.len() < n {
-            self.vision.resize(n, [0.0f32; VISION_LEN]);
-        }
-        let pass = VisionPass {
-            creatures: &self.creatures,
-            grid: &self.grid,
-        };
-        pass.run(&mut self.vision[..n]);
-    }
-
     /// Test-only deep clone of the World. Clones all SoA data and resets
-    /// transient state (vision, scratch bufs, spatial grid). Only available under `#[cfg(test)]`.
+    /// transient state (scratch bufs, spatial grid). Only available under `#[cfg(test)]`.
     #[cfg(test)]
     #[allow(dead_code)]
     pub fn clone_for_test(&self) -> World {
@@ -495,9 +463,11 @@ impl World {
             creatures.last_action[i] = self.creatures.last_action[i];
             creatures.action_this_tick[i] = self.creatures.action_this_tick[i];
             creatures.distance_travelled[i] = self.creatures.distance_travelled[i];
+            creatures.ticks_since_split[i] = self.creatures.ticks_since_split[i];
         }
         let mut grid = SpatialGrid::new();
         grid.rebuild(&creatures.x, &creatures.y);
+        let sector_lut = self.sector_lut.clone();
         World {
             tick: self.tick,
             seed: self.seed.clone(),
@@ -507,12 +477,7 @@ impl World {
             creatures,
             sliders: self.sliders.clone(),
             next_creature_id: self.next_creature_id,
-            peak_population: self.peak_population,
             world_ended: self.world_ended,
-            first_move_fired: self.first_move_fired,
-            first_eat_fired: self.first_eat_fired,
-            population_milestones_fired: self.population_milestones_fired,
-            vision: vec![[0.0f32; VISION_LEN]; n],
             profile: crate::profiler::Profiler::new(),
             scratch_fx: Vec::new(),
             scratch_fy: Vec::new(),
@@ -526,6 +491,8 @@ impl World {
             scratch_dead: Vec::new(),
             current_curriculum_factor: self.current_curriculum_factor,
             scratch_argmax_pre: Vec::new(),
+            sector_lut,
+            scratch_sector_accum: Vec::new(),
         }
     }
 }
@@ -575,11 +542,10 @@ mod tests {
         assert!(w.tick > 0);
     }
 
-    /// D3: world runs without genome fields. All creatures have MOVE_SPEED_MAX, 24 eyes.
+    /// D3: world runs without genome fields. All creatures have MOVE_SPEED_MAX.
     #[test]
     fn world_runs_2000_ticks_with_movement() {
         let mut w = World::new("movement-smoke");
-        // D3: no genome patch needed — all creatures have MOVE_SPEED_MAX, 24 eyes, VISION_RANGE_MAX.
         for _ in 0..2000 {
             if !w.tick_once() {
                 break;
@@ -632,7 +598,6 @@ mod tests {
     #[test]
     fn d19_thousand_creatures_thousand_ticks_no_explode() {
         use crate::brain::Brain;
-        use crate::vision::VISION_LEN;
 
         let mut w = World::new("d19-smoke");
         let mut seeder = SimRng::from_string("d19-seed");
@@ -644,7 +609,6 @@ mod tests {
             let x = seeder.uniform(10.0, WORLD_SIZE - 10.0);
             let y = seeder.uniform(10.0, WORLD_SIZE - 10.0);
             w.creatures.push(k + 1, x, y, FOUNDER_ENERGY, 0, b);
-            w.vision.push([0.0f32; VISION_LEN]);
         }
 
         let energy_start: f32 = w.creatures.energy.iter().sum();
@@ -714,7 +678,6 @@ mod tests {
         w.collect_deaths();
         let dead = std::mem::take(&mut w.scratch_dead);
         w.creatures.remove_indices(&dead);
-        w.vision.clear();
         assert_eq!(w.creatures.len(), 0);
         // Manual recompute (step() returns false immediately when empty).
         let pop = w.creatures.len() as f32;
@@ -743,7 +706,6 @@ mod tests {
             let id = w.next_creature_id;
             w.next_creature_id += 1;
             w.creatures.push(id, 1.0, 1.0, 10.0, 0, b);
-            w.vision.push([0.0f32; VISION_LEN]);
         }
         // Drive one tick so step() runs the factor compute.
         w.tick_once();
@@ -767,7 +729,6 @@ mod tests {
             let id = w.next_creature_id;
             w.next_creature_id += 1;
             w.creatures.push(id, 1.0, 1.0, 10.0, 0, b);
-            w.vision.push([0.0f32; VISION_LEN]);
         }
         w.tick_once();
         // At t=0.5 → s = 0.5*0.5*(3 - 1.0) = 0.5
@@ -808,45 +769,6 @@ mod tests {
             (w.current_curriculum_factor - 1.0).abs() < 1e-6,
             "auto_curriculum=false must pin factor to 1.0; got {}",
             w.current_curriculum_factor
-        );
-    }
-
-    /// perf-1 T2: child's trig cache is populated on birth; parent's is unchanged.
-    /// D3: trig is determined by sector index only (no genome fields).
-    #[test]
-    fn eye_trig_recomputed_on_birth() {
-        use crate::brain::Brain;
-        use crate::creature::CreatureSoA;
-        use crate::rng::SimRng;
-        use crate::vision::SECTORS;
-
-        let mut w = World::new("perf1-birth");
-        // Coerce the founder to definitely split this tick.
-        w.creatures.energy[0] = 1_000.0;
-        w.creatures.action_this_tick[0] = Action::Split;
-        let parent_trig_before: Vec<f32> = w.creatures.eye_trig[..SECTORS * 2].to_vec();
-        w.handle_births();
-        assert!(w.creatures.len() >= 2, "birth must have produced a child");
-        // Parent's cache unchanged.
-        assert_eq!(
-            &w.creatures.eye_trig[..SECTORS * 2],
-            parent_trig_before.as_slice()
-        );
-        // Child's cache matches a fresh recompute (D3: same for all creatures).
-        let child_idx = w.creatures.len() - 1;
-        let mut expected = CreatureSoA::with_capacity(1);
-        expected.push(
-            0,
-            0.0,
-            0.0,
-            0.0,
-            0,
-            Brain::founder(&mut SimRng::from_u64(0)), // brain irrelevant for cache
-        );
-        let off = child_idx * SECTORS * 2;
-        assert_eq!(
-            &w.creatures.eye_trig[off..off + SECTORS * 2],
-            &expected.eye_trig[..SECTORS * 2]
         );
     }
 }

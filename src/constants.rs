@@ -41,15 +41,31 @@ pub const CURRICULUM_MIN_FACTOR_DEFAULT: f32 = 0.0;
 pub const CURRICULUM_MIN_POP_DEFAULT: u32 = 1000;
 pub const CURRICULUM_MAX_POP_DEFAULT: u32 = 2000;
 
-// ---- Brain (v1.3 §D9) ----
-// Layout: [0..5) self-state, [5..77) vision 24×3, [77..80) last_action 3,
-//         [80..105) grass-patch 5×5, [105..112) padding zeros.
-pub const NN_INPUTS: usize = 112; // v1.3: 5 self-state + 72 vision + 3 last_action + 25 grass-patch + 7 pad
+// ---- Brain (v1.5 S5b) ----
+// 32-input semantic layout — see src/world/nn.rs::build_nn_input.
+//   [0..8)   self/memory (hunger, age_frac, prev_vx, prev_vy, is_last_graze,
+//            is_last_eat, ticks_since_split_norm, cooldown_ready)
+//   [8..12)  wall_proximity N/S/E/W (range WALL_PROXIMITY_RANGE)
+//   [12..20) creature_proximity × 8 world-aligned sectors (range PROXIMITY_RANGE)
+//   [20..28) grass_density × 8 sectors (range PROXIMITY_RANGE)
+//   [28]     padding (0.0) — reserved for predator-color (v1.6+)
+//   [29]     curr_grass_density (cells under the body)
+//   [30]     1.0 (bias-learning constant)
+//   [31]     padding (0.0) — SIMD alignment to 32 = 4 × 8
+pub const NN_INPUTS: usize = 32;
 pub const NN_HIDDEN_1: usize = 48;
 pub const NN_HIDDEN_2: usize = 24;
 pub const NN_OUTPUTS: usize = 5; // out[0]=vx, out[1]=vy, out[2..5]=action logits (Graze/Eat/Split)
 pub const NN_WEIGHT_COUNT: usize =
     NN_INPUTS * NN_HIDDEN_1 + NN_HIDDEN_1 * NN_HIDDEN_2 + NN_HIDDEN_2 * NN_OUTPUTS;
+const _: () = assert!(NN_WEIGHT_COUNT == 2808);
+/// Number of angular sectors for creature_proximity and grass_density inputs.
+/// World-aligned: 0 = N (0°), 1 = NE (45°), …, 7 = NW (315°).
+pub const NN_SECTORS: usize = 8;
+/// Range used by creature_proximity and grass_density sector inputs (world-units).
+pub const PROXIMITY_RANGE: f32 = 20.0;
+/// Range used by wall_proximity inputs (world-units).
+pub const WALL_PROXIMITY_RANGE: f32 = 50.0;
 pub const NN_MUT_RATE_DEFAULT: f32 = 0.02;
 pub const NN_MUT_SIGMA_DEFAULT: f32 = 0.02;
 // Per-layer He-uniform init ranges r = sqrt(6/fan_in). L1's 0.433 is the locked
@@ -66,7 +82,6 @@ pub const MUT_RATE_JITTER: f32 = 0.20;
 
 // ---- Trait-range constants still used as named values ----
 pub const MOVE_SPEED_MAX: f32 = 5.0;
-pub const VISION_RANGE_MAX: f32 = 80.0;
 /// Founder bite reach (legacy name). Inspector dropped the reported field
 /// in v1.5 S3 — constant retained for tests / future use.
 #[allow(dead_code)]
@@ -89,25 +104,10 @@ pub const FOUNDER_SPLIT_JITTER: f32 = 50.0;
 /// Default number of founders seeded at world init (multi-founder v1.5).
 pub const FOUNDER_COUNT_DEFAULT: u32 = 8;
 
-// ---- Vision (v5 §10, v6 §E, Milestone C.12) ----
-/// Maximum grid cells walked per ray; bounds worst-case DDA cost (v5 §3.6).
-/// vision_range_max = 80u; HASH_CELL = 5u → ~16 cells along a ray axis.
-/// Worst diagonal ≈ 32; double for slack.
-pub const MAX_CELLS_PER_RAY: usize = 64;
-
 // ---- Deterministic chunking (v6 §J) ----
 /// Chunk-count clamps. Per-tick count = `clamp(pop/32, MIN, min(MAX, workers))`.
 pub const MIN_CHUNKS: usize = 4;
 pub const MAX_CHUNKS: usize = 16;
-
-// ---- Population milestones (v5 §11, E.25.a) ----
-/// Thresholds that fire a PopulationMilestone event once per threshold ever (v5 §11).
-pub const POPULATION_MILESTONES: [u32; 6] = [10, 50, 100, 500, 1000, 2000];
-
-// ---- Vision geometry (v5 §3.5, v6 §E; perf-1 sector sin/cos cache) ----
-/// Number of vision sectors per creature. Matches EYE_SLOTS; kept in both
-/// vision.rs (re-export) and constants.rs (source of truth for creature.rs).
-pub const SECTORS: usize = 24;
 
 // ---- Grass grid ----
 /// Cell size in world-units. World is 600u → 120 cells per axis.
@@ -133,37 +133,14 @@ pub const GRASS_ENERGY_PER_BITE_DEFAULT: f32 = 10.0;
 /// Live-tunable via DevSliders.grass_bites_per_block.
 pub const GRASS_BITES_PER_BLOCK_DEFAULT: u32 = 2;
 
-// ---- NN input layout offsets (v1.3 D9) ----
-/// Self-state block length: [energy_frac, age_frac, prev_vx, prev_vy, cooldown_frac].
-/// Used in layout tests; `#[allow(dead_code)]` because tests are cfg(test)-only.
-#[allow(dead_code)]
-pub const NN_SELF_STATE_LEN: usize = 5;
-/// Vision passthrough block start. 5 self-state slots before.
-pub const NN_VISION_OFFSET: usize = 5;
-/// Vision block length: 24 sectors × 3 RGB features (Q3: dist+size dropped).
-pub const NN_VISION_LEN: usize = 72;
-/// Last-action one-hot block start. After vision block (5 + 72 = 77).
-pub const NN_LAST_ACTION_OFFSET: usize = 77;
-/// Last-action block length: 3 (Graze, Eat, Split).
-pub const NN_LAST_ACTION_LEN: usize = 3;
-/// Grass-patch 5×5 block start (77 + 3 = 80).
-pub const NN_GRASS_PATCH_OFFSET: usize = 80;
-/// Grass-patch block length. Used in layout tests; `#[allow(dead_code)]` because tests are cfg(test)-only.
-#[allow(dead_code)]
-pub const NN_GRASS_PATCH_LEN: usize = 25;
-/// One-hot for the action *two* ticks ago. Lets the brain see a 2-step action
-/// history (combined with the existing last-action slot at offset 77).
-/// Occupies former pad slots [105..108).
-pub const NN_LAST2_ACTION_OFFSET: usize = 105;
-#[allow(dead_code)]
-pub const NN_LAST2_ACTION_LEN: usize = 3;
-/// Normalized energy change since the previous NN forward pass:
-/// (energy_now - prev_energy) / energy_max. Range roughly [-1, 1].
-/// Occupies former pad slot [108..109).
-pub const NN_ENERGY_DELTA_OFFSET: usize = 108;
-/// Grass-patch center sample (dx=dy=0); 5×5 iteration is dy outer, dx inner,
-/// offset = (dy+2)*5 + (dx+2). Center: dy=0,dx=0 → 12; global slot 80+12 = 92.
-/// Used in tests to pin the center-slot index; `#[allow(dead_code)]` because tests are cfg(test)-only.
-#[allow(dead_code)]
-pub const NN_GRASS_PATCH_CENTER_SLOT: usize = NN_GRASS_PATCH_OFFSET + 12; // = 92
-                                                                          // Slots [105..112) are SIMD padding zeros.
+// ---- NN input layout offsets (v1.5 S5b) ----
+/// Wall proximity block start (after 8 self-state slots).
+pub const NN_WALL_OFFSET: usize = 8;
+/// Creature-proximity sector block start.
+pub const NN_CREATURE_SECTOR_OFFSET: usize = 12;
+/// Grass-density sector block start.
+pub const NN_GRASS_SECTOR_OFFSET: usize = 20;
+/// Slot for `curr_grass_density` (the density under the creature's body).
+pub const NN_CURR_GRASS_SLOT: usize = 29;
+/// Slot pinned to constant 1.0 (bias-learning).
+pub const NN_BIAS_SLOT: usize = 30;

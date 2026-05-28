@@ -21,6 +21,11 @@ pub struct GrassGrid {
     /// Double-buffer scratch. Same length as `density`. Recomputed every
     /// `step` call; never read between ticks.
     pub scratch: Vec<f32>,
+    /// Per-row "any non-empty" bitset (v1.5 S5b). One bit per row: 1 if any
+    /// cell in that row has `density > 0`, 0 otherwise. Lets the grass-sector
+    /// NN scan skip whole rows in O(1) when sparse. Length =
+    /// `GRASS_GRID_DIM.div_ceil(64)` u64s; regenerated after every `step()`.
+    pub row_has_density: Vec<u64>,
 }
 
 impl GrassGrid {
@@ -34,7 +39,44 @@ impl GrassGrid {
             let idx = rng.index(GRASS_CELL_COUNT);
             density[idx] = GRASS_MAX;
         }
-        Self { density, scratch }
+        let mut g = Self {
+            density,
+            scratch,
+            row_has_density: vec![0u64; GRASS_GRID_DIM.div_ceil(64)],
+        };
+        g.rebuild_row_bitset();
+        g
+    }
+
+    /// Recompute the per-row "any non-empty" bitset. Called from `step()`
+    /// after the density swap; exposed for tests that mutate `density` directly.
+    pub fn rebuild_row_bitset(&mut self) {
+        let words = GRASS_GRID_DIM.div_ceil(64);
+        if self.row_has_density.len() != words {
+            self.row_has_density.resize(words, 0);
+        }
+        for w in self.row_has_density.iter_mut() {
+            *w = 0;
+        }
+        for iy in 0..GRASS_GRID_DIM {
+            let row_off = iy * GRASS_GRID_DIM;
+            let any = self.density[row_off..row_off + GRASS_GRID_DIM]
+                .iter()
+                .any(|&d| d > 0.0);
+            if any {
+                self.row_has_density[iy / 64] |= 1u64 << (iy % 64);
+            }
+        }
+    }
+
+    /// Test whether row `iy` may contain any non-zero density cells.
+    #[inline]
+    pub fn row_nonempty(&self, iy: usize) -> bool {
+        let w = iy / 64;
+        if w >= self.row_has_density.len() {
+            return false;
+        }
+        (self.row_has_density[w] >> (iy % 64)) & 1 == 1
     }
 
     /// One propagation tick. Reads `self.density`, writes `self.scratch`, swaps.
@@ -98,6 +140,9 @@ impl GrassGrid {
         }
 
         std::mem::swap(&mut self.density, &mut self.scratch);
+        // v1.5 S5b: regenerate per-row bitset so the grass-sector NN scan can
+        // skip whole rows in O(1) when sparse.
+        self.rebuild_row_bitset();
     }
 
     /// Walled bilinear sample at continuous world position `(x, y)`.
@@ -223,6 +268,7 @@ mod tests {
         GrassGrid {
             density: vec![0.0f32; GRASS_CELL_COUNT],
             scratch: vec![0.0f32; GRASS_CELL_COUNT],
+            row_has_density: vec![0u64; GRASS_GRID_DIM.div_ceil(64)],
         }
     }
 
@@ -283,6 +329,7 @@ mod tests {
         let mut g = GrassGrid {
             density: vec![GRASS_MAX; GRASS_CELL_COUNT],
             scratch: vec![0.0f32; GRASS_CELL_COUNT],
+            row_has_density: vec![0u64; GRASS_GRID_DIM.div_ceil(64)],
         };
         for _ in 0..100 {
             g.step(0.005, 0.05);
@@ -526,6 +573,29 @@ mod tests {
             max_count >= 1,
             "at least one cell must be seeded; got {max_count}"
         );
+    }
+
+    /// v1.5 S5b: per-row bitset reflects current density state.
+    #[test]
+    fn row_bitset_tracks_density() {
+        let mut g = fresh_grid();
+        // No density anywhere → all bits zero.
+        g.rebuild_row_bitset();
+        for iy in 0..GRASS_GRID_DIM {
+            assert!(!g.row_nonempty(iy), "row {iy} must be empty initially");
+        }
+        // Seed cell (5, 7) — row 7 must now flag non-empty.
+        g.density[7 * GRASS_GRID_DIM + 5] = 0.4;
+        g.rebuild_row_bitset();
+        assert!(
+            g.row_nonempty(7),
+            "row 7 must be flagged after seeding (5,7)"
+        );
+        for iy in 0..GRASS_GRID_DIM {
+            if iy != 7 {
+                assert!(!g.row_nonempty(iy), "row {iy} must remain empty");
+            }
+        }
     }
 
     /// Test 15: density and scratch vectors have correct length after new().
