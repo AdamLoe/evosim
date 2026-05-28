@@ -1,27 +1,39 @@
-// v1.6 Wave B (Stage 1): sim worker.
+// v1.6 Wave C (Stage 2): sim worker with SharedArrayBuffer snapshots.
 //
-// Holds the wasm `WorldHandle` and the tick loop. Main thread holds no wasm
-// after this commit — it only renders snapshots posted from here.
+// Replaces Wave B's per-batch `snapshot` postMessage (and the explicit
+// non-shared-ArrayBuffer copy workaround that postMessage required) with a
+// double-buffered SAB write. The sim worker writes the inactive slot, flips
+// `CTRL_CURRENT_SLOT`, then bumps `CTRL_SEQ` so main's render loop can detect
+// a fresh snapshot. Zero structured-clone, zero copy.
 //
-// Stage 1 pacing is `setTimeout(0)`: simple, correct, caps high-TPS accuracy
-// at ~250 TPS due to Chrome's 4 ms minimum (Wave D replaces with
-// `Atomics.waitAsync` to fix that).
+// Pacing remains `setTimeout(0)` for Wave C — Wave D introduces
+// `Atomics.waitAsync` for accurate high-TPS pacing.
 //
 // References:
-//   - docs/plans/v1.6-plan.md §"Step B"
-//   - docs/plans/v1.6-implementer-guide.md §"Wave B"
+//   - docs/plans/v1.6-plan.md §"Step C"
+//   - docs/plans/v1.6-implementer-guide.md §"Wave C"
 
 import init, {
   WorldHandle,
   max_pop_for_sab,
 } from "../wasm/evosim";
 import * as _wasmMod from "../wasm/evosim";
-import type {
-  SimMessage,
-  SimMessageBoot,
-  SimReply,
-  SimReplySnapshot,
+import {
+  CONTROL_SAB_I32_LEN,
+  CREATURE_SOA_BYTES,
+  CTRL_CURRENT_SLOT,
+  CTRL_SEQ,
+  GRASS_BYTES,
+  SNAPSHOT_HEADER_BYTES,
+  SNAPSHOT_SAB_BYTES,
+  creatureSoAOffset,
+  grassOffset,
+  slotOffset,
+  type SimMessage,
+  type SimMessageBoot,
+  type SimReply,
 } from "./sim-bridge";
+import { span } from "./perf";
 
 // initThreadPool is only exported when wasm is built with --features threads.
 // Cast via unknown to avoid TS2614 on non-threaded builds.
@@ -43,6 +55,13 @@ const MAX_FRAME_DELTA_MS = 100;
 // Pending main → worker messages drained at the top of each loop iteration.
 const messageQueue: SimMessage[] = [];
 let booted = false;
+
+// SAB handles allocated at boot. Sized once and shared with main via
+// `boot_ready`. `ctrlI32` is the Int32Array view over `controlSab` used for
+// the slot-flip atomics. The snapshot SAB is reused across both slots.
+let controlSab: SharedArrayBuffer | null = null;
+let snapshotSab: SharedArrayBuffer | null = null;
+let ctrlI32: Int32Array | null = null;
 
 self.onmessage = (e: MessageEvent<SimMessage>): void => {
   const msg = e.data;
@@ -102,9 +121,9 @@ async function handleBoot(boot: SimMessageBoot): Promise<void> {
   );
 
   // Apply every persisted slider via the name-dispatcher. Per v1.6-plan.md
-  // §"Step B" — `set_slider(name, value)` is the sole entry point post-cutover,
-  // no per-typed `set_*` calls (including auto_curriculum, which rides this
-  // path as 0|1 via the new `try_set_slider` arm landed in this commit).
+  // §"Step C": per-typed `set_*` wasm exports are gone; `set_slider(name,
+  // value)` is the sole entry point. Bools ride the same path as 0|1 via the
+  // `"auto_curriculum"` arm in `try_set_slider`.
   for (const [name, value] of Object.entries(boot.initial_sliders)) {
     try {
       world.set_slider(name, value);
@@ -115,11 +134,19 @@ async function handleBoot(boot: SimMessageBoot): Promise<void> {
     }
   }
 
-  // First-paint handshake (gotcha 1): run one tick + post one snapshot BEFORE
-  // boot_ready so main's first RAF sees a valid snapshot. Skipping this makes
-  // the first frame see `latestSnapshot === undefined` → crash or pop=0 ghost.
+  // Allocate the two SABs once at boot. They live for the lifetime of this
+  // worker; main keeps the handles in closures so they're GC-rooted until the
+  // worker (and its closure references) are dropped on restart.
+  controlSab = new SharedArrayBuffer(CONTROL_SAB_I32_LEN * 4);
+  snapshotSab = new SharedArrayBuffer(SNAPSHOT_SAB_BYTES);
+  ctrlI32 = new Int32Array(controlSab);
+
+  // First-paint handshake (gotcha 1, retained from Wave B): run one tick and
+  // write one snapshot to slot 0 BEFORE posting boot_ready, so main's first
+  // RAF sees a valid live slot. The control word stays 0 so that initial
+  // snapshot is the live slot.
   world.step_n(1);
-  postSnapshot();
+  writeSnapshotToSAB();
 
   const reply: SimReply = {
     kind: "boot_ready",
@@ -128,8 +155,8 @@ async function handleBoot(boot: SimMessageBoot): Promise<void> {
     threads,
     rayon_ok: rayonOk,
     max_pop_for_sab: max_pop_for_sab(),
-    snapshot_sab: null, // Stage 1: postMessage; Wave C populates.
-    control_sab: null,
+    snapshot_sab: snapshotSab,
+    control_sab: controlSab,
   };
   post(reply);
 
@@ -220,39 +247,53 @@ function drainMessages(): void {
   }
 }
 
-// ─── Tick loop ──────────────────────────────────────────────────────────────
+// ─── Snapshot write (Wave C SAB path) ───────────────────────────────────────
 
-function postSnapshot(): void {
-  if (!world) return;
-  // Note: world.creatures_buffer() / creature_ids_buffer() return typed-array
-  // VIEWS over wasm linear memory (which is a SharedArrayBuffer under the
-  // threaded build). Structured clone shares the underlying SAB, so we
-  // explicitly copy into a fresh (non-shared) ArrayBuffer first — otherwise
-  // a Stage 1 render-vs-next-tick race would corrupt mid-frame reads.
-  // `grass_buffer_u8` already returns a fresh `Uint8Array::from(&[...])`
-  // (i.e. a copy) on the Rust side, so it can be sent as-is.
-  // (gotcha 11)
-  const creaturesView = world.creatures_buffer();
-  const creaturesBytes = new Uint8Array(creaturesView.byteLength);
-  creaturesBytes.set(
-    new Uint8Array(creaturesView.buffer, creaturesView.byteOffset, creaturesView.byteLength),
-  );
-  const idsView = world.creature_ids_buffer();
-  const idsCopy = new Float64Array(idsView.length);
-  idsCopy.set(idsView);
-  const snapshot: SimReplySnapshot = {
-    kind: "snapshot",
-    tick: world.tick,
-    pop: world.population,
-    tps: world.tps,
-    world_ended: world.world_ended,
-    jank_count: world.jank_count,
-    creatures: creaturesBytes,
-    grass: world.grass_buffer_u8(),
-    ids: idsCopy,
-  };
-  post(snapshot);
+/**
+ * Atomic-flip ordering, per implementer-guide gotcha 2:
+ *   1. read `current` (live slot)
+ *   2. write inactive slot fully (creatures + grass + stats)
+ *   3. `Atomics.store(ctrl, CTRL_CURRENT_SLOT, 1 - current)`  ← flip
+ *   4. `Atomics.add(ctrl, CTRL_SEQ, 1)`                       ← seq bump
+ *
+ * Store-before-add gives main's render loop a clean read: if seq changed,
+ * current_slot is already coherent. The whole region the inactive slot
+ * occupies is owned by the worker between the previous flip and the next, so
+ * no reader sees a torn write.
+ *
+ * The TS-side `worker.snapshot.write` span wraps only the `write_snapshot_to`
+ * wasm call — that's the cost the orchestrator is measuring. The flip itself
+ * is two atomic ops, well below the noise floor of any span.
+ */
+function writeSnapshotToSAB(): void {
+  if (!world || !ctrlI32 || !snapshotSab) return;
+  const current = Atomics.load(ctrlI32, CTRL_CURRENT_SLOT);
+  const inactive: 0 | 1 = current === 0 ? 1 : 0;
+
+  // Build three Uint8Array views over the inactive slot's regions. Each view
+  // aliases a fixed byte range inside the shared snapshot SAB — Rust writes
+  // straight through them via `Uint8Array::copy_from`.
+  const headerOff = slotOffset(inactive);
+  const creaturesOff = creatureSoAOffset(inactive);
+  const grassOff = grassOffset(inactive);
+
+  const statsView = new Uint8Array(snapshotSab, headerOff, SNAPSHOT_HEADER_BYTES);
+  const creaturesView = new Uint8Array(snapshotSab, creaturesOff, CREATURE_SOA_BYTES);
+  const grassView = new Uint8Array(snapshotSab, grassOff, GRASS_BYTES);
+
+  const writeSpan = span("worker.snapshot.write");
+  try {
+    world.write_snapshot_to(creaturesView, grassView, statsView);
+  } finally {
+    writeSpan.close();
+  }
+
+  // Publish: flip slot, then bump seq (store-before-add per gotcha 2).
+  Atomics.store(ctrlI32, CTRL_CURRENT_SLOT, inactive);
+  Atomics.add(ctrlI32, CTRL_SEQ, 1);
 }
+
+// ─── Tick loop ──────────────────────────────────────────────────────────────
 
 function step(): void {
   if (!world) return;
@@ -276,18 +317,19 @@ function step(): void {
 
   if (ticksThisIter > 0) {
     world.step_n(ticksThisIter);
-    postSnapshot();
+    writeSnapshotToSAB();
   } else if (paused || ended) {
-    // No tick this iter, but we still want main to see fresh paused/ended
-    // state if it just toggled. Cheap; only fires when ticksThisIter === 0.
-    postSnapshot();
+    // No tick this iter, but write a fresh snapshot anyway so main sees the
+    // most recent paused/ended state without staring at stale data. Cheap;
+    // only fires when ticksThisIter === 0.
+    writeSnapshotToSAB();
   }
 
   scheduleNext();
 }
 
 function scheduleNext(): void {
-  // Stage 1 pacing: setTimeout(0). Wave D replaces with `Atomics.waitAsync`.
+  // Stage 2 pacing: setTimeout(0). Wave D replaces with `Atomics.waitAsync`.
   setTimeout(step, 0);
 }
 

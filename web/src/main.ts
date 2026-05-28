@@ -1,20 +1,24 @@
-// v1.6 Wave B: main thread holds NO wasm. The sim runs in a Web Worker
-// (`web/src/sim-worker.ts`); main owns rendering, UI, and the message bridge.
+// v1.6 Wave C (Stage 2): main thread holds NO wasm and copies NO snapshot.
+// Sim writes the inactive snapshot slot in the SharedArrayBuffer and atomically
+// flips `CTRL_CURRENT_SLOT`; main per-RAF reads the live slot via typed-array
+// views — zero structured-clone, zero memcpy.
 //
-// Per v1.6-plan.md §"Step B":
-//   - Spawn the sim worker, send `boot`, await `boot_ready`.
-//   - Assert `boot_ready.max_pop_for_sab === MAX_POP_FOR_SAB` (Rust/TS const
-//     drift is fatal — rebuild wasm).
-//   - Render loop reads the most recent snapshot received via postMessage.
-//   - Restart = worker.terminate() + new Worker; old SAB views are GC'd by
-//     the closure swap.
+// Per v1.6-plan.md §"Step C":
+//   - On `boot_ready`, stash `controlSab` / `snapshotSab` handles.
+//   - Each RAF: open `frame.snapshot.read` span, atomic-load the live slot,
+//     build creature + grass typed-array views, read the stats header, call
+//     `renderWorld(...)`.
+//   - Restart = worker.terminate() + new Worker; old SAB views are GC'd along
+//     with the previous bridge. Render keeps painting the last-good frame
+//     during the worker re-init blip (the previous SAB stays GC-rooted while
+//     the new boot_ready is in flight).
 //   - `initial_sliders` is sourced from `currentSliderState()` (in-memory
 //     widget values), NOT `getSettings()` localStorage — so a mid-drag
-//     restart carries the dragged value. (gotcha 4)
-//   - `__world` debug hook is gone (gotcha 6).
+//     restart carries the dragged value. (Wave B gotcha 4)
+//   - `__world` debug hook is gone (Wave B gotcha 6).
 
 import { makeCamera } from "./render";
-import { renderWorld, type SimSnapshot } from "./render-gl";
+import { renderWorld } from "./render-gl";
 import { attachCameraControls } from "./camera";
 import { installRail, pollRail, highlights } from "./rail/index";
 import { installProfilerPanel } from "./widgets/perf-panel";
@@ -32,8 +36,14 @@ import { getSettings, setSetting } from "./settings";
 import {
   SimBridge,
   MAX_POP_FOR_SAB,
+  CTRL_CURRENT_SLOT,
+  CREATURE_STRIDE,
+  GRASS_BYTES,
+  creatureSoAOffset,
+  grassOffset,
+  slotOffset,
+  readSnapshotHeader,
   type SimReplyBootReady,
-  type SimReplySnapshot,
 } from "./sim-bridge";
 
 const status = document.getElementById("status") as HTMLSpanElement;
@@ -78,10 +88,16 @@ export function getTargetTPS(): number {
   return targetTPS;
 }
 
-// Latest snapshot received from the sim worker. The first one lands as part
-// of the boot handshake (worker runs one tick before posting boot_ready), so
-// the first RAF after boot is guaranteed to see a valid snapshot. (gotcha 1)
-let latestSnapshot: SimReplySnapshot | null = null;
+// SAB handles received via `boot_ready`. Per Wave C, the sim worker writes
+// the inactive slot of `snapshotSab` and bumps `controlI32[CTRL_CURRENT_SLOT]`;
+// main reads the live slot each RAF. Both are non-null after a successful
+// boot_ready handshake; main keeps painting the previous frame during the
+// brief restart blip while they're still bound to the *previous* worker's
+// SABs (the new bridge's boot_ready will replace them atomically).
+let controlSab: SharedArrayBuffer | null = null;
+let snapshotSab: SharedArrayBuffer | null = null;
+let controlI32: Int32Array | null = null;
+let snapshotView: DataView | null = null;
 let cachedSeed = "";
 
 async function main(): Promise<void> {
@@ -111,7 +127,7 @@ async function main(): Promise<void> {
     () => latestSnapshotWorldSize(),
   );
 
-  status.textContent = `seed: ${cachedSeed}  ·  tick 0  ·  pop ${latestSnapshot?.pop ?? 0}`;
+  status.textContent = `seed: ${cachedSeed}  ·  tick 0  ·  pop 0`;
 
   installPacingControls(() => simBridge);
   installRestartButton(() => restart());
@@ -161,37 +177,59 @@ async function main(): Promise<void> {
   function frame(now: number): void {
     const frameSpan = span("frame");
     try {
-      const snap = latestSnapshot;
-      if (!snap) {
-        // boot_ready hasn't landed yet (or restart in flight). Skip render
-        // this frame; the previous backbuffer remains visible.
+      // Wave C zero-copy snapshot read. `frame.snapshot.read` wraps the
+      // atomic-load + typed-array view construction. Construction itself is
+      // ~free (no copy); the span is here so its absence vs presence shows up
+      // in the perf-tree without changing the constant cost.
+      if (!controlI32 || !snapshotSab || !snapshotView) {
+        // boot_ready hasn't landed yet (or a restart is in flight and the
+        // previous bridge has been torn down). Skip render this frame.
         return;
       }
+      const readSpan = span("frame.snapshot.read");
+      const rawSlot = Atomics.load(controlI32, CTRL_CURRENT_SLOT);
+      // Defensive: the sim worker only ever stores 0 or 1 here, but clamp so
+      // a stale or corrupted control word can't blow up `Float32Array` ctor.
+      const slot: 0 | 1 = rawSlot === 1 ? 1 : 0;
+      const header = readSnapshotHeader(snapshotView, slotOffset(slot));
+      // Build typed-array views over the live slot's regions. These views
+      // alias the SAB — no copy. They are scoped to this frame; next frame
+      // builds new ones (cheap, ~30 ns each) so a mid-frame slot flip doesn't
+      // leak across frames.
+      const pop = Math.min(header.pop, MAX_POP_FOR_SAB);
+      const creatures = pop > 0
+        ? new Float32Array(snapshotSab, creatureSoAOffset(slot), pop * CREATURE_STRIDE)
+        : new Float32Array(0);
+      const grass = new Uint8Array(snapshotSab, grassOffset(slot), GRASS_BYTES);
+      readSpan.close();
 
-      if (snap.world_ended && !paused && getSettings().autoRun && !autoRestartPending) {
+      if (header.world_ended && !paused && getSettings().autoRun && !autoRestartPending) {
         autoRestartPending = true;
         void restart().then(() => {
           autoRestartPending = false;
         });
       }
 
-      const simSnap: SimSnapshot = {
-        creatures: snap.creatures as unknown as Float32Array,
-        ids: snap.ids,
-        grass: snap.grass,
-        pop: snap.pop,
-        world_size: latestSnapshotWorldSize(),
-        grass_dim: latestGrassDim,
-      };
-
-      pollRail(rail, snap, simBridge);
-      renderWorld(gl!, cam, viewW, viewH, simSnap, highlights, now);
+      pollRail(rail, header, simBridge);
+      renderWorld(
+        gl!,
+        cam,
+        viewW,
+        viewH,
+        creatures,
+        grass,
+        pop,
+        latestWorldSize,
+        latestGrassDim,
+        highlights,
+        now,
+      );
 
       if (now - lastStatusUpdate > 200) {
         lastStatusUpdate = now;
-        const endedSuffix = snap.world_ended ? "  (world ended)" : "";
+        const endedSuffix = header.world_ended ? "  (world ended)" : "";
         status.textContent =
-          `seed: ${cachedSeed}  ·  tick ${snap.tick}  ·  pop ${snap.pop}${endedSuffix}`;
+          `seed: ${cachedSeed}  ·  tick ${header.tick}  ·  pop ${header.pop}${endedSuffix}`;
       }
     } finally {
       frameSpan.close();
@@ -214,15 +252,10 @@ async function spawnSimWorker(seed: string): Promise<SimBridge> {
   const w = new Worker(new URL("./sim-worker.ts", import.meta.url), { type: "module" });
   const bridge = new SimBridge(w);
 
-  bridge.onSnapshot((snap) => {
-    // Reinterpret `creatures` (delivered as Uint8Array because of the wasm
-    // Float32Array.view cast at the boundary) back to its native typed-array.
-    // Structured clone preserves the underlying ArrayBuffer; we wrap it.
-    const cu = snap.creatures as unknown as Uint8Array;
-    const cf = new Float32Array(cu.buffer, cu.byteOffset, cu.byteLength / 4);
-    (snap as unknown as { creatures: Float32Array }).creatures = cf;
-    latestSnapshot = snap;
-  });
+  // Wave C: snapshots are SAB-backed, not postMessage'd. The Stage-1
+  // `snapshot` reply is gone, so we don't register an `onSnapshot` handler;
+  // SimBridge silently drops any stale snapshot that arrives (won't happen
+  // post-Wave C, but the bridge tolerates it).
 
   const bootReady = new Promise<SimReplyBootReady>((resolve) => {
     bridge.onBootReady((reply) => resolve(reply));
@@ -256,6 +289,19 @@ async function spawnSimWorker(seed: string): Promise<SimBridge> {
       `Rust/TS const drift.`,
     );
   }
+  // Wave C: SAB handles are now mandatory. boot_ready posts them only after
+  // the worker has run one tick + written one snapshot to slot 0, so the very
+  // first frame after handshake is guaranteed to see a populated live slot.
+  if (!ready.snapshot_sab || !ready.control_sab) {
+    throw new Error(
+      "[boot] sim worker did not deliver SAB handles (snapshot_sab/control_sab " +
+      "null). Wave C requires both — check sim-worker.ts boot path.",
+    );
+  }
+  controlSab = ready.control_sab;
+  snapshotSab = ready.snapshot_sab;
+  controlI32 = new Int32Array(controlSab);
+  snapshotView = new DataView(snapshotSab);
   latestWorldSize = ready.world_size;
   latestGrassDim = ready.grass_dim;
 

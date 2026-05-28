@@ -14,18 +14,12 @@ const TPS_WINDOW: usize = 60;
 #[wasm_bindgen]
 pub struct WorldHandle {
     inner: World,
-    /// Reusable serialization buffer for `creatures_buffer` — one f32 vec
-    /// shared across calls so JS can read a stable typed-array view.
-    creature_buf: Vec<f32>,
-    /// Reusable buffer for `grass_buffer` — avoids re-allocating 921_600 f32s each frame.
-    grass_buf: Vec<f32>,
-    /// Reusable u8-quantized buffer for `grass_buffer_u8` — backs the R8 GPU upload (v1.5 S6).
+    /// Reusable u8-quantized grass buffer used by `write_snapshot_to` to stage
+    /// the per-cell `(d * 255.0) as u8` density before the SAB copy. Only read
+    /// on wasm32 (the native `write_snapshot_to_native` test path quantizes
+    /// directly into the caller's `Vec<u8>`).
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     grass_buf_u8: Vec<u8>,
-    /// Reusable f64 buffer for `creature_ids_buffer` — index-aligned with creatures_buffer.
-    id_buf: Vec<f64>,
-    /// Reusable buffer for `pack_render_buffer` — already in GPU instance layout
-    /// (8 floats per visible creature: cx, cy, outer_px, inner_px, r, g, b, a).
-    render_buf: Vec<f32>,
     /// Rolling window of per-tick wall-clock durations in milliseconds (last TPS_WINDOW ticks).
     /// Used to compute TPS rolling average.
     tick_durations_ms: std::collections::VecDeque<f64>,
@@ -55,11 +49,7 @@ impl WorldHandle {
         let inner = World::new_with_sliders(actual_seed, crate::world::DevSliders::default());
         Self {
             inner,
-            creature_buf: Vec::new(),
-            grass_buf: Vec::new(),
             grass_buf_u8: Vec::new(),
-            id_buf: Vec::new(),
-            render_buf: Vec::new(),
             tick_durations_ms: std::collections::VecDeque::new(),
             jank_count: 0,
             snapshot_truncation_warned: false,
@@ -106,11 +96,7 @@ impl WorldHandle {
         let inner = World::new_with_sliders(actual_seed, sliders);
         Self {
             inner,
-            creature_buf: Vec::new(),
-            grass_buf: Vec::new(),
             grass_buf_u8: Vec::new(),
-            id_buf: Vec::new(),
-            render_buf: Vec::new(),
             tick_durations_ms: std::collections::VecDeque::new(),
             jank_count: 0,
             snapshot_truncation_warned: false,
@@ -198,119 +184,6 @@ impl WorldHandle {
         WORLD_SIZE
     }
 
-    /// Repack creature SoA into a contiguous Float32Array. Layout per creature
-    /// (8 floats, stride = [`creature_stride`]):
-    /// `[x, y, radius_world, r, g, b, id_lo, id_hi]`.
-    /// v1.5 S3: color is per-creature action-EMA with a 0.15 display floor so
-    /// fresh-born creatures (EMA=(0,0,0)) stay visible against the dark BG.
-    /// v1.6 S A1: id_lo/id_hi carry the stable creature id as two `u32`s
-    /// reinterpreted via `f32::from_bits`. JS reads them as a `Uint32Array`
-    /// view over the same memory — no float→u32 round-tripping.
-    #[wasm_bindgen]
-    pub fn creatures_buffer(&mut self) -> js_sys::Float32Array {
-        let n = self.inner.creatures.len();
-        let stride = creature_stride() as usize;
-        self.creature_buf.clear();
-        self.creature_buf.resize(n * stride, 0.0);
-        // D3: all body traits are constants.
-        let body_r = FOUNDER_SIZE * BODY_RADIUS_PER_SIZE;
-        for i in 0..n {
-            let off = i * stride;
-            self.creature_buf[off] = self.inner.creatures.x[i];
-            self.creature_buf[off + 1] = self.inner.creatures.y[i];
-            self.creature_buf[off + 2] = body_r;
-            // v1.5 S3: action-EMA color with display floor.
-            self.creature_buf[off + 3] = self.inner.creatures.color_r[i].max(0.15);
-            self.creature_buf[off + 4] = self.inner.creatures.color_g[i].max(0.15);
-            self.creature_buf[off + 5] = self.inner.creatures.color_b[i].max(0.15);
-            // v1.6 S A1: id column — split u64 into two u32 halves, reinterpret
-            // each as f32 via `from_bits`. JS undoes this with
-            // `new Uint32Array(buf.buffer, byteOffset + 24, 2)` over the same
-            // 8 bytes (no conversion cost; both sides see the raw bit pattern).
-            let id = self.inner.creatures.id[i];
-            let id_lo = id as u32;
-            let id_hi = (id >> 32) as u32;
-            self.creature_buf[off + 6] = f32::from_bits(id_lo);
-            self.creature_buf[off + 7] = f32::from_bits(id_hi);
-        }
-        unsafe { js_sys::Float32Array::view(&self.creature_buf) }
-    }
-
-    /// Pack visible creatures directly into a GPU-ready instance buffer.
-    /// Frustum culls against the viewport in one pass and writes the same
-    /// 8-float instance layout that `render-gl.ts` consumes:
-    /// `[cx, cy, outer_px, inner_px, r, g, b, a]` per creature.
-    ///
-    /// `inner_px` and `a` are always `0.0` / `1.0` for bodies (no rings).
-    /// Highlights remain handled JS-side because they're rare (≤ 1–2 per frame).
-    ///
-    /// Why this lives in Rust: the JS pack loop was the main per-frame CPU
-    /// cost at high creature counts (every field read crossed the typed-array
-    /// boundary). Packing in Rust skips that boundary entirely and lets us
-    /// frustum cull cheaply against the SoA.
-    ///
-    /// `px_per_size` mirrors `PX_PER_SIZE` from `render.ts` so the screen
-    /// radius computation is identical on both sides.
-    #[wasm_bindgen]
-    pub fn pack_render_buffer(
-        &mut self,
-        cam_cx: f32,
-        cam_cy: f32,
-        zoom: f32,
-        viewport_w: f32,
-        viewport_h: f32,
-        px_per_size: f32,
-    ) -> js_sys::Float32Array {
-        let n = self.inner.creatures.len();
-        self.render_buf.clear();
-        if n == 0 || zoom <= 0.0 {
-            return unsafe { js_sys::Float32Array::view(&self.render_buf) };
-        }
-
-        // Frustum bounds in world units. `margin` covers the body radius so
-        // creatures straddling the edge still get drawn.
-        let body_r = FOUNDER_SIZE * BODY_RADIUS_PER_SIZE;
-        let half_w = viewport_w / zoom * 0.5;
-        let half_h = viewport_h / zoom * 0.5;
-        let margin = body_r + 2.0;
-        let min_x = cam_cx - half_w - margin;
-        let max_x = cam_cx + half_w + margin;
-        let min_y = cam_cy - half_h - margin;
-        let max_y = cam_cy + half_h + margin;
-
-        let radius_px = (body_r * px_per_size * zoom).max(1.0);
-
-        self.render_buf.reserve(n * 8);
-
-        let xs = &self.inner.creatures.x;
-        let ys = &self.inner.creatures.y;
-        let rs = &self.inner.creatures.color_r;
-        let gs = &self.inner.creatures.color_g;
-        let bs = &self.inner.creatures.color_b;
-
-        for i in 0..n {
-            let x = xs[i];
-            let y = ys[i];
-            if x < min_x || x > max_x || y < min_y || y > max_y {
-                continue;
-            }
-            // v1.5 S3: EMA color with 0.15 display floor.
-            let r = rs[i].max(0.15);
-            let g = gs[i].max(0.15);
-            let b = bs[i].max(0.15);
-            self.render_buf.push(x);
-            self.render_buf.push(y);
-            self.render_buf.push(radius_px);
-            self.render_buf.push(0.0); // inner_px (filled disc)
-            self.render_buf.push(r);
-            self.render_buf.push(g);
-            self.render_buf.push(b);
-            self.render_buf.push(1.0); // alpha
-        }
-
-        unsafe { js_sys::Float32Array::view(&self.render_buf) }
-    }
-
     // ─── Grass render API (P1g) ──────────────────────────────────────────────
 
     /// Grass grid dimension (480). Constant accessor; called per frame by the
@@ -325,33 +198,6 @@ impl WorldHandle {
     #[wasm_bindgen(getter)]
     pub fn grass_cell_size(&self) -> f32 {
         GRASS_CELL_SIZE
-    }
-
-    /// Copy the current grass density field (921_600 f32s) into a cached Vec
-    /// and return a Float32Array view over it. Retained for callers that need
-    /// raw f32 density (debug / tests); the WebGL2 R8 path uses
-    /// `grass_buffer_u8` instead. The view is valid only until the next Rust
-    /// call that moves `self.grass_buf` (safe for single-frame use).
-    #[wasm_bindgen]
-    pub fn grass_buffer(&mut self) -> js_sys::Float32Array {
-        self.grass_buf.clear();
-        self.grass_buf.extend_from_slice(&self.inner.grass.density);
-        unsafe { js_sys::Float32Array::view(&self.grass_buf) }
-    }
-
-    /// v1.5 S6: u8-quantized density for the R8 GPU upload (921_600 bytes/frame
-    /// at the current grid dim). Returns a fresh `Uint8Array` copy — safe across
-    /// subsequent Rust calls. `(d * 255.0).clamp(0, 255) as u8`.
-    #[wasm_bindgen]
-    pub fn grass_buffer_u8(&mut self) -> js_sys::Uint8Array {
-        let density = &self.inner.grass.density;
-        self.grass_buf_u8.clear();
-        self.grass_buf_u8.reserve(density.len());
-        for d in density {
-            let q = (d * 255.0).clamp(0.0, 255.0) as u8;
-            self.grass_buf_u8.push(q);
-        }
-        js_sys::Uint8Array::from(&self.grass_buf_u8[..])
     }
 
     // ─── v1.6 S A1: SAB snapshot writer ─────────────────────────────────────
@@ -407,7 +253,8 @@ impl WorldHandle {
         header[16..20].copy_from_slice(&self.jank_count.to_le_bytes());
         stats_dst.subarray(0, 20).copy_from(&header);
 
-        // Grass — quantized to u8.
+        // Grass — quantized to u8. Buffer reused across snapshots to avoid the
+        // 921_600-byte re-allocation per tick.
         let density = &self.inner.grass.density;
         self.grass_buf_u8.clear();
         self.grass_buf_u8.reserve(density.len());
@@ -489,135 +336,6 @@ impl WorldHandle {
         self.inner.sliders.auto_curriculum = value;
     }
 
-    /// Typed setter — per-birth mutation rate multiplier.
-    #[wasm_bindgen]
-    pub fn set_mutation_rate_multiplier(&mut self, value: f32) {
-        self.apply_mutation_rate_multiplier(value);
-    }
-
-    /// Typed setter — NN mutation sigma.
-    #[wasm_bindgen]
-    pub fn set_nn_mutation_sigma(&mut self, value: f32) {
-        self.apply_nn_mutation_sigma(value);
-    }
-
-    /// Typed setter — per-bite energy transfer fraction.
-    #[wasm_bindgen]
-    pub fn set_eat_bite_fraction(&mut self, value: f32) {
-        self.apply_eat_bite_fraction(value);
-    }
-
-    /// Typed setter — grass cross-cell propagation rate (k).
-    #[wasm_bindgen]
-    pub fn set_grass_propagation_rate_k(&mut self, value: f32) {
-        self.apply_grass_propagation_rate_k(value);
-    }
-
-    /// Typed setter — grass in-cell logistic growth rate (r).
-    #[wasm_bindgen]
-    pub fn set_grass_in_cell_growth_r(&mut self, value: f32) {
-        self.apply_grass_in_cell_growth_r(value);
-    }
-
-    /// Typed setter — per-tick idle upkeep multiplier (0 = no drain, 1 = default).
-    #[wasm_bindgen]
-    pub fn set_upkeep_multiplier(&mut self, value: f32) {
-        self.apply_upkeep_multiplier(value);
-    }
-
-    /// Typed setter — multiplier on the per-distance movement cost.
-    #[wasm_bindgen]
-    pub fn set_move_cost_multiplier(&mut self, value: f32) {
-        self.apply_move_cost_multiplier(value);
-    }
-
-    /// Typed setter — multiplier on the per-attempt eat cost.
-    #[wasm_bindgen]
-    pub fn set_eat_cost_multiplier(&mut self, value: f32) {
-        self.apply_eat_cost_multiplier(value);
-    }
-
-    /// Typed setter — per-creature max energy cap.
-    #[wasm_bindgen]
-    pub fn set_energy_max(&mut self, value: f32) {
-        self.apply_energy_max(value);
-    }
-
-    /// Typed setter — energy gained per successful graze bite.
-    #[wasm_bindgen]
-    pub fn set_grass_energy_per_bite(&mut self, value: f32) {
-        self.apply_grass_energy_per_bite(value);
-    }
-
-    /// Typed setter — number of bites to drain a ripe grass cell.
-    #[wasm_bindgen]
-    pub fn set_grass_bites_per_block(&mut self, value: u32) {
-        self.apply_grass_bites_per_block(value);
-    }
-
-    /// Typed setter — digestion-cooldown duration in ticks. Eat is gated while
-    /// the per-creature cooldown is > 0.
-    #[wasm_bindgen]
-    pub fn set_digestion_cooldown(&mut self, value: u32) {
-        self.apply_digestion_cooldown(value);
-    }
-
-    /// Typed setter — per-tick cap on the repulsion position nudge. 0 disables
-    /// physical separation; ~5 = historical default.
-    #[wasm_bindgen]
-    pub fn set_repulsion_max(&mut self, value: f32) {
-        self.apply_repulsion_max(value);
-    }
-
-    /// Typed setter — past-lifespan threshold (ticks).
-    #[wasm_bindgen]
-    pub fn set_max_age(&mut self, value: u32) {
-        self.apply_max_age(value);
-    }
-
-    /// Typed setter — energy threshold required for a Split action.
-    #[wasm_bindgen]
-    pub fn set_split_threshold(&mut self, value: f32) {
-        self.apply_split_threshold(value);
-    }
-
-    /// Typed setter — energy gifted to each newborn at split.
-    #[wasm_bindgen]
-    pub fn set_split_gift(&mut self, value: f32) {
-        self.apply_split_gift(value);
-    }
-
-    /// Typed setter — founder count for the next world construction.
-    #[wasm_bindgen]
-    pub fn set_founder_count(&mut self, value: u32) {
-        self.apply_founder_count(value);
-    }
-
-    /// Typed setter — curriculum lower-pop knee.
-    #[wasm_bindgen]
-    pub fn set_curriculum_min_pop(&mut self, value: u32) {
-        self.apply_curriculum_min_pop(value);
-    }
-
-    /// Typed setter — curriculum upper-pop knee.
-    #[wasm_bindgen]
-    pub fn set_curriculum_max_pop(&mut self, value: u32) {
-        self.apply_curriculum_max_pop(value);
-    }
-
-    /// Typed setter — curriculum floor (clamped to [0, 1]).
-    #[wasm_bindgen]
-    pub fn set_curriculum_min_factor(&mut self, value: f32) {
-        self.apply_curriculum_min_factor(value);
-    }
-
-    /// Typed setter — curriculum master switch. Separate setter (not in
-    /// `try_set_slider`) because the value is a bool, not an f32.
-    #[wasm_bindgen]
-    pub fn set_auto_curriculum(&mut self, value: bool) {
-        self.apply_auto_curriculum(value);
-    }
-
     /// Apply a dev-panel slider live by name. JS console workflow
     /// (BUILD-REPORT Known Issue #4). Returns `Err` on unknown name so a
     /// console typo is visible instead of silently ignored.
@@ -666,17 +384,6 @@ impl WorldHandle {
             _ => return false,
         }
         true
-    }
-
-    /// Index-aligned Float64Array of creature stable IDs (u64 as f64).
-    /// Safe: u64 IDs stay below 2^53 in any v1 session.
-    #[wasm_bindgen]
-    pub fn creature_ids_buffer(&mut self) -> js_sys::Float64Array {
-        self.id_buf.clear();
-        for &id in &self.inner.creatures.id {
-            self.id_buf.push(id as f64);
-        }
-        unsafe { js_sys::Float64Array::view(&self.id_buf) }
     }
 
     /// Returns the SoA index of the topmost creature whose body circle (or
@@ -809,13 +516,6 @@ impl WorldHandle {
     #[wasm_bindgen]
     pub fn total_grass_density(&self) -> f32 {
         self.inner.grass.density.iter().sum()
-    }
-
-    /// Stats sample: [tick, population] as f32.
-    /// O(1). Called every 10 sim-ticks from the Stats panel (E.23).
-    #[wasm_bindgen]
-    pub fn stats_sample(&self) -> Box<[f32]> {
-        Box::new([self.inner.tick as f32, self.inner.population() as f32])
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -985,19 +685,6 @@ fn wasm_now_ms() -> f64 {
     epoch.elapsed().as_secs_f64() * 1000.0
 }
 
-/// Per-creature float count in [`WorldHandle::creatures_buffer`] and in the
-/// SAB-backed snapshot SoA produced by [`WorldHandle::write_snapshot_to`].
-///
-/// v1.6 S A1 layout: 8 floats (stride bumped 6 → 8). The trailing two slots
-/// carry the stable creature id split as `(id_lo, id_hi)` and reinterpreted
-/// from `u32` via `f32::from_bits`; readers undo the encoding with
-/// `new Uint32Array(buf.buffer, byteOffset + 24, 2)` over the same memory.
-/// Layout: `[x, y, radius_world, r, g, b, id_lo, id_hi]`.
-#[wasm_bindgen]
-pub fn creature_stride() -> u32 {
-    8
-}
-
 /// v1.6 SAB snapshot creature cap, mirrored from `constants::MAX_POP_FOR_SAB`.
 /// Sourced from Rust so the worker can pass it to main in `boot_ready`; main
 /// asserts it matches the TS `MAX_POP_FOR_SAB` constant (rebuild-wasm guard).
@@ -1009,35 +696,6 @@ pub fn max_pop_for_sab() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// v1.6 S A1: creature_stride() == 8 (id_lo/id_hi columns appended).
-    /// We can't call creatures_buffer() in native tests (js_sys::Float32Array
-    /// requires wasm32), so we test the stride constant and fill-math directly.
-    #[test]
-    fn creature_stride_is_8() {
-        assert_eq!(creature_stride(), 8);
-        let n: usize = 3;
-        let expected = n * creature_stride() as usize;
-        assert_eq!(expected, 24);
-    }
-
-    /// v1.6 S A1: fill-math test. Manually resize the creature_buf as the wasm
-    /// path would and assert the length matches population * stride (8).
-    #[test]
-    fn creature_buf_length_matches_population_times_stride() {
-        let mut handle = WorldHandle::new("s21-stride");
-        // Founder population at boot = FOUNDER_COUNT_DEFAULT (v1.5 multi-founder).
-        let n = handle.inner.creatures.len();
-        let stride = creature_stride() as usize;
-        assert_eq!(stride, 8);
-        handle.creature_buf.clear();
-        handle.creature_buf.resize(n * stride, 0.0);
-        assert_eq!(handle.creature_buf.len(), n * stride);
-        assert_eq!(
-            handle.creature_buf.len(),
-            FOUNDER_COUNT_DEFAULT as usize * stride
-        );
-    }
 
     /// v1.6 S A1: `write_snapshot_to_native` produces bytes that match the
     /// documented stride-8 layout. Exercises the same writer the wasm path
@@ -1186,16 +844,6 @@ mod tests {
             total >= 0.0,
             "total_grass_density must be non-negative, got {total}"
         );
-    }
-
-    /// S17: per-slider typed setters mutate the correct DevSliders field.
-    #[test]
-    fn set_slider_typed_mutates_field() {
-        let mut handle = WorldHandle::new("s17-typed");
-        handle.set_mutation_rate_multiplier(2.5);
-        assert!((handle.inner.sliders.mutation_rate_multiplier - 2.5).abs() < 1e-6);
-        handle.set_nn_mutation_sigma(0.05);
-        assert!((handle.inner.sliders.nn_mutation_sigma - 0.05).abs() < 1e-6);
     }
 
     /// S17: try_set_slider returns true for all known names. Uses the inner
