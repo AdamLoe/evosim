@@ -7,7 +7,7 @@
 
 import type { SnapshotHeader, SimBridge } from "../sim-bridge";
 import { maybeSampleStats } from "./stats";
-import { refreshInspector } from "./inspector";
+import { refreshInspector, updateLatestSoA } from "./inspector";
 import { pruneHighlights, highlights } from "./highlight";
 
 // ---- Rail state (opaque to main.ts) ----
@@ -58,15 +58,22 @@ export function pollRail(
   rail: RailState,
   snapshot: SnapshotHeader,
   simBridge: SimBridge,
+  creatures: Float32Array,
+  pop: number,
 ): void {
   // 1. Stats sample (E.23). Reads from the snapshot header now.
   maybeSampleStats(snapshot);
 
-  // 2. Inspector refresh (E.24). Sends async `inspect_id` requests via the
+  // 2. Wave D: refresh the inspector's SAB SoA cache BEFORE refreshInspector
+  //    so the per-frame fast-path sees the current snapshot. Also feeds the
+  //    canvas-click hit-test installed in `installCanvasClickHandler`.
+  updateLatestSoA(creatures, pop);
+
+  // 3. Inspector refresh (E.24). Sends async `inspect_id` requests via the
   //    SimBridge; replies render the panel when they arrive.
   refreshInspector(simBridge, rail);
 
-  // 3. Highlight prune.
+  // 4. Highlight prune.
   pruneHighlights(performance.now());
 }
 

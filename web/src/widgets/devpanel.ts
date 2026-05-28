@@ -163,9 +163,16 @@ export function installDevPanel(simBridge: SimBridge): void {
   const box = document.getElementById("devpanel-box") as HTMLDivElement | null;
   if (!box) return;
 
-  /** Send a `set_slider` for a Rust-named slider. */
+  /**
+   * Send a `set_slider` for a Rust-named slider via Wave D's per-name
+   * trailing-edge debouncer (16 ms). High-frequency pointermove events on a
+   * slider track coalesce to one postMessage per RAF tick; "last value wins"
+   * so the released value lands within `SLIDER_DEBOUNCE_MS` of the input.
+   * Boot's `initial_sliders` map (read via `currentSliderState()`) bypasses
+   * this entirely.
+   */
   const send = (name: string, value: number): void => {
-    simBridge.postMessage({ kind: "set_slider", name, value });
+    simBridge.debouncedSetSlider(name, value);
   };
 
   // Section header helper — keeps the panel scannable when more rows show up.

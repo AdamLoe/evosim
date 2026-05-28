@@ -316,6 +316,14 @@ interface PendingRequest {
   deadlineMs: number;
 }
 
+/** Wave D: per-name slider debounce trailing-edge delay (ms). */
+const SLIDER_DEBOUNCE_MS = 16;
+
+interface DebouncedSliderEntry {
+  timer: ReturnType<typeof setTimeout>;
+  value: number;
+}
+
 export class SimBridge {
   private worker: Worker;
   private nextRequestId = 1;
@@ -323,6 +331,24 @@ export class SimBridge {
   private snapshotHandler: ((snap: SimReplySnapshot) => void) | null = null;
   private bootReadyHandler: ((reply: SimReplyBootReady) => void) | null = null;
   private gcTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * Wave D: per-name trailing-edge debouncer for `set_slider` writes. A 100 Hz
+   * `pointermove` on a slider track would otherwise flood the worker with
+   * postMessages (and futex wakes). 16 ms trailing-edge collapses bursts to
+   * roughly one per RAF tick; "last value wins" so the released value is the
+   * one that lands.
+   */
+  private sliderDebounceTimers = new Map<string, DebouncedSliderEntry>();
+  /**
+   * Wave D: control SAB futex word view, populated when main wires up
+   * `attachControlSab` after `boot_ready`. Used by `postMessage` to wake the
+   * sim worker out of `Atomics.waitAsync(ctrl, CTRL_FUTEX, before, ...)`.
+   * Null until the SAB handshake completes; postMessage falls back to
+   * fire-and-forget while null (worker still wakes via the JS event loop on
+   * each `setTimeout(0)` iteration during Wave B/C, and Wave D's loop drains
+   * incoming messages at the top of every iteration regardless).
+   */
+  private controlI32: Int32Array | null = null;
 
   constructor(worker: Worker) {
     this.worker = worker;
@@ -331,6 +357,15 @@ export class SimBridge {
     };
     // Periodic GC of stale request entries. Cheap (≤ 100 entries typically).
     this.gcTimer = setInterval(() => this.gcPending(), 1_000);
+  }
+
+  /**
+   * Wave D: attach the control SAB so subsequent `postMessage` calls also
+   * notify the worker's futex. Called by main from `boot_ready` once the
+   * control SAB is available; safe to call again on restart.
+   */
+  attachControlSab(controlSab: SharedArrayBuffer): void {
+    this.controlI32 = new Int32Array(controlSab);
   }
 
   /** Issue a fresh u32 request id. */
@@ -344,6 +379,50 @@ export class SimBridge {
   /** Fire-and-forget send. Used for set_slider / set_paused / set_target_tps. */
   postMessage(msg: SimMessage): void {
     this.worker.postMessage(msg);
+    // Wave D: futex wake. The `add` mutates `CTRL_FUTEX` so the worker's
+    // `Atomics.waitAsync(ctrl, CTRL_FUTEX, before, timeoutMs)` resolves
+    // synchronously with `"not-equal"` if it was about to park; the `notify`
+    // covers the case where the worker is already parked. Wraparound at u32
+    // max is harmless (the futex value is opaque — only equality matters).
+    if (this.controlI32 !== null) {
+      Atomics.add(this.controlI32, CTRL_FUTEX, 1);
+      Atomics.notify(this.controlI32, CTRL_FUTEX, 1);
+    }
+  }
+
+  /**
+   * Wave D: debounced `set_slider` write. Per-name 16 ms trailing-edge
+   * debouncer; last value wins. Prevents pointermove flooding the worker
+   * during slider drags. Final value lands within `SLIDER_DEBOUNCE_MS` of the
+   * last input event.
+   *
+   * Use this for high-frequency dev-panel slider drags. Boot's
+   * `initial_sliders` map is NOT routed through here — those are applied
+   * synchronously by the worker before its first tick.
+   */
+  debouncedSetSlider(name: string, value: number): void {
+    const existing = this.sliderDebounceTimers.get(name);
+    if (existing !== undefined) {
+      clearTimeout(existing.timer);
+    }
+    const timer = setTimeout(() => {
+      this.sliderDebounceTimers.delete(name);
+      this.postMessage({ kind: "set_slider", name, value });
+    }, SLIDER_DEBOUNCE_MS);
+    this.sliderDebounceTimers.set(name, { timer, value });
+  }
+
+  /**
+   * Wave D: flush any pending debounced slider writes immediately. Called
+   * before tearing the bridge down (restart) so the last in-flight slider
+   * value isn't dropped on the floor.
+   */
+  flushDebouncedSliders(): void {
+    for (const [name, entry] of this.sliderDebounceTimers) {
+      clearTimeout(entry.timer);
+      this.postMessage({ kind: "set_slider", name, value: entry.value });
+    }
+    this.sliderDebounceTimers.clear();
   }
 
   /** Register the snapshot listener (called every batch by the worker). */
@@ -397,6 +476,13 @@ export class SimBridge {
     // Resolve any in-flight promises with null so awaiters don't hang.
     for (const { resolve } of this.pending.values()) resolve(null);
     this.pending.clear();
+    // Drop any pending slider debounce timers — the bridge is dying; the new
+    // bridge will receive the current slider state via `boot.initial_sliders`.
+    for (const entry of this.sliderDebounceTimers.values()) {
+      clearTimeout(entry.timer);
+    }
+    this.sliderDebounceTimers.clear();
+    this.controlI32 = null;
     this.worker.terminate();
   }
 
