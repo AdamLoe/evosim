@@ -48,6 +48,9 @@ pub struct NnStats {
     pub tick_proximity_creatures_us: AtomicU64,
     pub tick_proximity_grass_us: AtomicU64,
     pub tick_forward_us: AtomicU64,
+    pub tick_forward_l1_us: AtomicU64,
+    pub tick_forward_l2_us: AtomicU64,
+    pub tick_forward_l3_us: AtomicU64,
     /// Sum of every chunk's wall-clock duration this tick. Often larger than
     /// the tick.nn span itself (chunks run in parallel; sum-of-busy > wall).
     pub tick_chunk_wall_us: AtomicU64,
@@ -73,6 +76,9 @@ impl NnStats {
             tick_proximity_creatures_us: AtomicU64::new(0),
             tick_proximity_grass_us: AtomicU64::new(0),
             tick_forward_us: AtomicU64::new(0),
+            tick_forward_l1_us: AtomicU64::new(0),
+            tick_forward_l2_us: AtomicU64::new(0),
+            tick_forward_l3_us: AtomicU64::new(0),
             tick_chunk_wall_us: AtomicU64::new(0),
             tick_workers_used_bitset: AtomicU64::new(0),
         }
@@ -84,6 +90,9 @@ impl NnStats {
         self.tick_proximity_creatures_us.store(0, Ordering::Relaxed);
         self.tick_proximity_grass_us.store(0, Ordering::Relaxed);
         self.tick_forward_us.store(0, Ordering::Relaxed);
+        self.tick_forward_l1_us.store(0, Ordering::Relaxed);
+        self.tick_forward_l2_us.store(0, Ordering::Relaxed);
+        self.tick_forward_l3_us.store(0, Ordering::Relaxed);
         self.tick_chunk_wall_us.store(0, Ordering::Relaxed);
         self.tick_workers_used_bitset.store(0, Ordering::Relaxed);
     }
@@ -125,12 +134,16 @@ impl NnStats {
 
     /// Add per-creature sub-phase timings to this tick's aggregates. Called in
     /// addition to `record_chunk_lite` when the profiler is enabled.
+    #[allow(clippy::too_many_arguments)]
     pub fn record_chunk_subphases(
         &self,
         build_input_other_us: u64,
         proximity_creatures_us: u64,
         proximity_grass_us: u64,
         forward_us: u64,
+        forward_l1_us: u64,
+        forward_l2_us: u64,
+        forward_l3_us: u64,
     ) {
         self.tick_build_input_other_us
             .fetch_add(build_input_other_us, Ordering::Relaxed);
@@ -140,6 +153,12 @@ impl NnStats {
             .fetch_add(proximity_grass_us, Ordering::Relaxed);
         self.tick_forward_us
             .fetch_add(forward_us, Ordering::Relaxed);
+        self.tick_forward_l1_us
+            .fetch_add(forward_l1_us, Ordering::Relaxed);
+        self.tick_forward_l2_us
+            .fetch_add(forward_l2_us, Ordering::Relaxed);
+        self.tick_forward_l3_us
+            .fetch_add(forward_l3_us, Ordering::Relaxed);
     }
 
     /// JSON snapshot for the dev panel / inspector. One object with a
@@ -229,11 +248,11 @@ mod tests {
     fn record_chunk_accumulates_per_worker() {
         let s = NnStats::new(0);
         s.record_chunk_lite(0, 100, 250, 50);
-        s.record_chunk_subphases(30, 40, 50, 20);
+        s.record_chunk_subphases(30, 40, 50, 20, 5, 10, 5);
         s.record_chunk_lite(0, 300, 500, 80);
-        s.record_chunk_subphases(60, 70, 50, 40);
+        s.record_chunk_subphases(60, 70, 50, 40, 15, 20, 5);
         s.record_chunk_lite(2, 110, 180, 30);
-        s.record_chunk_subphases(10, 20, 30, 15);
+        s.record_chunk_subphases(10, 20, 30, 15, 5, 5, 5);
 
         assert_eq!(s.worker_chunks[0].load(Ordering::Relaxed), 2);
         assert_eq!(s.worker_creatures[0].load(Ordering::Relaxed), 130);
@@ -266,7 +285,7 @@ mod tests {
     fn reset_tick_clears_per_tick_only() {
         let s = NnStats::new(0);
         s.record_chunk_lite(0, 100, 200, 50);
-        s.record_chunk_subphases(10, 20, 30, 40);
+        s.record_chunk_subphases(10, 20, 30, 40, 5, 10, 25);
         s.reset_tick();
         assert_eq!(s.worker_chunks[0].load(Ordering::Relaxed), 1); // preserved
         assert_eq!(s.tick_forward_us.load(Ordering::Relaxed), 0); // cleared

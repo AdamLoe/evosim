@@ -329,6 +329,23 @@ impl World {
                 self.sliders.grass_in_cell_growth_r,
                 self.sliders.grass_propagation_rate_k,
             );
+            // Drain compute_propagation sub-phase timers into the profile tree
+            // as siblings under `tick.grass_step.compute`. par_chunks vs
+            // chunks_mut are mutually exclusive (cfg-gated); row_body is
+            // sum-busy across rayon workers and so can exceed par_chunks wall.
+            use std::sync::atomic::Ordering;
+            self.profile.record_under_tick(
+                "grass_step.compute.par_chunks",
+                self.grass.par_chunks_us.load(Ordering::Relaxed) as u32,
+            );
+            self.profile.record_under_tick(
+                "grass_step.compute.chunks_mut",
+                self.grass.chunks_mut_us.load(Ordering::Relaxed) as u32,
+            );
+            self.profile.record_under_tick(
+                "grass_step.compute.row_body",
+                self.grass.row_body_us.load(Ordering::Relaxed) as u32,
+            );
             // Bitset rebuild is a cheap O(cells) sweep with no per-cell math;
             // not worth its own profiler node.
             self.grass.rebuild_row_bitset();

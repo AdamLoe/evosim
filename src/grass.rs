@@ -1,25 +1,27 @@
-//! GrassGrid — 480×480 = 230_400 flat-Vec<f32> density field over the
-//! 600u walled world. Each cell is 1.25u square (v1.5 S6 — 16× density bump
+//! GrassGrid — 960×960 = 921_600 flat-Vec<f32> density field over the
+//! 1200u walled world. Each cell is 1.25u square (v1.5 S6 — 16× density bump
 //! from the 5u/120-dim v1.2 layout). Independent of SpatialGrid (5u, body
 //! queries). v1.2 grass-mechanic-brief §Grass storage / §Grass dynamics per
 //! tick / §Initial grass seed / §Bilinear sampling.
 
 use crate::constants::{GRASS_CELL_COUNT, GRASS_CELL_SIZE, GRASS_GRID_DIM, GRASS_MAX, WORLD_SIZE};
+use crate::profiler::clock_now_us_threadsafe;
 use crate::rng::SimRng;
 #[cfg(feature = "threads")]
 use rayon::prelude::*;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 // Compile-time invariant checks.
-const _: () = assert!(GRASS_CELL_COUNT == 230_400);
-const _: () = assert!(GRASS_GRID_DIM == 480);
+const _: () = assert!(GRASS_CELL_COUNT == 921_600);
+const _: () = assert!(GRASS_GRID_DIM == 960);
 
-/// 480×480 grass density field over the 600u walled world.
+/// 960×960 grass density field over the 1200u walled world.
 ///
 /// Row-major layout: cell (ix, iy) is at index `iy * GRASS_GRID_DIM + ix`.
 /// Density values are clamped to `[0.0, GRASS_MAX]` after each `step` call.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct GrassGrid {
-    /// Row-major density, length GRASS_CELL_COUNT (= 230_400).
+    /// Row-major density, length GRASS_CELL_COUNT (= 921_600).
     pub density: Vec<f32>,
     /// Double-buffer scratch. Same length as `density`. Recomputed every
     /// `step` call; never read between ticks.
@@ -29,6 +31,30 @@ pub struct GrassGrid {
     /// NN scan skip whole rows in O(1) when sparse. Length =
     /// `GRASS_GRID_DIM.div_ceil(64)` u64s; regenerated after every `step()`.
     pub row_has_density: Vec<u64>,
+    /// Per-tick wall time of the threaded `par_chunks_mut` dispatch block in
+    /// `compute_propagation` (us). Zero in non-threaded builds. Reset at the
+    /// top of each `compute_propagation` call; drained by the World caller.
+    pub par_chunks_us: AtomicU64,
+    /// Per-tick wall time of the sequential `chunks_mut` block in
+    /// `compute_propagation` (us). Zero in threaded builds.
+    pub chunks_mut_us: AtomicU64,
+    /// Per-tick sum-busy time inside the row_body closure across all
+    /// invocations (us). In threaded builds, this is summed across rayon
+    /// workers via `fetch_add`, so it can exceed `par_chunks_us` wall.
+    pub row_body_us: AtomicU64,
+}
+
+impl Clone for GrassGrid {
+    fn clone(&self) -> Self {
+        Self {
+            density: self.density.clone(),
+            scratch: self.scratch.clone(),
+            row_has_density: self.row_has_density.clone(),
+            par_chunks_us: AtomicU64::new(0),
+            chunks_mut_us: AtomicU64::new(0),
+            row_body_us: AtomicU64::new(0),
+        }
+    }
 }
 
 impl GrassGrid {
@@ -46,6 +72,9 @@ impl GrassGrid {
             density,
             scratch,
             row_has_density: vec![0u64; GRASS_GRID_DIM.div_ceil(64)],
+            par_chunks_us: AtomicU64::new(0),
+            chunks_mut_us: AtomicU64::new(0),
+            row_body_us: AtomicU64::new(0),
         };
         g.rebuild_row_bitset();
         g
@@ -157,26 +186,50 @@ impl GrassGrid {
             }
         };
 
+        // Reset per-tick timers. par_chunks_us / chunks_mut_us are written from
+        // the main thread (one of them stays 0 depending on `--features threads`);
+        // row_body_us is sum-busy across rayon workers via fetch_add.
+        self.par_chunks_us.store(0, Ordering::Relaxed);
+        self.chunks_mut_us.store(0, Ordering::Relaxed);
+        self.row_body_us.store(0, Ordering::Relaxed);
+
         #[cfg(feature = "threads")]
         {
             // Split scratch into contiguous row-chunks. ~30 rows/chunk at 480
             // dims keeps the per-chunk cost meaty enough to outweigh dispatch.
             let chunk_rows = (dim / 16).max(1);
+            let par_start = clock_now_us_threadsafe();
+            let row_body_us = &self.row_body_us;
             self.scratch
                 .par_chunks_mut(chunk_rows * dim)
                 .enumerate()
                 .for_each(|(ci, s_chunk)| {
                     let iy0 = ci * chunk_rows;
+                    let body_start = clock_now_us_threadsafe();
                     for (k, s_row) in s_chunk.chunks_mut(dim).enumerate() {
                         row_body(iy0 + k, s_row);
                     }
+                    let body_end = clock_now_us_threadsafe();
+                    row_body_us
+                        .fetch_add(body_end.saturating_sub(body_start), Ordering::Relaxed);
                 });
+            let par_end = clock_now_us_threadsafe();
+            self.par_chunks_us
+                .store(par_end.saturating_sub(par_start), Ordering::Relaxed);
         }
         #[cfg(not(feature = "threads"))]
         {
+            let seq_start = clock_now_us_threadsafe();
+            let body_start = clock_now_us_threadsafe();
             for (iy, s_row) in self.scratch.chunks_mut(dim).enumerate() {
                 row_body(iy, s_row);
             }
+            let body_end = clock_now_us_threadsafe();
+            self.row_body_us
+                .store(body_end.saturating_sub(body_start), Ordering::Relaxed);
+            let seq_end = clock_now_us_threadsafe();
+            self.chunks_mut_us
+                .store(seq_end.saturating_sub(seq_start), Ordering::Relaxed);
         }
 
         std::mem::swap(&mut self.density, &mut self.scratch);
@@ -308,6 +361,9 @@ mod tests {
             density: vec![0.0f32; GRASS_CELL_COUNT],
             scratch: vec![0.0f32; GRASS_CELL_COUNT],
             row_has_density: vec![0u64; GRASS_GRID_DIM.div_ceil(64)],
+            par_chunks_us: AtomicU64::new(0),
+            chunks_mut_us: AtomicU64::new(0),
+            row_body_us: AtomicU64::new(0),
         }
     }
 
@@ -369,6 +425,9 @@ mod tests {
             density: vec![GRASS_MAX; GRASS_CELL_COUNT],
             scratch: vec![0.0f32; GRASS_CELL_COUNT],
             row_has_density: vec![0u64; GRASS_GRID_DIM.div_ceil(64)],
+            par_chunks_us: AtomicU64::new(0),
+            chunks_mut_us: AtomicU64::new(0),
+            row_body_us: AtomicU64::new(0),
         };
         for _ in 0..100 {
             g.step(0.005, 0.05);

@@ -116,6 +116,9 @@ impl World {
                                     chunk_pick.build.creature_sectors_us,
                                     chunk_pick.build.grass_sectors_us,
                                     chunk_pick.forward_us,
+                                    chunk_pick.forward_l1_us,
+                                    chunk_pick.forward_l2_us,
+                                    chunk_pick.forward_l3_us,
                                 );
                             }
                         },
@@ -180,6 +183,9 @@ impl World {
                         chunk_pick.build.creature_sectors_us,
                         chunk_pick.build.grass_sectors_us,
                         chunk_pick.forward_us,
+                        chunk_pick.forward_l1_us,
+                        chunk_pick.forward_l2_us,
+                        chunk_pick.forward_l3_us,
                     );
                 }
             }
@@ -210,6 +216,18 @@ impl World {
             self.profile.record_under_tick(
                 "nn.forward",
                 self.nn_stats.tick_forward_us.load(Ordering::Relaxed) as u32,
+            );
+            self.profile.record_under_tick(
+                "nn.forward.l1",
+                self.nn_stats.tick_forward_l1_us.load(Ordering::Relaxed) as u32,
+            );
+            self.profile.record_under_tick(
+                "nn.forward.l2",
+                self.nn_stats.tick_forward_l2_us.load(Ordering::Relaxed) as u32,
+            );
+            self.profile.record_under_tick(
+                "nn.forward.l3",
+                self.nn_stats.tick_forward_l3_us.load(Ordering::Relaxed) as u32,
             );
         }
     }
@@ -462,6 +480,9 @@ pub(crate) fn decode_action(
 pub(crate) struct PickTimings {
     pub build: BuildTimings,
     pub forward_us: u64,
+    pub forward_l1_us: u64,
+    pub forward_l2_us: u64,
+    pub forward_l3_us: u64,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -500,7 +521,13 @@ pub(crate) fn pick_action_d(
         build_arg,
     );
     let t_fwd_start = if timed { clock_now_us_threadsafe() } else { 0 };
-    creatures.brains[i].forward(input_buf, output_buf, hidden_buf_1, hidden_buf_2);
+    creatures.brains[i].forward(
+        input_buf,
+        output_buf,
+        hidden_buf_1,
+        hidden_buf_2,
+        timings.as_deref_mut(),
+    );
     let t_fwd_end = if timed { clock_now_us_threadsafe() } else { 0 };
     if let Some(t) = timings {
         t.forward_us = t

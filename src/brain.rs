@@ -6,7 +6,9 @@
 //! mutation fitness than ReLU under no-gradient evolution.
 
 use crate::constants::*;
+use crate::profiler::clock_now_us_threadsafe;
 use crate::rng::SimRng;
+use crate::world::nn::PickTimings;
 use serde::{Deserialize, Serialize};
 use wide::f32x8;
 
@@ -104,8 +106,11 @@ impl Brain {
         output: &mut [f32; NN_OUTPUTS],
         hidden_1: &mut [f32; NN_HIDDEN_1],
         hidden_2: &mut [f32; NN_HIDDEN_2],
+        timings: Option<&mut PickTimings>,
     ) {
+        let timed = timings.is_some();
         // --- Layer 1: input → hidden_1 (Leaky ReLU) ---
+        let l1_start = if timed { clock_now_us_threadsafe() } else { 0 };
         let w1 = &self.weights[..W1_LEN];
         for h in 0..NN_HIDDEN_1 {
             let row = &w1[h * NN_INPUTS..h * NN_INPUTS + NN_INPUTS];
@@ -117,6 +122,7 @@ impl Brain {
             }
             hidden_1[h] = lrelu(acc.reduce_add());
         }
+        let l1_end = if timed { clock_now_us_threadsafe() } else { 0 };
 
         // --- Layer 2: hidden_1 → hidden_2 (Leaky ReLU) ---
         let w2 = &self.weights[W1_LEN..W1_LEN + W2_LEN];
@@ -130,6 +136,7 @@ impl Brain {
             }
             hidden_2[h] = lrelu(acc.reduce_add());
         }
+        let l2_end = if timed { clock_now_us_threadsafe() } else { 0 };
 
         // --- Layer 3: hidden_2 → output (tanh on velocity slots only) ---
         let w3 = &self.weights[W1_LEN + W2_LEN..];
@@ -143,6 +150,15 @@ impl Brain {
             }
             let sum = acc.reduce_add();
             output[o] = if o < 2 { sum.tanh() } else { sum };
+        }
+        let l3_end = if timed { clock_now_us_threadsafe() } else { 0 };
+
+        if let Some(t) = timings {
+            t.forward_l1_us = t
+                .forward_l1_us
+                .saturating_add(l1_end.saturating_sub(l1_start));
+            t.forward_l2_us = t.forward_l2_us.saturating_add(l2_end.saturating_sub(l1_end));
+            t.forward_l3_us = t.forward_l3_us.saturating_add(l3_end.saturating_sub(l2_end));
         }
     }
 
@@ -284,7 +300,7 @@ mod tests {
         let mut output = [0.0f32; NN_OUTPUTS];
         let mut h1 = [0.0f32; NN_HIDDEN_1];
         let mut h2 = [0.0f32; NN_HIDDEN_2];
-        brain.forward(&input, &mut output, &mut h1, &mut h2);
+        brain.forward(&input, &mut output, &mut h1, &mut h2, None);
         assert_eq!(output.len(), 5);
         assert!(
             output.iter().all(|&v| v == 0.0),
@@ -298,7 +314,7 @@ mod tests {
         let mut out2 = [0.0f32; NN_OUTPUTS];
         let mut h1b = [0.0f32; NN_HIDDEN_1];
         let mut h2b = [0.0f32; NN_HIDDEN_2];
-        brain2.forward(&input2, &mut out2, &mut h1b, &mut h2b);
+        brain2.forward(&input2, &mut out2, &mut h1b, &mut h2b, None);
         assert_eq!(out2.len(), 5);
         assert!(
             out2.iter().all(|&v| v.is_finite()),
@@ -320,7 +336,7 @@ mod tests {
         let mut out_simd = [0.0f32; NN_OUTPUTS];
         let mut h1_simd = [0.0f32; NN_HIDDEN_1];
         let mut h2_simd = [0.0f32; NN_HIDDEN_2];
-        brain.forward(&input, &mut out_simd, &mut h1_simd, &mut h2_simd);
+        brain.forward(&input, &mut out_simd, &mut h1_simd, &mut h2_simd, None);
 
         let mut out_scalar = [0.0f32; NN_OUTPUTS];
         let mut h1_scalar = [0.0f32; NN_HIDDEN_1];
@@ -378,7 +394,7 @@ mod tests {
         let mut output = [0.0f32; NN_OUTPUTS];
         let mut h1 = [0.0f32; NN_HIDDEN_1];
         let mut h2 = [0.0f32; NN_HIDDEN_2];
-        brain.forward(&input, &mut output, &mut h1, &mut h2);
+        brain.forward(&input, &mut output, &mut h1, &mut h2, None);
 
         let expected = 0.01 * -(NN_INPUTS as f32);
         let err = (h1[0] - expected).abs();
@@ -406,7 +422,7 @@ mod tests {
             let mut output = [0.0f32; NN_OUTPUTS];
             let mut h1 = [0.0f32; NN_HIDDEN_1];
             let mut h2 = [0.0f32; NN_HIDDEN_2];
-            brain.forward(&input, &mut output, &mut h1, &mut h2);
+            brain.forward(&input, &mut output, &mut h1, &mut h2, None);
             assert!(
                 output.iter().all(|v| v.is_finite()),
                 "NaN/inf on extreme input (sign={sign})"
@@ -427,12 +443,12 @@ mod tests {
         let mut out1 = [0.0f32; NN_OUTPUTS];
         let mut h1a = [0.0f32; NN_HIDDEN_1];
         let mut h2a = [0.0f32; NN_HIDDEN_2];
-        brain.forward(&input, &mut out1, &mut h1a, &mut h2a);
+        brain.forward(&input, &mut out1, &mut h1a, &mut h2a, None);
 
         let mut out2 = [0.0f32; NN_OUTPUTS];
         let mut h1b = [0.0f32; NN_HIDDEN_1];
         let mut h2b = [0.0f32; NN_HIDDEN_2];
-        brain.forward(&input, &mut out2, &mut h1b, &mut h2b);
+        brain.forward(&input, &mut out2, &mut h1b, &mut h2b, None);
 
         assert_eq!(
             out1, out2,
