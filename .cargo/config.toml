@@ -3,8 +3,25 @@
 # thread spawning in the browser. build-std rebuilds std with atomics support.
 # These flags are ONLY active when building for wasm32-unknown-unknown.
 # Native (x86_64) builds are unaffected.
+#
+# Link args: on nightly toolchains since ~late 2025, `+atomics` no longer
+# implies `--shared-memory` automatically — wasm-ld emits non-shared memory
+# unless told otherwise, and wasm-bindgen-rayon's postMessage(memory) then
+# fails with DataCloneError at boot. `--export=__heap_base` is required so
+# wasm-bindgen can find the symbol it uses to inject per-thread TLS init.
+# `--max-memory` is mandatory when memory is shared.
 [target.wasm32-unknown-unknown]
-rustflags = ["-C", "target-feature=+atomics,+bulk-memory,+mutable-globals"]
+rustflags = [
+    "-C", "target-feature=+atomics,+bulk-memory,+mutable-globals",
+    "-C", "link-arg=--shared-memory",
+    "-C", "link-arg=--max-memory=4294967296",
+    "-C", "link-arg=--import-memory",
+    "-C", "link-arg=--export=__heap_base",
+    "-C", "link-arg=--export=__wasm_init_tls",
+    "-C", "link-arg=--export=__tls_size",
+    "-C", "link-arg=--export=__tls_align",
+    "-C", "link-arg=--export=__tls_base",
+]
 
 [unstable]
 build-std = ["panic_abort", "std"]

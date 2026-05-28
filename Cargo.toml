@@ -52,6 +52,11 @@ panic = "abort"
 
 [profile.dev]
 opt-level = 1
+# panic=abort is required when building --features threads for wasm32.
+# Without it, the dev profile defaults to panic=unwind, the linker silently
+# emits non-shared WebAssembly.Memory, and wasm-bindgen-rayon's
+# postMessage(memory) fails with DataCloneError at boot.
+panic = "abort"
 
 # wasm-pack release profile: run wasm-opt with bulk-memory + mutable-globals
 # (required for wasm-bindgen-rayon's SharedArrayBuffer threading).
