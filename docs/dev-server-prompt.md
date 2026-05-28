@@ -27,7 +27,7 @@ curl -sf http://localhost:47821/ -o /dev/null && echo "up" || echo "down"
 
 > **Always rebuild wasm after any Rust change.** `web/wasm/` is gitignored
 > and not auto-rebuilt by `pnpm dev`. If you skip this, the TS layer will
-> hit ABI errors against a stale bundle (e.g. `stride !== 10` if a recent
+> hit ABI errors against a stale bundle (e.g. `stride !== 6` if a recent
 > commit changed `creature_stride()`).
 >
 > ```bash
@@ -200,8 +200,8 @@ rm -rf /home/adamg/evosim/web/node_modules/.vite
 | Dev panel sliders | `web/src/widgets/devpanel.ts` |
 | Perf panel | `web/src/widgets/perf-panel.ts` |
 | Simulation logic (Rust) | `src/world/tick.rs`, `src/world/mod.rs` |
-| NN forward pass / weight layout / color hash | `src/brain.rs` |
-| Vision raycast | `src/vision.rs` |
+| NN forward pass / weight layout | `src/brain.rs` |
+| NN inputs / proximity sensors | `src/world/proximity.rs` + `src/world/nn.rs::build_nn_input` |
 | Grass mechanic | `src/grass.rs` |
 | Wasm API surface | `src/wasm_api.rs` (`WorldHandle`) |
 
@@ -225,6 +225,19 @@ don't go looking for them:
 - `src/genome.rs` — creatures are now structurally identical (D3)
 - `src/torus.rs` — world is walled (D7)
 - `src/snapshot_hash.rs` + `tests/acceptance.rs` + goldens (D6)
+
+### v1.5 deletions (no longer in the codebase)
+
+- `src/vision.rs` — 24-sector RGB raycast vision (S5b); replaced by
+  `src/world/proximity.rs` with semantic 8-sector proximity inputs.
+- `CreatureSoA::eye_trig`, `CreatureSoA::last2_action`, `CreatureSoA::prev_energy`
+  — dead SoA columns (S5b).
+- `Brain::color_rgb`, `Brain::weight_hash`, `hash_weights`, `color_from_hash`
+  — NN-weight-hash color replaced by per-creature action-EMA (S3).
+- `World::peak_population`, `first_move_fired`, `first_eat_fired`,
+  `population_milestones_fired` — vestigial since D4 (S5b).
+- `creatures_buffer` `flag_eye/move/mouth/armor` slots — stride dropped
+  10→6, render now reads `[x, y, radius, r, g, b]`.
 
 ---
 

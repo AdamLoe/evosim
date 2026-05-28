@@ -1,13 +1,18 @@
 # evosim
 
 Browser-deployed idle evolution sandbox. Rust → wasm sim, plain-TS Vite shell,
-Canvas 2D rendering. See [docs/README.md](docs/README.md) for the full
+WebGL2 instanced rendering. See [docs/README.md](docs/README.md) for the full
 documentation index.
 
-v1.3 state: no save/resume, no carrion, no genome (only NN-weight evolution),
+v1.5 state: no save/resume, no carrion, no genome (only NN-weight evolution),
 no species tracking, no events or Hall of Fame. Walled world. 3-action enum
-(`Graze / Eat / Split`). Grass cells 5 world-units. Creature color derived from
-NN-weight xxhash64.
+(`Graze / Eat / Split`). Multi-founder spawn (default 8). Brain is a
+`32 → 48 → 24 → 5` pyramid with Leaky ReLU hidden layers and per-layer He init;
+inputs are semantic (self/memory + 4-wall + 8-sector creature + 8-sector grass).
+Creature color is a per-creature action EMA — green = grazing, red = biting
+prey, blue = splitting. Grass cells 1.25 world-units (480×480 grid), R8 GPU
+upload. Population-feedback curriculum factor (default floor 0.0) relieves
+upkeep pressure when population is fragile.
 
 ## Repo layout
 
@@ -17,7 +22,7 @@ NN-weight xxhash64.
 /web                   Vite + TypeScript shell
 /web/wasm              wasm-pack output (gitignored, regenerated each build)
 /docs                  README, architecture, development, contributing guides
-/docs/plans            v1.3 planning docs (canonical record of this pass)
+/docs/plans            mission + plan + review docs per pass (v1.3, v1.4, v1.5)
 /DECISIONS.md          running log of orchestrator decisions
 ```
 

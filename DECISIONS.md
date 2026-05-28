@@ -402,7 +402,35 @@ Final gate: cargo test --lib 119/119 (default + threads); clippy -D warnings cle
 - ef99b78 `fix(inspector): remove vestigial scavenge_efficiency + nose_count stubs; populate id/pos rows; drop mouth_tax wasm export` — creature_inspect_json drops "scavenge_efficiency" and "nose_count" constant-stub fields; mean_nose_count + mean_eye_count wasm exports deleted; set_mouth_tax wasm export + apply_mouth_tax helper + "mouth_tax" try_set_slider arm deleted; renderInspector populates ins-id and ins-pos; CreatureInspectJson drops scavenge_efficiency field; ins-scav HTML row removed.
 - 0ed5d23 `refactor(tests): rename stale test names + delete tautological body-radius test` — split_jitter_wraps → split_jitter_stays_in_bounds; repulsion_wraps_across_seam → repulsion_clamps_to_walls_after_movement; decode_action_scavenge_invalid_when_zero_eff → decode_action_split_invalid_when_low_energy; nan_logits_return_rest_zero_velocity → nan_logits_return_graze_zero_velocity; body_radius_constant_across_population deleted (pure tautology).
 
-Deferred to orchestrator (Low Priority / Orchestrator-Decision items):
+## v1.5 (2026-05-27)
+
+Goal: legible + evolvable brain. Replace 112-input RGB-vision-dump NN with 32 semantic signals; go from 1 to 2 hidden layers with Leaky ReLU; replace NN-hash colors with action-EMA so a glance shows strategy; scale grass 16× without melting the renderer; tidy UX papercuts; spawn multi-founder defaults so a single unlucky seed doesn't mask brain quality.
+
+Mission: `docs/plans/v1.5-mission.md`. Plan: `docs/plans/v1.5-plan.md`. Review synthesis: `docs/plans/v1.5-mission-review.md`.
+
+User overrides applied (vs. mission defaults):
+- `CURRICULUM_MIN_FACTOR` default `0.0` (not `0.25`). Exposed as a knob so the user can dial in any floor at runtime.
+- `nearest_creature_color` NN input cut. Slot 28 = padding. Future release will add directional color inputs.
+- `creature_stride` 10→6 (drop dead `flag_*` slots).
+
+Commits in landing order on main:
+
+- c6ab858 `docs(v1.5): materialize implementation plan with user overrides`
+- 55323d1 `feat(ui): add max_age/split_threshold/split_gift/founder_count sliders, TPS popup CSS, settings overlay` — S1 + multi-founder seed (default 8, halton-sequence), `new_with_founder_count` ctor, right-edge settings overlay (z-index 10), `select option {}` dark popup.
+- e893fa9 `perf(threads): make chunk count dynamic = clamp(pop/32, 4, min(16, workers))` — S2. Replaces constant `N_CHUNKS=8` with runtime-derived. `MIN_CHUNKS=4`, `MAX_CHUNKS=16`. Workers<MIN clamp guard added (caught by test).
+- b17075a `chore: ignore .claude/worktrees and untrack accidentally-added entries` — `git add -A` during S2 reconciliation pulled `.claude/worktrees/` in as embedded submodules; added to `.gitignore` and untracked.
+- 2bc2c2a `feat(world): population-feedback curriculum with tunable MIN_FACTOR floor (default 0.0)` — S4. `factor = MIN_FACTOR + (1 - MIN_FACTOR) * smoothstep(min_pop, max_pop, pop)`. Slider-exposed; `auto_curriculum` toggle (default on).
+- 608909e `feat(brain): replace NN-hash colors with per-creature action-EMA (Graze/Eat/Split → RGB)` — S3. Deleted `Brain::color_rgb`, `Brain::weight_hash`, `hash_weights`, `color_from_hash`; deleted `twox_hash` usage. `color_r/g/b: Vec<f32>` SoA columns init (0,0,0). EMA deltas (g: +0.01 argmax-Graze / -0.01, b: +0.5 Split / -0.005, r: +0.1 successful-bite / -0.001). `scratch_argmax_pre` on `World` carries argmax-before-fallthrough so cooldown-stalled predators don't bleed Green. Display floor 0.15/channel. Inspector schema rewritten (drops `color_rgb`/`weight_hash`/`photo_eff`/`eat_eff`/`armor`/`bite_reach`/`vision_range`/`eye_count`; adds `color_ema`/`cooldown_remaining`/`wall_proximity`). `creature_stride` 10→6.
+- 480fa22 `feat(brain): 2-hidden-layer pyramid (112→48→24→5) with Leaky ReLU + per-layer He init` — S5a. Topology only; inputs stayed at 112 in this transitional commit, so `NN_WEIGHT_COUNT=6648` here. Per-layer init `r_l1=0.433`, `r_l2=0.354`, `r_l3=0.500`. `tanh` moved inside `Brain::forward` (canonical output shape). `forward_pass_relu_clips_negative_hidden` → `forward_pass_lrelu_preserves_negative_with_small_slope` (asserts `hidden = 0.01·x` for negative pre-activation).
+- ef672b7 `feat(brain): rewrite NN inputs to 32 semantic signals; delete VisionPass and dead SoA columns` — S5b. `NN_INPUTS=32`, `NN_WEIGHT_COUNT=2808`. New `src/world/proximity.rs` (wall_proximity arithmetic + creature_proximity bilinear-sectored + grass_density LUT-driven). Deleted `src/vision.rs` (466 LOC), `SoA::last2_action`, `SoA::prev_energy`, `SoA::eye_trig`, `recompute_eye_trig_at`. Deleted vestigial `World::peak_population`/`first_move_fired`/`first_eat_fired`/`population_milestones_fired`. New `World::sector_lut` (33×33) + `scratch_sector_accum`. Slot 28 = padding (predator-color cut per user override). Slot 30 = 1.0 (bias-learning).
+- 509ed3c `feat(grass): 16× density (480×480 cells) with R8 GPU upload + parallel step` — S6. `GRASS_CELL_SIZE 5.0→1.25`. `GRASS_GRID_DIM 120→480`. `GRASS_CELL_COUNT 14_400→230_400`. New `grass_buffer_u8()` wasm export; quantize density → R8 (230 KB/frame vs ~920 KB at R32F, ≈14 MB/s @ 60 FPS — well under 25 MB/s budget). `GrassGrid::step` row loop parallelized via `par_chunks_mut` under `cfg(threads)`. Per-row `row_has_density: Vec<u64>` bitset regenerated each tick (closes mid-game grass-sector cost). LUT_RADIUS=16 was already sized for the new cell pitch (`20u / 1.25u = 16`).
+
+Deferred to v1.5.1 (per mission):
+- Dirty-rect grass uploads (R8 whole-frame meets budget at 13.8 MB/s).
+- Worker-utilization widget.
+- NN_MUT_RATE/SIGMA sweep with the new 32-input architecture (defaults retained).
+
+## v1.4 cleanup deferred to orchestrator (Low Priority / Orchestrator-Decision items):
 - §19 Pass-progress noise comments (D3:, M5:, Q3: inline markers) — stylistic call, user owns.
 - §20 serde derives on Action/Brain/DevSliders — Low Pri; no consumer confirmed but removal could break future serialization.
 - §17 POPULATION_MILESTONES / first_move_fired / first_eat_fired — tracking fields that run every tick with no consumer; kept as hooks per orchestrator decision note in punchlist.
