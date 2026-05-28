@@ -14,22 +14,13 @@ import { getSettings } from "./settings";
 import { span } from "./perf";
 import { CREATURE_STRIDE } from "./sim-bridge";
 
-/**
- * v1.6 Wave B: the renderer consumes a snapshot received via postMessage from
- * the sim worker rather than calling into wasm directly. Carries the same
- * fields previously exposed by `WorldHandle` getters that the renderer used.
- *
- * `creatures` is the stride-8 SoA from `creatures_buffer`; `ids` is the
- * index-aligned `creature_ids_buffer`; `grass` is the u8-quantized density.
- */
-export interface SimSnapshot {
-  creatures: Float32Array;
-  ids: Float64Array;
-  grass: Uint8Array;
-  pop: number;
-  world_size: number;
-  grass_dim: number;
-}
+// v1.6 Wave C: the renderer reads typed-array views over the live SAB slot
+// directly (no postMessage payload, no copy). `creatures` is a Float32Array
+// view over the stride-8 SoA in the snapshot slot; `grass` is a Uint8Array
+// view over the same slot's density region. IDs are interleaved at byte offset
+// +24 within each 32-byte creature stride (two raw u32s reinterpreted as f32
+// by Rust via `f32::from_bits`) — the highlight pass extracts them inline by
+// constructing a Uint32Array view over the creatures' underlying buffer.
 
 // ─── Shader sources ──────────────────────────────────────────────────────
 
@@ -77,8 +68,8 @@ void main() {
 
 // Grass: one quad spanning the world, samples an R8 density texture
 // (v1.5 S6 — was R32F) and fades green by density. Quantization to u8 happens
-// Rust-side via `grass_buffer_u8`; the shader treats `.r` as a normalized
-// f32 in [0, 1] either way.
+// Rust-side in the sim worker's `write_snapshot_to`; the shader treats `.r`
+// as a normalized f32 in [0, 1] either way.
 const GRASS_VS = `#version 300 es
 precision highp float;
 layout(location = 0) in vec2 a_corner;   // unit quad [0, 1]
@@ -337,13 +328,16 @@ export function renderWorld(
   cam: Camera,
   viewW: number,
   viewH: number,
-  snapshot: SimSnapshot,
+  creatures: Float32Array,
+  grass: Uint8Array,
+  pop: number,
+  world_size: number,
+  grass_dim: number,
   highlightMap: Map<number, number>,
   nowMs: number,
 ): void {
-  // v1.6 Wave B: stride is fixed at 8 post-sim-worker. The Wave A1 tolerant
-  // guard (`6 || 8`) is retired here — Stage 1 onward, the snapshot SoA always
-  // ships the stride-8 layout. Mismatch indicates Rust/TS const drift.
+  // v1.6 Wave C: stride is fixed at 8 post-SAB cutover; mismatch indicates
+  // Rust/TS const drift on `sim-bridge.ts`'s `CREATURE_STRIDE`.
   const stride = CREATURE_STRIDE;
   if (stride !== 8) {
     throw new Error(
@@ -365,28 +359,26 @@ export function renderWorld(
   // a real perf win at high cell counts (921_600 cells = 921 KB R8 upload
   // per frame + a fullscreen-discard fragment pass).
   if (getSettings().showGrass) {
-    const dim = snapshot.grass_dim;
-    // The grass typed-array is now a direct postMessage'd Uint8Array (no
-    // wasm-bindgen quantize+copy here — that runs in the sim worker). The
-    // span name is retained so the existing perf-tree comparison still works.
-    const readSpan = span("grass.upload.read");
-    const density = snapshot.grass;
-    readSpan.close();
+    const dim = grass_dim;
+    // Wave C: `grass` is a Uint8Array view over the SAB live slot — no
+    // wasm-bindgen quantize+copy on the read path (that runs in the sim
+    // worker via `write_snapshot_to`). The `grass.upload.read` span from
+    // Stage 1 is gone; only the GPU upload remains as a measured cost.
     const gpuSpan = span("grass.upload.gpu");
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, s.grassTex);
     if (dim !== s.grassTexDim) {
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, dim, dim, 0, gl.RED, gl.UNSIGNED_BYTE, density);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, dim, dim, 0, gl.RED, gl.UNSIGNED_BYTE, grass);
       s.grassTexDim = dim;
     } else {
-      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, dim, dim, gl.RED, gl.UNSIGNED_BYTE, density);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, dim, dim, gl.RED, gl.UNSIGNED_BYTE, grass);
     }
     gpuSpan.close();
     gl.useProgram(s.grassProgram);
     gl.uniform2f(s.grassU.viewport, viewW, viewH);
     gl.uniform2f(s.grassU.camPos, cam.cx, cam.cy);
     gl.uniform1f(s.grassU.zoom, cam.zoom);
-    gl.uniform1f(s.grassU.worldSize, snapshot.world_size);
+    gl.uniform1f(s.grassU.worldSize, world_size);
     gl.uniform1f(s.grassU.opacity, getSettings().grassOpacity);
     gl.bindVertexArray(s.grassVao);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -394,7 +386,7 @@ export function renderWorld(
 
   // ─── World-bounds frame ───
   {
-    const W = snapshot.world_size;
+    const W = world_size;
     FRAME_VERTS[0] = 0; FRAME_VERTS[1] = 0;
     FRAME_VERTS[2] = W; FRAME_VERTS[3] = 0;
     FRAME_VERTS[4] = W; FRAME_VERTS[5] = W;
@@ -410,12 +402,10 @@ export function renderWorld(
   }
 
   // ─── Creatures (bodies) ───
-  // JS-side frustum cull + GPU instance pack (replaces Rust-side
-  // pack_render_buffer which ran inside the world). With the sim now in a
-  // worker, there's no extra wasm-bindgen boundary to skip — we just iterate
-  // the postMessage'd Float32Array directly.
-  const creatures = snapshot.creatures;
-  const pop = snapshot.pop;
+  // JS-side frustum cull + GPU instance pack (replaces the Rust-side
+  // `pack_render_buffer` which Wave C deleted). Reads creature SoA fields
+  // directly from the SAB-backed Float32Array view — no wasm-bindgen
+  // boundary, just a contiguous typed-array load.
   if (pop > 0 && cam.zoom > 0) {
     const halfW = (viewW / cam.zoom) * 0.5;
     const halfH = (viewH / cam.zoom) * 0.5;
@@ -466,18 +456,28 @@ export function renderWorld(
 
   // ─── Highlight rings (rare path) ───
   // Inspector selection + transient highlights produce ≤ 1–2 rings/frame.
-  if (highlightMap.size > 0) {
-    const ids = snapshot.ids;
-    // Highlight pack lives in its own scratch slice — reuse instanceScratch
-    // but write after the body pack (or alone if no bodies). Simplest: reuse
-    // a small fixed scratch since highlights are ≤ ~8 per frame.
+  // Wave C: id is interleaved into the creature SoA at byte offset +24
+  // (id_lo) / +28 (id_hi) of each 32-byte stride — Rust stores the two u32
+  // halves of the stable u64 id via `f32::from_bits`. Build a Uint32Array
+  // view over the same backing SAB to read them without conversion cost.
+  if (highlightMap.size > 0 && pop > 0) {
+    const idView = new Uint32Array(
+      creatures.buffer,
+      creatures.byteOffset,
+      pop * stride * (creatures.BYTES_PER_ELEMENT / 4),
+    );
     const scratch = s.instanceScratch;
     let off = 0;
-    for (let k = 0; k < ids.length; k++) {
-      const cid = ids[k];
+    for (let k = 0; k < pop; k++) {
+      const base = k * stride;
+      // u32-pair → number via the f64 ladder. The max u64 a v1 session ever
+      // mints stays under 2^53 (DECISIONS E.21), so the f64 round-trip is
+      // lossless and `Map<number, …>` lookups stay correct.
+      const idLo = idView[base + 6];
+      const idHi = idView[base + 7];
+      const cid = idHi * 4294967296 + idLo;
       const exp = highlightMap.get(cid);
       if (exp === undefined || nowMs >= exp) continue;
-      const base = k * stride;
       const x = creatures[base];
       const y = creatures[base + 1];
       const radiusWorld = creatures[base + 2];
