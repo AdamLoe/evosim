@@ -346,6 +346,10 @@ impl World {
                 "grass_step.compute.row_body",
                 self.grass.row_body_us.load(Ordering::Relaxed) as u32,
             );
+            self.profile.record_under_tick(
+                "grass_step.compute.row_body.self",
+                self.grass.row_body_self_us.load(Ordering::Relaxed) as u32,
+            );
             // Bitset rebuild is a cheap O(cells) sweep with no per-cell math;
             // not worth its own profiler node.
             self.grass.rebuild_row_bitset();

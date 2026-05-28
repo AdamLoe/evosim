@@ -42,6 +42,11 @@ pub struct GrassGrid {
     /// invocations (us). In threaded builds, this is summed across rayon
     /// workers via `fetch_add`, so it can exceed `par_chunks_us` wall.
     pub row_body_us: AtomicU64,
+    /// Per-tick sum-busy time bracketing just the row_body closure body
+    /// itself (us), measured from inside the closure. Differs from
+    /// `row_body_us` by excluding the per-chunk `chunks_mut` dispatch overhead;
+    /// also summed across rayon workers via `fetch_add`.
+    pub row_body_self_us: AtomicU64,
 }
 
 impl Clone for GrassGrid {
@@ -53,6 +58,7 @@ impl Clone for GrassGrid {
             par_chunks_us: AtomicU64::new(0),
             chunks_mut_us: AtomicU64::new(0),
             row_body_us: AtomicU64::new(0),
+            row_body_self_us: AtomicU64::new(0),
         }
     }
 }
@@ -75,6 +81,7 @@ impl GrassGrid {
             par_chunks_us: AtomicU64::new(0),
             chunks_mut_us: AtomicU64::new(0),
             row_body_us: AtomicU64::new(0),
+            row_body_self_us: AtomicU64::new(0),
         };
         g.rebuild_row_bitset();
         g
@@ -143,13 +150,23 @@ impl GrassGrid {
         debug_assert_eq!(self.density.len(), GRASS_CELL_COUNT);
         debug_assert_eq!(self.scratch.len(), GRASS_CELL_COUNT);
 
+        // Reset per-tick timers at the top so the row_body closure (defined
+        // below) can hold a shared borrow of row_body_self_us alongside the
+        // shared borrow of self.density.
+        self.par_chunks_us.store(0, Ordering::Relaxed);
+        self.chunks_mut_us.store(0, Ordering::Relaxed);
+        self.row_body_us.store(0, Ordering::Relaxed);
+        self.row_body_self_us.store(0, Ordering::Relaxed);
+
         let dim = GRASS_GRID_DIM;
         let inv_max = 1.0 / GRASS_MAX;
         let d = &self.density;
+        let row_body_self_us = &self.row_body_self_us;
 
         // Single-row body: writes into `s_row` (one dim-long slice of scratch)
         // by reading the (iy-1, iy, iy+1) rows from `d`. Ghost-zero N/S/E/W.
         let row_body = |iy: usize, s_row: &mut [f32]| {
+            let body_self_start = clock_now_us_threadsafe();
             let row_self = iy * dim;
             let row_n = if iy == 0 { None } else { Some((iy - 1) * dim) };
             let row_s = if iy + 1 == dim {
@@ -184,14 +201,11 @@ impl GrassGrid {
                 let prop = k_propagate * max_neighbor;
                 s_row[ix] = (v + logistic + prop).clamp(0.0, GRASS_MAX);
             }
+            row_body_self_us.fetch_add(
+                clock_now_us_threadsafe().saturating_sub(body_self_start),
+                Ordering::Relaxed,
+            );
         };
-
-        // Reset per-tick timers. par_chunks_us / chunks_mut_us are written from
-        // the main thread (one of them stays 0 depending on `--features threads`);
-        // row_body_us is sum-busy across rayon workers via fetch_add.
-        self.par_chunks_us.store(0, Ordering::Relaxed);
-        self.chunks_mut_us.store(0, Ordering::Relaxed);
-        self.row_body_us.store(0, Ordering::Relaxed);
 
         #[cfg(feature = "threads")]
         {
@@ -363,6 +377,7 @@ mod tests {
             par_chunks_us: AtomicU64::new(0),
             chunks_mut_us: AtomicU64::new(0),
             row_body_us: AtomicU64::new(0),
+            row_body_self_us: AtomicU64::new(0),
         }
     }
 
@@ -427,6 +442,7 @@ mod tests {
             par_chunks_us: AtomicU64::new(0),
             chunks_mut_us: AtomicU64::new(0),
             row_body_us: AtomicU64::new(0),
+            row_body_self_us: AtomicU64::new(0),
         };
         for _ in 0..100 {
             g.step(0.005, 0.05);
