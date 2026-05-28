@@ -25,26 +25,57 @@ curl -sf http://localhost:47821/ -o /dev/null && echo "up" || echo "down"
 
 ## 3. How to start it
 
+> ## 🟢 ALWAYS USE THIS COMMAND
+>
+> ```bash
+> cd /home/adamg/evosim && \
+>   rustup run nightly wasm-pack build --target web --out-dir web/wasm --dev --features threads
+> ```
+>
+> **Use the threaded build by default. No exceptions.** The plain
+> `wasm-pack build --target web --out-dir web/wasm --dev` (without
+> `--features threads`) silently produces a single-threaded bundle:
+> the rayon pool is never initialized, `rayon::current_num_threads()`
+> returns 1, and the entire NN forward pass runs on the main thread
+> with no error or warning. The sim *looks* fine — just runs at ~1/8
+> speed on a typical desktop CPU.
+>
+> Every required compile + link flag for atomics, shared memory,
+> imported memory, and the wasm-bindgen-rayon TLS exports lives in
+> `.cargo/config.toml` under `[target.wasm32-unknown-unknown]`. Don't
+> re-pass them via `RUSTFLAGS` env vars — that *overrides* the config
+> and breaks the build silently.
+>
 > **Always rebuild wasm after any Rust change.** `web/wasm/` is gitignored
 > and not auto-rebuilt by `pnpm dev`. If you skip this, the TS layer will
 > hit ABI errors against a stale bundle (e.g. `stride !== 6` if a recent
 > commit changed `creature_stride()`).
 >
-> **Use the threaded build for normal dev work** — the sim's NN pass is
-> rayon-parallel, and the plain `--dev` build (no `--features threads`)
-> silently runs the entire forward pass on the main thread.
+> **Verify the bundle is threaded** after every build:
 >
 > ```bash
-> cd /home/adamg/evosim && \
->   RUSTFLAGS='--cfg getrandom_backend="wasm_js" -Ctarget-feature=+atomics,+bulk-memory,+mutable-globals -Cembed-bitcode=no' \
->   rustup run nightly wasm-pack build --target web --out-dir web/wasm --dev -- \
->   --features threads -Z build-std=std,panic_abort
+> grep -c initThreadPool web/wasm/evosim.js   # → 2 = threaded, 0 = plain
+> grep -F 'shared:true'  web/wasm/evosim.js   # → one hit = shared memory wired
 > ```
 >
-> Verify the bundle is threaded: `grep -c initThreadPool web/wasm/evosim.js`
-> should print `2`. If it prints `0`, you accidentally built the non-threaded
-> variant — repeat the command above. See section 7 for the plain
-> (non-threaded) variant and the release build.
+> If `initThreadPool` count is 0, you forgot `--features threads`. If
+> `shared:true` is missing, the linker didn't emit shared memory — check
+> `.cargo/config.toml` hasn't been clobbered.
+>
+> **Confirm at runtime** by opening DevTools console after the page loads.
+> You want this line:
+>
+> ```
+> [threads] pool ready: hardwareConcurrency=N crossOriginIsolated=true
+> ```
+>
+> If you see `[threads] not spawned. SharedArrayBuffer=false ...` →
+> COOP/COEP headers aren't reaching the doc. If you see
+> `[threads] initThreadPool failed; continuing single-threaded: ...` →
+> the wasm bundle is missing some thread requirement.
+>
+> See section 7 for the plain (non-threaded) variant — only useful for
+> quick build-only iteration where you don't actually run the sim.
 
 ```bash
 cd /home/adamg/evosim/web && rm -f /tmp/vite.log && \
@@ -146,32 +177,34 @@ stale bundle:
 Rebuild from the repo root:
 
 ```bash
-# Threaded dev build (DEFAULT for normal work — rayon parallel NN pass).
-# Requires nightly toolchain for atomics + -Z build-std.
+# Threaded dev build — THIS IS THE DEFAULT, USE THIS COMMAND.
+# Compile + link flags for atomics, shared memory, imported memory, and
+# wasm-bindgen-rayon TLS exports all live in .cargo/config.toml.
 cd /home/adamg/evosim && \
-  RUSTFLAGS='--cfg getrandom_backend="wasm_js" -Ctarget-feature=+atomics,+bulk-memory,+mutable-globals -Cembed-bitcode=no' \
-  rustup run nightly wasm-pack build --target web --out-dir web/wasm --dev -- \
-  --features threads -Z build-std=std,panic_abort
+  rustup run nightly wasm-pack build --target web --out-dir web/wasm --dev --features threads
 
-# Plain dev build (single-threaded; fast to compile but the NN forward pass
-# runs entirely on the main thread). Use only when iterating on non-perf
-# code and you don't want the ~30s build cost of the threaded variant.
+# Threaded release build — only for perf measurements or shipping.
+cd /home/adamg/evosim && \
+  rustup run nightly wasm-pack build --target web --out-dir web/wasm --release --features threads
+
+# Plain (non-threaded) build — NOT FOR RUNNING THE SIM. Rayon falls back to
+# a single thread, the NN forward pass runs on the main thread, and you'll
+# see ~1/Nx the throughput you'd get from threads. Only use this if you
+# specifically want to test the cfg(not(feature = "threads")) code path.
 cd /home/adamg/evosim && wasm-pack build --target web --out-dir web/wasm --dev
-
-# Release build (optimized; required for perf measurements). Add --features
-# threads + the RUSTFLAGS/nightly/build-std flags above for threaded release.
-cd /home/adamg/evosim && wasm-pack build --target web --out-dir web/wasm --release
 ```
 
 **Verify which build you ended up with:**
 
 ```bash
 grep -c initThreadPool web/wasm/evosim.js   # 2 = threaded, 0 = plain
+grep -F 'shared:true'  web/wasm/evosim.js   # one hit = shared memory wired
 ```
 
 A silent fall-through to the plain build is the most common footgun — the
 sim still runs but `rayon::current_num_threads()` returns 1 and the
-parallel NN pass collapses to a single chunk.
+parallel NN pass collapses to a single chunk. **Always check the grep
+output after every Rust change.**
 
 Then hard-reload the browser (Ctrl+Shift+R). Vite's HMR picks up the new
 `.js` glue automatically; the `.wasm` is fetched fresh on reload. Restart

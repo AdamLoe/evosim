@@ -13,11 +13,14 @@
 # Rust native (for tests only — no wasm output)
 cargo build
 
-# Debug wasm build (fast, larger output, includes panic messages)
-wasm-pack build --target web --out-dir web/wasm --dev
+# Debug wasm build — ALWAYS use --features threads. The plain command
+# (without --features threads) silently produces a single-threaded
+# bundle that runs the NN pass on the main thread. See
+# docs/dev-server-prompt.md §3 for details.
+rustup run nightly wasm-pack build --target web --out-dir web/wasm --dev --features threads
 
 # Release wasm build (used by CI and pnpm build)
-wasm-pack build --target web --out-dir web/wasm --release
+rustup run nightly wasm-pack build --target web --out-dir web/wasm --release --features threads
 
 # Install JS dependencies (run once; re-run after pnpm-lock.yaml changes)
 cd web && pnpm install
@@ -27,6 +30,13 @@ cd web && pnpm build
 
 # Dev server with COOP/COEP headers
 cd web && pnpm dev
+```
+
+After every Rust change, verify the bundle is threaded:
+
+```bash
+grep -c initThreadPool web/wasm/evosim.js   # → 2 (threaded) or 0 (broken)
+grep -F 'shared:true'  web/wasm/evosim.js   # → one hit
 ```
 
 `web/wasm/` is gitignored. Rebuild it after any Rust change — the JS will silently use the old wasm otherwise.
@@ -77,7 +87,7 @@ Cloudflare Pages serving `web/dist/`. The file `web/public/_headers` sets `Cross
 
 ## Common pitfalls
 
-- **Forgot to rebuild wasm.** If JS behavior looks wrong after a Rust change, run `wasm-pack build --target web --out-dir web/wasm --dev` and hard-refresh.
+- **Forgot to rebuild wasm.** If JS behavior looks wrong after a Rust change, run `rustup run nightly wasm-pack build --target web --out-dir web/wasm --dev --features threads` and hard-refresh. (Always include `--features threads` — see §"Build commands" above.)
 - **pnpm not found.** On this machine: `export PATH="$HOME/.local/bin:$PATH"` or use the full path `~/.local/bin/pnpm`.
 - **Clippy failure blocks CI.** Fix before pushing; `cargo clippy --all-targets -- -D warnings` locally.
 - **Golden mismatch after balance change.** If you intentionally changed a constant that affects sim output, re-bootstrap the golden (see above). If unexpected, investigate before re-bootstrapping.
