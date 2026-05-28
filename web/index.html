@@ -64,8 +64,12 @@
       <section id="rail-inspector" class="rail-panel"></section>
     </aside>
 
-    <!-- P3b: dev-panel overlay (bottom-right). Toggle via ~ hotkey or ⚙ top-bar button. -->
-    <div id="devpanel-box" class="overlay-widget" style="display:none"></div>
+    <!-- v1.5 settings overlay (right-edge, 320px). Toggle via ~ hotkey or
+         ⚙ top-bar button. The dev panel lives inside this container. -->
+    <aside id="settings-overlay" style="display:none">
+      <button id="settings-close" type="button" aria-label="Close">×</button>
+      <div id="devpanel-box"></div>
+    </aside>
 
     <!-- ui-perf: free-standing perf widget (bottom-left, always visible) -->
     <div id="perf-box" class="overlay-widget perf-widget">

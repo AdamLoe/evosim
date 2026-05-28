@@ -38,6 +38,7 @@ impl World {
                 let vision_ref = &self.vision[..n];
                 let grass_ref = &self.grass;
                 let energy_max = self.sliders.energy_max;
+                let split_threshold = self.sliders.split_threshold;
 
                 // Compute chunk_size identically to chunk_ranges (N_CHUNKS = 8).
                 let chunk_size = chunk_base_size(n);
@@ -77,6 +78,7 @@ impl World {
                                 prev_vx,
                                 prev_vy,
                                 energy_max,
+                                split_threshold,
                             );
                             vx_sub[k] = vx;
                             vy_sub[k] = vy;
@@ -100,6 +102,7 @@ impl World {
         {
             let _ = n; // unused in the sequential path
             let energy_max = self.sliders.energy_max;
+            let split_threshold = self.sliders.split_threshold;
             for &(lo, hi) in ranges {
                 let mut input_buf = [0.0f32; NN_INPUTS];
                 let mut hidden_buf = [0.0f32; NN_HIDDEN];
@@ -118,6 +121,7 @@ impl World {
                         prev_vx,
                         prev_vy,
                         energy_max,
+                        split_threshold,
                     );
                     self.creatures.vx[i] = vx;
                     self.creatures.vy[i] = vy;
@@ -261,11 +265,16 @@ pub(crate) fn build_nn_input(
 
 /// Check whether an action is currently valid for creature `i` (v6 §1 + §G).
 /// D9: 3-variant enum. Graze always valid; Eat gated on cooldown; Split on energy.
-pub(crate) fn is_valid_action(act: Action, energy: f32, cooldown: u32) -> bool {
+pub(crate) fn is_valid_action(
+    act: Action,
+    energy: f32,
+    cooldown: u32,
+    split_threshold: f32,
+) -> bool {
     match act {
         Action::Graze => true,
         Action::Eat => cooldown == 0,
-        Action::Split => energy >= SPLIT_THRESHOLD,
+        Action::Split => energy >= split_threshold,
     }
 }
 
@@ -275,7 +284,12 @@ pub(crate) fn is_valid_action(act: Action, energy: f32, cooldown: u32) -> bool {
 /// D3: genome removed. Logits slice length == Action::ALL.len().
 /// S5: If any logit is non-finite (NaN or ±inf), returns `Action::Graze`
 /// immediately (was Action::Rest).
-pub(crate) fn decode_action(logits: &[f32; 3], energy: f32, cooldown: u32) -> Action {
+pub(crate) fn decode_action(
+    logits: &[f32; 3],
+    energy: f32,
+    cooldown: u32,
+    split_threshold: f32,
+) -> Action {
     // S5: NaN / ±inf guard — non-finite logits make the sort undefined.
     if logits.iter().any(|v| !v.is_finite()) {
         return Action::Graze;
@@ -291,7 +305,7 @@ pub(crate) fn decode_action(logits: &[f32; 3], energy: f32, cooldown: u32) -> Ac
     });
     for &k in &order {
         let act = Action::ALL[k as usize];
-        if is_valid_action(act, energy, cooldown) {
+        if is_valid_action(act, energy, cooldown, split_threshold) {
             return act;
         }
     }
@@ -315,6 +329,7 @@ pub(crate) fn pick_action_d(
     prev_vx: f32,
     prev_vy: f32,
     energy_max: f32,
+    split_threshold: f32,
 ) -> (f32, f32, Action) {
     *input_buf = build_nn_input(i, creatures, vision, grass, prev_vx, prev_vy, energy_max);
     creatures.brains[i].forward(input_buf, output_buf, hidden_buf);
@@ -335,8 +350,7 @@ pub(crate) fn pick_action_d(
     );
     let energy = creatures.energy[i];
     let cooldown = creatures.digestion_cooldown[i];
-    // D3: genome removed; decode_action no longer needs &Genome.
-    let action = decode_action(logits, energy, cooldown);
+    let action = decode_action(logits, energy, cooldown, split_threshold);
 
     // S5: if decode_action saw non-finite logits it returns Graze; also zero
     // velocity so the creature does not coast on stale movement data.
@@ -451,7 +465,7 @@ mod tests {
         // Split is index 2 in the 3-logit slice. Make it highest.
         let logits = [0.0f32, 0.0, 10.0];
         // energy = 10 < SPLIT_THRESHOLD (50) → Split invalid.
-        let act = decode_action(&logits, 10.0, 0);
+        let act = decode_action(&logits, 10.0, 0, SPLIT_THRESHOLD);
         assert_ne!(act, Action::Split, "Split must be invalid when energy < 50");
         // D9: Should fall through to a valid action (Graze or Eat).
         assert!(matches!(act, Action::Graze | Action::Eat), "got {:?}", act);
@@ -462,7 +476,7 @@ mod tests {
     fn decode_action_first_index_tiebreak() {
         // All logits equal → Action::ALL[0] = Graze wins (D9: index 0 is Graze).
         let logits = [5.0f32; 3];
-        let act = decode_action(&logits, 100.0, 0);
+        let act = decode_action(&logits, 100.0, 0, SPLIT_THRESHOLD);
         // Action::ALL[0]=Graze is always valid → it wins.
         assert_eq!(act, Action::ALL[0], "lower index must win on ties");
         assert_eq!(act, Action::Graze, "Graze is index 0 after D9");
@@ -474,7 +488,7 @@ mod tests {
         // D9: Action::Eat has one_hot_index=1 (logit index 1 in the 3-slice).
         let logits = [0.0f32, 10.0, 0.0]; // Eat logit highest
                                           // cooldown > 0 → Eat invalid; falls through to Graze (always valid).
-        let act = decode_action(&logits, 100.0, 5);
+        let act = decode_action(&logits, 100.0, 5, SPLIT_THRESHOLD);
         assert_ne!(act, Action::Eat, "Eat must be invalid when cooldown > 0");
         assert_eq!(act, Action::Graze, "should fall through to Graze");
     }
@@ -485,7 +499,7 @@ mod tests {
         // Split is index 2, give it highest logit.
         let logits = [0.0f32, 0.0, 10.0];
         // energy = 0 → Split invalid.
-        let act = decode_action(&logits, 0.0, 0);
+        let act = decode_action(&logits, 0.0, 0, SPLIT_THRESHOLD);
         assert_ne!(
             act,
             Action::Split,
@@ -577,7 +591,7 @@ mod tests {
     fn decode_action_graze_always_valid_as_fallback() {
         // D9: 3-variant enum. Split invalid (energy=0), Eat invalid (cooldown>0). Graze wins.
         let logits = [-5.0f32, 2.0, 10.0]; // Split highest but invalid
-        let act = decode_action(&logits, 0.0, 1); // energy=0 → Split invalid; cooldown>0 → Eat invalid
+        let act = decode_action(&logits, 0.0, 1, SPLIT_THRESHOLD); // energy=0 → Split invalid; cooldown>0 → Eat invalid
         assert!(
             matches!(act, Action::Graze),
             "Expected Graze fallback, got {:?}",
@@ -660,11 +674,11 @@ mod tests {
     fn nan_logits_return_graze_zero_velocity() {
         // decode_action with a NaN logit must return Graze.
         let nan_logits = [f32::NAN, 0.0, 0.0];
-        let act = decode_action(&nan_logits, 100.0, 0);
+        let act = decode_action(&nan_logits, 100.0, 0, SPLIT_THRESHOLD);
         assert_eq!(act, Action::Graze, "NaN logit must produce Graze");
 
         let inf_logits = [f32::INFINITY, 0.0, 0.0];
-        let act2 = decode_action(&inf_logits, 100.0, 0);
+        let act2 = decode_action(&inf_logits, 100.0, 0, SPLIT_THRESHOLD);
         assert_eq!(act2, Action::Graze, "+Inf logit must produce Graze");
 
         // pick_action_d: when output_buf[2..5] has NaN the returned velocity must be 0.
@@ -684,7 +698,7 @@ mod tests {
             let vx = output_buf[0].tanh() * MOVE_SPEED_MAX;
             let vy = output_buf[1].tanh() * MOVE_SPEED_MAX;
             let w = World::new("s5-nan");
-            let act = decode_action(logits, w.creatures.energy[0], 0);
+            let act = decode_action(logits, w.creatures.energy[0], 0, SPLIT_THRESHOLD);
             (vx, vy, act)
         };
         assert_eq!(action, Action::Graze, "had_nan path must return Graze");

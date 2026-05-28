@@ -16,6 +16,11 @@ export function getEnergyMax(): number {
   return getSettings().energyMax;
 }
 
+/** Returns the current founder count for the next world construction. */
+export function getFounderCount(): number {
+  return getSettings().founderCount;
+}
+
 interface SliderSpec {
   label: string;
   min: number;
@@ -92,6 +97,10 @@ export function reapplyDevSliders(world: WorldHandle): void {
   world.set_energy_max(s.energyMax);
   world.set_grass_energy_per_bite(s.grassEnergyPerBite);
   world.set_grass_bites_per_block(s.grassBitesPerBlock);
+  world.set_max_age(s.maxAge);
+  world.set_split_threshold(s.splitThreshold);
+  world.set_split_gift(s.splitGift);
+  world.set_founder_count(s.founderCount);
 }
 
 // Default per-tick upkeep at multiplier=1: must match the Rust sum
@@ -300,7 +309,7 @@ export function installDevPanel(getWorld: () => WorldHandle): void {
     {
       label: "initial seed N",
       min: 0,
-      max: 800,
+      max: 8000,
       step: 1,
       default: persisted.initialGrassSeedCount,
       formatValue: (v) => String(Math.round(v)),
@@ -335,6 +344,68 @@ export function installDevPanel(getWorld: () => WorldHandle): void {
     box.appendChild(makeSlider(spec).row);
   }
 
+  // ── Lifecycle (v1.5) ──────────────────────────────────────────────
+  box.appendChild(header("lifecycle"));
+
+  const lifecycleSliders: SliderSpec[] = [
+    {
+      label: "max age",
+      min: 500,
+      max: 20000,
+      step: 100,
+      default: persisted.maxAge,
+      formatValue: (v) => String(Math.round(v)),
+      onChange: (v) => {
+        const rounded = Math.round(v);
+        setSetting("maxAge", rounded);
+        getWorld().set_max_age(rounded);
+      },
+    },
+    {
+      label: "split threshold",
+      min: 10,
+      max: 200,
+      step: 1,
+      default: persisted.splitThreshold,
+      formatValue: (v) => String(Math.round(v)),
+      onChange: (v) => {
+        const rounded = Math.round(v);
+        setSetting("splitThreshold", rounded);
+        getWorld().set_split_threshold(rounded);
+      },
+    },
+    {
+      label: "split gift",
+      min: 1,
+      max: 100,
+      step: 1,
+      default: persisted.splitGift,
+      formatValue: (v) => String(Math.round(v)),
+      onChange: (v) => {
+        const rounded = Math.round(v);
+        setSetting("splitGift", rounded);
+        getWorld().set_split_gift(rounded);
+      },
+    },
+    {
+      label: "founder count",
+      min: 1,
+      max: 32,
+      step: 1,
+      default: persisted.founderCount,
+      formatValue: (v) => String(Math.round(v)),
+      onChange: (v) => {
+        const rounded = Math.round(v);
+        setSetting("founderCount", rounded);
+        // Stored for next world construction; also push to the active world.
+        getWorld().set_founder_count(rounded);
+      },
+    },
+  ];
+  for (const spec of lifecycleSliders) {
+    box.appendChild(makeSlider(spec).row);
+  }
+
   // ── Reset ─────────────────────────────────────────────────────────
   const resetWrap = document.createElement("div");
   resetWrap.style.marginTop = "8px";
@@ -358,23 +429,14 @@ export function installDevPanel(getWorld: () => WorldHandle): void {
   resetWrap.appendChild(resetBtn);
   box.appendChild(resetWrap);
 
-  // ~ hotkey toggle (skip if focus is in an input/textarea).
-  window.addEventListener("keydown", (e) => {
-    if (e.key === "~" && !(e.target instanceof HTMLInputElement) && !(e.target instanceof HTMLTextAreaElement)) {
-      box.style.display = box.style.display === "none" ? "flex" : "none";
-    }
-  });
-
-  // Top-bar ⚙ button.
-  const topBar = document.getElementById("top-bar");
-  if (topBar) {
-    const btn = document.createElement("button");
-    btn.id = "devpanel-toggle";
-    btn.textContent = "⚙";
-    btn.title = "Dev panel (~ hotkey)";
-    btn.addEventListener("click", () => {
-      box.style.display = box.style.display === "none" ? "flex" : "none";
+  // ~ hotkey toggle (skip if focus is in an input/textarea). Targets the
+  // settings overlay that wraps the dev panel (v1.5).
+  const overlay = document.getElementById("settings-overlay") as HTMLElement | null;
+  if (overlay) {
+    window.addEventListener("keydown", (e) => {
+      if (e.key === "~" && !(e.target instanceof HTMLInputElement) && !(e.target instanceof HTMLTextAreaElement)) {
+        overlay.style.display = overlay.style.display === "none" ? "block" : "none";
+      }
     });
-    topBar.appendChild(btn);
   }
 }

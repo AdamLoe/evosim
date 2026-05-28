@@ -64,6 +64,8 @@ pub const FOUNDER_MAX_AGE: u32 = 5000;
 pub const FOUNDER_GRAZE_EFF: f32 = 5.0;
 pub const FOUNDER_BITE_REACH: f32 = 0.0;
 pub const FOUNDER_SPLIT_JITTER: f32 = 50.0;
+/// Default number of founders seeded at world init (multi-founder v1.5).
+pub const FOUNDER_COUNT_DEFAULT: u32 = 8;
 
 // ---- Vision (v5 §10, v6 §E, Milestone C.12) ----
 /// Maximum grid cells walked per ray; bounds worst-case DDA cost (v5 §3.6).

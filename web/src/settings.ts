@@ -28,6 +28,11 @@ export interface Settings {
   initialGrassSeedCount: number;
   mutRate: number;
   nnSigma: number;
+  // v1.5 sliders
+  maxAge: number;
+  splitThreshold: number;
+  splitGift: number;
+  founderCount: number;
 }
 
 const DEFAULTS: Settings = {
@@ -49,6 +54,10 @@ const DEFAULTS: Settings = {
   initialGrassSeedCount: 100,
   mutRate: 1.0,
   nnSigma: 0.02,
+  maxAge: 5000,
+  splitThreshold: 50,
+  splitGift: 30,
+  founderCount: 8,
 };
 
 function readFromStorage(): Partial<Settings> | null {

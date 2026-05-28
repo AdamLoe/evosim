@@ -34,6 +34,7 @@ pub struct WorldHandle {
 #[wasm_bindgen]
 impl WorldHandle {
     /// Construct from a string seed; empty string → random per build.
+    /// Uses the multi-founder default (`FOUNDER_COUNT_DEFAULT`).
     #[wasm_bindgen(constructor)]
     pub fn new(seed: &str) -> Self {
         let actual_seed = if seed.is_empty() {
@@ -45,7 +46,7 @@ impl WorldHandle {
         } else {
             seed.to_string()
         };
-        let inner = World::new(actual_seed);
+        let inner = World::new_with_sliders(actual_seed, crate::world::DevSliders::default());
         Self {
             inner,
             creature_buf: Vec::new(),
@@ -59,12 +60,26 @@ impl WorldHandle {
 
     /// Construct from a string seed with explicit initial grass seed count
     /// and energy-max cap. Both override the corresponding DevSliders defaults
-    /// for world creation; the founder spawns at `min(FOUNDER_ENERGY, energy_max)`.
+    /// for world creation; founders spawn at `min(FOUNDER_ENERGY, energy_max)`.
+    /// Kept for backwards compat — uses the default founder count.
     #[wasm_bindgen(js_name = newWithGrassSeed)]
-    pub fn new_with_grass_seed(
+    pub fn new_with_grass_seed(seed: &str, initial_grass_seed_count: u32, energy_max: f32) -> Self {
+        Self::new_with_founder_count(
+            seed,
+            initial_grass_seed_count,
+            energy_max,
+            FOUNDER_COUNT_DEFAULT,
+        )
+    }
+
+    /// Construct with explicit initial grass seed count, energy-max cap, and
+    /// founder count (clamped to [1, 32] inside `new_with_sliders`).
+    #[wasm_bindgen(js_name = newWithFounderCount)]
+    pub fn new_with_founder_count(
         seed: &str,
         initial_grass_seed_count: u32,
         energy_max: f32,
+        founder_count: u32,
     ) -> Self {
         let actual_seed = if seed.is_empty() {
             let mut bytes = [0u8; 8];
@@ -77,6 +92,7 @@ impl WorldHandle {
         let sliders = crate::world::DevSliders {
             grass_initial_seed_count: initial_grass_seed_count,
             energy_max: energy_max.max(1.0),
+            founder_count: founder_count.clamp(1, 32),
             ..Default::default()
         };
         let inner = World::new_with_sliders(actual_seed, sliders);
@@ -344,6 +360,19 @@ impl WorldHandle {
     fn apply_grass_bites_per_block(&mut self, value: u32) {
         self.inner.sliders.grass_bites_per_block = value.max(1);
     }
+    fn apply_max_age(&mut self, value: u32) {
+        self.inner.sliders.max_age = value.max(1);
+    }
+    fn apply_split_threshold(&mut self, value: f32) {
+        self.inner.sliders.split_threshold = value.max(0.0);
+    }
+    fn apply_split_gift(&mut self, value: f32) {
+        self.inner.sliders.split_gift = value.max(0.0);
+    }
+    fn apply_founder_count(&mut self, value: u32) {
+        // Stored for next world construction (active world keeps its current population).
+        self.inner.sliders.founder_count = value.clamp(1, 32);
+    }
 
     /// Typed setter — per-birth mutation rate multiplier.
     #[wasm_bindgen]
@@ -411,6 +440,30 @@ impl WorldHandle {
         self.apply_grass_bites_per_block(value);
     }
 
+    /// Typed setter — past-lifespan threshold (ticks).
+    #[wasm_bindgen]
+    pub fn set_max_age(&mut self, value: u32) {
+        self.apply_max_age(value);
+    }
+
+    /// Typed setter — energy threshold required for a Split action.
+    #[wasm_bindgen]
+    pub fn set_split_threshold(&mut self, value: f32) {
+        self.apply_split_threshold(value);
+    }
+
+    /// Typed setter — energy gifted to each newborn at split.
+    #[wasm_bindgen]
+    pub fn set_split_gift(&mut self, value: f32) {
+        self.apply_split_gift(value);
+    }
+
+    /// Typed setter — founder count for the next world construction.
+    #[wasm_bindgen]
+    pub fn set_founder_count(&mut self, value: u32) {
+        self.apply_founder_count(value);
+    }
+
     /// Apply a dev-panel slider live by name. JS console workflow
     /// (BUILD-REPORT Known Issue #4). Returns `Err` on unknown name so a
     /// console typo is visible instead of silently ignored.
@@ -443,6 +496,10 @@ impl WorldHandle {
             // grass_bites_per_block is u32; round the float input. Below-1
             // values are clamped by the apply_ helper.
             "grass_bites_per_block" => self.apply_grass_bites_per_block(value.max(0.0) as u32),
+            "max_age" => self.apply_max_age(value.max(0.0) as u32),
+            "split_threshold" => self.apply_split_threshold(value),
+            "split_gift" => self.apply_split_gift(value),
+            "founder_count" => self.apply_founder_count(value.max(0.0) as u32),
             _ => return false,
         }
         true
@@ -540,7 +597,7 @@ impl WorldHandle {
             "x": self.inner.creatures.x[i],
             "y": self.inner.creatures.y[i],
             "age": self.inner.creatures.age[i],
-            "max_age": FOUNDER_MAX_AGE,
+            "max_age": self.inner.sliders.max_age,
             "energy": self.inner.creatures.energy[i],
             "energy_frac": (self.inner.creatures.energy[i] / 100.0).clamp(0.0, 1.0),
             "size": FOUNDER_SIZE,
@@ -661,13 +718,16 @@ mod tests {
     #[test]
     fn creature_buf_length_matches_population_times_stride() {
         let mut handle = WorldHandle::new("s21-stride");
-        // Founder population = 1 at boot.
+        // Founder population at boot = FOUNDER_COUNT_DEFAULT (v1.5 multi-founder).
         let n = handle.inner.creatures.len();
         let stride = creature_stride() as usize;
         handle.creature_buf.clear();
         handle.creature_buf.resize(n * stride, 0.0);
         assert_eq!(handle.creature_buf.len(), n * stride);
-        assert_eq!(handle.creature_buf.len(), 10); // 1 creature × 10 floats
+        assert_eq!(
+            handle.creature_buf.len(),
+            FOUNDER_COUNT_DEFAULT as usize * stride
+        );
     }
 
     /// E.21: creature_inspect_json returns None for out-of-range idx.
@@ -679,21 +739,20 @@ mod tests {
         assert!(result.is_none(), "out-of-range idx must return None");
     }
 
-    /// S18 + S20: creature_at returns the founder's stable id (f64) at center.
+    /// S18 + S20: creature_at returns the founder's stable id (f64) at its
+    /// halton position. Uses a 1-founder world so we control placement exactly.
     #[test]
     fn creature_at_returns_stable_id() {
-        use crate::constants::WORLD_SIZE;
-        let handle = WorldHandle::new("e21-creature-at");
-        let cx = WORLD_SIZE * 0.5;
-        let cy = WORLD_SIZE * 0.5;
-        // Read founder's stable id directly from SoA.
+        let handle = WorldHandle::new_with_founder_count("e21-creature-at", 0, 100.0, 1);
         let founder_id = handle.inner.creatures.id[0] as f64;
-        // Zero tolerance: hit exactly at the center.
+        let cx = handle.inner.creatures.x[0];
+        let cy = handle.inner.creatures.y[0];
+        // Zero tolerance: hit exactly at the founder's position.
         let result = handle.creature_at(cx, cy, 0.0);
         assert_eq!(
             result,
             Some(founder_id),
-            "founder id must be found at world center"
+            "founder id must be found at its spawn position"
         );
         // With tolerance: hit just outside the body radius should still hit.
         let result_tol = handle.creature_at(cx + 2.0, cy, 3.0);
@@ -702,9 +761,9 @@ mod tests {
             Some(founder_id),
             "founder must be found within tolerance radius"
         );
-        // Far outside any creature — should return None even with tolerance.
-        let miss = handle.creature_at(0.0, 0.0, 1.5);
-        assert!(miss.is_none(), "empty corner must return None");
+        // Far from any creature — should return None even with tolerance.
+        let miss = handle.creature_at(cx + 200.0, cy + 200.0, 1.5);
+        assert!(miss.is_none(), "empty area must return None");
     }
 
     /// S18: creature_idx_by_id resolves a live id back to its SoA index.

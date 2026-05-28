@@ -275,12 +275,12 @@ impl World {
         let up_base = UPKEEP_BASE + UPKEEP_NN_FIXED + UPKEEP_GUT + mouth_tax;
         let mult = self.sliders.upkeep_multiplier;
         let energy_cap = self.sliders.energy_max;
+        let max_age = self.sliders.max_age;
         for i in 0..self.creatures.len() {
             let mut up = up_base * mult;
-            // D3: max_age is FOUNDER_MAX_AGE (constant).
             let age = self.creatures.age[i];
-            if age > FOUNDER_MAX_AGE {
-                let excess = (age - FOUNDER_MAX_AGE) as f32;
+            if age > max_age {
+                let excess = (age - max_age) as f32;
                 let age_mult = PAST_LIFESPAN_MULT.powf(excess / 1000.0);
                 up *= age_mult.min(1e6);
             }

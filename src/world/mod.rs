@@ -46,6 +46,14 @@ pub struct DevSliders {
     /// Live-tunable number of bites to drain a ripe grass cell. Density removed
     /// per bite = GRASS_MAX / bites_per_block.
     pub grass_bites_per_block: u32,
+    /// Lifespan threshold beyond which the past-lifespan upkeep penalty applies.
+    pub max_age: u32,
+    /// Energy threshold required for a Split action to fire.
+    pub split_threshold: f32,
+    /// Energy gifted to each newborn at split (clamped at parent's residual).
+    pub split_gift: f32,
+    /// Number of founders seeded at world init (clamped to [1, 32]).
+    pub founder_count: u32,
 }
 
 impl Default for DevSliders {
@@ -64,8 +72,25 @@ impl Default for DevSliders {
             energy_max: 100.0,
             grass_energy_per_bite: GRASS_ENERGY_PER_BITE_DEFAULT,
             grass_bites_per_block: GRASS_BITES_PER_BLOCK_DEFAULT,
+            max_age: FOUNDER_MAX_AGE,
+            split_threshold: SPLIT_THRESHOLD,
+            split_gift: SPLIT_GIFT_MAX,
+            founder_count: FOUNDER_COUNT_DEFAULT,
         }
     }
+}
+
+/// Halton sequence value at index `i` for base `b`. Used for deterministic
+/// quasi-random founder placement (multi-founder spawn, v1.5).
+fn halton(mut i: u32, b: u32) -> f32 {
+    let mut f = 1.0f32;
+    let mut r = 0.0f32;
+    while i > 0 {
+        f /= b as f32;
+        r += f * (i % b) as f32;
+        i /= b;
+    }
+    r
 }
 
 pub struct World {
@@ -112,8 +137,19 @@ pub struct World {
 }
 
 impl World {
+    /// Legacy 1-founder constructor used by Rust-side tests and as the basic
+    /// entrypoint when no slider overrides are needed. Wasm callers should
+    /// route through `WorldHandle::new_with_founder_count` for the multi-
+    /// founder default.
+    #[allow(dead_code)]
     pub fn new(seed: impl Into<String>) -> Self {
-        Self::new_with_sliders(seed, DevSliders::default())
+        Self::new_with_sliders(
+            seed,
+            DevSliders {
+                founder_count: 1,
+                ..Default::default()
+            },
+        )
     }
 
     pub fn new_with_sliders(seed: impl Into<String>, sliders: DevSliders) -> Self {
@@ -121,13 +157,24 @@ impl World {
         let mut rng = SimRng::from_string(&seed_string);
         let grass = GrassGrid::new(&mut rng, sliders.grass_initial_seed_count);
         let mut creatures = CreatureSoA::with_capacity(2048);
-        let founder_brain = Brain::founder(&mut rng);
-        let cx = WORLD_SIZE * 0.5;
-        let cy = WORLD_SIZE * 0.5;
+        let founder_count = sliders.founder_count.clamp(1, 32);
         let founder_energy = FOUNDER_ENERGY.min(sliders.energy_max);
-        creatures.push(0, cx, cy, founder_energy, 0, founder_brain);
+        let body_r = FOUNDER_SIZE * BODY_RADIUS_PER_SIZE;
+        let lo = body_r;
+        let hi = WORLD_SIZE - body_r;
+        for k in 0..founder_count {
+            let brain = Brain::founder(&mut rng);
+            // Halton (2, 3) gives a low-discrepancy 2D sequence; shift by 1 so
+            // the first sample isn't (0, 0).
+            let hx = halton(k + 1, 2);
+            let hy = halton(k + 1, 3);
+            let x = lo + hx * (hi - lo);
+            let y = lo + hy * (hi - lo);
+            creatures.push(k as u64, x, y, founder_energy, 0, brain);
+        }
         let mut grid = SpatialGrid::new();
         grid.rebuild(&creatures.x, &creatures.y);
+        let vision = vec![[0.0f32; VISION_LEN]; founder_count as usize];
         Self {
             tick: 0,
             seed: seed_string,
@@ -136,13 +183,13 @@ impl World {
             grid,
             creatures,
             sliders,
-            next_creature_id: 1,
-            peak_population: 1,
+            next_creature_id: founder_count as u64,
+            peak_population: founder_count,
             world_ended: false,
             first_move_fired: false,
             first_eat_fired: false,
             population_milestones_fired: 0,
-            vision: vec![[0.0f32; VISION_LEN]], // 1 for the founder
+            vision,
             profile: crate::profiler::Profiler::new(),
             scratch_fx: Vec::new(),
             scratch_fy: Vec::new(),
@@ -310,15 +357,17 @@ impl World {
         if n == 0 {
             return;
         }
+        let split_threshold = self.sliders.split_threshold;
+        let split_gift_max = self.sliders.split_gift;
         for i in 0..n {
             if self.creatures.action_this_tick[i] != Action::Split {
                 continue;
             }
-            if self.creatures.energy[i] < SPLIT_THRESHOLD {
+            if self.creatures.energy[i] < split_threshold {
                 continue;
             }
-            let parent_energy_after_cost = self.creatures.energy[i] - SPLIT_THRESHOLD;
-            let gift = parent_energy_after_cost.clamp(0.0, SPLIT_GIFT_MAX);
+            let parent_energy_after_cost = self.creatures.energy[i] - split_threshold;
+            let gift = parent_energy_after_cost.clamp(0.0, split_gift_max);
             self.creatures.energy[i] = parent_energy_after_cost - gift;
             let child_energy = gift;
 
@@ -427,8 +476,16 @@ mod tests {
 
     #[test]
     fn world_initializes_with_one_creature() {
+        // Legacy World::new uses 1 founder (multi-founder default lives on
+        // WorldHandle for the wasm entrypoint).
         let w = World::new("test-seed");
         assert_eq!(w.population(), 1);
+    }
+
+    #[test]
+    fn world_initializes_with_default_multi_founder() {
+        let w = World::new_with_sliders("multi-seed", DevSliders::default());
+        assert_eq!(w.population(), FOUNDER_COUNT_DEFAULT);
     }
 
     #[test]

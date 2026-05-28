@@ -10,7 +10,7 @@ import { renderWorld } from "./render-gl";
 import { attachCameraControls } from "./camera";
 import { installRail, pollRail, highlights } from "./rail/index";
 import { installProfilerPanel } from "./widgets/perf-panel";
-import { installDevPanel, getInitialGrassSeedCount, getEnergyMax, reapplyDevSliders } from "./widgets/devpanel";
+import { installDevPanel, getInitialGrassSeedCount, getEnergyMax, getFounderCount, reapplyDevSliders } from "./widgets/devpanel";
 import { installCanvasClickHandler, resetInspectorSelection } from "./rail/inspector";
 import { resetStats } from "./rail/stats";
 import { attachProfiler, timed, span } from "./perf";
@@ -109,10 +109,11 @@ async function main(): Promise<void> {
   // without re-installing UI. All subsystems that need the current world
   // either get it as a parameter each frame (pollRail, renderWorld) or
   // capture the `getWorld` getter below (which always returns the latest).
-  let world: WorldHandle = WorldHandle.newWithGrassSeed(
+  let world: WorldHandle = WorldHandle.newWithFounderCount(
     urlSeed ?? "",
     getInitialGrassSeedCount(),
     getEnergyMax(),
+    getFounderCount(),
   );
   const getWorld = (): WorldHandle => world;
   // Debug hook: expose the live world on `window.__world` so headless probes
@@ -155,13 +156,16 @@ async function main(): Promise<void> {
   // Perf-timing: install the Stats-panel toggle + 1Hz polling loop.
   installProfilerPanel(getWorld);
 
-  // P3b: dev panel overlay (6 sliders, ~ hotkey, ⚙ button).
+  // P3b: dev panel overlay (sliders, ~ hotkey, ⚙ button).
   installDevPanel(getWorld);
+
+  // v1.5: right-edge settings overlay toggle (⚙ button + close button).
+  installSettingsToggle();
 
   function restart(): void {
     const oldWorld = world;
     // New random seed each restart (empty string → random per build).
-    world = WorldHandle.newWithGrassSeed("", getInitialGrassSeedCount(), getEnergyMax());
+    world = WorldHandle.newWithFounderCount("", getInitialGrassSeedCount(), getEnergyMax(), getFounderCount());
     (window as unknown as { __world: WorldHandle }).__world = world;
     cachedSeed = world.seed;
     // Re-apply the user's current dev-slider tweaks; `initialGrassSeedCount`
@@ -338,6 +342,30 @@ function applyTopbarBtnStyle(btn: HTMLButtonElement): void {
   btn.style.borderRadius = "3px";
   btn.style.cursor = "pointer";
   btn.style.font = "inherit";
+}
+
+function installSettingsToggle(): void {
+  const overlay = document.getElementById("settings-overlay") as HTMLElement | null;
+  if (!overlay) return;
+  const bar = document.getElementById("top-bar");
+  if (bar) {
+    const btn = document.createElement("button");
+    btn.id = "devpanel-toggle";
+    btn.textContent = "⚙";
+    btn.title = "Settings (~ hotkey)";
+    applyTopbarBtnStyle(btn);
+    btn.style.marginLeft = "4px";
+    btn.addEventListener("click", () => {
+      overlay.style.display = overlay.style.display === "none" ? "block" : "none";
+    });
+    bar.appendChild(btn);
+  }
+  const close = document.getElementById("settings-close") as HTMLButtonElement | null;
+  if (close) {
+    close.addEventListener("click", () => {
+      overlay.style.display = "none";
+    });
+  }
 }
 
 function installRestartButton(onClick: () => void): void {
