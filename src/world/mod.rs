@@ -6,7 +6,7 @@
 pub(crate) mod nn;
 pub(crate) mod tick;
 
-use self::nn::chunk_ranges;
+use self::nn::{chunk_ranges, dynamic_chunks};
 use crate::brain::Brain;
 use crate::constants::*;
 use crate::creature::{Action, CreatureSoA};
@@ -237,7 +237,11 @@ impl World {
         {
             crate::profile_span!(&self.profile, "tick.nn");
             let n = self.creatures.len();
-            let ranges = chunk_ranges(n);
+            #[cfg(feature = "threads")]
+            let workers = rayon::current_num_threads().max(1);
+            #[cfg(not(feature = "threads"))]
+            let workers = 1;
+            let ranges = chunk_ranges(n, dynamic_chunks(n, workers));
             self.nn_forward_all_chunks(&ranges, n);
             // Snapshot energy *now* (immediately after NN forward — tick body
             // hasn't run yet, so energy still equals its value at NN input

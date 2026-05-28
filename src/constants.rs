@@ -74,10 +74,9 @@ pub const FOUNDER_COUNT_DEFAULT: u32 = 8;
 pub const MAX_CELLS_PER_RAY: usize = 64;
 
 // ---- Deterministic chunking (v6 §J) ----
-/// Fixed number of chunks for deterministic parallelism. Results identical
-/// regardless of actual core count (v6 §J). Pinned at 8 (matches typical
-/// core counts; v6 §J example value).
-pub const N_CHUNKS: usize = 8;
+/// Chunk-count clamps. Per-tick count = `clamp(pop/32, MIN, min(MAX, workers))`.
+pub const MIN_CHUNKS: usize = 4;
+pub const MAX_CHUNKS: usize = 16;
 
 // ---- Population milestones (v5 §11, E.25.a) ----
 /// Thresholds that fire a PopulationMilestone event once per threshold ever (v5 §11).

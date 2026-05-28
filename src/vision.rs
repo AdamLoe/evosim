@@ -62,7 +62,9 @@ impl<'a> VisionPass<'a> {
         #[cfg(feature = "threads")]
         {
             use rayon::prelude::*;
-            let chunk_size = crate::world::nn::chunk_base_size(n);
+            let workers = rayon::current_num_threads().max(1);
+            let chunks = crate::world::nn::dynamic_chunks(n, workers);
+            let chunk_size = n.div_ceil(chunks.max(1)).max(1);
             out[..n]
                 .par_chunks_mut(chunk_size)
                 .enumerate()

@@ -14,19 +14,18 @@ impl World {
     /// Run the NN forward pass for all creatures across fixed chunks (v6 §J).
     /// Sequential by default; rayon-parallel behind `cfg(feature = "threads")`.
     /// Results are bit-identical because the forward pass contains no RNG.
-    pub(crate) fn nn_forward_all_chunks(&mut self, ranges: &[(usize, usize); N_CHUNKS], n: usize) {
+    pub(crate) fn nn_forward_all_chunks(&mut self, ranges: &[(usize, usize)], n: usize) {
         // Threaded path: runs when compiled with --features threads.
         // Returns early so the sequential fallthrough below does not run.
         #[cfg(feature = "threads")]
         {
-            let _ = ranges; // threaded path uses chunk_base_size(n) directly
-                            // S23: write NN outputs directly into the SoA columns via par_chunks_mut.
-                            // Strategy: mem::take the three output columns off self.creatures so the
-                            // borrow checker sees them as independent locals. The remaining SoA fields
-                            // (x, y, energy, vision, etc.) are read-only during the parallel block.
-                            // After the parallel work, restore the three columns. The heap buffers
-                            // are never reallocated — only the Vec metadata (ptr/len/cap, 24 bytes
-                            // each) moves to the stack. Pattern mirrors perf-2 §5 scratch_neighbors.
+            // S23: write NN outputs directly into the SoA columns via par_chunks_mut.
+            // Strategy: mem::take the three output columns off self.creatures so the
+            // borrow checker sees them as independent locals. The remaining SoA fields
+            // (x, y, energy, vision, etc.) are read-only during the parallel block.
+            // After the parallel work, restore the three columns. The heap buffers
+            // are never reallocated — only the Vec metadata (ptr/len/cap, 24 bytes
+            // each) moves to the stack. Pattern mirrors perf-2 §5 scratch_neighbors.
             let mut vx_local = std::mem::take(&mut self.creatures.vx);
             let mut vy_local = std::mem::take(&mut self.creatures.vy);
             let mut act_local = std::mem::take(&mut self.creatures.action_this_tick);
@@ -40,8 +39,10 @@ impl World {
                 let energy_max = self.sliders.energy_max;
                 let split_threshold = self.sliders.split_threshold;
 
-                // Compute chunk_size identically to chunk_ranges (N_CHUNKS = 8).
-                let chunk_size = chunk_base_size(n);
+                // Stride derived from the same `ranges` the sequential path walks;
+                // keeps the threaded and sequential partitions identical for any
+                // dynamic chunk count.
+                let chunk_size = chunk_base_size_from_ranges(ranges, n);
 
                 // Tandem disjoint-mut chunks over the three output columns.
                 // zip_eq panics on length mismatch (defensive); all three vecs have
@@ -132,41 +133,45 @@ impl World {
     }
 }
 
-/// Compute `N_CHUNKS` non-overlapping index ranges that partition `0..n` (v6 §J).
-///
-/// Chunks are ceil-sized; the last chunk may be smaller. Empty chunks have
-/// `lo == hi`. Single-threaded path iterates them sequentially; the rayon
-/// path (behind `cfg(feature = "threads")`) iterates them in parallel —
-/// results are bit-identical because no RNG is consumed in the forward pass.
-///
-/// **Invariant (perf-4):** `vision.rs` uses `par_chunks_mut(n.div_ceil(N_CHUNKS).max(1))`
-/// which produces the same partition as this function for all `n`. Do not
-/// change one without updating the other, or vision and NN will partition
-/// creatures differently within a single tick and the threaded golden will
-/// silently drift.
-/// Single source of truth for the chunk stride used by every `par_chunks_mut`
-/// call in the simulation (vision.rs and nn_forward_all_chunks). Returns the
-/// stride such that `slice.par_chunks_mut(chunk_base_size(n))` yields the
-/// same partition as `chunk_ranges(n)`. The `.max(1)` guard keeps the stride
-/// well-defined when `n == 0` (rayon's `par_chunks_mut(0)` panics).
-///
-/// New `par_chunks_mut` call sites MUST use this function rather than inlining
-/// the formula; S39 test (c) pins the invariant via `chunk_partition_invariants_and_vision_agreement`.
-pub(crate) fn chunk_base_size(n: usize) -> usize {
-    n.div_ceil(N_CHUNKS).max(1)
+/// Dynamic chunk count: `clamp(pop/32, MIN_CHUNKS, min(MAX_CHUNKS, workers))`.
+/// `worker_count` is rayon's `current_num_threads()` under `--features threads`,
+/// else 1.
+pub(crate) fn dynamic_chunks(pop: usize, worker_count: usize) -> usize {
+    let upper = MAX_CHUNKS.min(worker_count.max(1)).max(MIN_CHUNKS);
+    (pop / 32).clamp(MIN_CHUNKS, upper)
 }
 
-pub(crate) fn chunk_ranges(n: usize) -> [(usize, usize); N_CHUNKS] {
-    let base = chunk_base_size(n);
-    let mut out = [(0usize, 0usize); N_CHUNKS];
-    for k in 0..N_CHUNKS {
+/// Stride used by `par_chunks_mut`. `ranges` is the partition the sequential
+/// path walks; this returns the chunk_size that reproduces it.
+#[cfg_attr(not(feature = "threads"), allow(dead_code))]
+pub(crate) fn chunk_base_size_from_ranges(ranges: &[(usize, usize)], n: usize) -> usize {
+    // ceil-sized chunks: stride = first non-empty range length, or n.div_ceil(k).
+    let k = ranges.len().max(1);
+    n.div_ceil(k).max(1)
+}
+
+/// Compute non-overlapping index ranges that partition `0..n` (v6 §J).
+///
+/// `chunks` is the dynamic count from `dynamic_chunks(n, workers)`. Chunks are
+/// ceil-sized; the last chunk may be smaller. Empty chunks have `lo == hi`.
+/// Single-threaded path iterates them sequentially; the rayon path iterates
+/// them in parallel — results are bit-identical because no RNG is consumed in
+/// the forward pass.
+pub(crate) fn chunk_ranges(n: usize, chunks: usize) -> Vec<(usize, usize)> {
+    let chunks = chunks.max(1);
+    let base = n.div_ceil(chunks).max(1);
+    let mut out = Vec::with_capacity(chunks);
+    for k in 0..chunks {
         let lo = (k * base).min(n);
         let hi = ((k + 1) * base).min(n);
-        out[k] = (lo, hi);
+        out.push((lo, hi));
     }
-    // S10: invariant — ranges are contiguous, non-overlapping, and cover exactly 0..n.
     debug_assert_eq!(out[0].0, 0, "chunk_ranges: first lo must be 0");
-    debug_assert_eq!(out[N_CHUNKS - 1].1, n, "chunk_ranges: last hi must equal n");
+    debug_assert_eq!(
+        out.last().unwrap().1,
+        n,
+        "chunk_ranges: last hi must equal n"
+    );
     debug_assert!(
         out.windows(2).all(|w| w[0].1 == w[1].0),
         "chunk_ranges: ranges must be contiguous (no gaps or overlaps)"
@@ -516,73 +521,95 @@ mod tests {
         );
     }
 
-    // ---- D.18 chunking tests (unchanged) ----
+    // ---- Dynamic chunking tests ----
 
-    /// D.18 test 16: chunk_ranges partitions n=1000 into 8 non-overlapping ranges.
+    /// dynamic_chunks: floor MIN_CHUNKS at pop=0/1, scale by pop/32, cap at
+    /// min(MAX_CHUNKS, workers).
     #[test]
-    fn chunk_ranges_partition() {
-        let ranges = chunk_ranges(1000);
-        assert_eq!(ranges.len(), N_CHUNKS);
-        // First lo = 0, last hi = 1000.
-        assert_eq!(ranges[0].0, 0);
-        assert_eq!(ranges[N_CHUNKS - 1].1, 1000);
-        // Ranges are contiguous and non-overlapping.
-        let mut total = 0usize;
-        for k in 0..N_CHUNKS {
-            let (lo, hi) = ranges[k];
-            assert!(lo <= hi, "range {k}: lo={lo} > hi={hi}");
-            total += hi - lo;
-            if k + 1 < N_CHUNKS {
-                assert_eq!(hi, ranges[k + 1].0, "gap between chunks {k} and {}", k + 1);
-            }
-        }
-        assert_eq!(total, 1000, "total elements across chunks must equal n");
+    fn dynamic_chunks_boundaries() {
+        // Plenty of workers — clamp dominated by pop/32 vs MIN/MAX.
+        assert_eq!(dynamic_chunks(0, 32), MIN_CHUNKS);
+        assert_eq!(dynamic_chunks(1, 32), MIN_CHUNKS);
+        assert_eq!(dynamic_chunks(32, 32), MIN_CHUNKS); // 32/32=1, clamped up to MIN
+        assert_eq!(dynamic_chunks(128, 32), MIN_CHUNKS); // 128/32=4 == MIN
+        assert_eq!(dynamic_chunks(160, 32), 5); // 160/32=5, between MIN and MAX
+        assert_eq!(dynamic_chunks(512, 32), MAX_CHUNKS); // 512/32=16 == MAX
+        assert_eq!(dynamic_chunks(2048, 32), MAX_CHUNKS); // saturated at MAX
+                                                          // Worker-limited: workers cap MAX.
+        assert_eq!(dynamic_chunks(2048, 1), MIN_CHUNKS); // min(MAX,1)=1 < MIN → MIN wins
+        assert_eq!(dynamic_chunks(2048, 6), 6); // min(MAX,6)=6, pop/32=64 clamps to 6
+        assert_eq!(dynamic_chunks(2048, 0), MIN_CHUNKS); // worker_count.max(1)=1 → MIN
     }
 
-    /// D.18 test 17: chunk_ranges handles n < N_CHUNKS gracefully (no panic).
+    /// chunk_ranges partitions n=1000 across `chunks` non-overlapping ranges.
+    #[test]
+    fn chunk_ranges_partition() {
+        for &chunks in &[MIN_CHUNKS, 8usize, MAX_CHUNKS] {
+            let ranges = chunk_ranges(1000, chunks);
+            assert_eq!(ranges.len(), chunks);
+            assert_eq!(ranges[0].0, 0);
+            assert_eq!(ranges.last().unwrap().1, 1000);
+            let mut total = 0usize;
+            for k in 0..chunks {
+                let (lo, hi) = ranges[k];
+                assert!(lo <= hi, "range {k}: lo={lo} > hi={hi}");
+                total += hi - lo;
+                if k + 1 < chunks {
+                    assert_eq!(hi, ranges[k + 1].0, "gap between chunks {k} and {}", k + 1);
+                }
+            }
+            assert_eq!(total, 1000, "total elements across chunks must equal n");
+        }
+    }
+
+    /// chunk_ranges handles n < chunks gracefully (no panic, trailing empty chunks).
     #[test]
     fn chunk_ranges_small_population() {
-        for n in [0, 1, 3, 7] {
-            let ranges = chunk_ranges(n);
+        for n in [0usize, 1, 3, 7] {
+            let chunks = MIN_CHUNKS;
+            let ranges = chunk_ranges(n, chunks);
+            assert_eq!(ranges.len(), chunks);
             let total: usize = ranges.iter().map(|(lo, hi)| hi - lo).sum();
             assert_eq!(total, n, "n={n}: total {total}");
-            // All ranges must be valid (lo <= hi).
             for &(lo, hi) in &ranges {
                 assert!(lo <= hi, "invalid range lo={lo} hi={hi} for n={n}");
             }
-            // First lo = 0.
             assert_eq!(ranges[0].0, 0);
-            // Last hi = n.
-            assert_eq!(ranges[N_CHUNKS - 1].1, n);
+            assert_eq!(ranges.last().unwrap().1, n);
         }
     }
 
-    /// S10: chunk_ranges invariants hold for a broad set of n values including
-    /// edge cases (0, 1, n < N_CHUNKS, n == N_CHUNKS, n % N_CHUNKS != 0, large n).
+    /// chunk_ranges invariants across a broad set of n values and chunk counts
+    /// in `[MIN_CHUNKS, MAX_CHUNKS]`.
     #[test]
     fn chunk_ranges_invariants() {
-        for &n in &[0usize, 1, 7, 8, 9, 100, 1500] {
-            let ranges = chunk_ranges(n);
-            // first lo = 0
-            assert_eq!(ranges[0].0, 0, "n={n}: first lo must be 0");
-            // last hi = n
-            assert_eq!(ranges[N_CHUNKS - 1].1, n, "n={n}: last hi must be n");
-            // all lo <= hi
-            for (k, &(lo, hi)) in ranges.iter().enumerate() {
-                assert!(lo <= hi, "n={n}: chunk {k}: lo={lo} > hi={hi}");
-            }
-            // contiguous
-            for k in 0..N_CHUNKS - 1 {
+        for &chunks in &[MIN_CHUNKS, 5usize, 8, 12, MAX_CHUNKS] {
+            for &n in &[0usize, 1, 7, 8, 9, 32, 100, 128, 1500, 2048] {
+                let ranges = chunk_ranges(n, chunks);
+                assert_eq!(ranges.len(), chunks);
+                assert_eq!(ranges[0].0, 0, "n={n} chunks={chunks}: first lo must be 0");
                 assert_eq!(
-                    ranges[k].1,
-                    ranges[k + 1].0,
-                    "n={n}: gap between chunks {k} and {}",
-                    k + 1
+                    ranges.last().unwrap().1,
+                    n,
+                    "n={n} chunks={chunks}: last hi must be n"
                 );
+                for (k, &(lo, hi)) in ranges.iter().enumerate() {
+                    assert!(
+                        lo <= hi,
+                        "n={n} chunks={chunks}: chunk {k}: lo={lo} > hi={hi}"
+                    );
+                }
+                for k in 0..chunks - 1 {
+                    assert_eq!(
+                        ranges[k].1,
+                        ranges[k + 1].0,
+                        "n={n} chunks={chunks}: gap between chunks {k} and {}",
+                        k + 1
+                    );
+                }
+                let total: usize = ranges.iter().map(|(lo, hi)| hi - lo).sum();
+                assert_eq!(total, n, "n={n} chunks={chunks}: total {total} != n");
             }
-            // total coverage
-            let total: usize = ranges.iter().map(|(lo, hi)| hi - lo).sum();
-            assert_eq!(total, n, "n={n}: total elements {total} != n");
         }
     }
 
@@ -599,31 +626,43 @@ mod tests {
         );
     }
 
-    /// S39 test (c): chunk_ranges partitions [0,n) cleanly AND agrees with the
-    /// chunk_base_size stride that vision.rs calls. Asserts cross-partition
-    /// equivalence by calling the real shared chunk_base_size function, not by
-    /// re-inlining the formula. Any future desync between the two is caught here.
+    /// chunk_ranges partitions [0,n) cleanly AND agrees with the par_chunks_mut
+    /// stride derived from the same ranges. Cross-partition equivalence is what
+    /// keeps the threaded and sequential NN paths walking the same boundaries.
     #[test]
     fn chunk_partition_invariants_and_vision_agreement() {
-        let cases = [0usize, 1, 7, 8, 9, 100, 1500, N_CHUNKS, N_CHUNKS + 1];
-        for &n in &cases {
-            let ranges = chunk_ranges(n);
+        let cases = [
+            (0usize, MIN_CHUNKS),
+            (1, MIN_CHUNKS),
+            (7, MIN_CHUNKS),
+            (32, MIN_CHUNKS),
+            (128, MIN_CHUNKS),
+            (1500, 8),
+            (2048, MAX_CHUNKS),
+        ];
+        for &(n, chunks) in &cases {
+            let ranges = chunk_ranges(n, chunks);
 
-            // (i) non-empty range count <= N_CHUNKS
+            // (i) range count == chunks
+            assert_eq!(ranges.len(), chunks, "n={n}: range count must equal chunks");
+
+            // (ii) non-empty range count <= chunks
             let non_empty = ranges.iter().filter(|(lo, hi)| lo < hi).count();
             assert!(
-                non_empty <= N_CHUNKS,
-                "n={n}: non-empty chunks {non_empty} exceed N_CHUNKS {N_CHUNKS}"
+                non_empty <= chunks,
+                "n={n}: non-empty {non_empty} > {chunks}"
             );
 
-            // (ii) first range starts at 0
+            // (iii) first/last bounds
             assert_eq!(ranges[0].0, 0, "n={n}: first range must start at 0");
-
-            // (iii) last range ends at n
-            assert_eq!(ranges[N_CHUNKS - 1].1, n, "n={n}: last range must end at n");
+            assert_eq!(
+                ranges.last().unwrap().1,
+                n,
+                "n={n}: last range must end at n"
+            );
 
             // (iv) contiguous and non-overlapping
-            for k in 0..N_CHUNKS - 1 {
+            for k in 0..chunks - 1 {
                 assert_eq!(
                     ranges[k].1,
                     ranges[k + 1].0,
@@ -636,33 +675,26 @@ mod tests {
             let total: usize = ranges.iter().map(|(lo, hi)| hi - lo).sum();
             assert_eq!(total, n, "n={n}: ranges do not cover [0,n)");
 
-            // (vi) cross-partition equivalence — reconstruct the partition that
-            // par_chunks_mut(chunk_base_size(n)) would produce and assert it
-            // matches chunk_ranges. This is the property vision.rs:74 relies on
-            // post-S39: vision calls chunk_base_size(n), and that stride must
-            // yield the same boundaries as chunk_ranges.
-            let base = chunk_base_size(n);
-            let mut reconstructed = [(0usize, 0usize); N_CHUNKS];
-            for k in 0..N_CHUNKS {
+            // (vi) cross-partition equivalence — par_chunks_mut(stride) yields
+            // the same boundaries as chunk_ranges.
+            let base = chunk_base_size_from_ranges(&ranges, n);
+            let mut reconstructed = Vec::with_capacity(chunks);
+            for k in 0..chunks {
                 let lo = (k * base).min(n);
                 let hi = ((k + 1) * base).min(n);
-                reconstructed[k] = (lo, hi);
+                reconstructed.push((lo, hi));
             }
             assert_eq!(
                 ranges, reconstructed,
-                "n={n}: chunk_ranges disagrees with par_chunks_mut(chunk_base_size(n)) partition"
+                "n={n}: chunk_ranges disagrees with par_chunks_mut(base) partition"
             );
 
-            // (vii) n=0 special-case: chunk_base_size returns 1 (not 0) to
-            // avoid par_chunks_mut(0) panic; all ranges are (0, 0).
+            // (vii) n=0 special-case: stride is 1 to keep par_chunks_mut well-defined.
             if n == 0 {
-                assert_eq!(
-                    base, 1,
-                    "n=0: chunk_base_size must return 1 to keep par_chunks_mut well-defined on []"
-                );
+                assert_eq!(base, 1, "n=0: stride must be 1");
                 for &(lo, hi) in &ranges {
-                    assert_eq!(lo, 0, "n=0: all ranges must be (0, 0)");
-                    assert_eq!(hi, 0, "n=0: all ranges must be (0, 0)");
+                    assert_eq!(lo, 0);
+                    assert_eq!(hi, 0);
                 }
             }
         }
