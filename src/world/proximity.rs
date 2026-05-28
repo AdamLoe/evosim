@@ -39,37 +39,50 @@ pub(crate) const LUT_DIM: usize = (LUT_RADIUS as usize) * 2 + 1;
 const GRASS_SECTOR_SAT: f32 = 4.0;
 
 /// Build the (sector, weight) lookup table indexed by integer cell offset
-/// `(dx, dy) ∈ [-LUT_RADIUS, LUT_RADIUS]² `. The stored sector is the
-/// *primary* (nearest) sector; the weight is its share of the total. Consumers
-/// distribute `1 - weight` to the adjacent sector — that side is computed at
-/// consumer time so the LUT stays compact (33×33 entries × 5 bytes = 5.4 KB).
-pub(crate) fn build_sector_lut() -> Vec<(u8, f32)> {
-    let mut lut = vec![(0u8, 0.0f32); LUT_DIM * LUT_DIM];
+/// `(dx, dy) ∈ [-LUT_RADIUS, LUT_RADIUS]² `. The stored tuple is
+/// `(primary_sector, adjacent_sector, weight_to_primary)`. Consumers split a
+/// contribution into `out[primary] += value * weight` and
+/// `out[adj] += value * (1 - weight)` — no `atan2` in the hot path.
+///
+/// Precomputing `adjacent_sector` (instead of recomputing it from real dx/dy
+/// at consumer time) is consistent with `weight` already being LUT-approximated:
+/// both share the same ±1.8°-at-d=20u angle error from snapping the source
+/// position to its containing cell center. Saves one `atan2` per cell.
+///
+/// Size: 33×33 entries × 8 bytes (with padding) ≈ 8.7 KB. Fits in L1.
+pub(crate) fn build_sector_lut() -> Vec<(u8, u8, f32)> {
+    let mut lut = vec![(0u8, 0u8, 0.0f32); LUT_DIM * LUT_DIM];
+    let two_pi = std::f32::consts::TAU;
+    let sector_width = two_pi / NN_SECTORS as f32;
     for dy in -LUT_RADIUS..=LUT_RADIUS {
         for dx in -LUT_RADIUS..=LUT_RADIUS {
-            let (sector, weight) = if dx == 0 && dy == 0 {
-                (0u8, 1.0f32)
+            let entry = if dx == 0 && dy == 0 {
+                // Degenerate: pin to sector 0 with full weight; adj is arbitrary
+                // because (1 - weight) = 0 makes the adj column unused.
+                (0u8, 1u8, 1.0f32)
             } else {
                 // angle in radians, clockwise from north (+y down).
                 let ang = (dx as f32).atan2(-dy as f32);
-                // Map to [0, 2π).
-                let two_pi = std::f32::consts::TAU;
                 let ang = if ang < 0.0 { ang + two_pi } else { ang };
-                // Sector width = 45° = π/4. Sector 0 is centered on north (0°),
-                // so the boundary between sector s and s+1 is at (s + 0.5)*45°.
-                let sector_f = ang / (two_pi / NN_SECTORS as f32);
-                // primary sector = nearest center.
+                // Sector width = 45° = π/4. Sector 0 is centered on north (0°);
+                // the boundary between sector s and s+1 is at (s + 0.5)*45°.
+                let sector_f = ang / sector_width;
                 let s_round = sector_f.round() as i32;
                 let primary = s_round.rem_euclid(NN_SECTORS as i32) as u8;
-                // distance to that center, in sector-widths; 0 = on center, 0.5 = on boundary.
-                let frac = (sector_f - s_round as f32).abs();
-                // Bilinear share for the primary sector: 1 at center, 0.5 on boundary.
-                let weight = 1.0 - frac;
-                (primary, weight)
+                // Signed distance to primary center in sector-widths;
+                // negative = source is rotationally before center → adj = primary-1.
+                let signed_frac = sector_f - s_round as f32;
+                let adj = if signed_frac >= 0.0 {
+                    ((primary as i32 + 1).rem_euclid(NN_SECTORS as i32)) as u8
+                } else {
+                    ((primary as i32 - 1).rem_euclid(NN_SECTORS as i32)) as u8
+                };
+                let weight = 1.0 - signed_frac.abs();
+                (primary, adj, weight)
             };
             let ix = (dx + LUT_RADIUS) as usize;
             let iy = (dy + LUT_RADIUS) as usize;
-            lut[iy * LUT_DIM + ix] = (sector, weight);
+            lut[iy * LUT_DIM + ix] = entry;
         }
     }
     lut
@@ -175,21 +188,32 @@ pub(crate) fn compute_grass_density_sectors(
     x: f32,
     y: f32,
     grass: &GrassGrid,
-    sector_lut: &[(u8, f32)],
+    sector_lut: &[(u8, u8, f32)],
     out: &mut [f32; 8],
 ) {
     *out = [0.0f32; 8];
-    let range = PROXIMITY_RANGE;
+    let range = GRASS_PROXIMITY_RANGE;
     let range2 = range * range;
     let cell = GRASS_CELL_SIZE;
     let inv_cell = 1.0 / cell;
     let cell_area = cell * cell;
     let dim = GRASS_GRID_DIM as i32;
 
-    // Creature cell (clamped).
+    // Creature cell (in-bounds query positions are clamped at world edges; the
+    // grid walk's lo/hi guards do the rest).
     let cx_cell = (x * inv_cell).floor() as i32;
     let cy_cell = (y * inv_cell).floor() as i32;
-    let r_cells = (range * inv_cell).ceil() as i32 + 1;
+    // No `+ 1` slack: a cell with center at offset (r_cells, 0) is at
+    // `r_cells * cell` world units away. With `r_cells = ceil(range / cell)`,
+    // the farthest in-range cell is at offset `floor(range / cell)`, which
+    // equals LUT_RADIUS at default params. Any cell at offset > LUT_RADIUS is
+    // strictly past `range` and gets culled by `d2 > range2` — no LUT access
+    // outside the ±LUT_RADIUS window.
+    let r_cells = (range * inv_cell).ceil() as i32;
+    debug_assert!(
+        r_cells <= LUT_RADIUS,
+        "r_cells={r_cells} > LUT_RADIUS={LUT_RADIUS}: bump LUT_RADIUS or shrink range"
+    );
 
     let iy_lo = (cy_cell - r_cells).max(0);
     let iy_hi = (cy_cell + r_cells).min(dim - 1);
@@ -201,6 +225,7 @@ pub(crate) fn compute_grass_density_sectors(
             continue;
         }
         let row_off = iy as usize * GRASS_GRID_DIM;
+        let lut_y = (iy - cy_cell + LUT_RADIUS) as usize;
         for ix in ix_lo..=ix_hi {
             let d = grass.density[row_off + ix as usize];
             if d <= 0.0 {
@@ -215,11 +240,12 @@ pub(crate) fn compute_grass_density_sectors(
             if d2 > range2 {
                 continue;
             }
-            // LUT lookup by integer cell offset (signed).
-            let lut_x = (ix - cx_cell).clamp(-LUT_RADIUS, LUT_RADIUS) + LUT_RADIUS;
-            let lut_y = (iy - cy_cell).clamp(-LUT_RADIUS, LUT_RADIUS) + LUT_RADIUS;
-            let (primary, w) = sector_lut[lut_y as usize * LUT_DIM + lut_x as usize];
-            let adj = adjacent_sector(dx, dy, primary);
+            // LUT covers ±LUT_RADIUS along each axis; r_cells <= LUT_RADIUS
+            // (guaranteed by the debug_assert above + per-frame constants) so
+            // no clamp is needed and the lookup is pure arithmetic.
+            let lut_x = (ix - cx_cell + LUT_RADIUS) as usize;
+            debug_assert!(lut_x < LUT_DIM && lut_y < LUT_DIM);
+            let (primary, adj, w) = sector_lut[lut_y * LUT_DIM + lut_x];
             // 1/d² weight, with a small floor to avoid singularity at d=0.
             let inv_d2 = 1.0 / d2.max(0.25);
             let contribution = d * cell_area * inv_d2;

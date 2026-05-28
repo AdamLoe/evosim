@@ -150,7 +150,7 @@ pub struct World {
     /// v1.5 S5b: precomputed (sector_id, weight) for each integer cell offset.
     /// 33×33 LUT (`proximity::LUT_DIM²`) eliminates `atan2` in the per-creature
     /// grass-density scan. Built once at `new_with_sliders`.
-    pub(crate) sector_lut: Vec<(u8, f32)>,
+    pub(crate) sector_lut: Vec<(u8, u8, f32)>,
     /// v1.5 S5b: per-creature 8-accumulator scratch reused across the NN input
     /// build. Resized in `step()` before the chunked input phase.
     pub(crate) scratch_sector_accum: Vec<[f32; 8]>,
