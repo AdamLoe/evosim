@@ -336,7 +336,7 @@ body {
   top: 0;
   bottom: 0;
   right: 0;
-  width: 320px;
+  width: 420px;
   /* border-box so width:320 INCLUDES the padding + border. Otherwise the box
      renders at 344px (320 + 12*2 padding) and bleeds 24px past --settings-w,
      overlapping the canvas/top-bar on the right. */

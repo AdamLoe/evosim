@@ -64,6 +64,7 @@ const _: () = assert!(NN_WEIGHT_COUNT == 2808);
 pub const NN_SECTORS: usize = 8;
 /// Range used by creature_proximity and grass_density sector inputs (world-units).
 pub const PROXIMITY_RANGE: f32 = 20.0;
+pub const GRASS_PROXIMITY_RANGE: f32 = 8.0;
 /// Range used by wall_proximity inputs (world-units).
 pub const WALL_PROXIMITY_RANGE: f32 = 50.0;
 pub const NN_MUT_RATE_DEFAULT: f32 = 0.02;

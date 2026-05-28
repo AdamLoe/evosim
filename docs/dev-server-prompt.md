@@ -30,12 +30,21 @@ curl -sf http://localhost:47821/ -o /dev/null && echo "up" || echo "down"
 > hit ABI errors against a stale bundle (e.g. `stride !== 6` if a recent
 > commit changed `creature_stride()`).
 >
+> **Use the threaded build for normal dev work** — the sim's NN pass is
+> rayon-parallel, and the plain `--dev` build (no `--features threads`)
+> silently runs the entire forward pass on the main thread.
+>
 > ```bash
-> cd /home/adamg/evosim && wasm-pack build --target web --out-dir web/wasm --dev
+> cd /home/adamg/evosim && \
+>   RUSTFLAGS='--cfg getrandom_backend="wasm_js" -Ctarget-feature=+atomics,+bulk-memory,+mutable-globals -Cembed-bitcode=no' \
+>   rustup run nightly wasm-pack build --target web --out-dir web/wasm --dev -- \
+>   --features threads -Z build-std=std,panic_abort
 > ```
 >
-> If the wasm artifact is missing entirely, build it first. See
-> section 7 for variants (release build, threads feature).
+> Verify the bundle is threaded: `grep -c initThreadPool web/wasm/evosim.js`
+> should print `2`. If it prints `0`, you accidentally built the non-threaded
+> variant — repeat the command above. See section 7 for the plain
+> (non-threaded) variant and the release build.
 
 ```bash
 cd /home/adamg/evosim/web && rm -f /tmp/vite.log && \
@@ -137,15 +146,32 @@ stale bundle:
 Rebuild from the repo root:
 
 ```bash
-# Standard dev build (fast, debug symbols):
+# Threaded dev build (DEFAULT for normal work — rayon parallel NN pass).
+# Requires nightly toolchain for atomics + -Z build-std.
+cd /home/adamg/evosim && \
+  RUSTFLAGS='--cfg getrandom_backend="wasm_js" -Ctarget-feature=+atomics,+bulk-memory,+mutable-globals -Cembed-bitcode=no' \
+  rustup run nightly wasm-pack build --target web --out-dir web/wasm --dev -- \
+  --features threads -Z build-std=std,panic_abort
+
+# Plain dev build (single-threaded; fast to compile but the NN forward pass
+# runs entirely on the main thread). Use only when iterating on non-perf
+# code and you don't want the ~30s build cost of the threaded variant.
 cd /home/adamg/evosim && wasm-pack build --target web --out-dir web/wasm --dev
 
-# Release build (optimized; required for perf measurements):
+# Release build (optimized; required for perf measurements). Add --features
+# threads + the RUSTFLAGS/nightly/build-std flags above for threaded release.
 cd /home/adamg/evosim && wasm-pack build --target web --out-dir web/wasm --release
-
-# Threads feature (rayon parallel NN — needs COOP/COEP, which dev server provides):
-cd /home/adamg/evosim && wasm-pack build --target web --out-dir web/wasm --dev -- --features threads
 ```
+
+**Verify which build you ended up with:**
+
+```bash
+grep -c initThreadPool web/wasm/evosim.js   # 2 = threaded, 0 = plain
+```
+
+A silent fall-through to the plain build is the most common footgun — the
+sim still runs but `rayon::current_num_threads()` returns 1 and the
+parallel NN pass collapses to a single chunk.
 
 Then hard-reload the browser (Ctrl+Shift+R). Vite's HMR picks up the new
 `.js` glue automatically; the `.wasm` is fetched fresh on reload. Restart
