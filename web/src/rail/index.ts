@@ -1,8 +1,11 @@
 // Rail orchestrator: boot + pollRail. Called from main.ts each RAF frame.
 // E.23: Stats sampling.
 // E.24: Inspector refresh.
+//
+// v1.6 Wave B: signatures drop the `WorldHandle` param. `pollRail` takes a
+// `SnapshotHeader` (for stats sampling) + `SimBridge` (for inspector refresh).
 
-import type { WorldHandle } from "../../wasm/evosim";
+import type { SnapshotHeader, SimBridge } from "../sim-bridge";
 import { maybeSampleStats } from "./stats";
 import { refreshInspector } from "./inspector";
 import { pruneHighlights, highlights } from "./highlight";
@@ -45,7 +48,7 @@ function installTabs(): RailState {
 
 // ---- installRail ----
 
-export function installRail(_world: WorldHandle): RailState {
+export function installRail(): RailState {
   return installTabs();
 }
 
@@ -53,13 +56,15 @@ export function installRail(_world: WorldHandle): RailState {
 
 export function pollRail(
   rail: RailState,
-  world: WorldHandle,
+  snapshot: SnapshotHeader,
+  simBridge: SimBridge,
 ): void {
-  // 1. Stats sample (E.23).
-  maybeSampleStats(world);
+  // 1. Stats sample (E.23). Reads from the snapshot header now.
+  maybeSampleStats(snapshot);
 
-  // 2. Inspector refresh (E.24). S18: no longer needs idsBuffer (uses creature_idx_by_id).
-  refreshInspector(world, rail);
+  // 2. Inspector refresh (E.24). Sends async `inspect_id` requests via the
+  //    SimBridge; replies render the panel when they arrive.
+  refreshInspector(simBridge, rail);
 
   // 3. Highlight prune.
   pruneHighlights(performance.now());

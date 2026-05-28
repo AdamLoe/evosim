@@ -1,20 +1,15 @@
 // Per-worker stats panel for the parallel NN forward pass.
 //
-// Polls `world.nn_worker_stats_json()` every POLL_MS and renders a small
-// dashboard:
+// v1.6 Wave B: polls via `SimBridge.requestNnStats()` (request/reply through
+// the worker boundary) every POLL_MS and renders a small dashboard:
 //
 //   * Pool ceiling vs workers ever-seen + workers-used this tick.
 //   * Per-worker table (chunks, creatures, uptime, busy %).
 //   * Per-tick sub-phase breakdown (only populated when the profiler is on).
 //
-// The "lite" counters (chunks/creatures/busy_us/first_seen) are recorded by
-// `nn_stats::record_chunk_lite` and are always live. The sub-phase rows
-// (build_input / proximity / forward) only fill when the user toggles the
-// profiler — there's a button to flip that.
-//
-// Cost: 1 JSON parse per POLL_MS + DOM updates. Negligible.
+// Cost: 1 round-trip + JSON parse per POLL_MS + DOM updates. Negligible.
 
-import type { WorldHandle } from "../../wasm/evosim";
+import type { SimBridge } from "../sim-bridge";
 
 const POLL_MS = 750;
 
@@ -55,7 +50,7 @@ function fmtCount(n: number): string {
 /** Build the threads-stats panel and append it to `container`. Returns a
  *  teardown fn that stops the poller. */
 export function installWorkerStatsPanel(
-  getWorld: () => WorldHandle,
+  simBridge: SimBridge,
   container: HTMLElement,
 ): () => void {
   // Header.
@@ -80,7 +75,7 @@ export function installWorkerStatsPanel(
   const profileBox = document.createElement("input");
   profileBox.type = "checkbox";
   profileBox.addEventListener("change", () => {
-    getWorld().profile_enable(profileBox.checked);
+    simBridge.postMessage({ kind: "profile_enable", on: profileBox.checked });
   });
   profileRow.append(profileBox, document.createTextNode(" sub-phase timing"));
   container.appendChild(profileRow);
@@ -102,10 +97,17 @@ export function installWorkerStatsPanel(
   container.appendChild(poolLine);
 
   let intervalId: number | null = null;
-  const tick = (): void => {
+  const tick = async (): Promise<void> => {
+    let raw: string | null;
+    try {
+      raw = await simBridge.requestNnStats();
+    } catch {
+      return;
+    }
+    if (!raw) return;
     let stats: NnStatsJson;
     try {
-      stats = JSON.parse(getWorld().nn_worker_stats_json()) as NnStatsJson;
+      stats = JSON.parse(raw) as NnStatsJson;
     } catch {
       return;
     }
@@ -149,8 +151,8 @@ export function installWorkerStatsPanel(
   };
 
   // Run once immediately so the panel isn't blank on open, then poll.
-  tick();
-  intervalId = window.setInterval(tick, POLL_MS);
+  void tick();
+  intervalId = window.setInterval(() => void tick(), POLL_MS);
 
   return () => {
     if (intervalId !== null) {

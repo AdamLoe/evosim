@@ -9,10 +9,27 @@
 // before they touch the GPU; an LOD threshold omits rings when the
 // on-screen body radius is < 6 px (they'd be invisible anyway).
 
-import type { WorldHandle } from "../wasm/evosim";
 import { type Camera, PX_PER_SIZE } from "./render";
 import { getSettings } from "./settings";
 import { span } from "./perf";
+import { CREATURE_STRIDE } from "./sim-bridge";
+
+/**
+ * v1.6 Wave B: the renderer consumes a snapshot received via postMessage from
+ * the sim worker rather than calling into wasm directly. Carries the same
+ * fields previously exposed by `WorldHandle` getters that the renderer used.
+ *
+ * `creatures` is the stride-8 SoA from `creatures_buffer`; `ids` is the
+ * index-aligned `creature_ids_buffer`; `grass` is the u8-quantized density.
+ */
+export interface SimSnapshot {
+  creatures: Float32Array;
+  ids: Float64Array;
+  grass: Uint8Array;
+  pop: number;
+  world_size: number;
+  grass_dim: number;
+}
 
 // ─── Shader sources ──────────────────────────────────────────────────────
 
@@ -320,21 +337,18 @@ export function renderWorld(
   cam: Camera,
   viewW: number,
   viewH: number,
-  world: WorldHandle,
-  stride: number,
-  ids: Float64Array,
+  snapshot: SimSnapshot,
   highlightMap: Map<number, number>,
   nowMs: number,
 ): void {
-  // Mandatory stride guard: mismatch corrupts the instance pack loop.
-  // v1.6 S A1: tolerant of 6 or 8 during the A1→B window. A1 lands the Rust
-  // stride bump 6→8 in isolation; without this fork a dev-server boot in
-  // that window would throw on the first highlight pass. Wave B tightens to
-  // `!== 8` after the sim worker lands.
-  if (stride !== 6 && stride !== 8) {
+  // v1.6 Wave B: stride is fixed at 8 post-sim-worker. The Wave A1 tolerant
+  // guard (`6 || 8`) is retired here — Stage 1 onward, the snapshot SoA always
+  // ships the stride-8 layout. Mismatch indicates Rust/TS const drift.
+  const stride = CREATURE_STRIDE;
+  if (stride !== 8) {
     throw new Error(
-      `creature_stride mismatch: expected 6 or 8, got ${stride} ` +
-      `(Rust wasm_api.rs::creature_stride and web/src/render-gl.ts must agree)`,
+      `creature_stride mismatch: expected 8, got ${stride} ` +
+      `(rebuild wasm — Rust/TS const drift)`,
     );
   }
 
@@ -351,12 +365,12 @@ export function renderWorld(
   // a real perf win at high cell counts (921_600 cells = 921 KB R8 upload
   // per frame + a fullscreen-discard fragment pass).
   if (getSettings().showGrass) {
-    const dim = world.grass_dim;
-    // Time the Rust→JS quantize+copy separately from the GPU texture upload —
-    // they have different characteristics (wasm-bindgen boundary vs. driver
-    // bandwidth) so collapsing them hides which one is hurting.
+    const dim = snapshot.grass_dim;
+    // The grass typed-array is now a direct postMessage'd Uint8Array (no
+    // wasm-bindgen quantize+copy here — that runs in the sim worker). The
+    // span name is retained so the existing perf-tree comparison still works.
     const readSpan = span("grass.upload.read");
-    const density = world.grass_buffer_u8() as unknown as Uint8Array;
+    const density = snapshot.grass;
     readSpan.close();
     const gpuSpan = span("grass.upload.gpu");
     gl.activeTexture(gl.TEXTURE0);
@@ -372,7 +386,7 @@ export function renderWorld(
     gl.uniform2f(s.grassU.viewport, viewW, viewH);
     gl.uniform2f(s.grassU.camPos, cam.cx, cam.cy);
     gl.uniform1f(s.grassU.zoom, cam.zoom);
-    gl.uniform1f(s.grassU.worldSize, world.world_size);
+    gl.uniform1f(s.grassU.worldSize, snapshot.world_size);
     gl.uniform1f(s.grassU.opacity, getSettings().grassOpacity);
     gl.bindVertexArray(s.grassVao);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -380,7 +394,7 @@ export function renderWorld(
 
   // ─── World-bounds frame ───
   {
-    const W = world.world_size;
+    const W = snapshot.world_size;
     FRAME_VERTS[0] = 0; FRAME_VERTS[1] = 0;
     FRAME_VERTS[2] = W; FRAME_VERTS[3] = 0;
     FRAME_VERTS[4] = W; FRAME_VERTS[5] = W;
@@ -396,40 +410,77 @@ export function renderWorld(
   }
 
   // ─── Creatures (bodies) ───
-  // Rust packs the instance buffer directly — no JS pack loop, no per-field
-  // typed-array reads across the wasm boundary. Trait rings have been
-  // removed entirely; highlights are drawn as a small second batch below.
-  const bodies = world.pack_render_buffer(
-    cam.cx, cam.cy, cam.zoom, viewW, viewH, PX_PER_SIZE,
-  ) as unknown as Float32Array;
-  const bodyCount = (bodies.length / FLOATS_PER_INSTANCE) | 0;
-  if (bodyCount > 0) {
-    gl.useProgram(s.discProgram);
-    gl.uniform2f(s.discU.viewport, viewW, viewH);
-    gl.uniform2f(s.discU.camPos, cam.cx, cam.cy);
-    gl.uniform1f(s.discU.zoom, cam.zoom);
-    gl.bindVertexArray(s.discVao);
-    gl.bindBuffer(gl.ARRAY_BUFFER, s.discInstanceBuf);
-    gl.bufferData(gl.ARRAY_BUFFER, bodies, gl.DYNAMIC_DRAW);
-    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, bodyCount);
+  // JS-side frustum cull + GPU instance pack (replaces Rust-side
+  // pack_render_buffer which ran inside the world). With the sim now in a
+  // worker, there's no extra wasm-bindgen boundary to skip — we just iterate
+  // the postMessage'd Float32Array directly.
+  const creatures = snapshot.creatures;
+  const pop = snapshot.pop;
+  if (pop > 0 && cam.zoom > 0) {
+    const halfW = (viewW / cam.zoom) * 0.5;
+    const halfH = (viewH / cam.zoom) * 0.5;
+    // body_radius is read per-creature from slot [i+2]; margin uses the
+    // typical max so we cull liberally and still draw straddlers.
+    const minX = cam.cx - halfW;
+    const maxX = cam.cx + halfW;
+    const minY = cam.cy - halfH;
+    const maxY = cam.cy + halfH;
+    // Grow the scratch buffer if needed (pop can exceed the initial reserve).
+    const neededFloats = pop * FLOATS_PER_INSTANCE;
+    if (s.instanceScratch.length < neededFloats) {
+      s.instanceScratch = new Float32Array(neededFloats * 2);
+    }
+    const scratch = s.instanceScratch;
+    let off = 0;
+    for (let i = 0; i < pop; i++) {
+      const base = i * stride;
+      const x = creatures[base];
+      const y = creatures[base + 1];
+      const radiusWorld = creatures[base + 2];
+      const margin = radiusWorld + 2;
+      if (x < minX - margin || x > maxX + margin ||
+          y < minY - margin || y > maxY + margin) continue;
+      const radiusPx = Math.max(1, radiusWorld * PX_PER_SIZE * cam.zoom);
+      scratch[off    ] = x;
+      scratch[off + 1] = y;
+      scratch[off + 2] = radiusPx;
+      scratch[off + 3] = 0; // inner_px (filled disc)
+      scratch[off + 4] = creatures[base + 3];
+      scratch[off + 5] = creatures[base + 4];
+      scratch[off + 6] = creatures[base + 5];
+      scratch[off + 7] = 1; // alpha
+      off += FLOATS_PER_INSTANCE;
+    }
+    const bodyCount = (off / FLOATS_PER_INSTANCE) | 0;
+    if (bodyCount > 0) {
+      gl.useProgram(s.discProgram);
+      gl.uniform2f(s.discU.viewport, viewW, viewH);
+      gl.uniform2f(s.discU.camPos, cam.cx, cam.cy);
+      gl.uniform1f(s.discU.zoom, cam.zoom);
+      gl.bindVertexArray(s.discVao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, s.discInstanceBuf);
+      gl.bufferData(gl.ARRAY_BUFFER, scratch.subarray(0, off), gl.DYNAMIC_DRAW);
+      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, bodyCount);
+    }
   }
 
-  // ─── Highlight rings (rare path, JS-side) ───
+  // ─── Highlight rings (rare path) ───
   // Inspector selection + transient highlights produce ≤ 1–2 rings/frame.
-  // Reading creatures_buffer here is cheap and only happens when needed.
   if (highlightMap.size > 0) {
-    const data = world.creatures_buffer() as unknown as Float32Array;
-    if (stride !== 6 && stride !== 8) throw new Error(`creature_stride mismatch: ${stride}`);
+    const ids = snapshot.ids;
+    // Highlight pack lives in its own scratch slice — reuse instanceScratch
+    // but write after the body pack (or alone if no bodies). Simplest: reuse
+    // a small fixed scratch since highlights are ≤ ~8 per frame.
     const scratch = s.instanceScratch;
     let off = 0;
     for (let k = 0; k < ids.length; k++) {
       const cid = ids[k];
       const exp = highlightMap.get(cid);
       if (exp === undefined || nowMs >= exp) continue;
-      const i = k * stride;
-      const x = data[i];
-      const y = data[i + 1];
-      const radiusWorld = data[i + 2];
+      const base = k * stride;
+      const x = creatures[base];
+      const y = creatures[base + 1];
+      const radiusWorld = creatures[base + 2];
       const radiusPx = Math.max(1, radiusWorld * PX_PER_SIZE * cam.zoom);
       const alpha = exp >= PERMANENT_EXP - 1
         ? 1.0

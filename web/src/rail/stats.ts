@@ -1,8 +1,13 @@
 // Stats panel: Canvas2D line chart (population) (E.23)
 // + profiler table toggle (perf-timing plan).
 // Samples collected per 10 sim-ticks; ring buffer of 500 samples.
+//
+// v1.6 Wave B: samples read from the snapshot header (no wasm on main thread).
+// Sampling guard is now `tick - lastSampledTick >= SAMPLE_INTERVAL_TICKS`
+// instead of `tick % 10 === 0` so high-TPS batches that step past multiple
+// 10-tick boundaries still produce one sample. (gotcha 8)
 
-import type { WorldHandle } from "../../wasm/evosim";
+import type { SnapshotHeader } from "../sim-bridge";
 
 interface Sample {
   tick: number;
@@ -27,14 +32,13 @@ export function resetStats(): void {
   lastSampledTick = -1;
 }
 
-export function maybeSampleStats(world: WorldHandle): void {
-  const tick = world.tick;
+export function maybeSampleStats(snapshot: SnapshotHeader): void {
+  const tick = snapshot.tick;
   if (tick === lastSampledTick) return;
-  if (tick % SAMPLE_INTERVAL_TICKS !== 0) return;
-  const raw = world.stats_sample() as unknown as Float32Array;
-  const t = raw[0];
-  const pop = raw[1];
-  samples.push({ tick: t, population: pop });
+  // gotcha 8: `>= SAMPLE_INTERVAL_TICKS` survives batches that step past
+  // multiple 10-tick boundaries (which `tick % 10 === 0` would skip).
+  if (lastSampledTick >= 0 && tick - lastSampledTick < SAMPLE_INTERVAL_TICKS) return;
+  samples.push({ tick, population: snapshot.pop });
   if (samples.length > SAMPLE_CAP) samples.shift();
   lastSampledTick = tick;
   drawChart();
