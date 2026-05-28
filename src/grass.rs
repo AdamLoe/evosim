@@ -97,6 +97,14 @@ impl GrassGrid {
     /// Out-of-bounds neighbors are treated as zero density (ghost-zero boundary).
     /// Empty cells with all-zero neighbors remain zero (no spontaneous spawn).
     pub fn step(&mut self, r_in_cell: f32, k_propagate: f32) {
+        self.compute_propagation(r_in_cell, k_propagate);
+        self.rebuild_row_bitset();
+    }
+
+    /// Phase 1 of `step()`: write the next density frame into `scratch` and
+    /// swap. Exposed separately so the World-side profiler can break the grass
+    /// step into compute-vs-bitset sub-spans.
+    pub fn compute_propagation(&mut self, r_in_cell: f32, k_propagate: f32) {
         debug_assert_eq!(self.density.len(), GRASS_CELL_COUNT);
         debug_assert_eq!(self.scratch.len(), GRASS_CELL_COUNT);
 
@@ -166,9 +174,6 @@ impl GrassGrid {
         }
 
         std::mem::swap(&mut self.density, &mut self.scratch);
-        // v1.5 S5b: regenerate per-row bitset so the grass-sector NN scan can
-        // skip whole rows in O(1) when sparse.
-        self.rebuild_row_bitset();
     }
 
     /// Walled bilinear sample at continuous world position `(x, y)`.

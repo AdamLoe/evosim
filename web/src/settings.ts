@@ -14,6 +14,7 @@ export interface Settings {
   showProfiler: boolean;
   showPopGraph: boolean;
   showGrass: boolean;
+  grassOpacity: number;
   // Energy economy
   upkeepMultiplier: number;
   moveCostMultiplier: number;
@@ -25,6 +26,8 @@ export interface Settings {
   grassGrowthR: number;
   grassEnergyPerBite: number;
   grassBitesPerBlock: number;
+  digestionCooldown: number;
+  repulsionMax: number;
   initialGrassSeedCount: number;
   mutRate: number;
   nnSigma: number;
@@ -47,6 +50,7 @@ const DEFAULTS: Settings = {
   showProfiler: false,
   showPopGraph: false,
   showGrass: true,
+  grassOpacity: 1.0,
   upkeepMultiplier: 1.0,
   moveCostMultiplier: 1.0,
   eatCostMultiplier: 1.0,
@@ -56,6 +60,8 @@ const DEFAULTS: Settings = {
   grassGrowthR: 0.05,
   grassEnergyPerBite: 10,
   grassBitesPerBlock: 2,
+  digestionCooldown: 50,
+  repulsionMax: 5.0,
   initialGrassSeedCount: 100,
   mutRate: 1.0,
   nnSigma: 0.02,

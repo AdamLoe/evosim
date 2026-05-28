@@ -63,6 +63,14 @@ pub struct DevSliders {
     pub curriculum_min_factor: f32,
     /// Curriculum master switch. When false the factor is pinned to 1.0.
     pub auto_curriculum: bool,
+    /// Ticks of digestion cooldown imposed after a successful bite (eat).
+    /// Eat is gated while >0; decrements once per tick in `energy_bookkeeping`.
+    pub digestion_cooldown_ticks: u32,
+    /// Per-tick cap on the position nudge applied by the creature-vs-creature
+    /// repulsion pass. 0 disables physical separation entirely; 5.0 is the
+    /// historical value. Higher values make collisions look "harder" but can
+    /// cause oscillation at high overlap depths.
+    pub repulsion_max: f32,
 }
 
 impl Default for DevSliders {
@@ -89,6 +97,8 @@ impl Default for DevSliders {
             curriculum_max_pop: CURRICULUM_MAX_POP_DEFAULT,
             curriculum_min_factor: CURRICULUM_MIN_FACTOR_DEFAULT,
             auto_curriculum: true,
+            digestion_cooldown_ticks: DIGESTION_COOLDOWN_TICKS,
+            repulsion_max: REPULSION_MAX,
         }
     }
 }
@@ -315,10 +325,13 @@ impl World {
         // ordering where sun.refill ran after photosynth_two_pass). See p1e §1.
         {
             crate::profile_span!(&self.profile, "tick.grass_step");
-            self.grass.step(
+            self.grass.compute_propagation(
                 self.sliders.grass_in_cell_growth_r,
                 self.sliders.grass_propagation_rate_k,
             );
+            // Bitset rebuild is a cheap O(cells) sweep with no per-cell math;
+            // not worth its own profiler node.
+            self.grass.rebuild_row_bitset();
         }
 
         // 8. Energy bookkeeping.

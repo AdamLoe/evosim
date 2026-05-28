@@ -9,7 +9,7 @@
   --settings-w: 0px;
 }
 body.settings-open {
-  --settings-w: 320px;
+  --settings-w: 420px;
 }
 
 html,
@@ -336,10 +336,13 @@ body {
   top: 0;
   bottom: 0;
   right: 0;
-  width: 420px;
-  /* border-box so width:320 INCLUDES the padding + border. Otherwise the box
-     renders at 344px (320 + 12*2 padding) and bleeds 24px past --settings-w,
-     overlapping the canvas/top-bar on the right. */
+  /* Width is driven by the same CSS variable the canvas/top-bar reserve room
+     against, so they can never drift apart. Change the body.settings-open
+     value above to resize the column. */
+  width: var(--settings-w);
+  /* border-box so `width` INCLUDES the padding + border. Without it the box
+     renders ~24px wider than --settings-w (12px padding × 2 + border) and
+     overlaps the canvas/top-bar on the right. */
   box-sizing: border-box;
   background: var(--rail-bg);
   border-left: 1px solid rgba(255, 255, 255, 0.08);

@@ -373,6 +373,12 @@ impl WorldHandle {
     fn apply_grass_bites_per_block(&mut self, value: u32) {
         self.inner.sliders.grass_bites_per_block = value.max(1);
     }
+    fn apply_digestion_cooldown(&mut self, value: u32) {
+        self.inner.sliders.digestion_cooldown_ticks = value;
+    }
+    fn apply_repulsion_max(&mut self, value: f32) {
+        self.inner.sliders.repulsion_max = value.max(0.0);
+    }
     fn apply_max_age(&mut self, value: u32) {
         self.inner.sliders.max_age = value.max(1);
     }
@@ -465,6 +471,20 @@ impl WorldHandle {
         self.apply_grass_bites_per_block(value);
     }
 
+    /// Typed setter — digestion-cooldown duration in ticks. Eat is gated while
+    /// the per-creature cooldown is > 0.
+    #[wasm_bindgen]
+    pub fn set_digestion_cooldown(&mut self, value: u32) {
+        self.apply_digestion_cooldown(value);
+    }
+
+    /// Typed setter — per-tick cap on the repulsion position nudge. 0 disables
+    /// physical separation; ~5 = historical default.
+    #[wasm_bindgen]
+    pub fn set_repulsion_max(&mut self, value: f32) {
+        self.apply_repulsion_max(value);
+    }
+
     /// Typed setter — past-lifespan threshold (ticks).
     #[wasm_bindgen]
     pub fn set_max_age(&mut self, value: u32) {
@@ -546,6 +566,8 @@ impl WorldHandle {
             // grass_bites_per_block is u32; round the float input. Below-1
             // values are clamped by the apply_ helper.
             "grass_bites_per_block" => self.apply_grass_bites_per_block(value.max(0.0) as u32),
+            "digestion_cooldown" => self.apply_digestion_cooldown(value.max(0.0) as u32),
+            "repulsion_max" => self.apply_repulsion_max(value),
             "max_age" => self.apply_max_age(value.max(0.0) as u32),
             "split_threshold" => self.apply_split_threshold(value),
             "split_gift" => self.apply_split_gift(value),

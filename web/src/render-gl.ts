@@ -12,6 +12,7 @@
 import type { WorldHandle } from "../wasm/evosim";
 import { type Camera, PX_PER_SIZE } from "./render";
 import { getSettings } from "./settings";
+import { span } from "./perf";
 
 // ─── Shader sources ──────────────────────────────────────────────────────
 
@@ -85,16 +86,19 @@ const GRASS_FS = `#version 300 es
 precision highp float;
 in vec2 v_uv;
 uniform sampler2D u_grass;
+uniform float u_opacity;
 out vec4 out_color;
 
-// Fade from green at density=1.0 to the dark background as density → 0.
+// Fade from white at density=1.0 to the dark background as density → 0.
 // Alpha tracks density so under-blend leaves the (near-black) clear color
-// showing through where grass is thin; at full density it's solid green.
+// showing through where grass is thin; at full density it's solid white.
+// u_opacity scales the whole alpha range so the user can dial grass back
+// without affecting density semantics.
 void main() {
   float d = clamp(texture(u_grass, v_uv).r, 0.0, 1.0);
   if (d <= 0.0) discard;
-  vec3 green = vec3(60.0/255.0, 180.0/255.0, 60.0/255.0);
-  out_color = vec4(green, d);
+  vec3 base = vec3(1.0, 1.0, 1.0);
+  out_color = vec4(base, d * u_opacity);
 }`;
 
 // World-bounds frame: 4 lines (one per edge).
@@ -143,6 +147,7 @@ interface GLState {
     camPos: WebGLUniformLocation;
     zoom: WebGLUniformLocation;
     worldSize: WebGLUniformLocation;
+    opacity: WebGLUniformLocation;
   };
   grassVao: WebGLVertexArrayObject;
   grassTex: WebGLTexture;
@@ -263,6 +268,7 @@ function initRenderer(gl: WebGL2RenderingContext): GLState {
     camPos: mustGet(gl.getUniformLocation(grassProgram, "u_cam_pos"), "u_cam_pos"),
     zoom: mustGet(gl.getUniformLocation(grassProgram, "u_zoom"), "u_zoom"),
     worldSize: mustGet(gl.getUniformLocation(grassProgram, "u_world_size"), "u_world_size"),
+    opacity: mustGet(gl.getUniformLocation(grassProgram, "u_opacity"), "u_opacity"),
   };
 
   const grassTex = mustGet(gl.createTexture(), "createTexture");
@@ -342,7 +348,13 @@ export function renderWorld(
   // per frame + a fullscreen-discard fragment pass).
   if (getSettings().showGrass) {
     const dim = world.grass_dim;
+    // Time the Rust→JS quantize+copy separately from the GPU texture upload —
+    // they have different characteristics (wasm-bindgen boundary vs. driver
+    // bandwidth) so collapsing them hides which one is hurting.
+    const readSpan = span("grass.upload.read");
     const density = world.grass_buffer_u8() as unknown as Uint8Array;
+    readSpan.close();
+    const gpuSpan = span("grass.upload.gpu");
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, s.grassTex);
     if (dim !== s.grassTexDim) {
@@ -351,11 +363,13 @@ export function renderWorld(
     } else {
       gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, dim, dim, gl.RED, gl.UNSIGNED_BYTE, density);
     }
+    gpuSpan.close();
     gl.useProgram(s.grassProgram);
     gl.uniform2f(s.grassU.viewport, viewW, viewH);
     gl.uniform2f(s.grassU.camPos, cam.cx, cam.cy);
     gl.uniform1f(s.grassU.zoom, cam.zoom);
     gl.uniform1f(s.grassU.worldSize, world.world_size);
+    gl.uniform1f(s.grassU.opacity, getSettings().grassOpacity);
     gl.bindVertexArray(s.grassVao);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }

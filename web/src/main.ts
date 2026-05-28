@@ -122,6 +122,10 @@ async function main(): Promise<void> {
     getEnergyMax(),
     getFounderCount(),
   );
+  // Push every persisted slider into the freshly-constructed world. The ctor
+  // only takes 4 args (seed/grass/energy/founders); everything else stayed at
+  // Rust defaults until the user touched the slider or hit restart.
+  reapplyDevSliders(world);
   const getWorld = (): WorldHandle => world;
   // Debug hook: expose the live world on `window.__world` so headless probes
   // (and the JS console) can poke at the sim state directly.

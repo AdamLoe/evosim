@@ -122,6 +122,8 @@ export function reapplyDevSliders(world: WorldHandle): void {
   world.set_energy_max(s.energyMax);
   world.set_grass_energy_per_bite(s.grassEnergyPerBite);
   world.set_grass_bites_per_block(s.grassBitesPerBlock);
+  world.set_digestion_cooldown(s.digestionCooldown);
+  world.set_repulsion_max(s.repulsionMax);
   world.set_max_age(s.maxAge);
   world.set_split_threshold(s.splitThreshold);
   world.set_split_gift(s.splitGift);
@@ -198,6 +200,19 @@ export function installDevPanel(getWorld: () => WorldHandle): void {
     default: persisted.showGrass,
     onChange: (v) => setSetting("showGrass", v),
   }));
+
+  // Render-time alpha multiplier for the grass overlay. 0 = invisible (but the
+  // upload + draw still happens — toggle the row above to skip entirely);
+  // 1 = full density-coloured opacity. The renderer reads this every frame.
+  box.appendChild(makeSlider({
+    label: "grass opacity",
+    min: 0,
+    max: 1,
+    step: 0.05,
+    default: persisted.grassOpacity,
+    formatValue: (v) => v.toFixed(2),
+    onChange: (v) => setSetting("grassOpacity", v),
+  }).row);
 
   // ── Energy economy ────────────────────────────────────────────────
   box.appendChild(header("energy"));
@@ -336,6 +351,31 @@ export function installDevPanel(getWorld: () => WorldHandle): void {
         const rounded = Math.round(v);
         setSetting("grassBitesPerBlock", rounded);
         getWorld().set_grass_bites_per_block(rounded);
+      },
+    },
+    {
+      label: "digestion cooldown",
+      min: 0,
+      max: 500,
+      step: 1,
+      default: persisted.digestionCooldown,
+      formatValue: (v) => `${Math.round(v)} ticks`,
+      onChange: (v) => {
+        const rounded = Math.round(v);
+        setSetting("digestionCooldown", rounded);
+        getWorld().set_digestion_cooldown(rounded);
+      },
+    },
+    {
+      label: "repulsion max",
+      min: 0,
+      max: 10,
+      step: 0.1,
+      default: persisted.repulsionMax,
+      formatValue: (v) => v.toFixed(1),
+      onChange: (v) => {
+        setSetting("repulsionMax", v);
+        getWorld().set_repulsion_max(v);
       },
     },
     {

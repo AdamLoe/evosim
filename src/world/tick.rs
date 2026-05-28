@@ -92,6 +92,7 @@ impl World {
         // D3: ri is constant for all creatures.
         let ri = FOUNDER_SIZE * BODY_RADIUS_PER_SIZE;
         let search = ri + ri; // rsum_max = 2 * ri (all same size)
+        let rep_max = self.sliders.repulsion_max;
 
         self.scratch_fx.resize(n, 0.0);
         self.scratch_fy.resize(n, 0.0);
@@ -119,7 +120,7 @@ impl World {
                     if d2 > 1e-8 {
                         let d = d2.sqrt();
                         let overlap = rsum - d;
-                        let f = (REPULSION_K * overlap).clamp(0.0, REPULSION_MAX);
+                        let f = (REPULSION_K * overlap).clamp(0.0, rep_max);
                         let ux = dx / d;
                         let uy = dy / d;
                         self.scratch_fx[i] -= ux * f;
@@ -132,7 +133,7 @@ impl World {
                             ((i as f32) * 0.7 + (j as f32) * 1.3).sin() * std::f32::consts::PI;
                         let ux = angle.cos();
                         let uy = angle.sin();
-                        let f = REPULSION_MAX;
+                        let f = rep_max;
                         self.scratch_fx[i] -= ux * f;
                         self.scratch_fy[i] -= uy * f;
                         self.scratch_fx[j] += ux * f;
@@ -251,7 +252,7 @@ impl World {
             if self.scratch_attempted_eat[i] {
                 self.creatures.energy[i] -= COST_EAT_ATTEMPT * eat_mult;
                 if self.scratch_cooldown_set[i] {
-                    self.creatures.digestion_cooldown[i] = DIGESTION_COOLDOWN_TICKS;
+                    self.creatures.digestion_cooldown[i] = self.sliders.digestion_cooldown_ticks;
                 }
             }
             self.creatures.energy[i] += self.scratch_gain[i];
@@ -387,12 +388,12 @@ mod tests {
         w.tick_once();
         for i in 0..w.creatures.len() {
             assert!(
-                w.scratch_fx[i].abs() <= REPULSION_MAX + 1e-3,
+                w.scratch_fx[i].abs() <= w.sliders.repulsion_max + 1e-3,
                 "scratch_fx[{i}] = {} not reset (sentinel survived)",
                 w.scratch_fx[i]
             );
             assert!(
-                w.scratch_fy[i].abs() <= REPULSION_MAX + 1e-3,
+                w.scratch_fy[i].abs() <= w.sliders.repulsion_max + 1e-3,
                 "scratch_fy[{i}] = {} not reset (sentinel survived)",
                 w.scratch_fy[i]
             );
