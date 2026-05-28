@@ -290,3 +290,156 @@ export type SimReply =
   | SimReplyInspectReply
   | SimReplyNnStatsReply
   | SimReplyProfileReply;
+
+// ---------------------------------------------------------------------------
+// Runtime SimBridge (Wave B)
+// ---------------------------------------------------------------------------
+
+/**
+ * Wave B runtime: owns the Web Worker, the request_id correlation table for
+ * async replies, and an emitter for the latest snapshot. Lives in this file
+ * (next to the discriminated unions) per v1.6-plan.md §4 ambiguity 4.
+ *
+ * Stage-1 contract: `postMessage` is fire-and-forget for set_slider /
+ * set_paused / set_target_tps / profile_enable / reset_jank; `request*`
+ * methods return a Promise that resolves when the matching reply
+ * arrives (correlated by `request_id`). Entries older than 5 s are dropped so
+ * the map can't leak when the worker is busy.
+ *
+ * Wave D adds a futex-notify on top of postMessage; Wave B does not.
+ */
+
+const REQUEST_TIMEOUT_MS = 5_000;
+
+interface PendingRequest {
+  resolve: (json: string | null) => void;
+  deadlineMs: number;
+}
+
+export class SimBridge {
+  private worker: Worker;
+  private nextRequestId = 1;
+  private pending = new Map<number, PendingRequest>();
+  private snapshotHandler: ((snap: SimReplySnapshot) => void) | null = null;
+  private bootReadyHandler: ((reply: SimReplyBootReady) => void) | null = null;
+  private gcTimer: ReturnType<typeof setInterval> | null = null;
+
+  constructor(worker: Worker) {
+    this.worker = worker;
+    this.worker.onmessage = (e: MessageEvent<SimReply>) => {
+      this.dispatch(e.data);
+    };
+    // Periodic GC of stale request entries. Cheap (≤ 100 entries typically).
+    this.gcTimer = setInterval(() => this.gcPending(), 1_000);
+  }
+
+  /** Issue a fresh u32 request id. */
+  mintRequestId(): number {
+    const id = this.nextRequestId;
+    this.nextRequestId = (this.nextRequestId + 1) >>> 0;
+    if (this.nextRequestId === 0) this.nextRequestId = 1;
+    return id;
+  }
+
+  /** Fire-and-forget send. Used for set_slider / set_paused / set_target_tps. */
+  postMessage(msg: SimMessage): void {
+    this.worker.postMessage(msg);
+  }
+
+  /** Register the snapshot listener (called every batch by the worker). */
+  onSnapshot(fn: (snap: SimReplySnapshot) => void): void {
+    this.snapshotHandler = fn;
+  }
+
+  /** Register the one-shot boot_ready listener. */
+  onBootReady(fn: (reply: SimReplyBootReady) => void): void {
+    this.bootReadyHandler = fn;
+  }
+
+  /** Inspector click → nearest creature in world space. */
+  requestInspectAt(wx: number, wy: number, toleranceWorld: number): Promise<string | null> {
+    const request_id = this.mintRequestId();
+    const p = this.makePending(request_id);
+    this.worker.postMessage({ kind: "inspect_at", wx, wy, tolerance_world: toleranceWorld, request_id });
+    return p;
+  }
+
+  /** Inspector per-frame refresh by stable creature id. */
+  requestInspectId(id: number): Promise<string | null> {
+    const request_id = this.mintRequestId();
+    const p = this.makePending(request_id);
+    this.worker.postMessage({ kind: "inspect_id", id, request_id });
+    return p;
+  }
+
+  /** 750 ms poll → NN worker stats JSON. */
+  requestNnStats(): Promise<string | null> {
+    const request_id = this.mintRequestId();
+    const p = this.makePending(request_id);
+    this.worker.postMessage({ kind: "request_nn_stats", request_id });
+    return p;
+  }
+
+  /** 1 s poll → profile report JSON (bundled with tps/jank/grass counters). */
+  requestProfileReport(): Promise<string | null> {
+    const request_id = this.mintRequestId();
+    const p = this.makePending(request_id);
+    this.worker.postMessage({ kind: "request_profile_report", request_id });
+    return p;
+  }
+
+  /** Tear down the worker and clear pending state. Called on restart. */
+  terminate(): void {
+    if (this.gcTimer !== null) {
+      clearInterval(this.gcTimer);
+      this.gcTimer = null;
+    }
+    // Resolve any in-flight promises with null so awaiters don't hang.
+    for (const { resolve } of this.pending.values()) resolve(null);
+    this.pending.clear();
+    this.worker.terminate();
+  }
+
+  private makePending(request_id: number): Promise<string | null> {
+    return new Promise<string | null>((resolve) => {
+      this.pending.set(request_id, {
+        resolve,
+        deadlineMs: performance.now() + REQUEST_TIMEOUT_MS,
+      });
+    });
+  }
+
+  private dispatch(reply: SimReply): void {
+    switch (reply.kind) {
+      case "boot_ready":
+        if (this.bootReadyHandler) this.bootReadyHandler(reply);
+        return;
+      case "snapshot":
+        if (this.snapshotHandler) this.snapshotHandler(reply);
+        return;
+      case "inspect_reply":
+      case "nn_stats_reply":
+      case "profile_reply": {
+        const entry = this.pending.get(reply.request_id);
+        if (!entry) return; // stale (TTL'd or never registered) — ignore.
+        this.pending.delete(reply.request_id);
+        if (reply.kind === "inspect_reply") {
+          entry.resolve(reply.json);
+        } else {
+          entry.resolve(reply.json);
+        }
+        return;
+      }
+    }
+  }
+
+  private gcPending(): void {
+    const now = performance.now();
+    for (const [id, entry] of this.pending) {
+      if (entry.deadlineMs < now) {
+        entry.resolve(null);
+        this.pending.delete(id);
+      }
+    }
+  }
+}

@@ -1,15 +1,28 @@
 // Inspector panel (E.24): click-targeted creature panel.
-// Opens on canvas click via creature_at; refreshes per frame while selected.
+//
+// v1.6 Wave B: click → async `inspect_at` request via SimBridge; per-frame
+// refresh → async `inspect_id` request. Stale-request_id replies are dropped
+// by the SimBridge's correlation map. If a reply lands within 1 frame the
+// panel paints; otherwise the placeholder "selecting…" stays visible.
 
-import type { WorldHandle } from "../../wasm/evosim";
+import type { SimBridge } from "../sim-bridge";
 import type { Camera } from "../render";
 import { screenToWorld } from "../render";
 import { highlights, HIGHLIGHT_PERMANENT } from "./highlight";
 import type { RailState } from "./index";
 
-type IS = { kind: "empty" } | { kind: "selected"; creatureId: number; diedAt?: number };
+type IS =
+  | { kind: "empty" }
+  | { kind: "pending" } // click sent, no reply yet
+  | { kind: "selected"; creatureId: number; diedAt?: number };
 
 let state: IS = { kind: "empty" };
+
+// Per-selection request-id tracker: drop replies that arrive after a newer
+// `inspect_id` has been sent. Cheap belt-and-braces (SimBridge already
+// correlates by id, but a selection switch should also invalidate older
+// in-flight refreshes).
+let lastInspectIdRequestSeq = 0;
 
 // The Inspector tab button (injected dynamically into #rail-tabs).
 let inspectorTab: HTMLButtonElement | null = null;
@@ -138,49 +151,48 @@ function clearSelection(rail: RailState): void {
 
 /**
  * Refresh the inspector panel each frame. Resolves the selected creature
- * by stable id via creature_idx_by_id; handles death with 2s placeholder
- * then auto-close. S18: no longer scans the ids buffer per frame.
+ * by stable id via an async `inspect_id` request through the SimBridge;
+ * replies that arrive after a newer request are dropped via the
+ * `lastInspectIdRequestSeq` guard. Handles death with a 2 s placeholder
+ * then auto-close.
  */
 export function refreshInspector(
-  world: WorldHandle,
+  simBridge: SimBridge,
   rail: RailState,
 ): void {
   const box = getInspectorBox();
-  // Primary guard: skip all wasm calls when the box is closed (D3).
-  // The display check is the explicit contract for "closed = no wasm calls"
-  // and protects against future state-vs-DOM drift.
+  // Primary guard: skip all requests when the box is closed.
   if (box && box.style.display === "none") return;
-  // Defensive guard: steady-state fallback; in practice clearSelection()
-  // already sets state.kind = "empty" before the display-none check can
-  // be reached, so both guards agree — this is belt-and-braces only.
   if (state.kind !== "selected") return;
   const { creatureId } = state;
 
-  // S18: stable-id lookup. Returns Option<u32> via wasm-bindgen
-  // (`number | undefined`). None means the creature died.
-  const foundIdx = world.creature_idx_by_id(creatureId);
+  const mySeq = ++lastInspectIdRequestSeq;
+  void simBridge.requestInspectId(creatureId).then((jsonStr) => {
+    // Drop replies superseded by a newer request (selection moved on).
+    if (mySeq !== lastInspectIdRequestSeq) return;
+    if (state.kind !== "selected" || state.creatureId !== creatureId) return;
 
-  if (foundIdx === undefined) {
-    // Creature died. 2-second placeholder per DECISIONS E.24.
-    if (!state.diedAt) {
-      state.diedAt = performance.now();
-      set("ins-action", "Creature died");
+    if (jsonStr === null) {
+      // Creature died (or reply dropped). 2-second placeholder per DECISIONS E.24.
+      if (state.kind === "selected" && !state.diedAt) {
+        state.diedAt = performance.now();
+        set("ins-action", "Creature died");
+      }
+      if (state.kind === "selected" && state.diedAt &&
+          performance.now() - state.diedAt > 2000) {
+        clearSelection(rail);
+      }
+      return;
     }
-    if (performance.now() - state.diedAt > 2000) {
-      clearSelection(rail);
-    }
-    return;
-  }
 
-  const jsonStr = world.creature_inspect_json(foundIdx);
-  if (!jsonStr) {
-    clearSelection(rail);
-    return;
-  }
-  const data: CreatureInspectJson = JSON.parse(jsonStr);
-  renderInspector(data);
-  // Keep permanent highlight.
-  highlights.set(creatureId, HIGHLIGHT_PERMANENT);
+    try {
+      const data: CreatureInspectJson = JSON.parse(jsonStr);
+      renderInspector(data);
+      highlights.set(creatureId, HIGHLIGHT_PERMANENT);
+    } catch {
+      // Malformed reply — leave panel alone.
+    }
+  });
 }
 
 /**
@@ -192,13 +204,13 @@ export function refreshInspector(
  *
  * Hit-test uses a tolerance_world radius of 6 / cam.zoom so that the minimum
  * tap target is always at least 6 screen pixels regardless of creature size or
- * zoom level (fixes the 4 screen-px hit target for size-1 creatures at zoom 4).
+ * zoom level.
  */
 export function installCanvasClickHandler(
   canvas: HTMLCanvasElement,
   cam: Camera,
   getView: () => { w: number; h: number },
-  getWorld: () => WorldHandle,
+  simBridge: SimBridge,
   rail: RailState,
 ): void {
   const closeBtn = getInspectorClose();
@@ -226,7 +238,6 @@ export function installCanvasClickHandler(
     // Tap detection: < 10 px movement, < 500 ms elapsed.
     if (dist >= 10 || elapsed >= 500) return;
 
-    const world = getWorld();
     const { w, h } = getView();
     const rect = canvas.getBoundingClientRect();
     const sx = e.clientX - rect.left;
@@ -234,25 +245,30 @@ export function installCanvasClickHandler(
     const [wx, wy] = screenToWorld(cam, w, h, sx, sy);
     // Tolerance in world units so tap target is at least 6 screen pixels wide.
     const toleranceWorld = 6.0 / cam.zoom;
-    // S18: creature_at returns a stable id (Option<f64>, surfaced as
-    // `number | undefined`). We immediately resolve it to an idx for the
-    // first inspect call; per-frame refresh uses creature_idx_by_id.
-    const id = world.creature_at(wx, wy, toleranceWorld);
 
-    if (id === undefined || id === null) {
-      clearSelection(rail);
-    } else {
-      // resolve id → idx for creature_inspect_json (same call stack; no step()
-      // between creature_at and inspect, so idx is guaranteed valid here).
-      const idx = world.creature_idx_by_id(id);
-      if (idx !== undefined) {
-        const jsonStr = world.creature_inspect_json(idx);
-        if (jsonStr) {
-          const data: CreatureInspectJson = JSON.parse(jsonStr);
-          openInspector(data, rail);
-        }
+    // Mark a request in flight; if the reply takes > 1 frame the user sees
+    // "selecting…" instead of stale data from a previous selection.
+    state = { kind: "pending" };
+    set("ins-action", "selecting…");
+    const box = getInspectorBox();
+    if (box) box.style.display = "block";
+
+    void simBridge.requestInspectAt(wx, wy, toleranceWorld).then((jsonStr) => {
+      // If the user clicked again before this reply arrived, the new click's
+      // `state = { kind: "pending" }` set above will have overwritten ours.
+      // Only honor this reply if state is still pending.
+      if (state.kind !== "pending") return;
+      if (!jsonStr) {
+        clearSelection(rail);
+        return;
       }
-    }
+      try {
+        const data: CreatureInspectJson = JSON.parse(jsonStr);
+        openInspector(data, rail);
+      } catch {
+        clearSelection(rail);
+      }
+    });
   });
 }
 

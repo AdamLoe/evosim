@@ -300,6 +300,43 @@ don't go looking for them:
 
 ---
 
+## 10. Sim Worker DevTools console (v1.6 Stage 1+)
+
+After v1.6 Wave B, the sim runs in a dedicated Web Worker
+(`web/src/sim-worker.ts`). Its console logs do **not** appear in the main
+page DevTools. To inspect them:
+
+- **Chrome / Edge**: DevTools → top-bar three-dot menu → **More tools →
+  Threads/Workers**. The sim worker appears as an entry; click to attach a
+  separate DevTools window. Alternative: DevTools → Sources → Threads pane
+  on the left rail (Chrome ≥ 110).
+- **Firefox**: navigate to `about:debugging#/runtime/this-firefox` →
+  find the evosim tab → click **Inspect** next to the worker entry.
+
+Two log lines confirm the threaded sim worker is wired up correctly:
+
+```
+[sim] crossOriginIsolated=true
+[sim] rayon workers: N
+```
+
+If you see `[sim] crossOriginIsolated=false`, the COOP/COEP headers aren't
+reaching the worker — same fix as the main-thread `[threads]` failure
+(see section 7).
+
+If main throws `[boot] max_pop_for_sab mismatch: worker reported X, main
+expects Y`, the Rust constant `MAX_POP_FOR_SAB` in `src/constants.rs` and the
+TypeScript constant in `web/src/sim-bridge.ts` have drifted. Rebuild wasm:
+
+```bash
+rustup run nightly wasm-pack build --target web --out-dir web/wasm --dev --features threads
+```
+
+Restart `pnpm dev` after the rebuild — Vite's HMR doesn't re-pull
+`web/wasm/`.
+
+---
+
 ## 9. Tail recent server logs
 
 ```bash

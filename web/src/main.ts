@@ -1,20 +1,40 @@
-import init, { WorldHandle, creature_stride } from "../wasm/evosim";
-// initThreadPool is only exported when wasm is built with --features threads.
-// Cast via unknown to avoid TS2614 on non-threaded builds.
-import * as _wasmMod from "../wasm/evosim";
-const initThreadPool = (_wasmMod as unknown as Record<string, unknown>)["initThreadPool"] as
-  | ((n: number) => Promise<void>)
-  | undefined;
+// v1.6 Wave B: main thread holds NO wasm. The sim runs in a Web Worker
+// (`web/src/sim-worker.ts`); main owns rendering, UI, and the message bridge.
+//
+// Per v1.6-plan.md §"Step B":
+//   - Spawn the sim worker, send `boot`, await `boot_ready`.
+//   - Assert `boot_ready.max_pop_for_sab === MAX_POP_FOR_SAB` (Rust/TS const
+//     drift is fatal — rebuild wasm).
+//   - Render loop reads the most recent snapshot received via postMessage.
+//   - Restart = worker.terminate() + new Worker; old SAB views are GC'd by
+//     the closure swap.
+//   - `initial_sliders` is sourced from `currentSliderState()` (in-memory
+//     widget values), NOT `getSettings()` localStorage — so a mid-drag
+//     restart carries the dragged value. (gotcha 4)
+//   - `__world` debug hook is gone (gotcha 6).
+
 import { makeCamera } from "./render";
-import { renderWorld } from "./render-gl";
+import { renderWorld, type SimSnapshot } from "./render-gl";
 import { attachCameraControls } from "./camera";
 import { installRail, pollRail, highlights } from "./rail/index";
 import { installProfilerPanel } from "./widgets/perf-panel";
-import { installDevPanel, getInitialGrassSeedCount, getEnergyMax, getFounderCount, reapplyDevSliders } from "./widgets/devpanel";
+import {
+  installDevPanel,
+  getInitialGrassSeedCount,
+  getEnergyMax,
+  getFounderCount,
+  currentSliderState,
+} from "./widgets/devpanel";
 import { installCanvasClickHandler, resetInspectorSelection } from "./rail/inspector";
 import { resetStats } from "./rail/stats";
-import { attachProfiler, timed, span } from "./perf";
+import { span } from "./perf";
 import { getSettings, setSetting } from "./settings";
+import {
+  SimBridge,
+  MAX_POP_FOR_SAB,
+  type SimReplyBootReady,
+  type SimReplySnapshot,
+} from "./sim-bridge";
 
 const status = document.getElementById("status") as HTMLSpanElement;
 const canvas = document.getElementById("aquarium") as HTMLCanvasElement;
@@ -24,12 +44,6 @@ if (!gl) throw new Error("WebGL2 context unavailable");
 let viewW = 0;
 let viewH = 0;
 function resize(): void {
-  // S22: cap DPR at 2 to avoid 3× pixel overdraw on 3× displays.
-  // WebGL2 uses gl.viewport against canvas.width/.height (physical px);
-  // viewW/viewH stay in CSS px so camera/cursor math is consistent.
-  // Read clientWidth/Height (not window.inner*) so we honor the CSS-applied
-  // width — when the settings overlay is open it pushes the canvas to the
-  // left of the reserved overlay column.
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   viewW = canvas.clientWidth || window.innerWidth;
   viewH = canvas.clientHeight || window.innerHeight;
@@ -39,34 +53,23 @@ function resize(): void {
 window.addEventListener("resize", resize);
 resize();
 
-/** Open or close the right-edge settings overlay. Shifts the game canvas to
- *  the left of the reserved column (no overlap with the simulation view)
- *  and re-runs `resize()` so the WebGL backbuffer matches the new client size. */
+/** Open or close the right-edge settings overlay. */
 export function setSettingsOpen(open: boolean): void {
   const overlay = document.getElementById("settings-overlay") as HTMLElement | null;
   if (!overlay) return;
   overlay.style.display = open ? "block" : "none";
   document.body.classList.toggle("settings-open", open);
-  // Defer to next frame so the layout change is committed before we sample
-  // canvas.clientWidth.
   requestAnimationFrame(resize);
 }
 export function isSettingsOpen(): boolean {
   return document.body.classList.contains("settings-open");
 }
 
-// Sim pacing: a play/pause toggle plus a target ticks/sec input. The frame
-// loop accumulates a fractional tick budget so ticks are spread evenly
-// across rAF frames instead of bursting at the start of a wall-clock second.
-// targetTPS is hydrated from persisted settings so user choice survives reload.
+// Pacing controls — TPS dropdown + play/pause toggle. Both forward to the
+// sim worker via SimBridge messages; the worker owns the actual tick loop.
 let paused = false;
 let targetTPS = getSettings().targetTPS;
-let tickBudget = 0;
-const MAX_TICKS_PER_FRAME = 2000;
-const MAX_FRAME_DELTA_MS = 100; // cap so tab-blur doesn't queue a tick tsunami.
 
-// The upkeep slider's /sec readout depends on the targetTPS, so the TPS
-// input notifies the dev panel to refresh that readout when it changes.
 let onTpsChange: ((tps: number) => void) | null = null;
 export function setTpsChangeListener(fn: (tps: number) => void): void {
   onTpsChange = fn;
@@ -75,186 +78,120 @@ export function getTargetTPS(): number {
   return targetTPS;
 }
 
+// Latest snapshot received from the sim worker. The first one lands as part
+// of the boot handshake (worker runs one tick before posting boot_ready), so
+// the first RAF after boot is guaranteed to see a valid snapshot. (gotcha 1)
+let latestSnapshot: SimReplySnapshot | null = null;
+let cachedSeed = "";
 
 async function main(): Promise<void> {
-  await init();
-
-  // Threads: spin up the rayon worker pool BEFORE any WorldHandle is
-  // constructed so the first tick gets parallelism. SAB feature-detect:
-  // browsers without SharedArrayBuffer skip initThreadPool — the wasm
-  // still works, just sequentially (rayon falls back to the calling
-  // thread when no workers are registered). See docs/plans/perf-4-threads.md.
-  //
-  // Logging: print a single line summary so the user can see at a glance
-  // whether threads spun up. `crossOriginIsolated` is the canonical
-  // "SAB actually works here" signal — COOP/COEP headers must reach the
-  // top-level document for it to be true.
-  const hwConc = navigator.hardwareConcurrency;
+  // crossOriginIsolated drives the threaded-build decision on the worker side;
+  // we still log it on main so the existing diagnostic line survives.
   const sabAvail = typeof SharedArrayBuffer !== "undefined";
   const isolated =
     (globalThis as unknown as { crossOriginIsolated?: boolean }).crossOriginIsolated ?? false;
-  if (sabAvail && initThreadPool) {
-    try {
-      await initThreadPool(hwConc);
-      console.log(
-        `[threads] pool ready: hardwareConcurrency=${hwConc} crossOriginIsolated=${isolated}`,
-      );
-    } catch (e) {
-      console.warn("[threads] initThreadPool failed; continuing single-threaded:", e);
-    }
-  } else {
-    console.warn(
-      `[threads] not spawned. SharedArrayBuffer=${sabAvail} initThreadPool=${!!initThreadPool} crossOriginIsolated=${isolated}`,
-    );
-  }
+  console.log(
+    `[threads] main thread: SharedArrayBuffer=${sabAvail} crossOriginIsolated=${isolated}`,
+  );
 
   const params = new URLSearchParams(window.location.search);
-  // Cap seed param length to prevent oversized inputs (S15).
-  const urlSeed = (params.get("seed") ?? "").slice(0, 128) || null;
+  const urlSeed = (params.get("seed") ?? "").slice(0, 128) || "";
 
-  // `world` is mutable so the restart button can swap in a fresh WorldHandle
-  // without re-installing UI. All subsystems that need the current world
-  // either get it as a parameter each frame (pollRail, renderWorld) or
-  // capture the `getWorld` getter below (which always returns the latest).
-  let world: WorldHandle = WorldHandle.newWithFounderCount(
-    urlSeed ?? "",
-    getInitialGrassSeedCount(),
-    getEnergyMax(),
-    getFounderCount(),
-  );
-  // Push every persisted slider into the freshly-constructed world. The ctor
-  // only takes 4 args (seed/grass/energy/founders); everything else stayed at
-  // Rust defaults until the user touched the slider or hit restart.
-  reapplyDevSliders(world);
-  const getWorld = (): WorldHandle => world;
-  // Debug hook: expose the live world on `window.__world` so headless probes
-  // (and the JS console) can poke at the sim state directly.
-  (window as unknown as { __world: WorldHandle }).__world = world;
+  // Spawn the sim worker. v1.6 Wave B: `worker: { format: "es" }` is already
+  // set in vite.config.ts (originally for wasm-bindgen-rayon); we piggyback.
+  let simBridge = await spawnSimWorker(urlSeed);
 
-  // S22: cache seed once per world lifetime (world.seed is a getter that
-  // allocates a new String each call; no need to call it per frame).
-  let cachedSeed = world.seed;
-
-  const stride = creature_stride();
-  const cam = makeCamera(world.world_size);
+  // Camera is sized by world_size received in boot_ready; cachedSeed is set
+  // from the same handshake. Both are set inside spawnSimWorker → bootReady.
+  const cam = makeCamera(latestSnapshotWorldSize());
   attachCameraControls(
     canvas,
     cam,
     () => ({ w: viewW, h: viewH }),
-    () => world.world_size,
+    () => latestSnapshotWorldSize(),
   );
 
-  status.textContent = `seed: ${cachedSeed}  ·  tick 0  ·  pop ${world.population}`;
+  status.textContent = `seed: ${cachedSeed}  ·  tick 0  ·  pop ${latestSnapshot?.pop ?? 0}`;
 
-  // Top-bar pacing controls + restart.
-  installPacingControls();
+  installPacingControls(() => simBridge);
   installRestartButton(() => restart());
 
-  // E.21: install right rail.
-  const rail = installRail(world);
+  const rail = installRail();
 
-  // E.24: canvas click → inspector.
-  installCanvasClickHandler(canvas, cam, () => ({ w: viewW, h: viewH }), getWorld, rail);
+  installCanvasClickHandler(canvas, cam, () => ({ w: viewW, h: viewH }), simBridge, rail);
 
-  // Profiler: attach world after construction so the TS profiler can
-  // forward enable/disable calls to the Rust side (D1, D9).
-  attachProfiler(getWorld);
+  // The TS-side profiler can no longer toggle the Rust profiler via a
+  // WorldHandle — main holds none. `attachProfiler` is now a no-op since the
+  // sim worker drives `profile_enable` directly when the checkbox toggles.
+  // Skip attaching; perf-panel.ts wires the toggle to the SimBridge.
 
-  // Perf-timing: install the Stats-panel toggle + 1Hz polling loop.
-  installProfilerPanel(getWorld);
+  installProfilerPanel(simBridge);
 
-  // P3b: dev panel overlay (sliders, ~ hotkey, ⚙ button).
-  installDevPanel(getWorld);
+  installDevPanel(simBridge);
 
-  // v1.5: right-edge settings overlay toggle (⚙ button + close button).
   installSettingsToggle();
 
-  function restart(): void {
-    const oldWorld = world;
-    // New random seed each restart (empty string → random per build).
-    world = WorldHandle.newWithFounderCount("", getInitialGrassSeedCount(), getEnergyMax(), getFounderCount());
-    (window as unknown as { __world: WorldHandle }).__world = world;
-    cachedSeed = world.seed;
-    // Re-apply the user's current dev-slider tweaks; `initialGrassSeedCount`
-    // is already baked into world construction above.
-    reapplyDevSliders(world);
-    // Clear UI state that referenced creatures from the old world.
+  async function restart(): Promise<void> {
+    const oldBridge = simBridge;
+    simBridge = await spawnSimWorker("");
+    // After the new worker's first snapshot lands, drop the old one.
+    oldBridge.terminate();
+    // Reset per-world UI state so stale ids don't linger across worlds.
     resetStats();
     resetInspectorSelection(rail);
     highlights.clear();
-    // Free the old world's wasm memory.
-    oldWorld.free();
   }
 
   // Restart hotkey: "r" (ignored when focus is in an input/textarea).
   window.addEventListener("keydown", (e) => {
     if (e.key !== "r" && e.key !== "R") return;
-    if (e.ctrlKey || e.metaKey || e.altKey) return; // don't hijack Ctrl-R
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
     if (e.target instanceof HTMLInputElement) return;
     if (e.target instanceof HTMLTextAreaElement) return;
     e.preventDefault();
-    restart();
+    void restart();
   });
 
-  // Sim + render loop.
-  let lastRender = performance.now();
-  // S22: throttle status DOM updates to 5 Hz (200 ms gate).
+  // Auto-restart trigger latch — guards against the brief gap between
+  // observing `world_ended` and the new worker's boot_ready landing.
+  let autoRestartPending = false;
+
+  // Render loop.
   let lastStatusUpdate = 0;
   function frame(now: number): void {
     const frameSpan = span("frame");
     try {
-      const rawDelta = now - lastRender;
-      lastRender = now;
-      // Clamp delta so a hidden/blurred tab doesn't queue thousands of ticks
-      // on resume. Drop any pent-up budget on resume from paused.
-      const delta = Math.min(rawDelta, MAX_FRAME_DELTA_MS);
-
-      // S22: hoist world_ended once per RAF frame (was called 3× per frame).
-      let ended = world.world_ended;
-
-      // Auto-restart: when the world has ended and the user has auto-run on,
-      // spawn a fresh world right away so the sim never stalls. The new
-      // world inherits the user's slider state (via reapplyDevSliders).
-      if (ended && !paused && getSettings().autoRun) {
-        restart();
-        ended = world.world_ended; // false on a fresh world
+      const snap = latestSnapshot;
+      if (!snap) {
+        // boot_ready hasn't landed yet (or restart in flight). Skip render
+        // this frame; the previous backbuffer remains visible.
+        return;
       }
 
-      let ticksThisFrame = 0;
-      if (paused || ended) {
-        tickBudget = 0;
-      } else {
-        tickBudget += targetTPS * (delta / 1000);
-        if (tickBudget > MAX_TICKS_PER_FRAME) {
-          // Cap one frame's worth; the rest of the backlog is dropped (we
-          // don't try to "catch up" if the target rate exceeds what the
-          // browser can deliver in real time).
-          tickBudget = MAX_TICKS_PER_FRAME;
-        }
-        ticksThisFrame = Math.floor(tickBudget);
-        tickBudget -= ticksThisFrame;
+      if (snap.world_ended && !paused && getSettings().autoRun && !autoRestartPending) {
+        autoRestartPending = true;
+        void restart().then(() => {
+          autoRestartPending = false;
+        });
       }
 
-      if (ticksThisFrame > 0) {
-        timed("step_n", () => world.step_n(ticksThisFrame));
-      }
+      const simSnap: SimSnapshot = {
+        creatures: snap.creatures as unknown as Float32Array,
+        ids: snap.ids,
+        grass: snap.grass,
+        pop: snap.pop,
+        world_size: latestSnapshotWorldSize(),
+        grass_dim: latestGrassDim,
+      };
 
-      // Fetch ids buffer once per frame (index-aligned with creatures_buffer).
-      const ids = world.creature_ids_buffer() as unknown as Float64Array;
+      pollRail(rail, snap, simBridge);
+      renderWorld(gl!, cam, viewW, viewH, simSnap, highlights, now);
 
-      // E.23/E.24: poll the rail (highlights, stats, inspector).
-      // S18: ids no longer passed to pollRail (inspector uses creature_idx_by_id instead).
-      timed("pollRail", () => pollRail(rail, world));
-
-      timed("renderWorld", () =>
-        renderWorld(gl!, cam, viewW, viewH, world, stride, ids, highlights, now));
-
-      // S22: throttle status DOM updates to 5 Hz (200 ms gate).
       if (now - lastStatusUpdate > 200) {
         lastStatusUpdate = now;
-        const endedSuffix = ended ? "  (world ended)" : "";
+        const endedSuffix = snap.world_ended ? "  (world ended)" : "";
         status.textContent =
-          `seed: ${cachedSeed}  ·  tick ${world.tick}  ·  pop ${world.population}${endedSuffix}`;
+          `seed: ${cachedSeed}  ·  tick ${snap.tick}  ·  pop ${snap.pop}${endedSuffix}`;
       }
     } finally {
       frameSpan.close();
@@ -264,7 +201,73 @@ async function main(): Promise<void> {
   requestAnimationFrame(frame);
 }
 
-function installPacingControls(): void {
+// ─── Worker spawn / boot handshake ──────────────────────────────────────────
+
+// Held outside spawnSimWorker so render loop can read after handshake.
+let latestWorldSize = 0;
+let latestGrassDim = 0;
+function latestSnapshotWorldSize(): number {
+  return latestWorldSize;
+}
+
+async function spawnSimWorker(seed: string): Promise<SimBridge> {
+  const w = new Worker(new URL("./sim-worker.ts", import.meta.url), { type: "module" });
+  const bridge = new SimBridge(w);
+
+  bridge.onSnapshot((snap) => {
+    // Reinterpret `creatures` (delivered as Uint8Array because of the wasm
+    // Float32Array.view cast at the boundary) back to its native typed-array.
+    // Structured clone preserves the underlying ArrayBuffer; we wrap it.
+    const cu = snap.creatures as unknown as Uint8Array;
+    const cf = new Float32Array(cu.buffer, cu.byteOffset, cu.byteLength / 4);
+    (snap as unknown as { creatures: Float32Array }).creatures = cf;
+    latestSnapshot = snap;
+  });
+
+  const bootReady = new Promise<SimReplyBootReady>((resolve) => {
+    bridge.onBootReady((reply) => resolve(reply));
+  });
+
+  // Wave B uses the seed echoed back from the worker for the displayed
+  // `seed:` line. We pass the URL/restart seed in; the worker resolves "" to
+  // a random seed. Main displays whatever it sent; the worker's seed is
+  // captured for parity if it ever differs.
+  // For now we don't have a `seed` field in boot_ready (not in protocol);
+  // fall back to the request seed for the status bar.
+  cachedSeed = seed === "" ? "(random)" : seed;
+
+  bridge.postMessage({
+    kind: "boot",
+    seed,
+    initial_grass_seed_count: getInitialGrassSeedCount(),
+    energy_max: getEnergyMax(),
+    founder_count: getFounderCount(),
+    initial_sliders: currentSliderState(),
+  });
+
+  const ready = await bootReady;
+  // gotcha 5: handshake assertion. Mismatch means Rust constant drifted from
+  // the TS const; only recovery is to rebuild wasm.
+  if (ready.max_pop_for_sab !== MAX_POP_FOR_SAB) {
+    throw new Error(
+      `[boot] max_pop_for_sab mismatch: worker reported ${ready.max_pop_for_sab}, ` +
+      `main expects ${MAX_POP_FOR_SAB}. Rebuild wasm (rustup run nightly wasm-pack ` +
+      `build --target web --out-dir web/wasm --dev --features threads) — ` +
+      `Rust/TS const drift.`,
+    );
+  }
+  latestWorldSize = ready.world_size;
+  latestGrassDim = ready.grass_dim;
+
+  // Push current pacing state to the freshly-booted worker so it matches the
+  // user's last-known dropdown / play-pause state across restarts.
+  bridge.postMessage({ kind: "set_target_tps", tps: targetTPS });
+  bridge.postMessage({ kind: "set_paused", paused });
+
+  return bridge;
+}
+
+function installPacingControls(getBridge: () => SimBridge): void {
   const bar = document.getElementById("top-bar")!;
   const wrap = document.createElement("span");
   wrap.style.marginLeft = "auto";
@@ -277,13 +280,10 @@ function installPacingControls(): void {
   toggle.id = "playpause-btn";
   toggle.title = "Play / pause (space)";
   applyTopbarBtnStyle(toggle);
-  const refreshToggleLabel = (): void => {
-    toggle.textContent = paused ? "▶ play" : "⏸ pause";
-  };
   refreshToggleLabel();
   toggle.onclick = () => {
     paused = !paused;
-    tickBudget = 0;
+    getBridge().postMessage({ kind: "set_paused", paused });
     refreshToggleLabel();
   };
   wrap.appendChild(toggle);
@@ -309,8 +309,6 @@ function installPacingControls(): void {
     opt.textContent = String(v);
     tpsSelect.appendChild(opt);
   }
-  // Snap initial value to the nearest option so persisted values from older
-  // schemas (or odd numbers) still match a dropdown choice.
   const nearest = tpsOptions.reduce((best, v) =>
     Math.abs(v - targetTPS) < Math.abs(best - targetTPS) ? v : best, tpsOptions[2]);
   targetTPS = nearest;
@@ -319,8 +317,8 @@ function installPacingControls(): void {
     const v = Number(tpsSelect.value);
     if (!Number.isFinite(v) || v < 1) return;
     targetTPS = v;
-    tickBudget = 0;
     setSetting("targetTPS", targetTPS);
+    getBridge().postMessage({ kind: "set_target_tps", tps: targetTPS });
     if (onTpsChange) onTpsChange(targetTPS);
   });
   wrap.appendChild(tpsLabel);
@@ -335,9 +333,13 @@ function installPacingControls(): void {
     if (e.target instanceof HTMLTextAreaElement) return;
     e.preventDefault();
     paused = !paused;
-    tickBudget = 0;
+    getBridge().postMessage({ kind: "set_paused", paused });
     refreshToggleLabel();
   });
+
+  function refreshToggleLabel(): void {
+    toggle.textContent = paused ? "▶ play" : "⏸ pause";
+  }
 }
 
 function applyTopbarBtnStyle(btn: HTMLButtonElement): void {

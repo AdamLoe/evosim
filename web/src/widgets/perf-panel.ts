@@ -1,8 +1,10 @@
 // ui-perf: free-standing Perf-timing widget (bottom-left, always visible).
-// Extracted from web/src/rail/stats.ts lines 101–270 (ui-perf plan D3).
-// Builds on the .overlay-widget base class (owned by ui-stats).
+//
+// v1.6 Wave B: polls the sim worker for the bundled profile report
+// (profile + tps + jank + grass counters) instead of calling wasm directly.
+// 1 Hz cadence preserved.
 
-import type { WorldHandle } from "../../wasm/evosim";
+import type { SimBridge } from "../sim-bridge";
 import { setProfilerEnabled, isProfilerEnabled, reportJson as tsPerfReport } from "../perf";
 
 // ─── Profiler panel ───────────────────────────────────────────────────────────
@@ -28,8 +30,20 @@ interface ProfReport {
   tree: ProfNode[];
 }
 
-/** Install the profiler checkbox + table. Call once after world is ready. */
-export function installProfilerPanel(getWorld: () => WorldHandle): void {
+/** Bundled reply from the sim worker's `request_profile_report` handler. */
+interface BundledProfile {
+  profile: ProfReport;
+  tps: number;
+  jank_count: number;
+  live_grass_cell_count: number;
+  total_grass_density: number;
+}
+
+// Latest bundle for tps / jank / grass-counter rendering between polls.
+let lastBundle: BundledProfile | null = null;
+
+/** Install the profiler checkbox + table. Call once after SimBridge is ready. */
+export function installProfilerPanel(simBridge: SimBridge): void {
   const checkbox = document.getElementById("profiler-enable") as HTMLInputElement | null;
   if (!checkbox) return;
 
@@ -37,24 +51,38 @@ export function installProfilerPanel(getWorld: () => WorldHandle): void {
   checkbox.checked = false;
   // D5: initial paint of "enable to record" hint so tbody isn't visually blank.
   clearTable();
-  renderTpsJank(getWorld());
-  renderObsCounters(getWorld());
 
-  // TPS + jank are always visible (independent of profiler enable).
-  // Poll at 1 Hz continuously so numbers stay fresh even when profiler is off.
-  // P3d: observability counters share the same 1 Hz cadence.
-  window.setInterval(() => {
-    renderTpsJank(getWorld());
-    renderObsCounters(getWorld());
-  }, POLL_INTERVAL_MS);
+  // Poll the bundled report at 1 Hz — TPS + jank + grass counters live in
+  // this reply so we don't need a second poller.
+  const poll = async (): Promise<void> => {
+    const raw = await simBridge.requestProfileReport();
+    if (!raw) return;
+    try {
+      lastBundle = JSON.parse(raw) as BundledProfile;
+    } catch (e) {
+      console.warn("profiler: failed to parse bundled report", e);
+      return;
+    }
+    renderTpsJank(lastBundle);
+    renderObsCounters(lastBundle);
+    if (isProfilerEnabled()) {
+      pollAndRenderTree(lastBundle);
+    }
+  };
+
+  // Run once immediately so the panel isn't blank for 1s.
+  void poll();
+  window.setInterval(() => void poll(), POLL_INTERVAL_MS);
 
   checkbox.addEventListener("change", () => {
     const on = checkbox.checked;
     setProfilerEnabled(on);
+    simBridge.postMessage({ kind: "profile_enable", on });
     if (on) {
-      startPolling(getWorld);
+      profilerPollHandle = 1; // sentinel: tree rendering happens inside poll()
+      if (lastBundle) pollAndRenderTree(lastBundle);
     } else {
-      stopPolling();
+      profilerPollHandle = 0;
       clearTable();
     }
   });
@@ -63,59 +91,37 @@ export function installProfilerPanel(getWorld: () => WorldHandle): void {
   const jankReset = document.getElementById("jank-reset") as HTMLButtonElement | null;
   if (jankReset) {
     jankReset.addEventListener("click", () => {
-      const world = getWorld();
-      world.reset_jank();
-      renderTpsJank(world);
+      simBridge.postMessage({ kind: "reset_jank" });
+      if (lastBundle) {
+        lastBundle.jank_count = 0;
+        renderTpsJank(lastBundle);
+      }
     });
   }
 }
 
-function startPolling(getWorld: () => WorldHandle): void {
-  if (profilerPollHandle !== 0) return; // already running
-  profilerPollHandle = window.setInterval(() => {
-    const world = getWorld();
-    pollAndRender(world);
-    renderTpsJank(world);
-    renderObsCounters(world);
-  }, POLL_INTERVAL_MS);
-  // Render once immediately so the table isn't blank for 1s.
-  const world = getWorld();
-  pollAndRender(world);
-  renderTpsJank(world);
-  renderObsCounters(world);
-}
-
-function stopPolling(): void {
-  if (profilerPollHandle !== 0) {
-    clearInterval(profilerPollHandle);
-    profilerPollHandle = 0;
-  }
-}
-
 /** Render TPS rolling average and jank counter into their DOM elements. */
-function renderTpsJank(world: WorldHandle): void {
+function renderTpsJank(bundle: BundledProfile): void {
   const tpsEl = document.getElementById("perf-tps");
   const jankEl = document.getElementById("perf-jank");
   if (tpsEl) {
-    const tps = world.tps;
+    const tps = bundle.tps;
     tpsEl.textContent = tps > 0 ? `${tps.toFixed(1)} TPS` : "— TPS";
   }
   if (jankEl) {
-    jankEl.textContent = `${world.jank_count} jank`;
+    jankEl.textContent = `${bundle.jank_count} jank`;
   }
 }
 
-/** Render P3d observability counters into their DOM elements (1 Hz cadence).
- * D3: mean_nose_count / mean_eye_count removed (genome deleted; body traits are constants).
- */
-function renderObsCounters(world: WorldHandle): void {
+/** Render P3d observability counters into their DOM elements (1 Hz cadence). */
+function renderObsCounters(bundle: BundledProfile): void {
   const grassCellsEl = document.getElementById("perf-grass-cells");
   const grassTotalEl = document.getElementById("perf-grass-total");
   if (grassCellsEl) {
-    grassCellsEl.textContent = `grass cells: ${world.live_grass_cell_count()}`;
+    grassCellsEl.textContent = `grass cells: ${bundle.live_grass_cell_count}`;
   }
   if (grassTotalEl) {
-    grassTotalEl.textContent = `grass total: ${world.total_grass_density().toFixed(1)}`;
+    grassTotalEl.textContent = `grass total: ${bundle.total_grass_density.toFixed(1)}`;
   }
 }
 
@@ -130,17 +136,14 @@ function clearTable(): void {
   if (banner) banner.style.display = "none";
 }
 
-function pollAndRender(world: WorldHandle): void {
+function pollAndRenderTree(bundle: BundledProfile): void {
   if (!isProfilerEnabled()) return;
+  // Reference `profilerPollHandle` so the unused-locals lint stays quiet — it
+  // is a Stage-1 sentinel for "tree rendering is live".
+  void profilerPollHandle;
 
-  let rustReport: ProfReport | null = null;
+  const rustReport = bundle.profile;
   let tsReport: ProfNode | null = null;
-  try {
-    rustReport = JSON.parse(world.profile_report_json()) as ProfReport;
-  } catch (e) {
-    console.warn("profiler: failed to parse Rust report", e);
-    return;
-  }
   try {
     tsReport = JSON.parse(tsPerfReport()) as ProfNode;
   } catch (e) {

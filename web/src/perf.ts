@@ -6,7 +6,9 @@
 // Design: mirrors the Rust Profiler (D1, D6): same ring-buffer-per-node
 // semantics, same JSON shape, same pruning on report. No wasm calls needed.
 
-import type { WorldHandle } from "../wasm/evosim";
+// v1.6 Wave B: this module is purely TS-side. The Rust profiler is enabled
+// via a `profile_enable` postMessage to the sim worker (wired in
+// `web/src/widgets/perf-panel.ts`); main holds no wasm handle.
 
 // ─── Constants (mirror of src/profiler.rs) ────────────────────────────────
 
@@ -36,17 +38,13 @@ const stack: Array<{ nodeId: NodeId; t0: number }> = [];
 
 let enabled = false;
 let epochMs = performance.now();
-let getWorld: (() => WorldHandle) | null = null;
 
 // ─── Public API ───────────────────────────────────────────────────────────
 
-export function attachProfiler(g: () => WorldHandle): void {
-  getWorld = g;
-}
-
 export function setProfilerEnabled(on: boolean): void {
   enabled = on;
-  if (getWorld) getWorld().profile_enable(on);
+  // Rust-side profile_enable lands via a SimBridge postMessage from
+  // `web/src/widgets/perf-panel.ts`; we only toggle the TS-side state here.
   if (on) {
     // Reset epoch on enable so first sample is at t≈0.
     epochMs = performance.now();

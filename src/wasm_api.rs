@@ -659,6 +659,10 @@ impl WorldHandle {
             "curriculum_min_pop" => self.apply_curriculum_min_pop(value.max(0.0) as u32),
             "curriculum_max_pop" => self.apply_curriculum_max_pop(value.max(0.0) as u32),
             "curriculum_min_factor" => self.apply_curriculum_min_factor(value),
+            // v1.6 Wave B: bools ride `set_slider` too (encoded as 0/1) so the
+            // protocol surface stays minimal — no dedicated `set_auto_curriculum`
+            // message kind. Per v1.6-plan.md §"Sim-bridge message protocol".
+            "auto_curriculum" => self.apply_auto_curriculum(value != 0.0),
             _ => return false,
         }
         true
