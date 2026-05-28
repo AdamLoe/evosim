@@ -1,17 +1,18 @@
-// v1.6 Wave C (Stage 2): sim worker with SharedArrayBuffer snapshots.
+// v1.6 Wave D (Stage 3): sim worker with `Atomics.waitAsync` pacing.
 //
-// Replaces Wave B's per-batch `snapshot` postMessage (and the explicit
-// non-shared-ArrayBuffer copy workaround that postMessage required) with a
-// double-buffered SAB write. The sim worker writes the inactive slot, flips
-// `CTRL_CURRENT_SLOT`, then bumps `CTRL_SEQ` so main's render loop can detect
-// a fresh snapshot. Zero structured-clone, zero copy.
+// Replaces Wave C's `setTimeout(0)` pacing with an async futex loop:
+// `await Atomics.waitAsync(ctrl, CTRL_FUTEX, before, timeoutMs).value`. The
+// `await` is what lets the worker event loop run between iterations so
+// `onmessage` callbacks fire — i.e. sliders / pause / restart / inspect
+// messages drain through `messageQueue` at the top of every iteration.
 //
-// Pacing remains `setTimeout(0)` for Wave C — Wave D introduces
-// `Atomics.waitAsync` for accurate high-TPS pacing.
+// **Synchronous `Atomics.wait` is forbidden** in this loop: it blocks the
+// worker event loop and dark-holes every postMessage from main. See
+// `docs/plans/v1.6-plan.md` §"Step D" for the canonical pseudocode.
 //
 // References:
-//   - docs/plans/v1.6-plan.md §"Step C"
-//   - docs/plans/v1.6-implementer-guide.md §"Wave C"
+//   - docs/plans/v1.6-plan.md §"Step D"
+//   - docs/plans/v1.6-implementer-guide.md §"Wave D"
 
 import init, {
   WorldHandle,
@@ -22,6 +23,7 @@ import {
   CONTROL_SAB_I32_LEN,
   CREATURE_SOA_BYTES,
   CTRL_CURRENT_SLOT,
+  CTRL_FUTEX,
   CTRL_SEQ,
   GRASS_BYTES,
   SNAPSHOT_HEADER_BYTES,
@@ -40,6 +42,12 @@ import { span } from "./perf";
 const initThreadPool = (_wasmMod as unknown as Record<string, unknown>)[
   "initThreadPool"
 ] as ((n: number) => Promise<void>) | undefined;
+
+// Wave D: rayon thread-count probe. Always exported (returns 1 on non-threaded
+// builds), so the cast is just to dodge TS narrowing through wildcard import.
+const rayonCurrentNumThreads = (_wasmMod as unknown as Record<string, unknown>)[
+  "rayon_current_num_threads"
+] as (() => number) | undefined;
 
 // ─── Worker-local state ─────────────────────────────────────────────────────
 
@@ -113,6 +121,22 @@ async function handleBoot(boot: SimMessageBoot): Promise<void> {
     );
   }
 
+  // Wave D footgun defense: even if `initThreadPool` resolved, rayon may have
+  // silently collapsed to one worker (v1.5 shipped this bug — COOP/COEP fine
+  // on dev but link-args dropped `--shared-memory` on the build). Probe the
+  // actual `rayon::current_num_threads()` value and warn loudly so the
+  // single-threaded mode is observable, not silent.
+  if (rayonCurrentNumThreads) {
+    const actual = rayonCurrentNumThreads();
+    if (actual <= 1) {
+      console.warn(
+        "[sim] rayon collapsed to 1 thread — sim will run single-threaded; " +
+        "check COOP/COEP and build flags",
+      );
+    }
+    threads = actual;
+  }
+
   world = WorldHandle.newWithFounderCount(
     boot.seed,
     boot.initial_grass_seed_count,
@@ -160,9 +184,11 @@ async function handleBoot(boot: SimMessageBoot): Promise<void> {
   };
   post(reply);
 
-  // Kick off the sim loop.
+  // Kick off the sim loop. The async loop body awaits `Atomics.waitAsync`
+  // between iterations, which lets the worker event loop run and `onmessage`
+  // callbacks fill `messageQueue` — Wave D's central correctness property.
   lastLoopMs = performance.now();
-  scheduleNext();
+  void simLoop();
 }
 
 // ─── Message dispatch ───────────────────────────────────────────────────────
@@ -293,44 +319,80 @@ function writeSnapshotToSAB(): void {
   Atomics.add(ctrlI32, CTRL_SEQ, 1);
 }
 
-// ─── Tick loop ──────────────────────────────────────────────────────────────
+// ─── Async tick loop (Wave D `Atomics.waitAsync` pacing) ───────────────────
+//
+// THE most important detail in v1.6: this loop body MUST be `async` and the
+// pacing primitive MUST be `Atomics.waitAsync` (NOT `Atomics.wait`).
+// Synchronous `Atomics.wait` inside a `while` loop blocks the worker event
+// loop, which means `onmessage` callbacks never fire — every slider, pause,
+// restart, and inspect message dark-holes silently. The `await` on the
+// `waitAsync` promise is what allows the event loop to run between
+// iterations so messages reach `messageQueue` before the next `drainMessages`.
+//
+// `messageQueue` is filled by the top-of-file `self.onmessage` handler;
+// `drainMessages` runs at the TOP of every iteration so a slider sent at
+// tick T takes effect for tick T+1 deterministically (slider drain ordering,
+// v1.6-plan.md locked decision 13).
 
-function step(): void {
-  if (!world) return;
-  drainMessages();
+async function simLoop(): Promise<void> {
+  // Loop terminates only via `worker.terminate()` (main's restart path).
+  // No "terminated" flag — the worker is destroyed wholesale on restart.
+  // We must guard on `world` because boot may not have completed before the
+  // first message arrives (race-safe: drainMessages returns early then too).
+  while (world !== null && ctrlI32 !== null) {
+    drainMessages();
 
-  const now = performance.now();
-  const rawDelta = now - lastLoopMs;
-  lastLoopMs = now;
-  const delta = Math.min(rawDelta, MAX_FRAME_DELTA_MS);
+    const now = performance.now();
+    const rawDelta = now - lastLoopMs;
+    lastLoopMs = now;
+    const delta = Math.min(rawDelta, MAX_FRAME_DELTA_MS);
 
-  let ticksThisIter = 0;
-  const ended = world.world_ended;
-  if (paused || ended) {
-    tickBudget = 0;
-  } else {
-    tickBudget += targetTPS * (delta / 1000);
-    if (tickBudget > MAX_TICKS_PER_BATCH) tickBudget = MAX_TICKS_PER_BATCH;
-    ticksThisIter = Math.floor(tickBudget);
-    tickBudget -= ticksThisIter;
+    let ticksThisIter = 0;
+    const ended = world.world_ended;
+    if (paused || ended) {
+      tickBudget = 0;
+    } else {
+      // Fractional-budget accumulator — same math `web/src/main.ts:222-232`
+      // used pre-decoupling. Replaces Wave C's `setTimeout(0)`-paced
+      // single-tick stepping (which capped near ~250 TPS due to Chrome's
+      // 4 ms `setTimeout` minimum).
+      tickBudget += targetTPS * (delta / 1000);
+      if (tickBudget > MAX_TICKS_PER_BATCH) tickBudget = MAX_TICKS_PER_BATCH;
+      ticksThisIter = Math.floor(tickBudget);
+      tickBudget -= ticksThisIter;
+    }
+
+    if (ticksThisIter > 0) {
+      world.step_n(ticksThisIter);
+      writeSnapshotToSAB();
+    } else if (paused || ended) {
+      // Cheap: write a fresh snapshot so main paints the latest paused/ended
+      // state. Only fires when ticksThisIter === 0 anyway, and when paused
+      // we'll park on `Atomics.waitAsync(Infinity)` immediately after.
+      writeSnapshotToSAB();
+    }
+
+    // Pacing wait. When paused, sleep indefinitely so we don't burn CPU on
+    // snapshot churn nobody's reading — main's `set_paused(false)` notifies
+    // the futex via SimBridge.postMessage to wake us. When running, sleep
+    // for whatever budget remains in this tick's wall-clock slice.
+    const elapsedThisIter = performance.now() - now;
+    const timeoutMs = paused
+      ? Infinity
+      : Math.max(0, 1000 / targetTPS - elapsedThisIter);
+    const before = Atomics.load(ctrlI32, CTRL_FUTEX);
+    const r = Atomics.waitAsync(ctrlI32, CTRL_FUTEX, before, timeoutMs);
+    if (r.async) {
+      // Standard path: park until a notify, a futex mutation, or the timeout
+      // elapses. The `await` is the load-bearing event-loop yield — without
+      // it, `onmessage` would never fire.
+      await r.value;
+    }
+    // r.async === false ⇒ "not-equal" (main mutated CTRL_FUTEX between our
+    // `Atomics.load(before)` and `waitAsync`) — fall straight through to the
+    // next iteration; the message that bumped the futex is already in the
+    // queue and `drainMessages` will pick it up.
   }
-
-  if (ticksThisIter > 0) {
-    world.step_n(ticksThisIter);
-    writeSnapshotToSAB();
-  } else if (paused || ended) {
-    // No tick this iter, but write a fresh snapshot anyway so main sees the
-    // most recent paused/ended state without staring at stale data. Cheap;
-    // only fires when ticksThisIter === 0.
-    writeSnapshotToSAB();
-  }
-
-  scheduleNext();
-}
-
-function scheduleNext(): void {
-  // Stage 2 pacing: setTimeout(0). Wave D replaces with `Atomics.waitAsync`.
-  setTimeout(step, 0);
 }
 
 // Entrypoint: boot is dispatched via the top-of-file `self.onmessage` handler.

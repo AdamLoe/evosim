@@ -210,7 +210,7 @@ async function main(): Promise<void> {
         });
       }
 
-      pollRail(rail, header, simBridge);
+      pollRail(rail, header, simBridge, creatures, pop);
       renderWorld(
         gl!,
         cam,
@@ -304,6 +304,14 @@ async function spawnSimWorker(seed: string): Promise<SimBridge> {
   snapshotView = new DataView(snapshotSab);
   latestWorldSize = ready.world_size;
   latestGrassDim = ready.grass_dim;
+
+  // Wave D: wire the control SAB into the bridge so subsequent postMessage
+  // calls also notify the worker's futex (CTRL_FUTEX). Without this, the
+  // worker would still wake on JS event-loop ticks (incoming messages do
+  // post a task), but the futex notify is what lets a sleeping worker park
+  // cheaply on `Atomics.waitAsync(Infinity)` while paused and still respond
+  // immediately to set_paused(false).
+  bridge.attachControlSab(controlSab);
 
   // Push current pacing state to the freshly-booted worker so it matches the
   // user's last-known dropdown / play-pause state across restarts.

@@ -693,6 +693,26 @@ pub fn max_pop_for_sab() -> u32 {
     MAX_POP_FOR_SAB as u32
 }
 
+/// v1.6 Wave D: runtime rayon thread-count probe. The sim worker calls this
+/// once at boot, immediately after the threaded pool init resolves, and
+/// `console.warn`s if the value is `<= 1` — surfacing the v1.5 silent
+/// single-thread footgun (a threaded build that nonetheless collapses to one
+/// worker because COOP/COEP headers or `--features threads` weren't applied
+/// end-to-end).
+///
+/// Returns `1` on non-threaded builds (the sequential pass owns the only worker).
+#[cfg(feature = "threads")]
+#[wasm_bindgen]
+pub fn rayon_current_num_threads() -> u32 {
+    rayon::current_num_threads() as u32
+}
+
+#[cfg(not(feature = "threads"))]
+#[wasm_bindgen]
+pub fn rayon_current_num_threads() -> u32 {
+    1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
