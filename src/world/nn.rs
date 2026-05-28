@@ -61,7 +61,8 @@ impl World {
                         debug_assert_eq!(vx_sub.len(), arg_sub.len());
 
                         let mut input_buf = [0.0f32; NN_INPUTS];
-                        let mut hidden_buf = [0.0f32; NN_HIDDEN];
+                        let mut hidden_buf_1 = [0.0f32; NN_HIDDEN_1];
+                        let mut hidden_buf_2 = [0.0f32; NN_HIDDEN_2];
                         let mut output_buf = [0.0f32; NN_OUTPUTS];
                         let lo = chunk_idx * chunk_size;
 
@@ -75,7 +76,8 @@ impl World {
                             let (vx, vy, action, argmax_pre) = pick_action_d(
                                 i,
                                 &mut input_buf,
-                                &mut hidden_buf,
+                                &mut hidden_buf_1,
+                                &mut hidden_buf_2,
                                 &mut output_buf,
                                 creatures_ref,
                                 &vision_ref[i],
@@ -112,7 +114,8 @@ impl World {
             let split_threshold = self.sliders.split_threshold;
             for &(lo, hi) in ranges {
                 let mut input_buf = [0.0f32; NN_INPUTS];
-                let mut hidden_buf = [0.0f32; NN_HIDDEN];
+                let mut hidden_buf_1 = [0.0f32; NN_HIDDEN_1];
+                let mut hidden_buf_2 = [0.0f32; NN_HIDDEN_2];
                 let mut output_buf = [0.0f32; NN_OUTPUTS];
                 for i in lo..hi {
                     let prev_vx = self.creatures.vx[i];
@@ -120,7 +123,8 @@ impl World {
                     let (vx, vy, action, argmax_pre) = pick_action_d(
                         i,
                         &mut input_buf,
-                        &mut hidden_buf,
+                        &mut hidden_buf_1,
+                        &mut hidden_buf_2,
                         &mut output_buf,
                         &self.creatures,
                         &self.vision[i],
@@ -338,7 +342,8 @@ pub(crate) fn decode_action(
 pub(crate) fn pick_action_d(
     i: usize,
     input_buf: &mut [f32; NN_INPUTS],
-    hidden_buf: &mut [f32; NN_HIDDEN],
+    hidden_buf_1: &mut [f32; NN_HIDDEN_1],
+    hidden_buf_2: &mut [f32; NN_HIDDEN_2],
     output_buf: &mut [f32; NN_OUTPUTS],
     creatures: &CreatureSoA,
     vision: &VisionBuf,
@@ -349,12 +354,11 @@ pub(crate) fn pick_action_d(
     split_threshold: f32,
 ) -> (f32, f32, Action, u8) {
     *input_buf = build_nn_input(i, creatures, vision, grass, prev_vx, prev_vy, energy_max);
-    creatures.brains[i].forward(input_buf, output_buf, hidden_buf);
+    creatures.brains[i].forward(input_buf, output_buf, hidden_buf_1, hidden_buf_2);
 
-    // Velocity: tanh(out[0..2]) × MOVE_SPEED_MAX (v6 §E).
-    // D3: move speed is a constant — no per-creature g_move_speed mirror.
-    let vx = output_buf[0].tanh() * MOVE_SPEED_MAX;
-    let vy = output_buf[1].tanh() * MOVE_SPEED_MAX;
+    // Velocity: out[0..2] are already tanh-activated in Brain::forward (S5a).
+    let vx = output_buf[0] * MOVE_SPEED_MAX;
+    let vy = output_buf[1] * MOVE_SPEED_MAX;
 
     // Action: valid-fallthrough argmax over logits out[2..5] (3 action logits).
     let logits: &[f32; 3] = output_buf[2..5].try_into().unwrap();
@@ -742,7 +746,8 @@ mod tests {
 
         // pick_action_d: when output_buf[2..5] has NaN the returned velocity must be 0.
         let input_buf = [0.0f32; NN_INPUTS];
-        let hidden_buf = [0.0f32; NN_HIDDEN];
+        let hidden_buf_1 = [0.0f32; NN_HIDDEN_1];
+        let hidden_buf_2 = [0.0f32; NN_HIDDEN_2];
         let mut output_buf = [0.0f32; NN_OUTPUTS];
         // Inject NaN into logit slots.
         output_buf[2] = f32::NAN;
@@ -750,12 +755,13 @@ mod tests {
         let logits: &[f32; 3] = output_buf[2..5].try_into().unwrap();
         let had_nan = logits.iter().any(|v| !v.is_finite());
         assert!(had_nan, "test setup: NaN must be detected");
-        // Simulate the velocity fallback.
+        // Simulate the velocity fallback. S5a: out[0..2] are tanh-activated inside
+        // Brain::forward, so the non-NaN branch only multiplies by MOVE_SPEED_MAX.
         let (vx, vy, action) = if had_nan {
             (0.0_f32, 0.0_f32, Action::Graze)
         } else {
-            let vx = output_buf[0].tanh() * MOVE_SPEED_MAX;
-            let vy = output_buf[1].tanh() * MOVE_SPEED_MAX;
+            let vx = output_buf[0] * MOVE_SPEED_MAX;
+            let vy = output_buf[1] * MOVE_SPEED_MAX;
             let w = World::new("s5-nan");
             let act = decode_action(logits, w.creatures.energy[0], 0, SPLIT_THRESHOLD);
             (vx, vy, act)
@@ -765,7 +771,8 @@ mod tests {
         assert_eq!(vy, 0.0, "had_nan path must zero vy");
         // Suppress unused-variable warnings from the buffers we allocated above.
         let _ = &input_buf;
-        let _ = &hidden_buf;
+        let _ = &hidden_buf_1;
+        let _ = &hidden_buf_2;
     }
 
     // ---- P2d grass-patch NN input tests ----

@@ -1,8 +1,9 @@
-//! Brain — fixed-shape NN: 112 inputs → 24 hidden (ReLU) → 5 outputs (v1.3 D9).
+//! Brain — fixed-shape NN: 112 inputs → 48 → 24 (Leaky ReLU) → 5 outputs (v1.5 S5a).
 //!
-//! Milestone D: SIMD forward pass (`wide::f32x8`) + geometric-skip mutation
-//! per v5 §5.3 / v6 §E. Weight layout: row-major, hidden-unit-contiguous
-//! (see D.15 spec and DECISIONS).
+//! 3-matmul pyramid, SIMD forward pass (`wide::f32x8`), geometric-skip mutation
+//! per v5 §5.3 / v6 §E. Weight layout: row-major, hidden-unit-contiguous.
+//! Leaky ReLU (slope 0.01) in hidden layers — sign-preservation gives smoother
+//! mutation fitness than ReLU under no-gradient evolution.
 
 use crate::constants::*;
 use crate::rng::SimRng;
@@ -11,41 +12,68 @@ use wide::f32x8;
 
 // Compile-time layout assertions.
 const _: () = assert!(NN_INPUTS == 112);
-const _: () = assert!(NN_HIDDEN == 24);
+const _: () = assert!(NN_HIDDEN_1 == 48);
+const _: () = assert!(NN_HIDDEN_2 == 24);
 const _: () = assert!(NN_OUTPUTS == 5);
 const _: () = assert!(
     NN_INPUTS.is_multiple_of(8),
     "NN_INPUTS must be multiple of 8 for SIMD chunks"
 );
 const _: () = assert!(
-    NN_HIDDEN.is_multiple_of(8),
-    "NN_HIDDEN must be multiple of 8 for output matmul"
+    NN_HIDDEN_1.is_multiple_of(8),
+    "NN_HIDDEN_1 must be multiple of 8 for layer-2 matmul"
+);
+const _: () = assert!(
+    NN_HIDDEN_2.is_multiple_of(8),
+    "NN_HIDDEN_2 must be multiple of 8 for output matmul"
 );
 // NOTE: NN_OUTPUTS (5) does NOT need SIMD alignment — only row stride matters.
-const _: () = assert!(NN_WEIGHT_COUNT == NN_INPUTS * NN_HIDDEN + NN_HIDDEN * NN_OUTPUTS);
 const _: () = assert!(
-    NN_WEIGHT_COUNT == 2808,
-    "v1.3 D9: NN_WEIGHT_COUNT must be 2808 (112*24 + 24*5)"
+    NN_WEIGHT_COUNT
+        == NN_INPUTS * NN_HIDDEN_1 + NN_HIDDEN_1 * NN_HIDDEN_2 + NN_HIDDEN_2 * NN_OUTPUTS
+);
+const _: () = assert!(
+    NN_WEIGHT_COUNT == 6648,
+    "v1.5 S5a: NN_WEIGHT_COUNT must be 6648 (112*48 + 48*24 + 24*5)"
 );
 
 /// Number of 8-wide SIMD chunks in the input vector (14).
 const INPUT_CHUNKS: usize = NN_INPUTS / 8; // 112/8 = 14
-/// Number of 8-wide SIMD chunks in the hidden vector (3).
-const HIDDEN_CHUNKS: usize = NN_HIDDEN / 8; // 24/8 = 3
+/// Number of 8-wide SIMD chunks in hidden_1 (6).
+const HIDDEN1_CHUNKS: usize = NN_HIDDEN_1 / 8; // 48/8 = 6
+/// Number of 8-wide SIMD chunks in hidden_2 (3).
+const HIDDEN2_CHUNKS: usize = NN_HIDDEN_2 / 8; // 24/8 = 3
+
+/// Weight-vec slice offsets for the three layers.
+const W1_LEN: usize = NN_INPUTS * NN_HIDDEN_1;
+const W2_LEN: usize = NN_HIDDEN_1 * NN_HIDDEN_2;
+
+#[inline]
+fn lrelu(x: f32) -> f32 {
+    x.max(0.01 * x)
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Brain {
-    /// NN weight vector. Length = NN_WEIGHT_COUNT = 2808 (v1.3).
+    /// NN weight vector. Length = NN_WEIGHT_COUNT = 6648 (v1.5 S5a, 112 inputs intact).
     pub weights: Vec<f32>,
     pub nn_mutation_rate: f32,
 }
 
 impl Brain {
-    /// Pure uniform-random init (v1.3 D8: F.30 hardwiring deleted).
+    /// Pure uniform-random init with per-layer He ranges (v1.5 S5a).
     pub fn founder(rng: &mut SimRng) -> Self {
         let mut weights = vec![0.0_f32; NN_WEIGHT_COUNT];
-        for w in &mut weights {
-            *w = rng.uniform(-NN_INIT_RANGE, NN_INIT_RANGE);
+        let (w1, rest) = weights.split_at_mut(W1_LEN);
+        let (w2, w3) = rest.split_at_mut(W2_LEN);
+        for w in w1.iter_mut() {
+            *w = rng.uniform(-NN_INIT_RANGE_L1, NN_INIT_RANGE_L1);
+        }
+        for w in w2.iter_mut() {
+            *w = rng.uniform(-NN_INIT_RANGE_L2, NN_INIT_RANGE_L2);
+        }
+        for w in w3.iter_mut() {
+            *w = rng.uniform(-NN_INIT_RANGE_L3, NN_INIT_RANGE_L3);
         }
         Self {
             weights,
@@ -61,79 +89,97 @@ impl Brain {
         }
     }
 
-    /// SIMD forward pass using `wide::f32x8`.
+    /// SIMD forward pass using `wide::f32x8` — 3-matmul pyramid.
     ///
-    /// Weight layout (row-major, v6 §E / D.15 spec):
-    /// - `weights[0 .. NN_INPUTS*NN_HIDDEN]`: input→hidden, row = hidden unit.
-    ///   `w_ih(h, i) = weights[h * NN_INPUTS + i]`.
-    /// - `weights[NN_INPUTS*NN_HIDDEN ..]`: hidden→output, row = output unit.
-    ///   `w_ho(o, h) = weights[NN_INPUTS*NN_HIDDEN + o * NN_HIDDEN + h]`.
+    /// Weight layout (row-major, hidden-unit-contiguous per layer):
+    /// - `weights[0 .. W1_LEN]`: input → hidden_1, row = hidden_1 unit.
+    /// - `weights[W1_LEN .. W1_LEN+W2_LEN]`: hidden_1 → hidden_2, row = hidden_2 unit.
+    /// - `weights[W1_LEN+W2_LEN ..]`: hidden_2 → output, row = output unit.
     ///
-    /// No biases (spec weight count matches no-bias exactly).
-    /// No activation on outputs (tanh + argmax applied at call site).
+    /// Leaky ReLU after L1 and L2; no activation in L3 (tanh on velocity slots
+    /// applied at call site).
     pub fn forward(
         &self,
         input: &[f32; NN_INPUTS],
         output: &mut [f32; NN_OUTPUTS],
-        hidden: &mut [f32; NN_HIDDEN],
+        hidden_1: &mut [f32; NN_HIDDEN_1],
+        hidden_2: &mut [f32; NN_HIDDEN_2],
     ) {
-        // --- Layer 1: input → hidden (ReLU) ---
-        // 14 SIMD chunks × 24 hidden units.
-        let w_ih = &self.weights[..NN_INPUTS * NN_HIDDEN];
-        for h in 0..NN_HIDDEN {
-            let row = &w_ih[h * NN_INPUTS..h * NN_INPUTS + NN_INPUTS];
+        // --- Layer 1: input → hidden_1 (Leaky ReLU) ---
+        let w1 = &self.weights[..W1_LEN];
+        for h in 0..NN_HIDDEN_1 {
+            let row = &w1[h * NN_INPUTS..h * NN_INPUTS + NN_INPUTS];
             let mut acc = f32x8::ZERO;
             for c in 0..INPUT_CHUNKS {
                 let xv = f32x8::from(&input[c * 8..c * 8 + 8]);
                 let wv = f32x8::from(&row[c * 8..c * 8 + 8]);
                 acc += xv * wv;
             }
-            let sum: f32 = acc.reduce_add();
-            hidden[h] = sum.max(0.0); // ReLU
+            hidden_1[h] = lrelu(acc.reduce_add());
         }
 
-        // --- Layer 2: hidden → output (no activation) ---
-        // 3 SIMD chunks × 5 output units (per-output dot product approach A).
-        let w_ho = &self.weights[NN_INPUTS * NN_HIDDEN..];
-        for o in 0..NN_OUTPUTS {
-            let row = &w_ho[o * NN_HIDDEN..o * NN_HIDDEN + NN_HIDDEN];
+        // --- Layer 2: hidden_1 → hidden_2 (Leaky ReLU) ---
+        let w2 = &self.weights[W1_LEN..W1_LEN + W2_LEN];
+        for h in 0..NN_HIDDEN_2 {
+            let row = &w2[h * NN_HIDDEN_1..h * NN_HIDDEN_1 + NN_HIDDEN_1];
             let mut acc = f32x8::ZERO;
-            for c in 0..HIDDEN_CHUNKS {
-                let hv = f32x8::from(&hidden[c * 8..c * 8 + 8]);
+            for c in 0..HIDDEN1_CHUNKS {
+                let hv = f32x8::from(&hidden_1[c * 8..c * 8 + 8]);
                 let wv = f32x8::from(&row[c * 8..c * 8 + 8]);
                 acc += hv * wv;
             }
-            output[o] = acc.reduce_add();
+            hidden_2[h] = lrelu(acc.reduce_add());
+        }
+
+        // --- Layer 3: hidden_2 → output (tanh on velocity slots only) ---
+        let w3 = &self.weights[W1_LEN + W2_LEN..];
+        for o in 0..NN_OUTPUTS {
+            let row = &w3[o * NN_HIDDEN_2..o * NN_HIDDEN_2 + NN_HIDDEN_2];
+            let mut acc = f32x8::ZERO;
+            for c in 0..HIDDEN2_CHUNKS {
+                let hv = f32x8::from(&hidden_2[c * 8..c * 8 + 8]);
+                let wv = f32x8::from(&row[c * 8..c * 8 + 8]);
+                acc += hv * wv;
+            }
+            let sum = acc.reduce_add();
+            output[o] = if o < 2 { sum.tanh() } else { sum };
         }
     }
 
-    /// Scalar (non-SIMD) forward pass — used as the reference implementation
-    /// in tests to verify SIMD correctness within 1e-5 relative error.
+    /// Scalar (non-SIMD) forward pass — reference implementation for tests.
     #[cfg(test)]
     pub fn forward_scalar(
         &self,
         input: &[f32; NN_INPUTS],
         output: &mut [f32; NN_OUTPUTS],
-        hidden: &mut [f32; NN_HIDDEN],
+        hidden_1: &mut [f32; NN_HIDDEN_1],
+        hidden_2: &mut [f32; NN_HIDDEN_2],
     ) {
-        // Layer 1: input → hidden (ReLU).
-        let w_ih = &self.weights[..NN_INPUTS * NN_HIDDEN];
-        for h in 0..NN_HIDDEN {
+        let w1 = &self.weights[..W1_LEN];
+        for h in 0..NN_HIDDEN_1 {
             let mut sum = 0.0f32;
             for i in 0..NN_INPUTS {
-                sum += input[i] * w_ih[h * NN_INPUTS + i];
+                sum += input[i] * w1[h * NN_INPUTS + i];
             }
-            hidden[h] = sum.max(0.0);
+            hidden_1[h] = lrelu(sum);
         }
 
-        // Layer 2: hidden → output (no activation).
-        let w_ho = &self.weights[NN_INPUTS * NN_HIDDEN..];
+        let w2 = &self.weights[W1_LEN..W1_LEN + W2_LEN];
+        for h in 0..NN_HIDDEN_2 {
+            let mut sum = 0.0f32;
+            for j in 0..NN_HIDDEN_1 {
+                sum += hidden_1[j] * w2[h * NN_HIDDEN_1 + j];
+            }
+            hidden_2[h] = lrelu(sum);
+        }
+
+        let w3 = &self.weights[W1_LEN + W2_LEN..];
         for o in 0..NN_OUTPUTS {
             let mut sum = 0.0f32;
-            for h in 0..NN_HIDDEN {
-                sum += hidden[h] * w_ho[o * NN_HIDDEN + h];
+            for h in 0..NN_HIDDEN_2 {
+                sum += hidden_2[h] * w3[o * NN_HIDDEN_2 + h];
             }
-            output[o] = sum;
+            output[o] = if o < 2 { sum.tanh() } else { sum };
         }
     }
 
@@ -174,12 +220,12 @@ mod tests {
         assert!(b.weights.iter().any(|w| *w != 0.0));
     }
 
-    /// D9: NN_WEIGHT_COUNT == 2808 post-v1.3.
+    /// v1.5 S5a: pyramid topology weight count = 112*48 + 48*24 + 24*5 = 6648.
     #[test]
-    fn nn_weight_count_post_v1_3() {
+    fn nn_weight_count_topology_pyramid() {
         assert_eq!(
-            NN_WEIGHT_COUNT, 2808,
-            "NN_WEIGHT_COUNT must be 112×24 + 24×5 = 2808"
+            NN_WEIGHT_COUNT, 6648,
+            "NN_WEIGHT_COUNT must be 112*48 + 48*24 + 24*5 = 6648"
         );
     }
 
@@ -214,8 +260,8 @@ mod tests {
             .zip(child.weights.iter())
             .filter(|(a, b)| a != b)
             .count();
-        // Expected ≈ 0.1 × 2808 ≈ 281. Just confirm "some but not all".
-        assert!(diffs > 50 && diffs < 600, "diffs = {diffs}");
+        // Expected ≈ 0.1 × 6648 ≈ 665. Just confirm "some but not all".
+        assert!(diffs > 200 && diffs < 1200, "diffs = {diffs}");
     }
 
     #[test]
@@ -228,16 +274,17 @@ mod tests {
         assert_eq!(parent.weights, child.weights);
     }
 
-    // ---- D.15 forward pass tests ----
+    // ---- Forward pass tests ----
 
-    /// D.15 test 1: zero weights → all outputs zero; non-zero weights → all outputs finite.
+    /// Zero weights → all outputs zero; non-zero weights → all outputs finite.
     #[test]
     fn forward_pass_output_shape() {
         let brain = Brain::zero();
         let input = [0.0f32; NN_INPUTS];
         let mut output = [0.0f32; NN_OUTPUTS];
-        let mut hidden = [0.0f32; NN_HIDDEN];
-        brain.forward(&input, &mut output, &mut hidden);
+        let mut h1 = [0.0f32; NN_HIDDEN_1];
+        let mut h2 = [0.0f32; NN_HIDDEN_2];
+        brain.forward(&input, &mut output, &mut h1, &mut h2);
         assert_eq!(output.len(), 5);
         assert!(
             output.iter().all(|&v| v == 0.0),
@@ -249,8 +296,9 @@ mod tests {
         let brain2 = Brain::founder(&mut rng);
         let input2 = [1.0f32; NN_INPUTS];
         let mut out2 = [0.0f32; NN_OUTPUTS];
-        let mut hid2 = [0.0f32; NN_HIDDEN];
-        brain2.forward(&input2, &mut out2, &mut hid2);
+        let mut h1b = [0.0f32; NN_HIDDEN_1];
+        let mut h2b = [0.0f32; NN_HIDDEN_2];
+        brain2.forward(&input2, &mut out2, &mut h1b, &mut h2b);
         assert_eq!(out2.len(), 5);
         assert!(
             out2.iter().all(|&v| v.is_finite()),
@@ -258,31 +306,31 @@ mod tests {
         );
     }
 
-    /// D.15 test 2 (CRITICAL): SIMD and scalar agree within 1e-5 relative error.
+    /// CRITICAL: SIMD and scalar agree within 1e-5 relative error.
     #[test]
     fn forward_pass_matches_scalar_reference() {
         let mut rng = SimRng::from_u64(12345);
         let brain = Brain::founder(&mut rng);
 
-        // Random input in [-1, 1].
         let mut input = [0.0f32; NN_INPUTS];
         for v in &mut input {
             *v = rng.symm();
         }
 
         let mut out_simd = [0.0f32; NN_OUTPUTS];
-        let mut hid_simd = [0.0f32; NN_HIDDEN];
-        brain.forward(&input, &mut out_simd, &mut hid_simd);
+        let mut h1_simd = [0.0f32; NN_HIDDEN_1];
+        let mut h2_simd = [0.0f32; NN_HIDDEN_2];
+        brain.forward(&input, &mut out_simd, &mut h1_simd, &mut h2_simd);
 
         let mut out_scalar = [0.0f32; NN_OUTPUTS];
-        let mut hid_scalar = [0.0f32; NN_HIDDEN];
-        brain.forward_scalar(&input, &mut out_scalar, &mut hid_scalar);
+        let mut h1_scalar = [0.0f32; NN_HIDDEN_1];
+        let mut h2_scalar = [0.0f32; NN_HIDDEN_2];
+        brain.forward_scalar(&input, &mut out_scalar, &mut h1_scalar, &mut h2_scalar);
 
         for o in 0..NN_OUTPUTS {
             let simd = out_simd[o];
             let scalar = out_scalar[o];
             let abs_err = (simd - scalar).abs();
-            // Use relative error; fall back to absolute if scalar is near zero.
             let ref_mag = scalar.abs().max(1e-6);
             let rel_err = abs_err / ref_mag;
             assert!(
@@ -291,57 +339,62 @@ mod tests {
             );
         }
 
-        // Also check hidden layer agreement.
-        for h in 0..NN_HIDDEN {
-            let simd = hid_simd[h];
-            let scalar = hid_scalar[h];
+        for h in 0..NN_HIDDEN_1 {
+            let simd = h1_simd[h];
+            let scalar = h1_scalar[h];
             let abs_err = (simd - scalar).abs();
             let ref_mag = scalar.abs().max(1e-6);
             let rel_err = abs_err / ref_mag;
             assert!(
                 rel_err < 1e-5,
-                "hidden[{h}]: simd={simd}, scalar={scalar}, rel_err={rel_err:.2e}"
+                "hidden_1[{h}]: simd={simd}, scalar={scalar}, rel_err={rel_err:.2e}"
+            );
+        }
+        for h in 0..NN_HIDDEN_2 {
+            let simd = h2_simd[h];
+            let scalar = h2_scalar[h];
+            let abs_err = (simd - scalar).abs();
+            let ref_mag = scalar.abs().max(1e-6);
+            let rel_err = abs_err / ref_mag;
+            assert!(
+                rel_err < 1e-5,
+                "hidden_2[{h}]: simd={simd}, scalar={scalar}, rel_err={rel_err:.2e}"
             );
         }
     }
 
-    /// D.15 test 3: ReLU clips negative hidden pre-activations → zero contribution.
+    /// Leaky ReLU preserves negative pre-activations at 1% slope (vs ReLU's hard zero).
     #[test]
-    fn forward_pass_relu_clips_negative_hidden() {
-        // Craft a brain so hidden unit 0 has strongly negative pre-activation.
-        // All input→hidden row 0 weights = -1.0; input = all +1.0.
-        // Pre-activation = -1 * 160 = -160 → after ReLU = 0.
-        // Then make all hidden→output weights for unit 0 = +100 (large).
-        // If ReLU is correct, the large weights shouldn't affect output.
-        // Compare against a brain with hidden→output row 0 weights = 0.
-        let mut brain_a = Brain::zero();
+    fn forward_pass_lrelu_preserves_negative_with_small_slope() {
+        // Craft hidden_1 unit 0 with strongly negative pre-activation.
+        // Row 0 of w1: all -1.0; input = all +1.0 → pre-activation = -NN_INPUTS = -112.
+        // After lrelu: 0.01 * -112 = -1.12.
+        let mut brain = Brain::zero();
         for i in 0..NN_INPUTS {
-            brain_a.weights[i] = -1.0; // row 0 of w_ih: all -1
+            brain.weights[i] = -1.0;
         }
-        // Set hidden→output weights for hidden unit 0 to +100 in brain_a.
-        let ho_offset = NN_INPUTS * NN_HIDDEN;
-        for o in 0..NN_OUTPUTS {
-            brain_a.weights[ho_offset + o * NN_HIDDEN] = 100.0;
-        }
-
-        let brain_b = Brain::zero(); // all zeros → output zero regardless
 
         let input = [1.0f32; NN_INPUTS];
-        let mut out_a = [0.0f32; NN_OUTPUTS];
-        let mut hid_a = [0.0f32; NN_HIDDEN];
-        brain_a.forward(&input, &mut out_a, &mut hid_a);
+        let mut output = [0.0f32; NN_OUTPUTS];
+        let mut h1 = [0.0f32; NN_HIDDEN_1];
+        let mut h2 = [0.0f32; NN_HIDDEN_2];
+        brain.forward(&input, &mut output, &mut h1, &mut h2);
 
-        let mut out_b = [0.0f32; NN_OUTPUTS];
-        let mut hid_b = [0.0f32; NN_HIDDEN];
-        brain_b.forward(&input, &mut out_b, &mut hid_b);
-
-        // hidden[0] in brain_a should be 0 (ReLU of -160).
-        assert_eq!(hid_a[0], 0.0, "ReLU must clip negative pre-activation to 0");
-        // Since hidden[0] = 0, the large w_ho weights don't contribute.
-        assert_eq!(out_a, out_b, "clipped hidden unit must not affect outputs");
+        let expected = 0.01 * -(NN_INPUTS as f32);
+        let err = (h1[0] - expected).abs();
+        assert!(
+            err < 1e-5,
+            "Leaky ReLU must preserve negative pre-activation at slope 0.01: \
+             hidden_1[0]={} expected={expected}",
+            h1[0]
+        );
+        // Other hidden_1 units have zero row weights → pre-activation 0 → lrelu(0) = 0.
+        for h in 1..NN_HIDDEN_1 {
+            assert_eq!(h1[h], 0.0);
+        }
     }
 
-    /// D.15 test 4: no NaN on extreme inputs (all ±1, weights all 0.3).
+    /// No NaN on extreme inputs.
     #[test]
     fn forward_pass_no_nan_on_extreme_inputs() {
         let mut brain = Brain::zero();
@@ -351,8 +404,9 @@ mod tests {
         for sign in [1.0f32, -1.0f32] {
             let input = [sign; NN_INPUTS];
             let mut output = [0.0f32; NN_OUTPUTS];
-            let mut hidden = [0.0f32; NN_HIDDEN];
-            brain.forward(&input, &mut output, &mut hidden);
+            let mut h1 = [0.0f32; NN_HIDDEN_1];
+            let mut h2 = [0.0f32; NN_HIDDEN_2];
+            brain.forward(&input, &mut output, &mut h1, &mut h2);
             assert!(
                 output.iter().all(|v| v.is_finite()),
                 "NaN/inf on extreme input (sign={sign})"
@@ -360,7 +414,7 @@ mod tests {
         }
     }
 
-    /// D.15 test 5: identical inputs + weights → bit-identical outputs (no RNG / global state).
+    /// Identical inputs + weights → bit-identical outputs (no RNG / global state).
     #[test]
     fn forward_pass_deterministic() {
         let mut rng = SimRng::from_u64(7);
@@ -371,20 +425,20 @@ mod tests {
         }
 
         let mut out1 = [0.0f32; NN_OUTPUTS];
-        let mut hid1 = [0.0f32; NN_HIDDEN];
-        brain.forward(&input, &mut out1, &mut hid1);
+        let mut h1a = [0.0f32; NN_HIDDEN_1];
+        let mut h2a = [0.0f32; NN_HIDDEN_2];
+        brain.forward(&input, &mut out1, &mut h1a, &mut h2a);
 
         let mut out2 = [0.0f32; NN_OUTPUTS];
-        let mut hid2 = [0.0f32; NN_HIDDEN];
-        brain.forward(&input, &mut out2, &mut hid2);
+        let mut h1b = [0.0f32; NN_HIDDEN_1];
+        let mut h2b = [0.0f32; NN_HIDDEN_2];
+        brain.forward(&input, &mut out2, &mut h1b, &mut h2b);
 
         assert_eq!(
             out1, out2,
             "forward pass must be bit-identical on same input"
         );
-        assert_eq!(
-            hid1, hid2,
-            "hidden layer must be bit-identical on same input"
-        );
+        assert_eq!(h1a, h1b, "hidden_1 must be bit-identical on same input");
+        assert_eq!(h2a, h2b, "hidden_2 must be bit-identical on same input");
     }
 }

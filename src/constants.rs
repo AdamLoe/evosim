@@ -45,12 +45,20 @@ pub const CURRICULUM_MAX_POP_DEFAULT: u32 = 2000;
 // Layout: [0..5) self-state, [5..77) vision 24×3, [77..80) last_action 3,
 //         [80..105) grass-patch 5×5, [105..112) padding zeros.
 pub const NN_INPUTS: usize = 112; // v1.3: 5 self-state + 72 vision + 3 last_action + 25 grass-patch + 7 pad
-pub const NN_HIDDEN: usize = 24;
+pub const NN_HIDDEN_1: usize = 48;
+pub const NN_HIDDEN_2: usize = 24;
 pub const NN_OUTPUTS: usize = 5; // out[0]=vx, out[1]=vy, out[2..5]=action logits (Graze/Eat/Split)
-pub const NN_WEIGHT_COUNT: usize = NN_INPUTS * NN_HIDDEN + NN_HIDDEN * NN_OUTPUTS;
+pub const NN_WEIGHT_COUNT: usize =
+    NN_INPUTS * NN_HIDDEN_1 + NN_HIDDEN_1 * NN_HIDDEN_2 + NN_HIDDEN_2 * NN_OUTPUTS;
 pub const NN_MUT_RATE_DEFAULT: f32 = 0.02;
 pub const NN_MUT_SIGMA_DEFAULT: f32 = 0.02;
-pub const NN_INIT_RANGE: f32 = 0.3; // uniform random weight initialisation range
+// Per-layer He-uniform init ranges r = sqrt(6/fan_in). L1's 0.433 is the locked
+// value from the 32-input mission target; kept here even though the transitional
+// 112-input commit's true L1 fan_in would yield ~0.231. Wave C (S5b) drops inputs
+// to 32 and the math aligns.
+pub const NN_INIT_RANGE_L1: f32 = 0.433;
+pub const NN_INIT_RANGE_L2: f32 = 0.354;
+pub const NN_INIT_RANGE_L3: f32 = 0.500;
 
 // ---- Brain mutation (v5 §6; body mutation removed in D3) ----
 pub const MUT_RATE_OF_RATES: f32 = 0.005;
