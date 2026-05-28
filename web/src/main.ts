@@ -76,30 +76,6 @@ export function getTargetTPS(): number {
 }
 
 
-// F.27: seed display + copy button. The getter form lets the copy button
-// (installed once) always copy the *current* world's seed across restarts.
-function installSeedDisplay(getSeed: () => string): void {
-  const valueEl = document.getElementById("seed-value");
-  if (valueEl) valueEl.textContent = getSeed();
-  const btn = document.getElementById("seed-copy-btn") as HTMLButtonElement | null;
-  if (btn) {
-    btn.addEventListener("click", async () => {
-      try {
-        await navigator.clipboard.writeText(getSeed());
-        btn.textContent = "copied";
-        setTimeout(() => (btn.textContent = "copy"), 1200);
-      } catch (e) {
-        console.warn("clipboard copy failed", e);
-      }
-    });
-  }
-}
-
-function updateSeedDisplay(seed: string): void {
-  const valueEl = document.getElementById("seed-value");
-  if (valueEl) valueEl.textContent = seed;
-}
-
 async function main(): Promise<void> {
   await init();
 
@@ -140,10 +116,6 @@ async function main(): Promise<void> {
   // S22: cache seed once per world lifetime (world.seed is a getter that
   // allocates a new String each call; no need to call it per frame).
   let cachedSeed = world.seed;
-
-  // F.27: seed display. The copy button (installed once) reads the current
-  // seed via the getter so it stays correct across restarts.
-  installSeedDisplay(() => cachedSeed);
 
   const stride = creature_stride();
   const cam = makeCamera(world.world_size);
@@ -192,7 +164,6 @@ async function main(): Promise<void> {
     resetStats();
     resetInspectorSelection(rail);
     highlights.clear();
-    updateSeedDisplay(cachedSeed);
     // Free the old world's wasm memory.
     oldWorld.free();
   }

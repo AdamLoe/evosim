@@ -216,27 +216,6 @@ body {
   margin-bottom: 8px;
 }
 
-/* F.27: Seed pill in top bar */
-.seed-pill {
-  margin-left: 12px;
-  padding: 2px 6px;
-  background: rgba(255, 255, 255, 0.06);
-  border-radius: 3px;
-  font-family: ui-monospace, monospace;
-  font-size: 11px;
-  display: inline-flex;
-  gap: 4px;
-  align-items: center;
-}
-#seed-copy-btn {
-  background: transparent;
-  color: var(--fg);
-  border: 0;
-  padding: 0 2px;
-  cursor: pointer;
-  font: inherit;
-}
-
 /* ui-perf: free-standing perf widget (bottom-left, always visible).
    Builds on .overlay-widget (defined by ui-stats). */
 #perf-box {
@@ -348,10 +327,13 @@ body {
   padding: 8px 0;
 }
 
-/* v1.5: Right-edge settings overlay containing the dev panel. */
+/* v1.5: Right-edge settings overlay containing the dev panel. Occupies the
+   full-height column on the right; the top-bar is narrowed via `right:
+   var(--settings-w)` so it sits to the left of the overlay instead of
+   bleeding under it. */
 #settings-overlay {
   position: fixed;
-  top: 36px; /* clear the top-bar */
+  top: 0;
   bottom: 0;
   right: 0;
   width: 320px;
