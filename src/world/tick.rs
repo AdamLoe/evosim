@@ -319,7 +319,11 @@ impl World {
             };
             self.creatures.color_b[i] = (self.creatures.color_b[i] + db).clamp(0.0, 1.0);
 
-            let dr = if self.scratch_got_a_bite[i] { 1.0 } else { -0.01 };
+            let dr = if self.scratch_got_a_bite[i] {
+                1.0
+            } else {
+                -0.01
+            };
             self.creatures.color_r[i] = (self.creatures.color_r[i] + dr).clamp(0.0, 1.0);
         }
     }
