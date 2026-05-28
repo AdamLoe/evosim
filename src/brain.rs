@@ -157,8 +157,12 @@ impl Brain {
             t.forward_l1_us = t
                 .forward_l1_us
                 .saturating_add(l1_end.saturating_sub(l1_start));
-            t.forward_l2_us = t.forward_l2_us.saturating_add(l2_end.saturating_sub(l1_end));
-            t.forward_l3_us = t.forward_l3_us.saturating_add(l3_end.saturating_sub(l2_end));
+            t.forward_l2_us = t
+                .forward_l2_us
+                .saturating_add(l2_end.saturating_sub(l1_end));
+            t.forward_l3_us = t
+                .forward_l3_us
+                .saturating_add(l3_end.saturating_sub(l2_end));
         }
     }
 

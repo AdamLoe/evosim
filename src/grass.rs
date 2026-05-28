@@ -210,8 +210,7 @@ impl GrassGrid {
                         row_body(iy0 + k, s_row);
                     }
                     let body_end = clock_now_us_threadsafe();
-                    row_body_us
-                        .fetch_add(body_end.saturating_sub(body_start), Ordering::Relaxed);
+                    row_body_us.fetch_add(body_end.saturating_sub(body_start), Ordering::Relaxed);
                 });
             let par_end = clock_now_us_threadsafe();
             self.par_chunks_us
