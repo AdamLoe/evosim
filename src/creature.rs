@@ -54,9 +54,12 @@ pub struct CreatureSoA {
     /// Tick at which this creature was born (for lifespan stats).
     pub birth_tick: Vec<u32>,
     pub brains: Vec<Brain>,
-    /// M5: packed 0x00RRGGBB derived from NN weight hash. Hot-mirror of Brain.color_rgb.
-    /// Length invariant: == x.len().
-    pub(crate) color_rgb: Vec<u32>,
+    /// v1.5 S3: per-creature action-EMA color channels in [0, 1].
+    /// Green tracks Graze argmax; red tracks successful bites; blue tracks Split.
+    /// Initialized to 0.0 at birth — color emerges from behavior.
+    pub color_r: Vec<f32>,
+    pub color_g: Vec<f32>,
+    pub color_b: Vec<f32>,
     /// Pre-computed (dx, dy) per sector per creature; interleaved as
     /// [s0_dx, s0_dy, s1_dx, s1_dy, …, s23_dx, s23_dy] per creature.
     /// Length invariant: == x.len() * SECTORS * 2.
@@ -84,7 +87,9 @@ impl CreatureSoA {
             distance_travelled: Vec::with_capacity(cap),
             birth_tick: Vec::with_capacity(cap),
             brains: Vec::with_capacity(cap),
-            color_rgb: Vec::with_capacity(cap),
+            color_r: Vec::with_capacity(cap),
+            color_g: Vec::with_capacity(cap),
+            color_b: Vec::with_capacity(cap),
             eye_trig: Vec::with_capacity(cap * SECTORS * 2),
         }
     }
@@ -127,7 +132,10 @@ impl CreatureSoA {
         self.prev_energy.push(energy);
         self.distance_travelled.push(0.0);
         self.birth_tick.push(birth_tick);
-        self.color_rgb.push(brain.color_rgb); // M5: hot-mirror from Brain
+        // v1.5 S3: color EMA starts at zero — emerges from action history.
+        self.color_r.push(0.0);
+        self.color_g.push(0.0);
+        self.color_b.push(0.0);
         self.brains.push(brain);
         // Extend trig buffer by one chunk of zeros, then populate.
         debug_assert_eq!(
@@ -161,7 +169,9 @@ impl CreatureSoA {
             self.prev_energy.swap_remove(k);
             self.distance_travelled.swap_remove(k);
             self.birth_tick.swap_remove(k);
-            self.color_rgb.swap_remove(k);
+            self.color_r.swap_remove(k);
+            self.color_g.swap_remove(k);
+            self.color_b.swap_remove(k);
             self.brains.swap_remove(k);
             swap_remove_chunk(&mut self.eye_trig, k, SECTORS * 2);
         }
@@ -252,5 +262,21 @@ mod tests {
         assert_eq!(soa.len(), 5);
         soa.remove_indices(&[0, 2]);
         assert_eq!(soa.len(), 3);
+    }
+
+    /// v1.5 S3: color EMA channels initialize to 0.0 at birth.
+    #[test]
+    fn color_ema_zero_at_birth() {
+        let mut soa = CreatureSoA::with_capacity(2);
+        let mut rng = SimRng::from_u64(7);
+        for k in 0u64..3 {
+            let b = Brain::founder(&mut rng);
+            soa.push(k, k as f32, 0.0, 100.0, 0, b);
+        }
+        for i in 0..soa.len() {
+            assert_eq!(soa.color_r[i], 0.0, "color_r[{i}] must be 0 at birth");
+            assert_eq!(soa.color_g[i], 0.0, "color_g[{i}] must be 0 at birth");
+            assert_eq!(soa.color_b[i], 0.0, "color_b[{i}] must be 0 at birth");
+        }
     }
 }

@@ -149,6 +149,11 @@ pub struct World {
     /// Curriculum factor recomputed at the top of each `step()` and applied to
     /// move/eat/upkeep costs. Init 1.0 so pre-tick reads (tests) see "normal".
     pub current_curriculum_factor: f32,
+    /// v1.5 S3: per-creature pre-fallthrough argmax (index of largest action
+    /// logit before validity gating). 0=Graze, 1=Eat, 2=Split. Consumed by the
+    /// color-EMA bookkeeping pass to credit Graze intent even when fallthrough
+    /// landed on a different action.
+    pub(crate) scratch_argmax_pre: Vec<u8>,
 }
 
 impl World {
@@ -217,6 +222,7 @@ impl World {
             scratch_eat_candidates: Vec::new(),
             scratch_dead: Vec::new(),
             current_curriculum_factor: 1.0,
+            scratch_argmax_pre: Vec::new(),
         }
     }
 
@@ -274,6 +280,9 @@ impl World {
             #[cfg(not(feature = "threads"))]
             let workers = 1;
             let ranges = chunk_ranges(n, dynamic_chunks(n, workers));
+            // v1.5 S3: argmax-pre buffer mirrors per-creature output; sized to
+            // match population before the chunked NN pass writes into it.
+            self.scratch_argmax_pre.resize(n, 0);
             self.nn_forward_all_chunks(&ranges, n);
             // Snapshot energy *now* (immediately after NN forward — tick body
             // hasn't run yet, so energy still equals its value at NN input
@@ -328,11 +337,18 @@ impl World {
             // S27: collect_deaths writes into self.scratch_dead (promoted pool).
             self.collect_deaths();
             if !self.scratch_dead.is_empty() {
-                // Mirror swap_remove on vision vec to keep it index-aligned.
+                // Mirror swap_remove on parallel buffers (vision + S3 scratch
+                // columns that need to stay index-aligned through bookkeeping).
                 // Walk from back just like remove_indices does.
                 for &k in self.scratch_dead.iter().rev() {
                     if k < self.vision.len() {
                         self.vision.swap_remove(k);
+                    }
+                    if k < self.scratch_argmax_pre.len() {
+                        self.scratch_argmax_pre.swap_remove(k);
+                    }
+                    if k < self.scratch_got_a_bite.len() {
+                        self.scratch_got_a_bite.swap_remove(k);
                     }
                 }
                 // Use mem::take to avoid borrow conflict: remove_indices takes
@@ -350,10 +366,16 @@ impl World {
             self.handle_births();
         }
 
-        // 12. Step-12 tail: last_action promotion, tick bump, milestone events,
-        //     world-end check. Cheap today (R9: bookkeeping_tail span).
+        // 12. Step-12 tail: last_action promotion, color-EMA update, tick bump,
+        //     milestone events, world-end check.
         {
             crate::profile_span!(&self.profile, "tick.bookkeeping_tail");
+
+            // v1.5 S3: per-creature action-EMA color update.
+            {
+                crate::profile_span!(&self.profile, "tick.color_ema");
+                self.color_ema_update();
+            }
 
             // Promote action chain by one tick:
             //   last2_action ← last_action  (the one-tick-older slot)
@@ -503,6 +525,7 @@ impl World {
             scratch_eat_candidates: Vec::new(),
             scratch_dead: Vec::new(),
             current_curriculum_factor: self.current_curriculum_factor,
+            scratch_argmax_pre: Vec::new(),
         }
     }
 }

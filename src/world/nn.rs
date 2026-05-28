@@ -29,6 +29,8 @@ impl World {
             let mut vx_local = std::mem::take(&mut self.creatures.vx);
             let mut vy_local = std::mem::take(&mut self.creatures.vy);
             let mut act_local = std::mem::take(&mut self.creatures.action_this_tick);
+            // v1.5 S3: argmax-pre column lives on World, not CreatureSoA.
+            let mut argmax_pre_local = std::mem::take(&mut self.scratch_argmax_pre);
 
             {
                 // All &self borrows are now valid because the three detached columns
@@ -44,17 +46,19 @@ impl World {
                 // dynamic chunk count.
                 let chunk_size = chunk_base_size_from_ranges(ranges, n);
 
-                // Tandem disjoint-mut chunks over the three output columns.
-                // zip_eq panics on length mismatch (defensive); all three vecs have
-                // len >= n (invariant on CreatureSoA) so the slices are same-length.
+                // Tandem disjoint-mut chunks over the four output columns.
+                // zip_eq panics on length mismatch (defensive); all four vecs have
+                // len >= n (invariant on CreatureSoA + S3 scratch_argmax_pre sized in step()).
                 vx_local[..n]
                     .par_chunks_mut(chunk_size)
                     .zip(vy_local[..n].par_chunks_mut(chunk_size))
                     .zip(act_local[..n].par_chunks_mut(chunk_size))
+                    .zip(argmax_pre_local[..n].par_chunks_mut(chunk_size))
                     .enumerate()
-                    .for_each(|(chunk_idx, ((vx_sub, vy_sub), act_sub))| {
+                    .for_each(|(chunk_idx, (((vx_sub, vy_sub), act_sub), arg_sub))| {
                         debug_assert_eq!(vx_sub.len(), vy_sub.len());
                         debug_assert_eq!(vx_sub.len(), act_sub.len());
+                        debug_assert_eq!(vx_sub.len(), arg_sub.len());
 
                         let mut input_buf = [0.0f32; NN_INPUTS];
                         let mut hidden_buf = [0.0f32; NN_HIDDEN];
@@ -68,7 +72,7 @@ impl World {
                             // the end-of-last-tick velocity at this point (S23).
                             let prev_vx = vx_sub[k];
                             let prev_vy = vy_sub[k];
-                            let (vx, vy, action) = pick_action_d(
+                            let (vx, vy, action, argmax_pre) = pick_action_d(
                                 i,
                                 &mut input_buf,
                                 &mut hidden_buf,
@@ -84,18 +88,20 @@ impl World {
                             vx_sub[k] = vx;
                             vy_sub[k] = vy;
                             act_sub[k] = action;
+                            arg_sub[k] = argmax_pre;
                         }
                     });
             } // read-only borrows of &self.creatures etc. dropped here
 
-            // Restore the three output columns. The heap buffers were never
-            // freed — only the Vec metadata traveled to the stack. If the
-            // parallel for_each panics, the columns are left as Vec::new()
-            // (the World is poisoned; no further ticks run). No drop-guard added
-            // — consistent with the scratch_neighbors pattern (perf-2 §5).
+            // Restore the output columns. The heap buffers were never freed —
+            // only the Vec metadata traveled to the stack. If the parallel
+            // for_each panics, the columns are left as Vec::new() (the World
+            // is poisoned; no further ticks run). No drop-guard added —
+            // consistent with the scratch_neighbors pattern (perf-2 §5).
             self.creatures.vx = vx_local;
             self.creatures.vy = vy_local;
             self.creatures.action_this_tick = act_local;
+            self.scratch_argmax_pre = argmax_pre_local;
         }
 
         // Sequential fallthrough: runs in default builds only.
@@ -111,7 +117,7 @@ impl World {
                 for i in lo..hi {
                     let prev_vx = self.creatures.vx[i];
                     let prev_vy = self.creatures.vy[i];
-                    let (vx, vy, action) = pick_action_d(
+                    let (vx, vy, action, argmax_pre) = pick_action_d(
                         i,
                         &mut input_buf,
                         &mut hidden_buf,
@@ -127,6 +133,7 @@ impl World {
                     self.creatures.vx[i] = vx;
                     self.creatures.vy[i] = vy;
                     self.creatures.action_this_tick[i] = action;
+                    self.scratch_argmax_pre[i] = argmax_pre;
                 }
             }
         } // end #[cfg(not(feature = "threads"))]
@@ -322,6 +329,11 @@ pub(crate) fn decode_action(
 /// Builds the 112-input vector, runs the SIMD forward pass, decodes velocity
 /// via tanh and action via valid-fallthrough argmax (v1.3 D9).
 /// Movement happens every tick from NN vx/vy regardless of action argmax.
+///
+/// v1.5 S3: returns `(vx, vy, action, argmax_pre)`. `argmax_pre` is the index
+/// (0/1/2) of the highest action logit BEFORE the validity-fallthrough step
+/// — needed so the color EMA can credit Graze intent even when a creature
+/// is in cooldown and falls through to a different action.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn pick_action_d(
     i: usize,
@@ -335,7 +347,7 @@ pub(crate) fn pick_action_d(
     prev_vy: f32,
     energy_max: f32,
     split_threshold: f32,
-) -> (f32, f32, Action) {
+) -> (f32, f32, Action, u8) {
     *input_buf = build_nn_input(i, creatures, vision, grass, prev_vx, prev_vy, energy_max);
     creatures.brains[i].forward(input_buf, output_buf, hidden_buf);
 
@@ -353,6 +365,21 @@ pub(crate) fn pick_action_d(
         logits.iter().all(|v| v.is_finite()),
         "non-finite logits for creature {i}: {logits:?}"
     );
+
+    // v1.5 S3: pre-fallthrough argmax (first-index tiebreak; defaults to 0
+    // when any logit is non-finite — same NaN guard as decode_action).
+    let argmax_pre: u8 = if logits.iter().any(|v| !v.is_finite()) {
+        0
+    } else {
+        let mut best = 0u8;
+        for k in 1u8..3 {
+            if logits[k as usize] > logits[best as usize] {
+                best = k;
+            }
+        }
+        best
+    };
+
     let energy = creatures.energy[i];
     let cooldown = creatures.digestion_cooldown[i];
     let action = decode_action(logits, energy, cooldown, split_threshold);
@@ -361,10 +388,10 @@ pub(crate) fn pick_action_d(
     // velocity so the creature does not coast on stale movement data.
     let had_nan = logits.iter().any(|v| !v.is_finite());
     if had_nan {
-        return (0.0, 0.0, Action::Graze);
+        return (0.0, 0.0, Action::Graze, argmax_pre);
     }
 
-    (vx, vy, action)
+    (vx, vy, action, argmax_pre)
 }
 
 #[cfg(test)]

@@ -43,23 +43,39 @@ function set(id: string, text: string): void {
   if (el) el.textContent = text;
 }
 
+// v1.5 S3: TS-side action ring buffer (per selected creature). Reset on
+// selection change; entries are the current_action string each refresh.
+let actionHistory: string[] = [];
+let historyForId: number | null = null;
+
+function pushHistory(creatureId: number, action: string): void {
+  if (historyForId !== creatureId) {
+    actionHistory = [];
+    historyForId = creatureId;
+  }
+  actionHistory.push(action);
+  if (actionHistory.length > 60) actionHistory.shift();
+}
+
 function renderInspector(data: CreatureInspectJson): void {
   set("ins-id", `${data.id}`);
   set("ins-pos", `(${data.x.toFixed(1)}, ${data.y.toFixed(1)})`);
   set("ins-action", data.current_action);
   set("ins-age", `${data.age} / ${data.max_age}`);
   set("ins-energy", `${data.energy.toFixed(1)} (${(data.energy_frac * 100).toFixed(0)}%)`);
-  set("ins-size", data.size.toFixed(2));
-  set("ins-photo", data.graze_efficiency.toFixed(2));
-  set("ins-eat", data.eat_efficiency.toFixed(2));
-  set("ins-move", data.move_speed.toFixed(2));
-  set("ins-eyes", `${data.eye_count}`);
-  set("ins-vision", data.vision_range.toFixed(1));
-  set("ins-armor", data.armor.toFixed(2));
-  set("ins-bite", data.bite_reach.toFixed(2));
-  // M5: NN-weight hash color replaces placeholder pigment.
-  set("ins-color", data.color_rgb);
-  set("ins-hash", data.weight_hash);
+  set("ins-cooldown", `${data.cooldown_remaining}`);
+  // v1.5 S3: EMA swatch (display-floored to 0.15) + raw triplet text.
+  const [r, g, b] = data.color_ema;
+  const r255 = Math.round(Math.max(r, 0.15) * 255);
+  const g255 = Math.round(Math.max(g, 0.15) * 255);
+  const b255 = Math.round(Math.max(b, 0.15) * 255);
+  const swatch = document.getElementById("ins-ema-swatch");
+  if (swatch) swatch.style.backgroundColor = `rgb(${r255}, ${g255}, ${b255})`;
+  set("ins-ema-values", `${r.toFixed(2)} / ${g.toFixed(2)} / ${b.toFixed(2)}`);
+  const [wn, ws, we, ww] = data.wall_proximity;
+  set("ins-walls", `${wn.toFixed(2)} / ${ws.toFixed(2)} / ${we.toFixed(2)} / ${ww.toFixed(2)}`);
+  pushHistory(data.id, data.current_action);
+  set("ins-history", actionHistory.slice(-30).map(a => a[0]).join(""));
   set("ins-nn-rate", data.nn_mutation_rate.toFixed(4));
   set("ins-nn-count", `${data.nn_weight_count}`);
 }
@@ -75,16 +91,12 @@ export interface CreatureInspectJson {
   energy_frac: number;
   size: number;
   current_action: string;
-  graze_efficiency: number;
-  eat_efficiency: number;
   move_speed: number;
-  vision_range: number;
-  eye_count: number;
-  armor: number;
-  bite_reach: number;
-  // M5: NN-weight hash color replaces placeholder pigment.
-  color_rgb: string;
-  weight_hash: string;
+  cooldown_remaining: number;
+  // v1.5 S3: action-EMA color (raw, unfloored).
+  color_ema: [number, number, number];
+  // v1.5 S3: N/S/E/W wall proximity in [0, 1].
+  wall_proximity: [number, number, number, number];
   nn_mutation_rate: number;
   nn_weight_count: number;
 }

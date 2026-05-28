@@ -320,9 +320,9 @@ export function renderWorld(
   nowMs: number,
 ): void {
   // Mandatory stride guard: mismatch corrupts the instance pack loop.
-  if (stride !== 10) {
+  if (stride !== 6) {
     throw new Error(
-      `creature_stride mismatch: expected 10, got ${stride} ` +
+      `creature_stride mismatch: expected 6, got ${stride} ` +
       `(Rust wasm_api.rs::creature_stride and web/src/render-gl.ts must agree)`,
     );
   }
@@ -400,7 +400,7 @@ export function renderWorld(
   // Reading creatures_buffer here is cheap and only happens when needed.
   if (highlightMap.size > 0) {
     const data = world.creatures_buffer() as unknown as Float32Array;
-    if (stride !== 10) throw new Error(`creature_stride mismatch: ${stride}`);
+    if (stride !== 6) throw new Error(`creature_stride mismatch: ${stride}`);
     const scratch = s.instanceScratch;
     let off = 0;
     for (let k = 0; k < ids.length; k++) {

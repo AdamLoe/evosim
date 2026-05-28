@@ -59,7 +59,9 @@ pub const MUT_RATE_JITTER: f32 = 0.20;
 // ---- Trait-range constants still used as named values ----
 pub const MOVE_SPEED_MAX: f32 = 5.0;
 pub const VISION_RANGE_MAX: f32 = 80.0;
-/// Used in wasm_api creature_inspect_json as the reported bite_reach value.
+/// Founder bite reach (legacy name). Inspector dropped the reported field
+/// in v1.5 S3 — constant retained for tests / future use.
+#[allow(dead_code)]
 pub const BITE_REACH_MIN: f32 = 1.0;
 
 // ---- Physics (v6 §D) ----
@@ -70,6 +72,9 @@ pub const REPULSION_MAX: f32 = 5.0;
 pub const FOUNDER_ENERGY: f32 = 200.0;
 pub const FOUNDER_SIZE: f32 = 1.0;
 pub const FOUNDER_MAX_AGE: u32 = 5000;
+/// Founder graze efficiency (legacy name). Inspector dropped the reported
+/// field in v1.5 S3 — constant retained for tests / future use.
+#[allow(dead_code)]
 pub const FOUNDER_GRAZE_EFF: f32 = 5.0;
 pub const FOUNDER_BITE_REACH: f32 = 0.0;
 pub const FOUNDER_SPLIT_JITTER: f32 = 50.0;

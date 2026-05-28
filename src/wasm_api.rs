@@ -189,11 +189,10 @@ impl WorldHandle {
     }
 
     /// Repack creature SoA into a contiguous Float32Array. Layout per creature
-    /// (10 floats, stride = [`creature_stride`]):
-    /// `[x, y, radius_world, r, g, b, flag_eye, flag_move, flag_mouth, flag_armor]`.
-    /// Ring flags: 1.0 if trait > 0, else 0.0. See v6 §B for ring order.
-    /// D3: genome deleted — body traits are compile-time constants; color is NN-weight hash.
-    /// D9: scav ring slot removed (Action::Scavenge deleted; brown ring was always lit).
+    /// (6 floats, stride = [`creature_stride`]):
+    /// `[x, y, radius_world, r, g, b]`.
+    /// v1.5 S3: color is per-creature action-EMA with a 0.15 display floor so
+    /// fresh-born creatures (EMA=(0,0,0)) stay visible against the dark BG.
     #[wasm_bindgen]
     pub fn creatures_buffer(&mut self) -> js_sys::Float32Array {
         let n = self.inner.creatures.len();
@@ -207,18 +206,10 @@ impl WorldHandle {
             self.creature_buf[off] = self.inner.creatures.x[i];
             self.creature_buf[off + 1] = self.inner.creatures.y[i];
             self.creature_buf[off + 2] = body_r;
-            // M5: unpack per-creature color from NN-weight hash hot-mirror.
-            let c = self.inner.creatures.color_rgb[i];
-            self.creature_buf[off + 3] = ((c >> 16) & 0xFF) as f32 / 255.0; // R
-            self.creature_buf[off + 4] = ((c >> 8) & 0xFF) as f32 / 255.0; // G
-            self.creature_buf[off + 5] = (c & 0xFF) as f32 / 255.0; // B
-                                                                    // Feature ring flags (v6 §B, ring order: eye→move→mouth→armor).
-                                                                    // D3: eye_count=24 (>0), move_speed=MOVE_SPEED_MAX (>0), armor=0.
-                                                                    // D9: scav slot removed.
-            self.creature_buf[off + 6] = 1.0; // eye_count=24 always > 0
-            self.creature_buf[off + 7] = 1.0; // move_speed=MOVE_SPEED_MAX always > 0
-            self.creature_buf[off + 8] = 1.0; // eat_eff=1.0 constant
-            self.creature_buf[off + 9] = 0.0; // armor=0 constant
+            // v1.5 S3: action-EMA color with display floor.
+            self.creature_buf[off + 3] = self.inner.creatures.color_r[i].max(0.15);
+            self.creature_buf[off + 4] = self.inner.creatures.color_g[i].max(0.15);
+            self.creature_buf[off + 5] = self.inner.creatures.color_b[i].max(0.15);
         }
         unsafe { js_sys::Float32Array::view(&self.creature_buf) }
     }
@@ -271,7 +262,9 @@ impl WorldHandle {
 
         let xs = &self.inner.creatures.x;
         let ys = &self.inner.creatures.y;
-        let colors = &self.inner.creatures.color_rgb;
+        let rs = &self.inner.creatures.color_r;
+        let gs = &self.inner.creatures.color_g;
+        let bs = &self.inner.creatures.color_b;
 
         for i in 0..n {
             let x = xs[i];
@@ -279,10 +272,10 @@ impl WorldHandle {
             if x < min_x || x > max_x || y < min_y || y > max_y {
                 continue;
             }
-            let c = colors[i];
-            let r = ((c >> 16) & 0xFF) as f32 / 255.0;
-            let g = ((c >> 8) & 0xFF) as f32 / 255.0;
-            let b = (c & 0xFF) as f32 / 255.0;
+            // v1.5 S3: EMA color with 0.15 display floor.
+            let r = rs[i].max(0.15);
+            let g = gs[i].max(0.15);
+            let b = bs[i].max(0.15);
             self.render_buf.push(x);
             self.render_buf.push(y);
             self.render_buf.push(radius_px);
@@ -622,7 +615,9 @@ impl WorldHandle {
 
     /// JSON blob for the Inspector panel. Returns None if idx is out of range.
     /// O(1) — all fields are direct SoA reads.
-    /// D3: genome deleted; body traits are compile-time constants.
+    /// v1.5 S3 schema: drops color_rgb/weight_hash/photo_eff/eat_eff/armor/
+    /// bite_reach/vision_range/eye_count. Adds color_ema (raw, unfloored),
+    /// cooldown_remaining, and wall_proximity (N/S/E/W, range 50u).
     #[wasm_bindgen]
     pub fn creature_inspect_json(&self, idx: u32) -> Option<String> {
         let i = idx as usize;
@@ -631,27 +626,36 @@ impl WorldHandle {
         }
         let action_name = format!("{:?}", self.inner.creatures.action_this_tick[i]);
         let brain = &self.inner.creatures.brains[i];
+        // v1.5 S3: wall_proximity (N/S/E/W) computed inline; S5b promotes to
+        // a shared proximity.rs helper. Range 50u, linear normalize: 1.0 at
+        // wall contact → 0.0 at >=50u away.
+        let cx = self.inner.creatures.x[i];
+        let cy = self.inner.creatures.y[i];
+        let wall_range = 50.0_f32;
+        let wp_n = (1.0 - (cy / wall_range)).clamp(0.0, 1.0);
+        let wp_s = (1.0 - ((WORLD_SIZE - cy) / wall_range)).clamp(0.0, 1.0);
+        let wp_w = (1.0 - (cx / wall_range)).clamp(0.0, 1.0);
+        let wp_e = (1.0 - ((WORLD_SIZE - cx) / wall_range)).clamp(0.0, 1.0);
         let json = serde_json::json!({
             "index": idx,
             "id": self.inner.creatures.id[i],
-            "x": self.inner.creatures.x[i],
-            "y": self.inner.creatures.y[i],
+            "x": cx,
+            "y": cy,
             "age": self.inner.creatures.age[i],
             "max_age": self.inner.sliders.max_age,
             "energy": self.inner.creatures.energy[i],
             "energy_frac": (self.inner.creatures.energy[i] / 100.0).clamp(0.0, 1.0),
             "size": FOUNDER_SIZE,
             "current_action": action_name,
-            "graze_efficiency": FOUNDER_GRAZE_EFF,
-            "eat_efficiency": 1.0_f32,
             "move_speed": MOVE_SPEED_MAX,
-            "vision_range": VISION_RANGE_MAX,
-            "eye_count": 24_u8,
-            "armor": 0.0_f32,
-            "bite_reach": BITE_REACH_MIN,
-            // M5: NN-weight hash color replaces placeholder pigment.
-            "color_rgb": format!("#{:06X}", brain.color_rgb),
-            "weight_hash": format!("{:016X}", brain.weight_hash),
+            "cooldown_remaining": self.inner.creatures.digestion_cooldown[i],
+            // v1.5 S3: action-EMA color, raw (unfloored) for the inspector readout.
+            "color_ema": [
+                self.inner.creatures.color_r[i],
+                self.inner.creatures.color_g[i],
+                self.inner.creatures.color_b[i],
+            ],
+            "wall_proximity": [wp_n, wp_s, wp_e, wp_w],
             "nn_mutation_rate": brain.nn_mutation_rate,
             "nn_weight_count": brain.weights.len(),
         });
@@ -729,31 +733,30 @@ fn wasm_now_ms() -> f64 {
 }
 
 /// Per-creature float count in [`WorldHandle::creatures_buffer`].
-/// v1.4 layout: 10 floats (v1.1 was 11; scav slot removed post-D9).
-/// Offset 0..6: x, y, radius_world, color_r, color_g, color_b (NN-weight hash).
-/// Offset 6..10: flag_eye, flag_move, flag_mouth, flag_armor.
+/// v1.5 S3 layout: 6 floats (dropped flag_eye/move/mouth/armor — all-constant
+/// post-D3; replaced color_rgb hash with action-EMA r/g/b columns).
+/// Layout: `[x, y, radius_world, r, g, b]`.
 #[wasm_bindgen]
 pub fn creature_stride() -> u32 {
-    10
+    6
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// v1.4: creature_stride() == 10 (scav slot removed post-D9).
+    /// v1.5 S3: creature_stride() == 6 (flag_* slots dropped, color is EMA RGB).
     /// We can't call creatures_buffer() in native tests (js_sys::Float32Array
     /// requires wasm32), so we test the stride constant and fill-math directly.
     #[test]
-    fn creature_stride_is_10() {
-        assert_eq!(creature_stride(), 10);
-        // verify that n creatures × stride == expected buffer size
+    fn creature_stride_is_6() {
+        assert_eq!(creature_stride(), 6);
         let n: usize = 3;
         let expected = n * creature_stride() as usize;
-        assert_eq!(expected, 30);
+        assert_eq!(expected, 18);
     }
 
-    /// v1.4: fill-math test. Manually resize the creature_buf as the wasm
+    /// v1.5 S3: fill-math test. Manually resize the creature_buf as the wasm
     /// path would and assert the length matches population * stride.
     #[test]
     fn creature_buf_length_matches_population_times_stride() {

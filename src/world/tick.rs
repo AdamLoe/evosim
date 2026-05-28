@@ -299,6 +299,43 @@ impl World {
         }
     }
 
+    /// v1.5 S3: per-creature action-EMA color update.
+    /// Green (Graze): +0.01 if argmax-pre==Graze else -0.01.
+    /// Blue (Split):  +0.5 on Split tick else -0.005.
+    /// Red (Eat):     +0.1 per successful bite else -0.001.
+    /// All channels clamped to [0, 1]. Scratch buffers (`scratch_argmax_pre`,
+    /// `scratch_got_a_bite`) must already be index-aligned with `creatures`
+    /// over `0..creatures.len()`. Newborns appended this tick (indices beyond
+    /// the scratch length) keep their initial (0,0,0) EMA.
+    pub(crate) fn color_ema_update(&mut self) {
+        let n = self.creatures.len();
+        let m = n
+            .min(self.scratch_argmax_pre.len())
+            .min(self.scratch_got_a_bite.len());
+        for i in 0..m {
+            let dg = if self.scratch_argmax_pre[i] == Action::Graze as u8 {
+                0.01
+            } else {
+                -0.01
+            };
+            self.creatures.color_g[i] = (self.creatures.color_g[i] + dg).clamp(0.0, 1.0);
+
+            let db = if self.creatures.action_this_tick[i] == Action::Split {
+                0.5
+            } else {
+                -0.005
+            };
+            self.creatures.color_b[i] = (self.creatures.color_b[i] + db).clamp(0.0, 1.0);
+
+            let dr = if self.scratch_got_a_bite[i] {
+                0.1
+            } else {
+                -0.001
+            };
+            self.creatures.color_r[i] = (self.creatures.color_r[i] + dr).clamp(0.0, 1.0);
+        }
+    }
+
     pub(crate) fn collect_deaths(&mut self) {
         // S27: use promoted scratch_dead buffer instead of a per-call Vec.
         self.scratch_dead.clear();
@@ -879,6 +916,54 @@ mod tests {
         assert!(
             (pred_change - COST_EAT_ATTEMPT).abs() < 1e-4,
             "predator should only lose COST_EAT_ATTEMPT ({COST_EAT_ATTEMPT}); lost {pred_change}"
+        );
+    }
+
+    // ---- v1.5 S3 color-EMA tests ----
+
+    /// v1.5 S3: one EMA tick where argmax-pre==Graze, action==Graze, no bite.
+    /// Green +0.01, blue −0.005 (clamped to 0), red −0.001 (clamped to 0).
+    /// Then a Split tick from non-zero blue bumps blue by +0.5 (clamped to 1).
+    #[test]
+    fn color_ema_increments_on_action() {
+        let mut w = World::new("s3-color-ema");
+        let n = w.creatures.len();
+
+        // --- Tick 1: Graze pre-argmax, Graze action, no bite ---
+        w.creatures.action_this_tick[0] = Action::Graze;
+        w.scratch_argmax_pre.resize(n, Action::Graze as u8);
+        w.scratch_got_a_bite.resize(n, false);
+
+        w.color_ema_update();
+
+        assert!(
+            (w.creatures.color_g[0] - 0.01).abs() < 1e-6,
+            "green expected 0.01 got {}",
+            w.creatures.color_g[0]
+        );
+        assert_eq!(w.creatures.color_b[0], 0.0, "blue clamped at 0");
+        assert_eq!(w.creatures.color_r[0], 0.0, "red clamped at 0");
+
+        // --- Tick 2: Split action with Split pre-argmax + a bite ---
+        w.creatures.action_this_tick[0] = Action::Split;
+        w.scratch_argmax_pre[0] = Action::Split as u8;
+        w.scratch_got_a_bite[0] = true;
+
+        w.color_ema_update();
+
+        // green: was 0.01, argmax-pre != Graze → -0.01 → back to 0.
+        assert_eq!(w.creatures.color_g[0], 0.0, "green back to 0");
+        // blue: was 0.0, +0.5 (Split tick) → 0.5.
+        assert!(
+            (w.creatures.color_b[0] - 0.5).abs() < 1e-6,
+            "blue expected 0.5 got {}",
+            w.creatures.color_b[0]
+        );
+        // red: was 0.0, +0.1 (bite) → 0.1.
+        assert!(
+            (w.creatures.color_r[0] - 0.1).abs() < 1e-6,
+            "red expected 0.1 got {}",
+            w.creatures.color_r[0]
         );
     }
 }

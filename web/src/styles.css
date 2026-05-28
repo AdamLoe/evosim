@@ -190,6 +190,18 @@ body {
 }
 #inspector-close:hover { opacity: 1; }
 
+/* v1.5 S3: EMA color swatch inline with the inspector EMA row. */
+.ema-swatch {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  margin-right: 6px;
+  vertical-align: middle;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 2px;
+  background-color: rgb(38, 38, 38);
+}
+
 /* E.23: Stats charts */
 #rail-stats canvas {
   display: block;
