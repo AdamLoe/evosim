@@ -54,11 +54,6 @@ const rayonCurrentNumThreads = (_wasmMod as unknown as Record<string, unknown>)[
 let world: WorldHandle | null = null;
 let paused = false;
 let targetTPS = 60;
-let tickBudget = 0;
-let lastLoopMs = 0;
-
-const MAX_TICKS_PER_BATCH = 2000;
-const MAX_FRAME_DELTA_MS = 100;
 
 // Pending main → worker messages drained at the top of each loop iteration.
 const messageQueue: SimMessage[] = [];
@@ -187,7 +182,6 @@ async function handleBoot(boot: SimMessageBoot): Promise<void> {
   // Kick off the sim loop. The async loop body awaits `Atomics.waitAsync`
   // between iterations, which lets the worker event loop run and `onmessage`
   // callbacks fill `messageQueue` — Wave D's central correctness property.
-  lastLoopMs = performance.now();
   void simLoop();
 }
 
@@ -210,11 +204,9 @@ function handle(msg: SimMessage): void {
       return;
     case "set_target_tps":
       targetTPS = msg.tps;
-      tickBudget = 0;
       return;
     case "set_paused":
       paused = msg.paused;
-      tickBudget = 0;
       return;
     case "profile_enable":
       world.profile_enable(msg.on);
@@ -342,41 +334,30 @@ async function simLoop(): Promise<void> {
   while (world !== null && ctrlI32 !== null) {
     drainMessages();
 
-    const now = performance.now();
-    const rawDelta = now - lastLoopMs;
-    lastLoopMs = now;
-    const delta = Math.min(rawDelta, MAX_FRAME_DELTA_MS);
-
-    let ticksThisIter = 0;
+    const iterStart = performance.now();
     const ended = world.world_ended;
-    if (paused || ended) {
-      tickBudget = 0;
-    } else {
-      // Fractional-budget accumulator — same math `web/src/main.ts:222-232`
-      // used pre-decoupling. Replaces Wave C's `setTimeout(0)`-paced
-      // single-tick stepping (which capped near ~250 TPS due to Chrome's
-      // 4 ms `setTimeout` minimum).
-      tickBudget += targetTPS * (delta / 1000);
-      if (tickBudget > MAX_TICKS_PER_BATCH) tickBudget = MAX_TICKS_PER_BATCH;
-      ticksThisIter = Math.floor(tickBudget);
-      tickBudget -= ticksThisIter;
-    }
 
-    if (ticksThisIter > 0) {
-      world.step_n(ticksThisIter);
-      writeSnapshotToSAB();
-    } else if (paused || ended) {
-      // Cheap: write a fresh snapshot so main paints the latest paused/ended
-      // state. Only fires when ticksThisIter === 0 anyway, and when paused
-      // we'll park on `Atomics.waitAsync(Infinity)` immediately after.
+    if (!paused && !ended) {
+      // Mission §"Stage 1": one tick, one snapshot. The renderer always reads
+      // the latest SAB slot at RAF rate; per-tick snapshots give it the
+      // freshest view it can possibly have. v1.6 Wave D originally shipped a
+      // `step_n(floor(budget))` accumulator lifted from main.ts pre-decoupling
+      // — but main.ts batched because it shared the render thread, and the
+      // worker doesn't, so batching here only hurt snapshot freshness (at
+      // 8000 pop the SAB flipped every ~1.2s; the renderer repainted the same
+      // stale slot in between).
+      world.step_n(1);
       writeSnapshotToSAB();
     }
 
     // Pacing wait. When paused, sleep indefinitely so we don't burn CPU on
     // snapshot churn nobody's reading — main's `set_paused(false)` notifies
-    // the futex via SimBridge.postMessage to wake us. When running, sleep
-    // for whatever budget remains in this tick's wall-clock slice.
-    const elapsedThisIter = performance.now() - now;
+    // the futex via SimBridge.postMessage to wake us. When running, sleep for
+    // whatever target-TPS slice remains after this tick. If the tick itself
+    // overran the slice (high pop), elapsed already exceeds the budget and
+    // timeoutMs falls through at 0 — the next tick fires immediately, and we
+    // naturally underrun targetTPS.
+    const elapsedThisIter = performance.now() - iterStart;
     const timeoutMs = paused
       ? Infinity
       : Math.max(0, 1000 / targetTPS - elapsedThisIter);
