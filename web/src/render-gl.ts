@@ -103,11 +103,16 @@ out vec2 v_local;
 out vec4 v_color;
 
 void main() {
+  // v_local stays in [-1, 1] over the bounding quad — same convention as
+  // DISC_VS. The fragment shader discards outside the inscribed circle so
+  // the halo is round, not square.
   v_local = a_corner * 2.0;
   v_color = a_color;
   vec2 center_px = (a_center - u_cam_pos) * u_zoom + u_viewport * 0.5;
-  // 3.6 = 2.0 (quad half-extent → full) × 1.8 (halo scale).
-  vec2 pos_px = center_px + a_corner * 3.6 * a_radii_px.x;
+  // 2.8 = 2.0 (quad half-extent → full) × 1.4 (halo scale). Tightened from
+  // 1.8 → 1.4 in the bug-fix patch since the broken square halo had felt
+  // very large; the inscribed-circle halo at 1.4 is appropriately subtle.
+  vec2 pos_px = center_px + a_corner * 2.8 * a_radii_px.x;
   vec2 ndc = (pos_px / u_viewport) * 2.0 - 1.0;
   ndc.y = -ndc.y;
   gl_Position = vec4(ndc, 0.0, 1.0);
@@ -122,12 +127,16 @@ out vec4 out_color;
 uniform float u_halo_alpha;
 
 void main() {
-  // v_local is in [-2, 2] because the quad was scaled by 1.8 in VS.
-  // Re-normalize against the bigger quad so r in [0, 1] across the halo.
-  float r = length(v_local) / 1.8;
+  // v_local is in [-1, 1] over the bounding quad. Discard outside the
+  // inscribed circle so the halo silhouette is round — the previous code
+  // divided by 1.8 here, which kept r < 1 across the entire quad and
+  // produced visible square corners against dark backgrounds.
+  float r = length(v_local);
   if (r > 1.0) discard;
-  float falloff = pow(1.0 - clamp(r, 0.0, 1.0), 2.0);
-  float a = min(falloff * u_halo_alpha, 0.3);
+  float falloff = pow(1.0 - r, 2.0);
+  // Cap tightened from 0.3 → 0.15 so dense formations don't pile up into
+  // colored mush on dark themes.
+  float a = min(falloff * u_halo_alpha, 0.15);
   out_color = vec4(v_color.rgb, a);
 }`;
 
