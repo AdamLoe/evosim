@@ -330,36 +330,69 @@ impl World {
         // Sequential scalar pass over 57_600 cells. Reads slider-driven r and k.
         // Graze consumes density (step 5); propagation runs after (matching old
         // ordering where sun.refill ran after photosynth_two_pass). See p1e §1.
+        //
+        // v1.7 profiler: `tick.grass_step` stays a LEAF in the tick tree (it
+        // measures the main sim worker's wait for the parallel rayon
+        // dispatch). The per-worker sum-busy breakdown moves to the sibling
+        // top-level `grass_step` tree under the new naming:
+        //   grass_step                 (sim worker wall-clock — same time as `tick.grass_step`)
+        //   grass_step.dispatch        (par_chunks OR chunks_mut, mutually exclusive)
+        //   grass_step.row_compute     (sum-busy across workers in row_body closure)
+        //   grass_step.row_compute.body  (closure body only; excludes per-row setup)
+        //   grass_step.bitset_rebuild  (row_has_density sweep after propagation)
+        //
+        // The root being equal to `tick.grass_step` is intentional and useful
+        // — it's the real wall-clock parent that the children sum below
+        // (children can exceed the root because they're sum-across-workers).
         {
             crate::profile_span!(&self.profile, "tick.grass_step");
+            let gs_root_start = crate::profiler::clock_now_us_threadsafe();
             self.grass.compute_propagation(
                 self.sliders.grass_in_cell_growth_r,
                 self.sliders.grass_propagation_rate_k,
             );
-            // Drain compute_propagation sub-phase timers into the profile tree
-            // as siblings under `tick.grass_step.compute`. par_chunks vs
-            // chunks_mut are mutually exclusive (cfg-gated); row_body is
-            // sum-busy across rayon workers and so can exceed par_chunks wall.
             use std::sync::atomic::Ordering;
-            self.profile.record_under_tick(
-                "grass_step.compute.par_chunks",
-                self.grass.par_chunks_us.load(Ordering::Relaxed) as u32,
-            );
-            self.profile.record_under_tick(
-                "grass_step.compute.chunks_mut",
-                self.grass.chunks_mut_us.load(Ordering::Relaxed) as u32,
-            );
-            self.profile.record_under_tick(
-                "grass_step.compute.row_body",
+            // par_chunks_us (threaded) and chunks_mut_us (sequential) are
+            // mutually exclusive at build time — only one is ever non-zero —
+            // and they both measure the same conceptual span (outer loop
+            // wall-clock). Sum-then-record collapses them under the unified
+            // `dispatch` name regardless of which build is active.
+            let dispatch_us = self.grass.par_chunks_us.load(Ordering::Relaxed)
+                + self.grass.chunks_mut_us.load(Ordering::Relaxed);
+            self.profile
+                .record_under_root("grass_step", "dispatch", dispatch_us as u32);
+            self.profile.record_under_root(
+                "grass_step",
+                "row_compute",
                 self.grass.row_body_us.load(Ordering::Relaxed) as u32,
             );
-            self.profile.record_under_tick(
-                "grass_step.compute.row_body.self",
+            self.profile.record_under_root(
+                "grass_step",
+                "row_compute.body",
                 self.grass.row_body_self_us.load(Ordering::Relaxed) as u32,
             );
-            // Bitset rebuild is a cheap O(cells) sweep with no per-cell math;
-            // not worth its own profiler node.
+
+            // Bitset rebuild is short but the v1.7 panel wants it explicit so
+            // unaccounted-for time inside `grass_step` doesn't hide as a
+            // rollup. Bracket the call with a clock-now pair.
+            let bs_start = crate::profiler::clock_now_us_threadsafe();
             self.grass.rebuild_row_bitset();
+            let bs_end = crate::profiler::clock_now_us_threadsafe();
+            self.profile.record_under_root(
+                "grass_step",
+                "bitset_rebuild",
+                bs_end.saturating_sub(bs_start) as u32,
+            );
+            // Root `grass_step` row: the sim worker's wall-clock for the whole
+            // (compute_propagation + bitset_rebuild) block. Its own measurement
+            // — not a rollup. Children may exceed it (sum-busy across rayon
+            // workers > the wall-clock the sim worker actually waited).
+            let gs_root_end = crate::profiler::clock_now_us_threadsafe();
+            self.profile.record_under_root(
+                "grass_step",
+                "",
+                gs_root_end.saturating_sub(gs_root_start) as u32,
+            );
         }
 
         // 8. Energy bookkeeping.
@@ -404,16 +437,18 @@ impl World {
             self.handle_births();
         }
 
-        // 12. Step-12 tail: last_action promotion, color-EMA update, tick bump,
-        //     world-end check.
+        // 12. Step-12 tail: last_action promotion, tick bump, world-end check.
+        // v1.7: `tick.color_ema` is a sibling under `tick`, not a child of
+        // `tick.bookkeeping_tail` (per the mission's tick-tree diagram).
+        // Lifted out of the bookkeeping brace so the profiler attaches it
+        // directly to the tick root.
+        {
+            crate::profile_span!(&self.profile, "tick.color_ema");
+            self.color_ema_update();
+        }
+
         {
             crate::profile_span!(&self.profile, "tick.bookkeeping_tail");
-
-            // v1.5 S3: per-creature action-EMA color update.
-            {
-                crate::profile_span!(&self.profile, "tick.color_ema");
-                self.color_ema_update();
-            }
 
             // Promote action chain by one tick: last_action ← action_this_tick.
             // Bulk memcpy (S30 pattern).

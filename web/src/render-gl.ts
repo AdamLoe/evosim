@@ -346,6 +346,32 @@ export function renderWorld(
     );
   }
 
+  // v1.7: outer `frame.render_world` bracket. Parent of `.grass` and
+  // `.creatures` children; the parent timer is a real measurement so any
+  // setup time (viewport / clear) shows up as parent-minus-children overhead
+  // instead of disappearing into a rollup.
+  const renderWorldSpan = span("frame.render_world");
+  try {
+    renderWorldImpl(gl, cam, viewW, viewH, creatures, grass, pop, world_size, grass_dim, highlightMap, nowMs);
+  } finally {
+    renderWorldSpan.close();
+  }
+}
+
+function renderWorldImpl(
+  gl: WebGL2RenderingContext,
+  cam: Camera,
+  viewW: number,
+  viewH: number,
+  creatures: Float32Array,
+  grass: Uint8Array,
+  pop: number,
+  world_size: number,
+  grass_dim: number,
+  highlightMap: Map<number, number>,
+  nowMs: number,
+): void {
+  const stride = CREATURE_STRIDE;
   if (!state) state = initRenderer(gl);
   const s = state;
 
@@ -358,30 +384,31 @@ export function renderWorld(
   // Skipping the upload + draw entirely when the user toggles grass off is
   // a real perf win at high cell counts (921_600 cells = 921 KB R8 upload
   // per frame + a fullscreen-discard fragment pass).
+  // v1.7: bracketed by `frame.render_world.grass` so the parent
+  // `frame.render_world` row's overhead column reads correctly.
   if (getSettings().showGrass) {
-    const dim = grass_dim;
-    // Wave C: `grass` is a Uint8Array view over the SAB live slot — no
-    // wasm-bindgen quantize+copy on the read path (that runs in the sim
-    // worker via `write_snapshot_to`). The `grass.upload.read` span from
-    // Stage 1 is gone; only the GPU upload remains as a measured cost.
-    const gpuSpan = span("grass.upload.gpu");
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, s.grassTex);
-    if (dim !== s.grassTexDim) {
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, dim, dim, 0, gl.RED, gl.UNSIGNED_BYTE, grass);
-      s.grassTexDim = dim;
-    } else {
-      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, dim, dim, gl.RED, gl.UNSIGNED_BYTE, grass);
+    const grassSpan = span("frame.render_world.grass");
+    try {
+      const dim = grass_dim;
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, s.grassTex);
+      if (dim !== s.grassTexDim) {
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, dim, dim, 0, gl.RED, gl.UNSIGNED_BYTE, grass);
+        s.grassTexDim = dim;
+      } else {
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, dim, dim, gl.RED, gl.UNSIGNED_BYTE, grass);
+      }
+      gl.useProgram(s.grassProgram);
+      gl.uniform2f(s.grassU.viewport, viewW, viewH);
+      gl.uniform2f(s.grassU.camPos, cam.cx, cam.cy);
+      gl.uniform1f(s.grassU.zoom, cam.zoom);
+      gl.uniform1f(s.grassU.worldSize, world_size);
+      gl.uniform1f(s.grassU.opacity, getSettings().grassOpacity);
+      gl.bindVertexArray(s.grassVao);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    } finally {
+      grassSpan.close();
     }
-    gpuSpan.close();
-    gl.useProgram(s.grassProgram);
-    gl.uniform2f(s.grassU.viewport, viewW, viewH);
-    gl.uniform2f(s.grassU.camPos, cam.cx, cam.cy);
-    gl.uniform1f(s.grassU.zoom, cam.zoom);
-    gl.uniform1f(s.grassU.worldSize, world_size);
-    gl.uniform1f(s.grassU.opacity, getSettings().grassOpacity);
-    gl.bindVertexArray(s.grassVao);
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
 
   // ─── World-bounds frame ───
@@ -401,7 +428,11 @@ export function renderWorld(
     gl.drawArrays(gl.LINE_LOOP, 0, 4);
   }
 
-  // ─── Creatures (bodies) ───
+  // ─── Creatures (bodies + highlight rings) ───
+  // v1.7: combined under `frame.render_world.creatures`. Includes the JS-side
+  // frustum cull, instance pack, body draw, and the rare highlight-ring pass.
+  const creaturesSpan = span("frame.render_world.creatures");
+  try {
   // JS-side frustum cull + GPU instance pack (replaces the Rust-side
   // `pack_render_buffer` which Wave C deleted). Reads creature SoA fields
   // directly from the SAB-backed Float32Array view — no wasm-bindgen
@@ -506,5 +537,8 @@ export function renderWorld(
       gl.bufferData(gl.ARRAY_BUFFER, scratch.subarray(0, off), gl.DYNAMIC_DRAW);
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, hCount);
     }
+  }
+  } finally {
+    creaturesSpan.close();
   }
 }

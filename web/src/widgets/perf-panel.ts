@@ -3,6 +3,12 @@
 // v1.6 Wave B: polls the sim worker for the bundled profile report
 // (profile + tps + jank + grass counters) instead of calling wasm directly.
 // 1 Hz cadence preserved.
+//
+// v1.7 profiler overhaul: renders four stacked tables (frame, tick, nn,
+// grass_step) as independent top-level trees instead of one merged table.
+// Display order is fixed (tree by definition, rows within a tree by Rust/TS
+// insertion order). No sort, no rollup — every row's `total ms` is its own
+// real measurement.
 
 import type { SimBridge } from "../sim-bridge";
 import { setProfilerEnabled, isProfilerEnabled, reportJson as tsPerfReport } from "../perf";
@@ -11,7 +17,6 @@ import { setProfilerEnabled, isProfilerEnabled, reportJson as tsPerfReport } fro
 // Perf-timing plan: toggle checkbox + 1Hz polling + table rendering.
 
 const POLL_INTERVAL_MS = 1000;
-let profilerPollHandle = 0;
 
 /** JSON node shape from profile_report_json() / reportJson() */
 interface ProfNode {
@@ -39,6 +44,12 @@ interface BundledProfile {
   total_grass_density: number;
 }
 
+// v1.7: order in which top-level trees render in the panel. Trees not in this
+// list still render at the bottom in JSON-insertion order so a future Rust
+// addition (e.g. `gpu`) doesn't drop on the floor — they just don't get a
+// pinned slot.
+const TREE_ORDER = ["frame", "tick", "nn", "grass_step"];
+
 // Latest bundle for tps / jank / grass-counter rendering between polls.
 let lastBundle: BundledProfile | null = null;
 
@@ -49,8 +60,8 @@ export function installProfilerPanel(simBridge: SimBridge): void {
 
   // Default OFF — match D9 (no persistence, unchecked on every page load).
   checkbox.checked = false;
-  // D5: initial paint of "enable to record" hint so tbody isn't visually blank.
-  clearTable();
+  // D5: initial paint of "enable to record" hint so the panel area isn't blank.
+  clearTrees();
 
   // Poll the bundled report at 1 Hz — TPS + jank + grass counters live in
   // this reply so we don't need a second poller.
@@ -66,7 +77,7 @@ export function installProfilerPanel(simBridge: SimBridge): void {
     renderTpsJank(lastBundle);
     renderObsCounters(lastBundle);
     if (isProfilerEnabled()) {
-      pollAndRenderTree(lastBundle);
+      pollAndRenderTrees(lastBundle);
     }
   };
 
@@ -79,11 +90,9 @@ export function installProfilerPanel(simBridge: SimBridge): void {
     setProfilerEnabled(on);
     simBridge.postMessage({ kind: "profile_enable", on });
     if (on) {
-      profilerPollHandle = 1; // sentinel: tree rendering happens inside poll()
-      if (lastBundle) pollAndRenderTree(lastBundle);
+      if (lastBundle) pollAndRenderTrees(lastBundle);
     } else {
-      profilerPollHandle = 0;
-      clearTable();
+      clearTrees();
     }
   });
 
@@ -125,22 +134,18 @@ function renderObsCounters(bundle: BundledProfile): void {
   }
 }
 
-function clearTable(): void {
-  const tbody = document.getElementById("profiler-tbody");
-  if (tbody) {
-    // D5: show hint instead of leaving tbody literally empty.
-    tbody.innerHTML =
-      `<tr><td colspan="6" class="pf-empty-hint">enable to record</td></tr>`;
+function clearTrees(): void {
+  const root = document.getElementById("profiler-trees");
+  if (root) {
+    root.innerHTML =
+      `<div class="pf-empty-hint" style="text-align:center;opacity:0.45;font-style:italic;padding:8px 0">enable to record</div>`;
   }
   const banner = document.getElementById("profiler-stabilizing");
   if (banner) banner.style.display = "none";
 }
 
-function pollAndRenderTree(bundle: BundledProfile): void {
+function pollAndRenderTrees(bundle: BundledProfile): void {
   if (!isProfilerEnabled()) return;
-  // Reference `profilerPollHandle` so the unused-locals lint stays quiet — it
-  // is a Stage-1 sentinel for "tree rendering is live".
-  void profilerPollHandle;
 
   const rustReport = bundle.profile;
   let tsReport: ProfNode | null = null;
@@ -150,19 +155,39 @@ function pollAndRenderTree(bundle: BundledProfile): void {
     console.warn("profiler: failed to parse TS report", e);
   }
 
-  // Build merged tree: start with Rust tree, append TS frame root if available.
-  const tree: ProfNode[] = [...rustReport.tree];
+  // Merge tree list: Rust roots from the report + live TS `frame` overrides
+  // the Rust-side `frame` placeholder (which is always empty — the TS panel
+  // owns the frame tree). Rust may emit a `frame` root with zero samples; we
+  // unconditionally swap it for the TS-side one when available.
+  const treesByName = new Map<string, ProfNode>();
+  for (const r of rustReport.tree) {
+    treesByName.set(r.name, r);
+  }
   if (tsReport) {
-    // Replace the Rust-side "frame" placeholder (call_count=0) with the live TS report.
-    const frameIdx = tree.findIndex((n) => n.name === "frame");
-    if (frameIdx >= 0) {
-      tree[frameIdx] = tsReport;
-    } else {
-      tree.push(tsReport);
-    }
+    treesByName.set("frame", tsReport);
   }
 
-  // Determine if any node is still stabilizing (effective_window < 90% of window_ms).
+  // Stable order: pinned trees first (frame, tick, nn, grass_step), then any
+  // others in JSON insertion order.
+  const ordered: ProfNode[] = [];
+  const seen = new Set<string>();
+  for (const name of TREE_ORDER) {
+    const t = treesByName.get(name);
+    if (t) {
+      ordered.push(t);
+      seen.add(name);
+    }
+  }
+  for (const r of rustReport.tree) {
+    if (!seen.has(r.name)) {
+      ordered.push(r);
+      seen.add(r.name);
+    }
+  }
+  // (TS-side frame, if not in TREE_ORDER for some reason, was already inserted above.)
+
+  // Stabilizing banner — driven by the smallest effective_window across any
+  // tree's populated nodes.
   const windowMs = rustReport.window_ms;
   const threshold = windowMs * 0.9;
   let minEffective = Infinity;
@@ -174,7 +199,7 @@ function pollAndRenderTree(bundle: BundledProfile): void {
       checkStabilizing(n.children);
     }
   }
-  checkStabilizing(tree);
+  for (const t of ordered) checkStabilizing([t]);
 
   const banner = document.getElementById("profiler-stabilizing");
   if (banner) {
@@ -187,60 +212,108 @@ function pollAndRenderTree(bundle: BundledProfile): void {
     }
   }
 
-  renderProfilerTable(tree);
+  renderTreesStacked(ordered);
 }
 
-function renderProfilerTable(tree: ProfNode[]): void {
-  const tbody = document.getElementById("profiler-tbody");
-  if (!tbody) return;
+/**
+ * v1.7: render each top-level tree as its own table, stacked vertically.
+ * Columns: path · total ms · calls · ms/call · share %.
+ * - `total ms` is taken DIRECTLY from the node's `total_us`. No rollup. A
+ *   parent row that out-measures the sum of its children is showing real
+ *   overhead time and that visibility is the diagnostic point.
+ * - `share %` is `node.total_us / root.total_us` so siblings inside a tree
+ *   are comparable to each other. The root row shows 100%.
+ * - `path` indents one level per dot beyond the root name.
+ */
+function renderTreesStacked(trees: ProfNode[]): void {
+  const root = document.getElementById("profiler-trees");
+  if (!root) return;
 
-  // D5: empty-state guard — show hint when no samples are recorded.
-  const allEmpty =
-    tree.length === 0 || tree.every((n) => n.call_count === 0);
-  if (allEmpty) {
-    tbody.innerHTML =
-      `<tr><td colspan="6" class="pf-empty-hint">enable to record</td></tr>`;
+  if (trees.length === 0) {
+    root.innerHTML =
+      `<div class="pf-empty-hint" style="text-align:center;opacity:0.45;font-style:italic;padding:8px 0">enable to record</div>`;
     return;
+  }
+
+  const parts: string[] = [];
+  for (const tree of trees) {
+    parts.push(renderOneTree(tree));
+  }
+  root.innerHTML = parts.join("");
+}
+
+function renderOneTree(treeRoot: ProfNode): string {
+  const rootTotalUs = treeRoot.total_us;
+  const hasSamples = treeRoot.call_count > 0 || treeRoot.children.some((c) => c.call_count > 0);
+
+  if (!hasSamples) {
+    return (
+      `<div class="profiler-tree-section">` +
+        `<div class="profiler-tree-header">${escHtml(treeRoot.name)}</div>` +
+        `<div class="pf-empty-hint" style="text-align:center;opacity:0.45;font-style:italic;padding:4px 0">(no samples yet)</div>` +
+      `</div>`
+    );
   }
 
   const rows: string[] = [];
 
-  function renderNode(node: ProfNode, depth: number, parentTotalUs: number | null): void {
+  function renderNode(node: ProfNode, depth: number, pathPrefix: string): void {
+    // Two profiler subsystems use different conventions for node.name:
+    //   - Rust profiler: leaf-only ("forward", "l1", "build_input", etc.)
+    //   - TS profiler (`web/src/perf.ts`): caller passes the literal full
+    //     dotted path ("frame.render_world.grass") which we then store as the
+    //     node name.
+    // Normalize: if the node name already contains the prefix, use it as-is
+    // (TS shape); otherwise append it (Rust shape).
+    const fullPath =
+      pathPrefix === ""
+        ? node.name
+        : node.name.startsWith(pathPrefix + ".") || node.name === pathPrefix
+          ? node.name
+          : `${pathPrefix}.${node.name}`;
     const totalMs = node.total_us / 1000;
-    const perCallUs = node.call_count > 0 ? node.total_us / node.call_count : null;
-    const callsPerParent =
-      node.parent_call_count !== null && node.parent_call_count > 0
-        ? node.call_count / node.parent_call_count
-        : null;
+    const msPerCall = node.call_count > 0 ? node.total_us / node.call_count / 1000 : null;
+    // share % is relative to the top-level tree root so siblings within a
+    // tree are directly comparable. depth-0 (the root row) is pinned to 100%.
     const sharePct =
-      parentTotalUs !== null && parentTotalUs > 0
-        ? (node.total_us / parentTotalUs) * 100
-        : (depth === 0 ? 100 : null);
+      depth === 0
+        ? 100
+        : rootTotalUs > 0
+          ? (node.total_us / rootTotalUs) * 100
+          : null;
 
-    const fmt = (v: number | null, decimals: number, suffix = ""): string =>
-      v !== null && isFinite(v) ? v.toFixed(decimals) + suffix : "-";
+    const fmt = (v: number | null, decimals: number): string =>
+      v !== null && isFinite(v) ? v.toFixed(decimals) : "-";
 
     rows.push(
       `<tr class="pf-depth-${Math.min(depth, 4)}">` +
-        `<td class="pf-name">${escHtml(node.name)}</td>` +
+        `<td class="pf-name">${escHtml(fullPath)}</td>` +
         `<td>${fmt(totalMs, 2)}</td>` +
         `<td>${node.call_count > 0 ? node.call_count : "-"}</td>` +
-        `<td>${fmt(perCallUs, 1)}</td>` +
-        `<td>${fmt(callsPerParent, 2)}</td>` +
+        `<td>${fmt(msPerCall, 3)}</td>` +
         `<td>${fmt(sharePct, 1)}</td>` +
         `</tr>`,
     );
 
     for (const child of node.children) {
-      renderNode(child, depth + 1, node.total_us);
+      renderNode(child, depth + 1, fullPath);
     }
   }
 
-  for (const root of tree) {
-    renderNode(root, 0, null);
-  }
+  renderNode(treeRoot, 0, "");
 
-  tbody.innerHTML = rows.join("");
+  return (
+    `<div class="profiler-tree-section">` +
+      `<div class="profiler-tree-header">${escHtml(treeRoot.name)}</div>` +
+      `<table class="profiler-table">` +
+        `<thead><tr>` +
+          `<th>path</th><th>total ms</th><th>calls</th>` +
+          `<th>ms/call</th><th>share %</th>` +
+        `</tr></thead>` +
+        `<tbody>${rows.join("")}</tbody>` +
+      `</table>` +
+    `</div>`
+  );
 }
 
 function escHtml(s: string): string {

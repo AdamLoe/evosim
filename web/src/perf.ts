@@ -59,12 +59,25 @@ export function isProfilerEnabled(): boolean {
   return enabled;
 }
 
-/** Open a named span. Returns a handle with a close() method. */
+/** Open a named span. Returns a handle with a close() method.
+ *
+ * v1.7: when called at the top of the stack with a name that exactly matches
+ * a top-level root ("frame"), the sample is attached to the root itself
+ * instead of opening a duplicate child under it. This makes
+ * `span("frame")` at the top of the RAF callback the canonical outer
+ * bracket — its total_us shows up as the root's own measured time, not as
+ * a `frame.frame` child row in the panel. */
 export function span(name: string): { close: () => void } {
   if (!enabled) return NOOP_SPAN;
   const t0 = performance.now();
-  const parent = stack.length > 0 ? stack[stack.length - 1].nodeId : 0; // 0 = frame root
-  const nodeId = ensureChild(parent, name);
+  let nodeId: NodeId;
+  if (stack.length === 0 && name === "frame") {
+    // Attach the sample to the pre-seeded root rather than a same-named child.
+    nodeId = 0;
+  } else {
+    const parent = stack.length > 0 ? stack[stack.length - 1].nodeId : 0; // 0 = frame root
+    nodeId = ensureChild(parent, name);
+  }
   stack.push({ nodeId, t0 });
   return {
     close() {

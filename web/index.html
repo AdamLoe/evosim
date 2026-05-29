@@ -81,15 +81,8 @@
         <span id="perf-grass-total" class="perf-stat perf-obs">grass total: —</span>
       </div>
       <div id="profiler-stabilizing" class="profiler-stabilizing" style="display:none"></div>
-      <table id="profiler-table" class="profiler-table">
-        <thead>
-          <tr>
-            <th>Stage</th><th>total ms</th><th>calls</th>
-            <th>/call us</th><th>calls/par</th><th>share %</th>
-          </tr>
-        </thead>
-        <tbody id="profiler-tbody"></tbody>
-      </table>
+      <!-- v1.7: four stacked tables (frame, tick, nn, grass_step) injected by perf-panel.ts -->
+      <div id="profiler-trees"></div>
     </div>
 
     <script type="module" src="/src/main.ts"></script>

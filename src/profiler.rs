@@ -37,7 +37,9 @@ pub type NodeId = u16;
 
 /// Synthetic root for Rust tick spans (index 0).
 const ROOT_TICK: NodeId = 0;
-/// Synthetic root for TS frame spans (index 1).
+/// Synthetic root for TS frame spans (index 1) — present so legacy callers and
+/// the `record_external` path keep working; the live TS-side `frame` tree is
+/// built in `web/src/perf.ts` and stitched into the report on the panel side.
 const ROOT_FRAME: NodeId = 1;
 
 #[derive(Default)]
@@ -59,6 +61,13 @@ struct ProfilerInner {
     /// Resolved child-by-name cache: (parent_id, name) → child_id.
     /// One allocation per new span name; thereafter O(1) lookup.
     child_index: HashMap<(NodeId, String), NodeId>,
+    /// Roots indexed by name. `tick` and `frame` are pre-seeded; additional
+    /// roots like `nn` and `grass_step` are added lazily by `ensure_root` so
+    /// the four sibling trees from v1.7 can coexist without re-ordering nodes.
+    roots: HashMap<String, NodeId>,
+    /// Stable insertion order of root names so `report_json` walks them in the
+    /// order they were minted (tick before nn before grass_step, etc.).
+    root_order: Vec<NodeId>,
     /// Epoch in ms; subtracted from now_ms to fit timestamps in u32.
     /// Gives ~49 days of headroom.
     epoch_ms: f64,
@@ -91,10 +100,17 @@ impl Profiler {
         // The tick root itself is pushed/popped by the macro in World::step().
         // We pre-seed it empty — no stack entry needed at init time.
 
+        let mut roots = HashMap::new();
+        roots.insert("tick".to_string(), ROOT_TICK);
+        roots.insert("frame".to_string(), ROOT_FRAME);
+        let root_order = vec![ROOT_TICK, ROOT_FRAME];
+
         let inner = ProfilerInner {
             nodes,
             stack: Vec::with_capacity(16),
             child_index: HashMap::new(),
+            roots,
+            root_order,
             epoch_ms: clock_now_ms(),
         };
 
@@ -138,8 +154,10 @@ impl Profiler {
         }
     }
 
-    /// Push the ROOT_TICK span itself (called from World::step tick root macro).
-    /// This is the only span that has no parent — it IS the root.
+    /// Push the `tick` root span (legacy entry point retained for tests and the
+    /// `profile_span!("tick")` macro arm). Equivalent to
+    /// `push_root_named("tick")` but slightly cheaper because the root is
+    /// guaranteed to exist at index 0.
     pub fn push_root(&self) -> SpanGuard {
         let start_us = clock_now_us();
         let mut inner = self.inner.borrow_mut();
@@ -151,22 +169,45 @@ impl Profiler {
         }
     }
 
-    /// Record an externally-timed span (called from TS via wasm_api).
-    /// Record an externally-timed sample under the `tick` root, addressed by a
-    /// dotted path. Used by aggregating callers (the parallel NN pass) that
-    /// compute their own duration outside the RAII span machinery (because the
-    /// Profiler isn't Send/Sync and can't be touched from worker threads).
+    /// Push a named top-level root span. v1.7: the four conceptual trees
+    /// (`tick`, `frame`, `nn`, `grass_step`) coexist as siblings. The first
+    /// call with a new name mints a fresh root node; subsequent calls reuse
+    /// the same node id so samples accumulate.
     ///
-    /// `path` is a dotted ancestor chain under ROOT_TICK, e.g.
-    /// `"nn.proximity.creatures"`. The leaf node is created lazily.
+    /// Caller MUST check `enabled()` first.
+    #[allow(dead_code)] // exposed for parity with `push_root`; record_under_root is the hot path
+    pub fn push_root_named(&self, name: &str) -> SpanGuard {
+        let start_us = clock_now_us();
+        let mut inner = self.inner.borrow_mut();
+        let root_id = inner.ensure_root(name);
+        inner.stack.push((root_id, start_us));
+        drop(inner);
+        SpanGuard {
+            profiler: self as *const Profiler,
+            start_us,
+        }
+    }
+
+    /// Record an externally-timed sample under an arbitrary top-level root,
+    /// addressed by a dotted path. The root is minted on first use; subsequent
+    /// calls reuse the existing node tree. Used by aggregating callers (the
+    /// parallel NN pass, the grass propagation pass) that compute their own
+    /// duration outside the RAII span machinery (because the Profiler isn't
+    /// Send/Sync and can't be touched from worker threads).
+    ///
+    /// `root_name` is a top-level tree name (e.g. `"nn"`, `"grass_step"`).
+    /// `path` is the dotted chain under that root (e.g. `"forward.l1"` or `""`
+    /// for the root itself). Empty `path` records into the root's own ring.
+    ///
     /// Silently no-ops when the profiler is disabled.
-    pub fn record_under_tick(&self, path: &str, dur_us: u32) {
+    pub fn record_under_root(&self, root_name: &str, path: &str, dur_us: u32) {
         if !self.enabled() {
             return;
         }
         let mut inner = self.inner.borrow_mut();
         let now_ms = inner.now_ms_relative();
-        let mut current = ROOT_TICK;
+        let root_id = inner.ensure_root(root_name);
+        let mut current = root_id;
         for part in path.split('.') {
             if part.is_empty() {
                 continue;
@@ -212,7 +253,9 @@ impl Profiler {
         let window_ms = WINDOW_MS;
         let enabled = self.enabled.load(Ordering::Relaxed);
 
-        // Collect root nodes (tick=0, frame=1).
+        // Serialize every root in insertion order. v1.7: the panel walks the
+        // returned `tree` array as a list of independent top-level trees
+        // (tick, frame, nn, grass_step, ...) instead of two fixed roots.
         let mut out = String::with_capacity(2048);
         out.push_str("{\"now_ms\":");
         push_f64(&mut out, now_ms_abs);
@@ -222,24 +265,12 @@ impl Profiler {
         out.push_str(if enabled { "true" } else { "false" });
         out.push_str(",\"tree\":[");
 
-        // Serialize tick root (node 0) and frame root (node 1).
-        serialize_node(
-            &inner.nodes,
-            ROOT_TICK,
-            now_ms_rel,
-            window_ms,
-            None,
-            &mut out,
-        );
-        out.push(',');
-        serialize_node(
-            &inner.nodes,
-            ROOT_FRAME,
-            now_ms_rel,
-            window_ms,
-            None,
-            &mut out,
-        );
+        for (i, &root_id) in inner.root_order.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            serialize_node(&inner.nodes, root_id, now_ms_rel, window_ms, None, &mut out);
+        }
 
         out.push_str("]}");
         out
@@ -257,6 +288,30 @@ impl ProfilerInner {
     fn now_ms_relative(&self) -> u32 {
         let ms = clock_now_ms() - self.epoch_ms;
         ms.max(0.0) as u32
+    }
+
+    /// Ensure a top-level root node with the given name exists. Returns its
+    /// NodeId. Creates lazily on first call and tracks insertion order so
+    /// `report_json` walks roots in the order they were minted.
+    fn ensure_root(&mut self, name: &str) -> NodeId {
+        if let Some(&id) = self.roots.get(name) {
+            return id;
+        }
+        if self.nodes.len() >= MAX_NODES {
+            // Fall back to ROOT_TICK so we never panic; samples land in the
+            // wrong tree rather than being dropped.
+            return ROOT_TICK;
+        }
+        let new_id = self.nodes.len() as NodeId;
+        self.nodes.push(Node {
+            name: name.to_string(),
+            parent: None,
+            children: Vec::new(),
+            samples: VecDeque::with_capacity(SAMPLES_PER_NODE),
+        });
+        self.roots.insert(name.to_string(), new_id);
+        self.root_order.push(new_id);
+        new_id
     }
 
     /// Ensure a child node with the given name exists under `parent`.
