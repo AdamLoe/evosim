@@ -369,9 +369,19 @@ async function simLoop(): Promise<void> {
     // timeoutMs falls through at 0 — the next tick fires immediately, and we
     // naturally underrun targetTPS.
     const elapsedThisIter = performance.now() - iterStart;
+    // CRITICAL: clamp the running-case timeout to a positive minimum.
+    // `Atomics.waitAsync(ta, idx, before, 0)` returns SYNCHRONOUSLY with
+    // `{async: false, value: "timed-out"}` per the spec — no Promise, no
+    // microtask, no event-loop yield. If we let `timeoutMs` reach 0 (which
+    // happens whenever `step_n(1)` overran the per-tick budget, e.g. high
+    // pop or high target-TPS) the loop would spin synchronously and
+    // `onmessage` would never fire — re-introducing the plan-review #C1 bug
+    // that made every slider / pause / TPS / inspect dark-hole. 1 ms is
+    // small enough not to affect throughput (sim was already underrunning)
+    // and forces `waitAsync` onto the async path so the await is real.
     const timeoutMs = paused
       ? Infinity
-      : Math.max(0, 1000 / targetTPS - elapsedThisIter);
+      : Math.max(1, 1000 / targetTPS - elapsedThisIter);
     const before = Atomics.load(ctrlI32, CTRL_FUTEX);
     const r = Atomics.waitAsync(ctrlI32, CTRL_FUTEX, before, timeoutMs);
     if (r.async) {
@@ -379,11 +389,19 @@ async function simLoop(): Promise<void> {
       // elapses. The `await` is the load-bearing event-loop yield — without
       // it, `onmessage` would never fire.
       await r.value;
+    } else {
+      // `r.async === false` ⇒ value at CTRL_FUTEX changed between our
+      // `Atomics.load(before)` and the `waitAsync` call ("not-equal"). A
+      // postMessage from main raced us — the matching task is queued in the
+      // worker's task queue but `onmessage` hasn't dispatched yet (it's a
+      // macrotask, not synchronous with `Atomics.notify`). We MUST yield to
+      // the macrotask queue here, otherwise we loop straight back to
+      // `drainMessages()` which sees an empty queue and we lose the wake.
+      // A microtask yield (`await Promise.resolve()`) is NOT sufficient —
+      // postMessage dispatches as a task. `setTimeout(0)` gives a real
+      // macrotask boundary.
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
     }
-    // r.async === false ⇒ "not-equal" (main mutated CTRL_FUTEX between our
-    // `Atomics.load(before)` and `waitAsync`) — fall straight through to the
-    // next iteration; the message that bumped the futex is already in the
-    // queue and `drainMessages` will pick it up.
   }
 }
 
