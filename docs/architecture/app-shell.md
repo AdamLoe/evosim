@@ -48,7 +48,19 @@ left column uses a row grid for top-bar / canvas / profiler.
 - Cross-widget source-of-truth coupling: `showProfiler` is the single
   state for both the Settings checkbox and the perf-panel ✕ button;
   flipping either writes the same setting and re-calls
-  `setProfilerVisible()`.
+  `setProfilerVisible()`. v1.9.1: visibility-only — the Rust profiler is
+  always-on (the worker enables it at boot) and the panel keeps polling
+  the bundled report whenever it's visible, regardless of any
+  backend "enabled" flag.
+- The rail open/closed toggle: `Settings.railOpen` (default `true`)
+  drives `#app-shell.rail-collapsed`, which collapses the grid track to
+  `0` and hides `#right-rail`. The ⚙ button and the `~` hotkey both
+  route through `setRailOpen` in `main.ts`.
+- Theming: `web/src/themes.ts` owns the palette map. `applyTheme(id)`
+  writes inline custom properties onto `<html>`; the four shipped themes
+  (charcoal, slate, light, vivid) each define **every** CSS var listed
+  in `styles.css`'s `:root` block. Charcoal is byte-identical to the
+  `:root` fallback so default users see no change after v1.9.1.
 
 ## What it does NOT own
 
@@ -70,7 +82,7 @@ left column uses a row grid for top-bar / canvas / profiler.
 
 | Element | Purpose | Installer / consumer |
 |---|---|---|
-| `#app-shell` | Two-column grid. | CSS-only. |
+| `#app-shell` | Two-column grid. Carries `.rail-collapsed` when the rail is hidden. | CSS-only; class flipped by `main.ts → applyRailOpen`. |
 | `#left-col` | Top-bar + canvas + profiler. | CSS-only. |
 | `#top-bar` | Always-visible status strip + pacing buttons + settings button. | `main.ts` populates with status text, play/pause toggle, target-TPS dropdown, restart, ⚙ Settings. |
 | `#canvas-wrap > #aquarium` | The WebGL2 sim view. | `render-gl.ts`. |
@@ -87,14 +99,19 @@ left column uses a row grid for top-bar / canvas / profiler.
 
 - **Default tab on boot:** Settings (`activeTab = "settings"` inside
   `installTabs`).
-- **`⚙` Settings button or `~` hotkey** → `rail.switchTab("settings")`.
-- **Click a creature on canvas** → `rail.switchTab("inspector")` AND
-  populate the inspector body.
+- **`⚙` Settings button or `~` hotkey** → toggle the rail
+  open/closed (v1.9.1; previously: switch to Settings tab). Routes
+  through `setRailOpen` in `main.ts` so the persisted setting + the
+  `.rail-collapsed` class on `#app-shell` stay in sync.
+- **Click a creature on canvas** → force the rail open via
+  `setRailOpen(true)` AND `rail.switchTab("inspector")` AND populate
+  the inspector body. Applies in both the SoA fast-path and the
+  `inspect_at` fallback.
 - **Deselect (click empty world)** → Inspector tab stays active and
   shows the empty-state hint; the user switches away manually.
 - The `~` hotkey is ignored when focus is inside an `<input>` /
   `<textarea>` so typing a tilde in the dev panel doesn't fire the
-  switch.
+  toggle.
 
 ## Settings tab — stage-then-apply
 
@@ -103,7 +120,8 @@ Two interaction tiers live inside the same tab:
 - **Live-apply** (Run + Display groups). Edits hit `setSetting(...)`
   and the apply callback immediately. No dirty tracking. Sliders in
   this tier: `autoRun`, `showProfiler`, `showPopGraph`, `showGrass`,
-  `grassOpacity`.
+  `grassOpacity`, `theme` (Display-group dropdown wired through
+  `applyTheme`).
 - **Stage-then-apply** (every other group: Energy, Grass, Eat,
   Lifecycle, Curriculum). Edits update only the in-memory widget
   value. The Settings tab's footer reconciles staged changes.
@@ -142,6 +160,31 @@ edits — re-opening Settings shows them still dirty.
 **Toast text** lives in one place
 (`widgets/devpanel.ts → TOAST_CONSTRUCTION`) and fires through
 `toast.ts → showToast`.
+
+## Theming
+
+`web/src/themes.ts` exports a `Theme` interface (`id`, `name`, `tokens:
+Record<string, string>`), the `THEMES` map (currently four entries:
+`charcoal`, `slate`, `light`, `vivid`), `DEFAULT_THEME_ID = "charcoal"`,
+and `applyTheme(id)`. `applyTheme` looks the theme up in the map (falling
+back to the default if `id` is unknown) and writes each of the
+`REQUIRED_TOKENS` onto `document.documentElement` via
+`style.setProperty`.
+
+Invariant: every theme must set **every** CSS var that appears in the
+`:root` block of `styles.css` — otherwise a switch from a heavier theme
+leaves a stale value painted. The current required set is the twelve
+palette tokens (`--bg-app`, `--bg-panel`, `--bg-panel-alt`,
+`--bg-canvas`, `--fg`, `--fg-muted`, `--fg-faint`, `--border`,
+`--border-strong`, `--accent`, `--accent-dirty`, `--danger`). Layout
+constants (`--rail-w`, `--tab-h`, `--topbar-h`, `--profiler-h`) live on
+`:root` only — they are not theme-owned.
+
+`main.ts → main()` calls `applyTheme(getSettings().theme)` before any UI
+installer runs, so the first paint uses the persisted theme rather than
+flashing the `:root` fallback (charcoal). The Settings tab's Display
+group hosts a live-apply dropdown (`makeThemeRow` in `devpanel.ts`) that
+persists the choice and re-calls `applyTheme` on change.
 
 ## Boot-payload accessors
 
@@ -186,6 +229,8 @@ construction.
 - `web/src/settings.ts` → `Settings` interface, `DEFAULTS`,
   `getSettings` / `setSetting` / `resetSettings`, the unknown-key
   filter on load.
+- `web/src/themes.ts` → `Theme` interface, `THEMES` map,
+  `DEFAULT_THEME_ID`, `applyTheme(id)`, `REQUIRED_TOKENS` invariant.
 
 ## Update when
 

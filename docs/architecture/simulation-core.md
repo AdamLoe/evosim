@@ -65,7 +65,8 @@ WorldHandle::sliders_defaults_json() -> String        // canonical DevSliders de
 WorldHandle::creature_at(wx, wy, tol) -> Option<f64>  // inspector click
 WorldHandle::creature_idx_by_id(id: f64) -> Option<u32>
 WorldHandle::creature_inspect_json(idx: u32) -> Option<String>
-WorldHandle::profile_enable(on: bool)
+WorldHandle::profile_enable(on: bool)                 // v1.9.1: worker calls once with true at boot
+WorldHandle::profile_clear()                          // v1.9.1: zero ring buffers, keep topology
 WorldHandle::profile_report_json() -> String
 WorldHandle::nn_worker_stats_json() -> String
 WorldHandle::tps / jank_count / tick / population / world_ended / world_size
@@ -154,6 +155,9 @@ hardwiring. The 32-byte input vector is SIMD-aligned for `wide::f32x8`.
 - `src/wasm_api.rs` → `WorldHandle`, `WorldHandle::set_slider`,
   `WorldHandle::write_snapshot_to`,
   `WorldHandle::sliders_defaults_json`,
+  `WorldHandle::profile_enable`,
+  `WorldHandle::profile_clear` (v1.9.1),
+  `WorldHandle::profile_report_json`,
   free functions `max_pop_for_sim`,
   `rayon_current_num_threads`.
 

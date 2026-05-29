@@ -50,7 +50,12 @@ grass_step           ← sum-busy across all rayon workers, per tick
   dispatch overhead, etc.) and that is the diagnostic value.
 - The Rust profiler API (`Profiler::push`, `push_root`,
   `push_root_named`, `record_under_root`, `ensure_root`,
-  `report_json`).
+  `report_json`, `clear`). `WorldHandle::profile_enable(on)` toggles
+  recording (v1.9.1: called once with `true` at boot, left on).
+  `WorldHandle::profile_clear()` zeroes every per-node ring buffer
+  and resets the epoch without touching the enabled flag — used by
+  the panel's "Reset profiler + jank" button alongside
+  `resetFrameTree()` on the TS side.
 - The honest-call-count contract: every sample carries an underlying
   invocation count so `ms/call` reflects per-creature / per-row cost,
   not per-tick cost. RAII spans contribute 1; sum-of-workers drains
@@ -60,7 +65,14 @@ grass_step           ← sum-busy across all rayon workers, per tick
 - The 1 Hz worker→main poll cadence for the profile report.
 - The display rules: insertion-order stable, indent by dotted-prefix
   depth, `(no samples yet)` placeholder for an empty tree, a single
-  `window: X.X s` header above the four trees, default OFF.
+  `window: X.X s` header above the four trees.
+- v1.9.1: the backend is **always-on**. The worker calls
+  `world.profile_enable(true)` once at boot and never disables. The
+  Settings "Show profiler" checkbox + the panel's ✕ button are
+  visibility-only — they show/hide `#perf-box` and skip the per-poll
+  tree render when hidden, but the Rust ring buffers keep accumulating
+  so the panel has data the moment it reappears. Default panel
+  visibility is `true` (`Settings.showProfiler = true`).
 
 ## What it does NOT own
 
@@ -200,10 +212,13 @@ flagged for a future pass.
   `Profiler::push_root`, `Profiler::push_root_named`,
   `Profiler::record_under_root` (signature
   `(root_name, path, dur_us, call_count)`),
-  `Profiler::record_external`, `ProfilerInner::ensure_root`,
+  `Profiler::record_external`, `Profiler::clear`,
+  `ProfilerInner::ensure_root`,
   `report_json`, `serialize_node` (writes `total_call_count`),
   `clock_now_us_threadsafe`, `SpanGuard`, `ROOT_TICK`,
   `ROOT_FRAME`, `WINDOW_MS`, `SAMPLES_PER_NODE`, `MAX_NODES`.
+- `src/wasm_api.rs` → `WorldHandle::profile_enable`,
+  `WorldHandle::profile_clear`, `WorldHandle::profile_report_json`.
 - `src/world/mod.rs` → the `record_under_root("grass_step", ...)` calls
   (passing paired `_us` + `_calls`) and the `tick.color_ema` sibling
   lift.
@@ -220,7 +235,8 @@ flagged for a future pass.
   `row_body_self_us`, `dispatch_calls`, `row_body_calls` atomic
   counters.
 - `web/src/perf.ts` → `span`, `setProfilerEnabled`,
-  `isProfilerEnabled`, `reportJson`, `recordSample` (3-tuple
+  `isProfilerEnabled`, `reportJson`, `resetFrameTree` (v1.9.1
+  panel-reset helper), `recordSample` (3-tuple
   `[ts, dur, call_count]`), the empty-stack `frame` special-case.
 - `web/src/render-gl.ts` → the `frame.render_world*` span calls.
 - `web/src/main.ts` → the outer `span("frame")` and

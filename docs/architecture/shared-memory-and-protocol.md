@@ -103,8 +103,9 @@ mantissa is exact up to 2^53 — well above any v1 session's id count.
 | `inspect_id` | `{ id, request_id }` | per inspector refresh |
 | `request_nn_stats` | `{ request_id }` | ~750 ms poll |
 | `request_profile_report` | `{ request_id }` | ~1000 ms poll |
-| `profile_enable` | `{ on: boolean }` | per checkbox toggle |
-| `reset_jank` | `{}` | per button click |
+| `profile_enable` | `{ on: boolean }` | once at boot (v1.9.1: worker enables on construction, leaves on) |
+| `reset_jank` | `{}` | per "Reset profiler + jank" button click |
+| `reset_profile` | `{}` | per "Reset profiler + jank" button click (v1.9.1; fires alongside `reset_jank` to wipe the Rust ring buffers) |
 
 Every `postMessage` from main is followed by `Atomics.add(controlI32,
 CTRL_FUTEX, 1)` + `Atomics.notify(controlI32, CTRL_FUTEX, 1)` so the
