@@ -84,6 +84,72 @@ void main() {
   out_color = vec4(col, v_color.a * alpha);
 }`;
 
+// Halo program: soft Gaussian-falloff glow with per-creature breathing
+// pulse. Quad scaled 2× body radius; the FS discards outside the inscribed
+// circle so the silhouette is round. Pulse phase derived from instance
+// color so different creatures breathe out-of-sync (no synchronized
+// flicker). Additive blend.
+const HALO_VS = `#version 300 es
+precision highp float;
+layout(location = 0) in vec2 a_corner;
+layout(location = 1) in vec2 a_center;
+layout(location = 2) in vec2 a_radii_px;
+layout(location = 3) in vec4 a_color;
+
+uniform vec2 u_viewport;
+uniform vec2 u_cam_pos;
+uniform float u_zoom;
+
+out vec2 v_local;
+out vec4 v_color;
+
+void main() {
+  // v_local stays in [-1, 1] over the bounding quad — same convention as
+  // DISC_VS. The FS discards outside r=1 (round inscribed circle).
+  v_local = a_corner * 2.0;
+  v_color = a_color;
+  vec2 center_px = (a_center - u_cam_pos) * u_zoom + u_viewport * 0.5;
+  // 4.0 = 2.0 (quad half-extent → full quad width) × 2.0 (halo scale).
+  // Halo extends to 2× body radius; combined with Gaussian falloff this
+  // gives a soft outer glow that fades to invisible well within the quad.
+  vec2 pos_px = center_px + a_corner * 4.0 * a_radii_px.x;
+  vec2 ndc = (pos_px / u_viewport) * 2.0 - 1.0;
+  ndc.y = -ndc.y;
+  gl_Position = vec4(ndc, 0.0, 1.0);
+}`;
+
+const HALO_FS = `#version 300 es
+precision highp float;
+in vec2 v_local;
+in vec4 v_color;
+out vec4 out_color;
+
+uniform float u_time;        // seconds since boot
+uniform float u_strength;    // peak alpha, theme-driven via --creature-halo
+
+void main() {
+  float r = length(v_local);
+  if (r > 1.0) discard;
+
+  // Gaussian falloff — much softer than the pow(1-r,n) family. exp(-r²·k)
+  // hits 0.37 at r=0.5, 0.018 at r=1.0; combined with the discard above,
+  // produces a smooth outer-glow gradient that fades naturally to black.
+  float falloff = exp(-r * r * 4.0);
+
+  // Per-creature pulse: phase derived from the instance color so each
+  // creature breathes on its own clock. The hash multipliers are
+  // arbitrary primes chosen to spread phases across [0, 2π) for any
+  // plausible RGB distribution. Pulse rate ~1.4 Hz.
+  float phase = dot(v_color.rgb, vec3(17.3, 31.1, 7.7));
+  float pulse = 0.6 + 0.4 * sin(u_time * 1.4 + phase);
+
+  // u_strength comes from --creature-halo alpha. Final alpha is gated
+  // entirely by the Gaussian × pulse so dense overlap reads as soft
+  // luminance instead of paint.
+  float a = falloff * pulse * u_strength;
+  out_color = vec4(v_color.rgb, a);
+}`;
+
 // Grass: one quad spanning the world, samples an R8 density texture
 // (v1.5 S6 — was R32F) and fades green by density. Quantization to u8 happens
 // Rust-side in the sim worker's `write_snapshot_to`; the shader treats `.r`
@@ -227,6 +293,15 @@ interface GLState {
   };
   discVao: WebGLVertexArrayObject;
   discInstanceBuf: WebGLBuffer;
+  haloProgram: WebGLProgram;
+  haloU: {
+    viewport: WebGLUniformLocation;
+    camPos: WebGLUniformLocation;
+    zoom: WebGLUniformLocation;
+    time: WebGLUniformLocation;
+    strength: WebGLUniformLocation;
+  };
+  haloVao: WebGLVertexArrayObject;
   trailProgram: WebGLProgram;
   trailU: {
     viewport: WebGLUniformLocation;
@@ -343,8 +418,46 @@ function initRenderer(gl: WebGL2RenderingContext): GLState {
   // Ring stops are constants — set once at link time. Thickness isn't a
   // theme concern; per-theme styling lives in u_ring_color's alpha.
   gl.useProgram(discProgram);
-  gl.uniform1f(discU.ringInner, 0.84);
-  gl.uniform1f(discU.ringOuter, 0.92);
+  // Ring sits at the actual disc edge (0.96..1.0) and is half the thickness
+  // of the v1.9.2 initial values (was 0.84..0.92 — 8% inset and 8% thick).
+  gl.uniform1f(discU.ringInner, 0.96);
+  gl.uniform1f(discU.ringOuter, 1.0);
+
+  // ─── Halo program ───
+  // Soft Gaussian glow with per-creature pulse. Reuses the disc instance
+  // buffer; the VS scales the bounding quad 2× the body radius.
+  const haloProgram = link(
+    gl,
+    compile(gl, gl.VERTEX_SHADER, HALO_VS),
+    compile(gl, gl.FRAGMENT_SHADER, HALO_FS),
+  );
+  const haloVao = mustGet(gl.createVertexArray(), "createVertexArray");
+  gl.bindVertexArray(haloVao);
+  const haloQuadBuf = mustGet(gl.createBuffer(), "createBuffer");
+  gl.bindBuffer(gl.ARRAY_BUFFER, haloQuadBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, unitQuad, gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  // Bind the SAME instance buffer as disc — halo reads the body instance
+  // stream verbatim and just scales the quad 2× in the vertex shader.
+  gl.bindBuffer(gl.ARRAY_BUFFER, discInstanceBuf);
+  gl.enableVertexAttribArray(1);
+  gl.vertexAttribPointer(1, 2, gl.FLOAT, false, INSTANCE_STRIDE_BYTES, 0);
+  gl.vertexAttribDivisor(1, 1);
+  gl.enableVertexAttribArray(2);
+  gl.vertexAttribPointer(2, 2, gl.FLOAT, false, INSTANCE_STRIDE_BYTES, 8);
+  gl.vertexAttribDivisor(2, 1);
+  gl.enableVertexAttribArray(3);
+  gl.vertexAttribPointer(3, 4, gl.FLOAT, false, INSTANCE_STRIDE_BYTES, 16);
+  gl.vertexAttribDivisor(3, 1);
+  gl.bindVertexArray(null);
+  const haloU = {
+    viewport: mustGet(gl.getUniformLocation(haloProgram, "u_viewport"), "u_viewport"),
+    camPos: mustGet(gl.getUniformLocation(haloProgram, "u_cam_pos"), "u_cam_pos"),
+    zoom: mustGet(gl.getUniformLocation(haloProgram, "u_zoom"), "u_zoom"),
+    time: mustGet(gl.getUniformLocation(haloProgram, "u_time"), "u_time"),
+    strength: mustGet(gl.getUniformLocation(haloProgram, "u_strength"), "u_strength"),
+  };
 
   // ─── Trail program (Wave 3) ───
   const trailProgram = link(
@@ -463,6 +576,7 @@ function initRenderer(gl: WebGL2RenderingContext): GLState {
   return {
     gl,
     discProgram, discU, discVao, discInstanceBuf,
+    haloProgram, haloU, haloVao,
     trailProgram, trailU, trailVao, trailInstanceBuf,
     trailScratch: new Float32Array(MAX_POP_FOR_SIM * TRAIL_FLOATS_PER_INSTANCE),
     grassProgram, grassU, grassVao, grassTex, grassTexDim: 0,
@@ -549,6 +663,18 @@ function readRingColor(): [number, number, number, number] {
   ringColorCacheKey = raw;
   ringColorCacheVal = raw ? parseRgba(raw) : [0, 0, 0, 0.6];
   return ringColorCacheVal;
+}
+
+// --creature-halo is consumed as an rgba where only the alpha matters —
+// the halo paints in the creature's own color, not the token color.
+let haloStrengthCacheKey = "";
+let haloStrengthCacheVal = 0.18;
+function readHaloStrength(): number {
+  const raw = readCssVar("--creature-halo");
+  if (raw === haloStrengthCacheKey) return haloStrengthCacheVal;
+  haloStrengthCacheKey = raw;
+  haloStrengthCacheVal = raw ? parseRgba(raw)[3] : 0.18;
+  return haloStrengthCacheVal;
 }
 
 export function renderWorld(
@@ -799,6 +925,24 @@ function renderWorldImpl(
     if (bodyCount > 0) {
       gl.bindBuffer(gl.ARRAY_BUFFER, s.discInstanceBuf);
       gl.bufferData(gl.ARRAY_BUFFER, scratch.subarray(0, off), gl.DYNAMIC_DRAW);
+
+      // ─── Halo pass ───
+      // Soft Gaussian glow with per-creature breathing pulse. Drawn under
+      // bodies (and under trails) with additive blending. Skipped at high
+      // pop to avoid overdraw cost + visual mush.
+      const haloStrength = readHaloStrength();
+      if (pop <= 8000 && haloStrength > 0.0) {
+        gl.useProgram(s.haloProgram);
+        gl.uniform2f(s.haloU.viewport, viewW, viewH);
+        gl.uniform2f(s.haloU.camPos, cam.cx, cam.cy);
+        gl.uniform1f(s.haloU.zoom, cam.zoom);
+        gl.uniform1f(s.haloU.time, performance.now() / 1000);
+        gl.uniform1f(s.haloU.strength, haloStrength);
+        gl.blendFunc(gl.ONE, gl.ONE);
+        gl.bindVertexArray(s.haloVao);
+        gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, bodyCount);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      }
 
       // ─── Trail pass (Wave 3) ───
       // Drawn under the body so the body always paints over its own trail's

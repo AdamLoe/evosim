@@ -31,9 +31,12 @@
   /* v1.9.2 renderer tokens. Consumed by `web/src/render-gl.ts` as
      GL uniforms (not rendered to DOM). --grass-tint is parsed as a
      comma-separated rgb-float triple in [0, 1] for a vec3 uniform;
-     --creature-ring uses standard rgba() syntax. */
+     --creature-ring uses standard rgba() syntax. --creature-halo also
+     uses rgba() but only its alpha channel is read (the halo paints
+     in the creature's own color). */
   --grass-tint: 0.55, 0.85, 0.45;
   --creature-ring: rgba(0, 0, 0, 0.6);
+  --creature-halo: rgba(0, 0, 0, 0.18);
 
   --rail-w: 420px;
   --tab-h: 36px;

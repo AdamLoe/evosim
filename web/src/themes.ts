@@ -54,9 +54,12 @@ export const REQUIRED_TOKENS = [
   "--chart-grid",
   // v1.9.2 renderer tokens. --grass-tint is a comma-separated rgb-float
   // triple in [0, 1] (consumed as a vec3 uniform). --creature-ring is a
-  // standard rgba() color.
+  // standard rgba() color. --creature-halo also rgba() but only the
+  // alpha channel is read (peak halo strength; the halo paints in the
+  // creature's own color).
   "--grass-tint",
   "--creature-ring",
+  "--creature-halo",
 ] as const;
 
 // Charcoal mirrors the current :root fallback values exactly — so users on
@@ -85,6 +88,7 @@ const CHARCOAL: Theme = {
     "--chart-grid": "rgba(232, 227, 218, 0.10)",
     "--grass-tint": "0.55, 0.85, 0.45",
     "--creature-ring": "rgba(0, 0, 0, 0.6)",
+    "--creature-halo": "rgba(0, 0, 0, 0.18)",
   },
 };
 
@@ -112,6 +116,7 @@ const SLATE: Theme = {
     "--chart-grid": "rgba(217, 227, 241, 0.10)",
     "--grass-tint": "0.42, 0.78, 0.55",
     "--creature-ring": "rgba(0, 0, 0, 0.5)",
+    "--creature-halo": "rgba(0, 0, 0, 0.22)",
   },
 };
 
@@ -139,6 +144,7 @@ const LIGHT: Theme = {
     "--chart-grid": "rgba(29, 28, 26, 0.12)",
     "--grass-tint": "0.62, 0.88, 0.55",
     "--creature-ring": "rgba(0, 0, 0, 0.5)",
+    "--creature-halo": "rgba(0, 0, 0, 0.06)",
   },
 };
 
@@ -166,6 +172,7 @@ const VIVID: Theme = {
     "--chart-grid": "rgba(241, 236, 255, 0.12)",
     "--grass-tint": "0.30, 0.92, 0.40",
     "--creature-ring": "rgba(0, 0, 0, 0.7)",
+    "--creature-halo": "rgba(0, 0, 0, 0.28)",
   },
 };
 
@@ -195,6 +202,7 @@ const MIDNIGHT: Theme = {
     "--chart-grid": "rgba(223, 230, 242, 0.08)",
     "--grass-tint": "0.25, 0.55, 0.50",
     "--creature-ring": "rgba(255, 255, 255, 0.4)",
+    "--creature-halo": "rgba(0, 0, 0, 0.30)",
   },
 };
 
