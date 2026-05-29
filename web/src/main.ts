@@ -173,7 +173,13 @@ async function main(): Promise<void> {
   let autoRestartPending = false;
 
   // Render loop.
-  let lastStatusUpdate = 0;
+  // v1.7.2: FPS counter — count frames per 1 s sampling window. Until the
+  // first full second elapses we show "—" (em-dash) so we don't display a
+  // synthetic value computed off a partial window. Reset and sample every
+  // ~1000 ms; conventional "frames in the last 1 s" semantic.
+  let framesThisSecond = 0;
+  let fpsWindowStart = performance.now();
+  let lastFps = -1;
   function frame(now: number): void {
     const frameSpan = span("frame");
     try {
@@ -225,12 +231,29 @@ async function main(): Promise<void> {
         now,
       );
 
-      if (now - lastStatusUpdate > 200) {
-        lastStatusUpdate = now;
-        const endedSuffix = header.world_ended ? "  (world ended)" : "";
-        status.textContent =
-          `seed: ${cachedSeed}  ·  tick ${header.tick}  ·  pop ${header.pop}${endedSuffix}`;
+      // v1.7.2: status text updates every RAF. The legacy 200 ms throttle
+      // dated from the WorldHandle era where reading `tick` was a wasm call;
+      // post-Wave-C it's a `view.getUint32` and the canvas already paints at
+      // full FPS. The status was the only thing lagging.
+      framesThisSecond++;
+      if (now - fpsWindowStart >= 1000) {
+        lastFps = framesThisSecond;
+        framesThisSecond = 0;
+        fpsWindowStart = now;
       }
+      const endedSuffix = header.world_ended ? "  (world ended)" : "";
+      // `header.tps` is the rolling-avg TPS the worker writes into the SAB
+      // header each snapshot; rounding to int matches the perf-widget's
+      // `#perf-tps` granularity. FPS shows "—" until the first 1 s window
+      // closes (and likewise while paused / world-ended — both stop the RAF
+      // pump from advancing fast enough to fill a window).
+      const tpsStr = isFinite(header.tps) && header.tps > 0
+        ? header.tps.toFixed(0)
+        : "—";
+      const fpsStr = lastFps >= 0 ? lastFps.toString() : "—";
+      status.textContent =
+        `seed: ${cachedSeed}  ·  tick ${header.tick}  ·  pop ${header.pop}` +
+        `  ·  ${tpsStr} TPS  ·  ${fpsStr} FPS${endedSuffix}`;
     } finally {
       frameSpan.close();
     }

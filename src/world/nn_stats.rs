@@ -64,6 +64,27 @@ pub struct NnStats {
     /// Sum of every chunk's wall-clock duration this tick. Often larger than
     /// the tick.nn span itself (chunks run in parallel; sum-of-busy > wall).
     pub tick_chunk_wall_us: AtomicU64,
+
+    // ── Paired per-tick call counters (v1.7.2) ────────────────────────────
+    // Each `_calls` counter is incremented alongside its paired `_us`
+    // accumulator inside the per-worker chunk loop. Drained by the post-tick
+    // pass alongside the timing so the profiler's `ms/call` column reflects
+    // honest per-creature / per-chunk cost instead of per-tick cost.
+    /// `build_input_total_us` is bracketed once per chunk → calls == chunk_count.
+    pub tick_build_input_total_calls: AtomicU64,
+    /// `build_input_other_us` is summed per creature inside `build_nn_input`.
+    pub tick_build_input_other_calls: AtomicU64,
+    /// Proximity bracket runs once per creature inside `build_nn_input`.
+    pub tick_proximity_total_calls: AtomicU64,
+    pub tick_proximity_creatures_calls: AtomicU64,
+    pub tick_proximity_grass_calls: AtomicU64,
+    /// Forward pass + layers run once per creature.
+    pub tick_forward_calls: AtomicU64,
+    pub tick_forward_l1_calls: AtomicU64,
+    pub tick_forward_l2_calls: AtomicU64,
+    pub tick_forward_l3_calls: AtomicU64,
+    /// Chunk-wall = one bracket per chunk → calls == chunk_count.
+    pub tick_chunk_wall_calls: AtomicU64,
     /// Number of distinct workers that picked up work this tick (rough
     /// parallelism utilization indicator). Counted via a transient bitset.
     pub tick_workers_used_bitset: AtomicU64,
@@ -93,6 +114,16 @@ impl NnStats {
             tick_forward_l3_us: AtomicU64::new(0),
             tick_chunk_wall_us: AtomicU64::new(0),
             tick_workers_used_bitset: AtomicU64::new(0),
+            tick_build_input_total_calls: AtomicU64::new(0),
+            tick_build_input_other_calls: AtomicU64::new(0),
+            tick_proximity_total_calls: AtomicU64::new(0),
+            tick_proximity_creatures_calls: AtomicU64::new(0),
+            tick_proximity_grass_calls: AtomicU64::new(0),
+            tick_forward_calls: AtomicU64::new(0),
+            tick_forward_l1_calls: AtomicU64::new(0),
+            tick_forward_l2_calls: AtomicU64::new(0),
+            tick_forward_l3_calls: AtomicU64::new(0),
+            tick_chunk_wall_calls: AtomicU64::new(0),
         }
     }
 
@@ -109,6 +140,19 @@ impl NnStats {
         self.tick_forward_l3_us.store(0, Ordering::Relaxed);
         self.tick_chunk_wall_us.store(0, Ordering::Relaxed);
         self.tick_workers_used_bitset.store(0, Ordering::Relaxed);
+        self.tick_build_input_total_calls
+            .store(0, Ordering::Relaxed);
+        self.tick_build_input_other_calls
+            .store(0, Ordering::Relaxed);
+        self.tick_proximity_total_calls.store(0, Ordering::Relaxed);
+        self.tick_proximity_creatures_calls
+            .store(0, Ordering::Relaxed);
+        self.tick_proximity_grass_calls.store(0, Ordering::Relaxed);
+        self.tick_forward_calls.store(0, Ordering::Relaxed);
+        self.tick_forward_l1_calls.store(0, Ordering::Relaxed);
+        self.tick_forward_l2_calls.store(0, Ordering::Relaxed);
+        self.tick_forward_l3_calls.store(0, Ordering::Relaxed);
+        self.tick_chunk_wall_calls.store(0, Ordering::Relaxed);
     }
 
     /// Always-on per-chunk telemetry — 2 clock reads per chunk (start + end)
@@ -139,6 +183,8 @@ impl NnStats {
         self.worker_busy_us[w].fetch_add(chunk_us, Ordering::Relaxed);
         self.tick_chunk_wall_us
             .fetch_add(chunk_us, Ordering::Relaxed);
+        // v1.7.2: one chunk wall-clock bracket per `record_chunk_lite` call.
+        self.tick_chunk_wall_calls.fetch_add(1, Ordering::Relaxed);
 
         if w < 64 {
             self.tick_workers_used_bitset
@@ -154,9 +200,17 @@ impl NnStats {
     /// respectively) — v1.7 requires every parent row to be a real measurement,
     /// not a sum of children. Workers bracket the parent operation directly and
     /// fetch_add into these counters alongside the leaf timings.
+    /// v1.7.2: each `_us` sum is paired with a `_calls` count so the
+    /// post-tick drain can pass honest per-invocation counts to the profiler.
+    /// `creatures_in_chunk` is the number of creatures the calling chunk
+    /// processed (== one call to `pick_action_d`, which is also one call to
+    /// `build_nn_input`, the proximity bracket, the forward pass, and each
+    /// layer). The `build_input_total` bracket is the per-chunk call; one
+    /// per `record_chunk_subphases` invocation.
     #[allow(clippy::too_many_arguments)]
     pub fn record_chunk_subphases(
         &self,
+        creatures_in_chunk: u64,
         build_input_total_us: u64,
         build_input_other_us: u64,
         proximity_total_us: u64,
@@ -185,6 +239,28 @@ impl NnStats {
             .fetch_add(forward_l2_us, Ordering::Relaxed);
         self.tick_forward_l3_us
             .fetch_add(forward_l3_us, Ordering::Relaxed);
+
+        // Paired call counters (v1.7.2). `build_input_total` is one bracket
+        // per chunk; everything inside `build_nn_input` and `pick_action_d`
+        // runs once per creature in the chunk.
+        self.tick_build_input_total_calls
+            .fetch_add(1, Ordering::Relaxed);
+        self.tick_build_input_other_calls
+            .fetch_add(creatures_in_chunk, Ordering::Relaxed);
+        self.tick_proximity_total_calls
+            .fetch_add(creatures_in_chunk, Ordering::Relaxed);
+        self.tick_proximity_creatures_calls
+            .fetch_add(creatures_in_chunk, Ordering::Relaxed);
+        self.tick_proximity_grass_calls
+            .fetch_add(creatures_in_chunk, Ordering::Relaxed);
+        self.tick_forward_calls
+            .fetch_add(creatures_in_chunk, Ordering::Relaxed);
+        self.tick_forward_l1_calls
+            .fetch_add(creatures_in_chunk, Ordering::Relaxed);
+        self.tick_forward_l2_calls
+            .fetch_add(creatures_in_chunk, Ordering::Relaxed);
+        self.tick_forward_l3_calls
+            .fetch_add(creatures_in_chunk, Ordering::Relaxed);
     }
 
     /// JSON snapshot for the dev panel / inspector. One object with a
@@ -273,13 +349,13 @@ mod tests {
     #[test]
     fn record_chunk_accumulates_per_worker() {
         let s = NnStats::new(0);
-        // (build_total, build_other, prox_total, prox_creatures, prox_grass, fwd, l1, l2, l3)
+        // (creatures_in_chunk, build_total, build_other, prox_total, prox_creatures, prox_grass, fwd, l1, l2, l3)
         s.record_chunk_lite(0, 100, 250, 50);
-        s.record_chunk_subphases(120, 30, 90, 40, 50, 20, 5, 10, 5);
+        s.record_chunk_subphases(50, 120, 30, 90, 40, 50, 20, 5, 10, 5);
         s.record_chunk_lite(0, 300, 500, 80);
-        s.record_chunk_subphases(180, 60, 120, 70, 50, 40, 15, 20, 5);
+        s.record_chunk_subphases(80, 180, 60, 120, 70, 50, 40, 15, 20, 5);
         s.record_chunk_lite(2, 110, 180, 30);
-        s.record_chunk_subphases(60, 10, 50, 20, 30, 15, 5, 5, 5);
+        s.record_chunk_subphases(30, 60, 10, 50, 20, 30, 15, 5, 5, 5);
 
         assert_eq!(s.worker_chunks[0].load(Ordering::Relaxed), 2);
         assert_eq!(s.worker_creatures[0].load(Ordering::Relaxed), 130);
@@ -292,6 +368,13 @@ mod tests {
         // workers 0 and 2 used → bitset = 0b101 = 5; popcount = 2
         let used = s.tick_workers_used_bitset.load(Ordering::Relaxed);
         assert_eq!(used.count_ones(), 2);
+
+        // v1.7.2: paired call counters accumulate creatures_in_chunk per chunk
+        // for per-creature counters and 1 per chunk for the per-chunk bracket.
+        assert_eq!(s.tick_forward_calls.load(Ordering::Relaxed), 160);
+        assert_eq!(s.tick_build_input_total_calls.load(Ordering::Relaxed), 3);
+        assert_eq!(s.tick_build_input_other_calls.load(Ordering::Relaxed), 160);
+        assert_eq!(s.tick_chunk_wall_calls.load(Ordering::Relaxed), 3);
     }
 
     #[test]
@@ -312,11 +395,14 @@ mod tests {
     fn reset_tick_clears_per_tick_only() {
         let s = NnStats::new(0);
         s.record_chunk_lite(0, 100, 200, 50);
-        s.record_chunk_subphases(60, 10, 50, 20, 30, 40, 5, 10, 25);
+        s.record_chunk_subphases(50, 60, 10, 50, 20, 30, 40, 5, 10, 25);
         s.reset_tick();
         assert_eq!(s.worker_chunks[0].load(Ordering::Relaxed), 1); // preserved
         assert_eq!(s.tick_forward_us.load(Ordering::Relaxed), 0); // cleared
         assert_eq!(s.tick_workers_used_bitset.load(Ordering::Relaxed), 0);
+        // v1.7.2: paired call counters are also reset.
+        assert_eq!(s.tick_forward_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(s.tick_chunk_wall_calls.load(Ordering::Relaxed), 0);
     }
 
     #[test]

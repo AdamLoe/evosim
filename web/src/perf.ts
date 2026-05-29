@@ -24,7 +24,10 @@ interface PerfNode {
   name: string;
   parent: NodeId | null;
   children: NodeId[];
-  samples: Array<[number, number]>; // [timestamp_ms, dur_us]
+  // [timestamp_ms, dur_us, call_count]. v1.7.2: call_count is the number of
+  // underlying work-unit invocations represented by the sample; RAII-style
+  // spans record 1, drained sum-of-workers samples record N.
+  samples: Array<[number, number, number]>;
 }
 
 // ─── State ────────────────────────────────────────────────────────────────
@@ -85,7 +88,8 @@ export function span(name: string): { close: () => void } {
       if (!top) return;
       const durUs = Math.max(0, Math.round((performance.now() - top.t0) * 1000));
       const tsMs = Math.max(0, performance.now() - epochMs);
-      recordSample(top.nodeId, tsMs, durUs);
+      // v1.7.2: each RAII span = one underlying invocation → call_count = 1.
+      recordSample(top.nodeId, tsMs, durUs, 1);
     },
   };
 }
@@ -109,7 +113,7 @@ export function reportJson(): string {
   pruneAll(nowMsRel);
   const parts: string[] = [];
   serializeNode(0, nowMsRel, null, parts);
-  return parts[0] ?? '{"name":"frame","total_us":0,"call_count":0,"parent_call_count":null,"effective_window_ms":0,"children":[]}';
+  return parts[0] ?? '{"name":"frame","total_us":0,"call_count":0,"total_call_count":0,"parent_call_count":null,"effective_window_ms":0,"children":[]}';
 }
 
 // ─── Internals ────────────────────────────────────────────────────────────
@@ -126,12 +130,17 @@ function ensureChild(parent: NodeId, name: string): NodeId {
   return id;
 }
 
-function recordSample(nodeId: NodeId, tsMs: number, durUs: number): void {
+function recordSample(
+  nodeId: NodeId,
+  tsMs: number,
+  durUs: number,
+  callCount: number,
+): void {
   const node = nodes[nodeId];
   if (node.samples.length >= SAMPLES_PER_NODE) {
     node.samples.shift();
   }
-  node.samples.push([tsMs, durUs]);
+  node.samples.push([tsMs, durUs, callCount]);
 }
 
 function pruneAll(nowMsRel: number): void {
@@ -156,20 +165,26 @@ function serializeNode(
   output: string[],
 ): string {
   const node = nodes[id];
+  // v1.7.2: call_count = sample count (legacy field); total_call_count is the
+  // sum of per-sample invocation counts and matches the Rust report's shape.
   const callCount = node.samples.length;
   const totalUs = node.samples.reduce((s, [, d]) => s + d, 0);
+  const totalCallCount = node.samples.reduce((s, [, , c]) => s + c, 0);
   const effectiveWindowMs =
     callCount > 0 ? Math.min(WINDOW_MS, nowMsRel - node.samples[0][0]) : 0;
 
   const childParts: string[] = [];
   for (const childId of node.children) {
-    childParts.push(serializeNode(childId, nowMsRel, callCount, []));
+    // Parent-call-count fed to children is the parent's honest invocation
+    // count (matches Rust behavior for `total_call_count`).
+    childParts.push(serializeNode(childId, nowMsRel, totalCallCount, []));
   }
 
   const json =
     `{"name":${JSON.stringify(node.name)}` +
     `,"total_us":${totalUs}` +
     `,"call_count":${callCount}` +
+    `,"total_call_count":${totalCallCount}` +
     `,"parent_call_count":${parentCallCount === null ? "null" : parentCallCount}` +
     `,"effective_window_ms":${Math.max(0, Math.round(effectiveWindowMs))}` +
     `,"children":[${childParts.join(",")}]}`;

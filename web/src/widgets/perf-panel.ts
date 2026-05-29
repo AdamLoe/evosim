@@ -22,7 +22,15 @@ const POLL_INTERVAL_MS = 1000;
 interface ProfNode {
   name: string;
   total_us: number;
+  /** Sample count: number of distinct ring-buffer entries for this node. */
   call_count: number;
+  /**
+   * v1.7.2: sum of per-sample call counts. For RAII spans this equals
+   * `call_count`; for sum-of-workers drains it's the real per-invocation
+   * count (e.g. creature_count × ticks for `nn.forward.l1`). The panel
+   * divides by this to get honest `ms/call`.
+   */
+  total_call_count: number;
   parent_call_count: number | null;
   effective_window_ms: number;
   children: ProfNode[];
@@ -235,7 +243,26 @@ function renderTreesStacked(trees: ProfNode[]): void {
     return;
   }
 
-  const parts: string[] = [];
+  // v1.7.2: render the actual sample window length at the top of the panel
+  // so "tick.total_ms" is interpretable without guessing whether the window
+  // is 17 s, 40 s, or 60 s. Per-tick aggregation makes the window uniform
+  // across nodes, so taking the max effective_window_ms over all populated
+  // nodes is a good proxy for "how much data is the panel showing".
+  let maxWindowMs = 0;
+  function scanWindow(node: ProfNode): void {
+    if (node.call_count > 0 && node.effective_window_ms > maxWindowMs) {
+      maxWindowMs = node.effective_window_ms;
+    }
+    for (const c of node.children) scanWindow(c);
+  }
+  for (const t of trees) scanWindow(t);
+  const windowSec = maxWindowMs / 1000;
+  const windowHeader =
+    `<div class="profiler-window" style="opacity:0.7;font-size:11px;padding:2px 4px 6px 4px">` +
+      `window: ${windowSec.toFixed(1)} s` +
+    `</div>`;
+
+  const parts: string[] = [windowHeader];
   for (const tree of trees) {
     parts.push(renderOneTree(tree));
   }
@@ -272,7 +299,11 @@ function renderOneTree(treeRoot: ProfNode): string {
           ? node.name
           : `${pathPrefix}.${node.name}`;
     const totalMs = node.total_us / 1000;
-    const msPerCall = node.call_count > 0 ? node.total_us / node.call_count / 1000 : null;
+    // v1.7.2: use `total_call_count` (honest per-work-unit count) for the
+    // calls column and the ms/call divisor. Falls back to `call_count` when
+    // missing (older JSON shape) so a stale wasm doesn't blank the panel.
+    const honestCalls = node.total_call_count ?? node.call_count;
+    const msPerCall = honestCalls > 0 ? node.total_us / honestCalls / 1000 : null;
     // share % is relative to the top-level tree root so siblings within a
     // tree are directly comparable. depth-0 (the root row) is pinned to 100%.
     const sharePct =
@@ -289,7 +320,7 @@ function renderOneTree(treeRoot: ProfNode): string {
       `<tr class="pf-depth-${Math.min(depth, 4)}">` +
         `<td class="pf-name">${escHtml(fullPath)}</td>` +
         `<td>${fmt(totalMs, 2)}</td>` +
-        `<td>${node.call_count > 0 ? node.call_count : "-"}</td>` +
+        `<td>${honestCalls > 0 ? honestCalls : "-"}</td>` +
         `<td>${fmt(msPerCall, 3)}</td>` +
         `<td>${fmt(sharePct, 1)}</td>` +
         `</tr>`,

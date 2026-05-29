@@ -112,6 +112,7 @@ impl World {
                             );
                             if timed {
                                 stats_ref.record_chunk_subphases(
+                                    vx_sub.len() as u64,
                                     chunk_pick.build_input_total_us,
                                     chunk_pick.build.other_us,
                                     chunk_pick.build.proximity_total_us,
@@ -181,6 +182,7 @@ impl World {
                     .record_chunk_lite(0, chunk_start_us, chunk_end_us, (hi - lo) as u64);
                 if timed {
                     self.nn_stats.record_chunk_subphases(
+                        (hi - lo) as u64,
                         chunk_pick.build_input_total_us,
                         chunk_pick.build.other_us,
                         chunk_pick.build.proximity_total_us,
@@ -205,19 +207,26 @@ impl World {
         // stays a leaf in the `tick` tree.
         if timed {
             use std::sync::atomic::Ordering;
-            // Root: sum-busy of every worker chunk this tick. `record_chunk_lite`
-            // accumulates this unconditionally, which is what the `nn` top-level
-            // row reads — a real per-worker bracket, not a rollup of children.
+            // v1.7.2: each drained sample now carries an honest call count.
+            // The `nn` root is bracketed once per chunk, every sub-phase under
+            // `build_nn_input` runs once per creature, and the forward layers
+            // run once per creature too. Reading both `_us` and `_calls`
+            // atomics in matched pairs keeps the panel's `ms/call` column
+            // pinned to real per-call cost.
             self.profile.record_under_root(
                 "nn",
                 "",
                 self.nn_stats.tick_chunk_wall_us.load(Ordering::Relaxed) as u32,
+                self.nn_stats.tick_chunk_wall_calls.load(Ordering::Relaxed) as u32,
             );
             self.profile.record_under_root(
                 "nn",
                 "build_input",
                 self.nn_stats
                     .tick_build_input_total_us
+                    .load(Ordering::Relaxed) as u32,
+                self.nn_stats
+                    .tick_build_input_total_calls
                     .load(Ordering::Relaxed) as u32,
             );
             self.profile.record_under_root(
@@ -226,12 +235,18 @@ impl World {
                 self.nn_stats
                     .tick_build_input_other_us
                     .load(Ordering::Relaxed) as u32,
+                self.nn_stats
+                    .tick_build_input_other_calls
+                    .load(Ordering::Relaxed) as u32,
             );
             self.profile.record_under_root(
                 "nn",
                 "proximity",
                 self.nn_stats
                     .tick_proximity_total_us
+                    .load(Ordering::Relaxed) as u32,
+                self.nn_stats
+                    .tick_proximity_total_calls
                     .load(Ordering::Relaxed) as u32,
             );
             self.profile.record_under_root(
@@ -240,6 +255,9 @@ impl World {
                 self.nn_stats
                     .tick_proximity_creatures_us
                     .load(Ordering::Relaxed) as u32,
+                self.nn_stats
+                    .tick_proximity_creatures_calls
+                    .load(Ordering::Relaxed) as u32,
             );
             self.profile.record_under_root(
                 "nn",
@@ -247,26 +265,33 @@ impl World {
                 self.nn_stats
                     .tick_proximity_grass_us
                     .load(Ordering::Relaxed) as u32,
+                self.nn_stats
+                    .tick_proximity_grass_calls
+                    .load(Ordering::Relaxed) as u32,
             );
             self.profile.record_under_root(
                 "nn",
                 "forward",
                 self.nn_stats.tick_forward_us.load(Ordering::Relaxed) as u32,
+                self.nn_stats.tick_forward_calls.load(Ordering::Relaxed) as u32,
             );
             self.profile.record_under_root(
                 "nn",
                 "forward.l1",
                 self.nn_stats.tick_forward_l1_us.load(Ordering::Relaxed) as u32,
+                self.nn_stats.tick_forward_l1_calls.load(Ordering::Relaxed) as u32,
             );
             self.profile.record_under_root(
                 "nn",
                 "forward.l2",
                 self.nn_stats.tick_forward_l2_us.load(Ordering::Relaxed) as u32,
+                self.nn_stats.tick_forward_l2_calls.load(Ordering::Relaxed) as u32,
             );
             self.profile.record_under_root(
                 "nn",
                 "forward.l3",
                 self.nn_stats.tick_forward_l3_us.load(Ordering::Relaxed) as u32,
+                self.nn_stats.tick_forward_l3_calls.load(Ordering::Relaxed) as u32,
             );
         }
     }

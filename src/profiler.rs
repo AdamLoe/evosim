@@ -1,7 +1,11 @@
 //! In-app hierarchical profiler. Runtime-toggleable, zero-cost when off.
 //! Sampled spans accumulate into a tree keyed by ancestor path; each node
-//! holds a ring buffer of (timestamp_ms_u32, dur_us_u32) samples over the
-//! last WINDOW_MS. Reports are produced on demand and prune stale samples.
+//! holds a ring buffer of (timestamp_ms_u32, dur_us_u32, call_count_u32)
+//! samples over the last WINDOW_MS. The trailing `call_count` is the number
+//! of underlying work units represented by the sample — 1 for an RAII span
+//! (one push/drop pair), N for a sum-of-workers drain (where N is the number
+//! of per-creature or per-row invocations whose timings were summed into
+//! `dur_us`). Reports are produced on demand and prune stale samples.
 //!
 //! Determinism: this module performs no RNG calls and only reads
 //! `web_sys::Performance::now()` (or a native Instant clock in tests).
@@ -48,10 +52,17 @@ struct Node {
     #[allow(dead_code)] // retained for potential v1.1 self-time computation
     parent: Option<NodeId>,
     children: Vec<NodeId>,
-    /// Ring buffer of (timestamp_ms_relative_to_epoch: u32, dur_us: u32).
-    /// total_us and call_count are RECOMPUTED from this ring on every report —
-    /// there is NO running counter field. (Design decision D4/R1.)
-    samples: VecDeque<(u32, u32)>,
+    /// Ring buffer of (timestamp_ms_relative_to_epoch: u32, dur_us: u32,
+    /// call_count: u32). total_us / total_call_count are RECOMPUTED from this
+    /// ring on every report — there is NO running counter field. (Design
+    /// decision D4/R1.)
+    ///
+    /// `call_count` is the number of underlying work-unit invocations this
+    /// sample represents. RAII spans (push/drop) record 1. Sum-of-workers
+    /// drains (`nn.forward`, `grass_step.row_compute`, …) record the actual
+    /// per-creature / per-row invocation count so the panel's `ms/call`
+    /// column reflects honest per-call cost. (v1.7.2)
+    samples: VecDeque<(u32, u32, u32)>,
 }
 
 struct ProfilerInner {
@@ -199,8 +210,14 @@ impl Profiler {
     /// `path` is the dotted chain under that root (e.g. `"forward.l1"` or `""`
     /// for the root itself). Empty `path` records into the root's own ring.
     ///
+    /// `call_count` is the number of underlying work-unit invocations this
+    /// drained sample represents (e.g. creature_count for `nn.forward.l1`,
+    /// GRASS_GRID_DIM for `grass_step.row_compute`, 1 for `dispatch`).
+    /// v1.7.2: honest call counts so the panel's `ms/call` column reflects
+    /// per-call cost, not per-tick cost.
+    ///
     /// Silently no-ops when the profiler is disabled.
-    pub fn record_under_root(&self, root_name: &str, path: &str, dur_us: u32) {
+    pub fn record_under_root(&self, root_name: &str, path: &str, dur_us: u32, call_count: u32) {
         if !self.enabled() {
             return;
         }
@@ -218,7 +235,7 @@ impl Profiler {
         if samples.len() == SAMPLES_PER_NODE {
             samples.pop_front();
         }
-        samples.push_back((now_ms, dur_us));
+        samples.push_back((now_ms, dur_us, call_count));
     }
 
     /// `path` is a dotted ancestor chain under ROOT_FRAME, e.g.
@@ -239,7 +256,9 @@ impl Profiler {
         if samples.len() == SAMPLES_PER_NODE {
             samples.pop_front();
         }
-        samples.push_back((now_ms, dur_us));
+        // Each `record_external` call represents one RAII-equivalent
+        // invocation; v1.7.2 stores call_count=1 for parity with SpanGuard.
+        samples.push_back((now_ms, dur_us, 1));
     }
 
     /// Build the JSON report. Prunes stale samples as a side effect.
@@ -344,7 +363,7 @@ impl ProfilerInner {
     fn prune(&mut self, now_ms: u32) {
         let cutoff = now_ms.saturating_sub(WINDOW_MS);
         for node in &mut self.nodes {
-            while let Some(&(ts, _)) = node.samples.front() {
+            while let Some(&(ts, _, _)) = node.samples.front() {
                 if ts < cutoff {
                     node.samples.pop_front();
                 } else {
@@ -393,7 +412,8 @@ impl Drop for SpanGuard {
             if samples.len() == SAMPLES_PER_NODE {
                 samples.pop_front();
             }
-            samples.push_back((ts, dur));
+            // RAII span = one underlying invocation → call_count = 1 (v1.7.2).
+            samples.push_back((ts, dur, 1));
         }
     }
 }
@@ -412,11 +432,16 @@ fn serialize_node(
     let node = &nodes[id as usize];
 
     // Recompute totals from the (post-prune) ring buffer — no running counter.
+    // v1.7.2: `call_count` is the count of distinct samples in the ring
+    // (preserved for backward-compatible JSON shape); `total_call_count` is
+    // the sum of per-sample `call_count` fields and reflects the real number
+    // of underlying work-unit invocations the panel divides by for ms/call.
     let call_count = node.samples.len() as u64;
-    let total_us: u64 = node.samples.iter().map(|&(_, d)| d as u64).sum();
+    let total_us: u64 = node.samples.iter().map(|&(_, d, _)| d as u64).sum();
+    let total_call_count: u64 = node.samples.iter().map(|&(_, _, c)| c as u64).sum();
 
     // Effective window: time span actually covered by current samples.
-    let effective_window_ms: u32 = if let Some(&(oldest_ts, _)) = node.samples.front() {
+    let effective_window_ms: u32 = if let Some(&(oldest_ts, _, _)) = node.samples.front() {
         // effective = now_ms - oldest_ts, capped at window_ms.
         // (newest_ts is implicit in now_ms for report purposes.)
         now_ms.saturating_sub(oldest_ts).min(window_ms)
@@ -430,6 +455,8 @@ fn serialize_node(
     out.push_str(&total_us.to_string());
     out.push_str(",\"call_count\":");
     out.push_str(&call_count.to_string());
+    out.push_str(",\"total_call_count\":");
+    out.push_str(&total_call_count.to_string());
     out.push_str(",\"parent_call_count\":");
     match parent_call_count {
         Some(n) => out.push_str(&n.to_string()),
@@ -444,7 +471,17 @@ fn serialize_node(
         if i > 0 {
             out.push(',');
         }
-        serialize_node(nodes, child_id, now_ms, window_ms, Some(call_count), out);
+        // Parent call count for children is the parent's total_call_count
+        // (the real per-invocation count), not the sample count. Lets a panel
+        // compute children's per-parent-call ratio honestly when needed.
+        serialize_node(
+            nodes,
+            child_id,
+            now_ms,
+            window_ms,
+            Some(total_call_count),
+            out,
+        );
     }
 
     out.push_str("]}");
@@ -840,6 +877,7 @@ mod tests {
                 "name",
                 "total_us",
                 "call_count",
+                "total_call_count",
                 "parent_call_count",
                 "effective_window_ms",
                 "children",
@@ -1008,6 +1046,52 @@ mod tests {
             (4990..=5010).contains(&ew),
             "effective_window_ms={ew} expected ~5000"
         );
+        clear_fake_clock();
+    }
+
+    /// v1.7.2: `record_under_root` carries an honest call_count that the JSON
+    /// surfaces as `total_call_count`. A drained sample with N invocations
+    /// must contribute N to `total_call_count`, while the legacy `call_count`
+    /// (== sample count) stays at 1 per drain.
+    #[test]
+    fn profiler_record_under_root_call_count_is_honest() {
+        set_fake_clock_us(0);
+        let p = Profiler::new();
+        p.set_enabled(true);
+        // Three drains under `nn.forward.l1`: 1500, 1200, 1100 underlying
+        // creature-forward invocations summed into 100µs, 80µs, 70µs.
+        p.record_under_root("nn", "forward.l1", 100, 1500);
+        p.record_under_root("nn", "forward.l1", 80, 1200);
+        p.record_under_root("nn", "forward.l1", 70, 1100);
+        let v: serde_json::Value = serde_json::from_str(&p.report_json()).unwrap();
+        let nn = v["tree"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["name"] == "nn")
+            .unwrap()
+            .clone();
+        let fwd = nn["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["name"] == "forward")
+            .unwrap()
+            .clone();
+        let l1 = fwd["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["name"] == "l1")
+            .unwrap()
+            .clone();
+        // Sample count vs honest invocation count.
+        assert_eq!(l1["call_count"], 3, "sample count = 3 drains");
+        assert_eq!(
+            l1["total_call_count"], 3800,
+            "total_call_count = 1500 + 1200 + 1100"
+        );
+        assert_eq!(l1["total_us"], 250, "total_us = 100 + 80 + 70");
         clear_fake_clock();
     }
 

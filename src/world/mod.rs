@@ -359,17 +359,28 @@ impl World {
             // `dispatch` name regardless of which build is active.
             let dispatch_us = self.grass.par_chunks_us.load(Ordering::Relaxed)
                 + self.grass.chunks_mut_us.load(Ordering::Relaxed);
-            self.profile
-                .record_under_root("grass_step", "dispatch", dispatch_us as u32);
+            // v1.7.2: drain paired call counters so the panel's `ms/call`
+            // column reflects per-row-body cost (and per-tick cost for the
+            // 1-per-tick parents).
+            let dispatch_calls = self.grass.dispatch_calls.load(Ordering::Relaxed) as u32;
+            let row_body_calls = self.grass.row_body_calls.load(Ordering::Relaxed) as u32;
+            self.profile.record_under_root(
+                "grass_step",
+                "dispatch",
+                dispatch_us as u32,
+                dispatch_calls,
+            );
             self.profile.record_under_root(
                 "grass_step",
                 "row_compute",
                 self.grass.row_body_us.load(Ordering::Relaxed) as u32,
+                row_body_calls,
             );
             self.profile.record_under_root(
                 "grass_step",
                 "row_compute.body",
                 self.grass.row_body_self_us.load(Ordering::Relaxed) as u32,
+                row_body_calls,
             );
 
             // Bitset rebuild is short but the v1.7 panel wants it explicit so
@@ -382,6 +393,7 @@ impl World {
                 "grass_step",
                 "bitset_rebuild",
                 bs_end.saturating_sub(bs_start) as u32,
+                1,
             );
             // Root `grass_step` row: the sim worker's wall-clock for the whole
             // (compute_propagation + bitset_rebuild) block. Its own measurement
@@ -392,6 +404,7 @@ impl World {
                 "grass_step",
                 "",
                 gs_root_end.saturating_sub(gs_root_start) as u32,
+                1,
             );
         }
 
