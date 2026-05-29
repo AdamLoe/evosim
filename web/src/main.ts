@@ -4,7 +4,7 @@
 // the SimBridge.
 
 import { makeCamera } from "./render";
-import { renderWorld } from "./render-gl";
+import { renderWorld, resetInterpolation } from "./render-gl";
 import { attachCameraControls } from "./camera";
 import { installRail, pollRail, highlights } from "./rail/index";
 import { installProfilerPanel } from "./widgets/perf-panel";
@@ -26,6 +26,7 @@ import {
   SimBridge,
   MAX_POP_FOR_SIM,
   CTRL_CURRENT_SLOT,
+  CTRL_SEQ,
   CREATURE_STRIDE,
   GRASS_BYTES,
   creatureSoAOffset,
@@ -131,6 +132,10 @@ async function main(): Promise<void> {
     resetStats();
     resetInspectorSelection(rail);
     highlights.clear();
+    // v1.9.2 Wave 3: clear interpolation maps so the first frame after
+    // restart doesn't lerp from positions in the dead worker's last
+    // snapshot.
+    resetInterpolation();
   }
 
   window.addEventListener("keydown", (e) => {
@@ -164,6 +169,7 @@ async function main(): Promise<void> {
       const readSpan = span("frame.snapshot.read");
       const rawSlot = Atomics.load(controlI32, CTRL_CURRENT_SLOT);
       const slot: 0 | 1 = rawSlot === 1 ? 1 : 0;
+      const seq = Atomics.load(controlI32, CTRL_SEQ);
       const header = readSnapshotHeader(snapshotView, slotOffset(slot));
       const pop = Math.min(header.pop, MAX_POP_FOR_SIM);
       const creatures = pop > 0
@@ -192,6 +198,8 @@ async function main(): Promise<void> {
         latestGrassDim,
         highlights,
         now,
+        seq,
+        targetTPS,
       );
 
       framesThisSecond++;

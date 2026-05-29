@@ -12,7 +12,7 @@
 import { type Camera, PX_PER_SIZE } from "./render";
 import { getSettings } from "./settings";
 import { span } from "./perf";
-import { CREATURE_STRIDE } from "./sim-bridge";
+import { CREATURE_STRIDE, MAX_POP_FOR_SIM } from "./sim-bridge";
 
 // v1.6 Wave C: the renderer reads typed-array views over the live SAB slot
 // directly (no postMessage payload, no copy). `creatures` is a Float32Array
@@ -179,6 +179,55 @@ void main() {
   out_color = vec4(u_grass_tint, d2 * u_opacity);
 }`;
 
+// Trail program (v1.9.2 Wave 3): a thin quad-as-line drawn between two
+// endpoints per creature, fading alpha toward the trailing edge. One
+// instance per creature with both prev and curr positions; pre-allocated
+// to the same MAX_POP_FOR_SIM ceiling as bodies.
+const TRAIL_VS = `#version 300 es
+precision highp float;
+layout(location = 0) in vec2 a_corner;        // unit quad in [0, 1]
+layout(location = 1) in vec2 a_start;         // world-space trail start
+layout(location = 2) in vec2 a_end;           // world-space trail end (= body)
+layout(location = 3) in vec4 a_color;         // rgb + per-instance alpha
+layout(location = 4) in float a_thickness;    // screen px
+
+uniform vec2 u_viewport;
+uniform vec2 u_cam_pos;
+uniform float u_zoom;
+
+out float v_t;
+out vec4 v_color;
+
+void main() {
+  vec2 start_px = (a_start - u_cam_pos) * u_zoom + u_viewport * 0.5;
+  vec2 end_px   = (a_end   - u_cam_pos) * u_zoom + u_viewport * 0.5;
+  vec2 axis = end_px - start_px;
+  float len = max(length(axis), 0.0001);
+  vec2 dir = axis / len;
+  vec2 perp = vec2(-dir.y, dir.x);
+  // a_corner.x ∈ [0, 1] selects along the trail (start → end);
+  // a_corner.y ∈ [0, 1] selects across the trail width.
+  vec2 pos_px = start_px + dir * (a_corner.x * len)
+              + perp * ((a_corner.y - 0.5) * a_thickness);
+  v_t = a_corner.x;
+  v_color = a_color;
+  vec2 ndc = (pos_px / u_viewport) * 2.0 - 1.0;
+  ndc.y = -ndc.y;
+  gl_Position = vec4(ndc, 0.0, 1.0);
+}`;
+
+const TRAIL_FS = `#version 300 es
+precision highp float;
+in float v_t;     // 0 at trail start (back), 1 at body (front)
+in vec4 v_color;
+out vec4 out_color;
+
+void main() {
+  // Fade alpha toward the trailing edge so the body looks like it's
+  // dragging a comet tail.
+  out_color = vec4(v_color.rgb, v_color.a * v_t);
+}`;
+
 // World-bounds frame: 4 lines (one per edge).
 const FRAME_VS = `#version 300 es
 precision highp float;
@@ -205,6 +254,9 @@ void main() {
 const FLOATS_PER_INSTANCE = 8; // cx, cy, outer_px, inner_px, r, g, b, a
 const INSTANCE_STRIDE_BYTES = FLOATS_PER_INSTANCE * 4;
 
+// v1.9.2 Wave 3: trail instance is [startX, startY, endX, endY, r, g, b, a, thickness].
+const TRAIL_FLOATS_PER_INSTANCE = 9;
+
 // Permanent-highlight sentinel; matches HIGHLIGHT_PERMANENT in highlight.ts.
 const PERMANENT_EXP = Number.MAX_SAFE_INTEGER;
 const HIGHLIGHT_FADE_MS = 1500;
@@ -230,6 +282,16 @@ interface GLState {
     haloAlpha: WebGLUniformLocation;
   };
   haloVao: WebGLVertexArrayObject;
+  trailProgram: WebGLProgram;
+  trailU: {
+    viewport: WebGLUniformLocation;
+    camPos: WebGLUniformLocation;
+    zoom: WebGLUniformLocation;
+  };
+  trailVao: WebGLVertexArrayObject;
+  trailInstanceBuf: WebGLBuffer;
+  // Per-trail instance: [startX, startY, endX, endY, r, g, b, a, thickness] (9 f32).
+  trailScratch: Float32Array;
   grassProgram: WebGLProgram;
   grassU: {
     viewport: WebGLUniformLocation;
@@ -376,6 +438,51 @@ function initRenderer(gl: WebGL2RenderingContext): GLState {
     haloAlpha: mustGet(gl.getUniformLocation(haloProgram, "u_halo_alpha"), "u_halo_alpha"),
   };
 
+  // ─── Trail program (Wave 3) ───
+  const trailProgram = link(
+    gl,
+    compile(gl, gl.VERTEX_SHADER, TRAIL_VS),
+    compile(gl, gl.FRAGMENT_SHADER, TRAIL_FS),
+  );
+
+  const trailVao = mustGet(gl.createVertexArray(), "createVertexArray");
+  gl.bindVertexArray(trailVao);
+  // Unit quad covering the trail rectangle (x ∈ [0, 1] along the trail,
+  // y ∈ [0, 1] across its width — recentered to ±0.5 in the VS).
+  const trailQuadBuf = mustGet(gl.createBuffer(), "createBuffer");
+  gl.bindBuffer(gl.ARRAY_BUFFER, trailQuadBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+    0, 0,
+    1, 0,
+    0, 1,
+    1, 1,
+  ]), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+
+  const trailInstanceBuf = mustGet(gl.createBuffer(), "createBuffer");
+  gl.bindBuffer(gl.ARRAY_BUFFER, trailInstanceBuf);
+  const trailStrideBytes = TRAIL_FLOATS_PER_INSTANCE * 4;
+  gl.enableVertexAttribArray(1);
+  gl.vertexAttribPointer(1, 2, gl.FLOAT, false, trailStrideBytes, 0);
+  gl.vertexAttribDivisor(1, 1);
+  gl.enableVertexAttribArray(2);
+  gl.vertexAttribPointer(2, 2, gl.FLOAT, false, trailStrideBytes, 8);
+  gl.vertexAttribDivisor(2, 1);
+  gl.enableVertexAttribArray(3);
+  gl.vertexAttribPointer(3, 4, gl.FLOAT, false, trailStrideBytes, 16);
+  gl.vertexAttribDivisor(3, 1);
+  gl.enableVertexAttribArray(4);
+  gl.vertexAttribPointer(4, 1, gl.FLOAT, false, trailStrideBytes, 32);
+  gl.vertexAttribDivisor(4, 1);
+  gl.bindVertexArray(null);
+
+  const trailU = {
+    viewport: mustGet(gl.getUniformLocation(trailProgram, "u_viewport"), "u_viewport"),
+    camPos: mustGet(gl.getUniformLocation(trailProgram, "u_cam_pos"), "u_cam_pos"),
+    zoom: mustGet(gl.getUniformLocation(trailProgram, "u_zoom"), "u_zoom"),
+  };
+
   // ─── Grass program ───
   const grassProgram = link(
     gl,
@@ -449,10 +556,36 @@ function initRenderer(gl: WebGL2RenderingContext): GLState {
     gl,
     discProgram, discU, discVao, discInstanceBuf,
     haloProgram, haloU, haloVao,
+    trailProgram, trailU, trailVao, trailInstanceBuf,
+    trailScratch: new Float32Array(MAX_POP_FOR_SIM * TRAIL_FLOATS_PER_INSTANCE),
     grassProgram, grassU, grassVao, grassTex, grassTexDim: 0,
     frameProgram, frameU, frameVao, frameBuf,
     instanceScratch: new Float32Array(4096 * FLOATS_PER_INSTANCE),
   };
+}
+
+// ─── Interpolation state (v1.9.2 Wave 3) ─────────────────────────────────
+// Two id-keyed Maps hold the previous and current snapshot positions; a
+// seq counter on the control SAB drives the flip detection in renderWorld.
+// We reuse Map instances across flips (clear, don't recreate) so 30 k-entry
+// rebuilds don't churn the heap.
+
+interface XY { x: number; y: number; }
+let prevById: Map<number, XY> = new Map();
+let currById: Map<number, XY> = new Map();
+let flipTimeMs = 0;
+let lastSeenSeq = -1;
+
+/**
+ * Reset the interpolation state. Called by `main.ts → restart()` so the
+ * first post-restart snapshot doesn't draw a long interpolation lerp from
+ * positions in the dead worker.
+ */
+export function resetInterpolation(): void {
+  prevById.clear();
+  currById.clear();
+  flipTimeMs = performance.now();
+  lastSeenSeq = -1;
 }
 
 // Reusable 8-float buffer for the world-bounds frame line endpoints.
@@ -533,6 +666,8 @@ export function renderWorld(
   grass_dim: number,
   highlightMap: Map<number, number>,
   nowMs: number,
+  seq: number,
+  targetTPS: number,
 ): void {
   // v1.6 Wave C: stride is fixed at 8 post-SAB cutover; mismatch indicates
   // Rust/TS const drift on `sim-bridge.ts`'s `CREATURE_STRIDE`.
@@ -550,7 +685,10 @@ export function renderWorld(
   // instead of disappearing into a rollup.
   const renderWorldSpan = span("frame.render_world");
   try {
-    renderWorldImpl(gl, cam, viewW, viewH, creatures, grass, pop, world_size, grass_dim, highlightMap, nowMs);
+    renderWorldImpl(
+      gl, cam, viewW, viewH, creatures, grass, pop, world_size, grass_dim,
+      highlightMap, nowMs, seq, targetTPS,
+    );
   } finally {
     renderWorldSpan.close();
   }
@@ -568,6 +706,8 @@ function renderWorldImpl(
   grass_dim: number,
   highlightMap: Map<number, number>,
   nowMs: number,
+  seq: number,
+  targetTPS: number,
 ): void {
   const stride = CREATURE_STRIDE;
   if (!state) state = initRenderer(gl);
@@ -657,27 +797,108 @@ function renderWorldImpl(
       s.instanceScratch = new Float32Array(neededFloats * 2);
     }
     const scratch = s.instanceScratch;
+
+    // ─── Interpolation flip detection + alpha (Wave 3) ───
+    // The renderer reads the same seq counter the sim worker bumps on
+    // every snapshot publish; on a change we swap the prev/curr id-maps
+    // (no deep copy — pointer swap), then repopulate curr from the
+    // current SoA. lastSeenSeq < 0 is the boot path: seed curr with the
+    // first snapshot positions and skip interpolation until a real flip.
+    const idView = new Uint32Array(
+      creatures.buffer,
+      creatures.byteOffset,
+      pop * stride * (creatures.BYTES_PER_ELEMENT / 4),
+    );
+    if (seq !== lastSeenSeq) {
+      const tmp = prevById;
+      prevById = currById;
+      currById = tmp;
+      currById.clear();
+      for (let i = 0; i < pop; i++) {
+        const base = i * stride;
+        const idLo = idView[base + 6];
+        const idHi = idView[base + 7];
+        const cid = idHi * 4294967296 + idLo;
+        currById.set(cid, { x: creatures[base], y: creatures[base + 1] });
+      }
+      // First snapshot ever: there is nothing to lerp from, so clear
+      // prev so the body path renders at curr verbatim.
+      if (lastSeenSeq === -1) prevById.clear();
+      lastSeenSeq = seq;
+      flipTimeMs = nowMs;
+    }
+    const expectedIntervalMs = Math.max(16, Math.min(250, 1000 / Math.max(targetTPS, 1)));
+    const alpha = Math.min(1, Math.max(0, (nowMs - flipTimeMs) / expectedIntervalMs));
+
+    // Trail scratch: parallel to bodies, one entry per creature that has
+    // both prev and curr and is actually moving.
+    const trailScratch = s.trailScratch;
+    let trailOff = 0;
+    const trailThicknessPx = 1.5;
+    const enableTrails = pop <= 12000;
+
     let off = 0;
     for (let i = 0; i < pop; i++) {
       const base = i * stride;
-      const x = creatures[base];
-      const y = creatures[base + 1];
+      const cx_raw = creatures[base];
+      const cy_raw = creatures[base + 1];
       const radiusWorld = creatures[base + 2];
+      // Look up prev/curr by id; lerp position if prev exists.
+      const idLo = idView[base + 6];
+      const idHi = idView[base + 7];
+      const cid = idHi * 4294967296 + idLo;
+      const prev = prevById.get(cid);
+      let x: number;
+      let y: number;
+      if (prev !== undefined) {
+        x = prev.x + (cx_raw - prev.x) * alpha;
+        y = prev.y + (cy_raw - prev.y) * alpha;
+      } else {
+        x = cx_raw;
+        y = cy_raw;
+      }
       const margin = radiusWorld + 2;
       if (x < minX - margin || x > maxX + margin ||
           y < minY - margin || y > maxY + margin) continue;
       const radiusPx = Math.max(1, radiusWorld * PX_PER_SIZE * cam.zoom);
+      const cr = creatures[base + 3];
+      const cg = creatures[base + 4];
+      const cb = creatures[base + 5];
       scratch[off    ] = x;
       scratch[off + 1] = y;
       scratch[off + 2] = radiusPx;
       scratch[off + 3] = 0; // inner_px (filled disc)
-      scratch[off + 4] = creatures[base + 3];
-      scratch[off + 5] = creatures[base + 4];
-      scratch[off + 6] = creatures[base + 5];
+      scratch[off + 4] = cr;
+      scratch[off + 5] = cg;
+      scratch[off + 6] = cb;
       scratch[off + 7] = 1; // alpha
       off += FLOATS_PER_INSTANCE;
+
+      // Trail: only when we have a prev and the creature actually moved.
+      if (enableTrails && prev !== undefined) {
+        const dx = cx_raw - prev.x;
+        const dy = cy_raw - prev.y;
+        if (dx * dx + dy * dy > 0.04) {
+          // Start = where the body was 40 % of the interval ago;
+          // End = current interpolated body position.
+          const a0 = Math.max(0, alpha - 0.4);
+          const sx = prev.x + dx * a0;
+          const sy = prev.y + dy * a0;
+          trailScratch[trailOff    ] = sx;
+          trailScratch[trailOff + 1] = sy;
+          trailScratch[trailOff + 2] = x;
+          trailScratch[trailOff + 3] = y;
+          trailScratch[trailOff + 4] = cr;
+          trailScratch[trailOff + 5] = cg;
+          trailScratch[trailOff + 6] = cb;
+          trailScratch[trailOff + 7] = 0.5;
+          trailScratch[trailOff + 8] = trailThicknessPx;
+          trailOff += TRAIL_FLOATS_PER_INSTANCE;
+        }
+      }
     }
     const bodyCount = (off / FLOATS_PER_INSTANCE) | 0;
+    const trailCount = (trailOff / TRAIL_FLOATS_PER_INSTANCE) | 0;
     if (bodyCount > 0) {
       // Upload instance data once; both halo and body draws consume the
       // same buffer (halo via its own VAO that re-binds the same buffer).
@@ -699,6 +920,25 @@ function renderWorldImpl(
         gl.bindVertexArray(s.haloVao);
         gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, bodyCount);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      }
+
+      // ─── Trail pass (Wave 3) ───
+      // Drawn between halo and body so the body always paints over its
+      // own trail's leading edge. Alpha blend (the global default), with
+      // per-fragment alpha fade toward the trailing tip.
+      if (trailCount > 0) {
+        gl.bindBuffer(gl.ARRAY_BUFFER, s.trailInstanceBuf);
+        gl.bufferData(
+          gl.ARRAY_BUFFER,
+          trailScratch.subarray(0, trailOff),
+          gl.DYNAMIC_DRAW,
+        );
+        gl.useProgram(s.trailProgram);
+        gl.uniform2f(s.trailU.viewport, viewW, viewH);
+        gl.uniform2f(s.trailU.camPos, cam.cx, cam.cy);
+        gl.uniform1f(s.trailU.zoom, cam.zoom);
+        gl.bindVertexArray(s.trailVao);
+        gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, trailCount);
       }
 
       // ─── Body draw ───
