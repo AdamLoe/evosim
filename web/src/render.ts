@@ -15,7 +15,7 @@ export function makeCamera(worldSize: number): Camera {
 }
 
 export function clampCamera(cam: Camera, worldSize: number, viewW: number, viewH: number): void {
-  cam.zoom = Math.max(0.5, Math.min(16, cam.zoom));
+  cam.zoom = Math.max(0.25, Math.min(16, cam.zoom));
   // Pan limit: world edge cannot leave the viewport center (v6 §N).
   cam.cx = Math.max(0, Math.min(worldSize, cam.cx));
   cam.cy = Math.max(0, Math.min(worldSize, cam.cy));
