@@ -19,7 +19,20 @@
       "Bash(pkill -f 'vite.*47821')",
       "Bash(curl -sf http://localhost:47821/wasm/evosim.js -o /dev/null)",
       "Read(//tmp/**)",
-      "Bash(wasm-pack build *)"
+      "Bash(wasm-pack build *)",
+      "Bash(cargo build *)",
+      "Bash(cargo test *)",
+      "Bash(RUSTFLAGS='--cfg getrandom_backend=\"wasm_js\" -Ctarget-feature=+atomics,+bulk-memory,+mutable-globals -Cembed-bitcode=no' rustup run nightly wasm-pack build --target web --out-dir web/wasm --dev -- --features threads -Z build-std=std,panic_abort)",
+      "Bash(pnpm typecheck *)",
+      "Bash(pnpm build *)",
+      "Bash(rustup run *)",
+      "Bash(kill 1646)",
+      "Bash(ps -fp 1853)",
+      "Bash(kill 25203)",
+      "Bash(git show *)",
+      "Bash(git -C /home/adamg/evosim show 5214ba2 --stat)",
+      "Bash(ps -fp 20503)",
+      "Bash(cargo clippy *)"
     ]
   }
 }
