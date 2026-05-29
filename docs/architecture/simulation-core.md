@@ -61,6 +61,7 @@ holds the only `WorldHandle` and calls into it via:
 WorldHandle::step_n(n: u32) -> bool                   // one or more ticks
 WorldHandle::write_snapshot_to(c, g, s)               // SAB byte dump
 WorldHandle::set_slider(name: &str, value: f32)       // sole mutation entry
+WorldHandle::sliders_defaults_json() -> String        // canonical DevSliders defaults
 WorldHandle::creature_at(wx, wy, tol) -> Option<f64>  // inspector click
 WorldHandle::creature_idx_by_id(id: f64) -> Option<u32>
 WorldHandle::creature_inspect_json(idx: u32) -> Option<String>
@@ -145,9 +146,15 @@ hardwiring. The 32-byte input vector is SIMD-aligned for `wide::f32x8`.
   `GRASS_CELL_COUNT = 921_600`, `MAX_POP_FOR_SIM = 32_000`,
   `NN_INPUTS = 32`, `NN_HIDDEN_1 = 48`, `NN_HIDDEN_2 = 24`,
   `NN_OUTPUTS = 5`, `NN_WEIGHT_COUNT = 2808`,
-  `MIN_CHUNKS = 4`, `MAX_CHUNKS = 16`, `FOUNDER_COUNT_DEFAULT = 8`.
+  `MIN_CHUNKS = 4`, `MAX_CHUNKS = 16`, `STARTING_POP_DEFAULT = 8`,
+  `CREATURE_SIZE = 1.0`, `START_ENERGY_DEFAULT = 200.0`,
+  `MAX_AGE_DEFAULT = 5000`, `SPLIT_THRESHOLD_DEFAULT = 50.0`,
+  `SPLIT_GIFT_MAX_DEFAULT = 30.0`, `SPLIT_JITTER_DEFAULT = 50.0`,
+  `FULL_GRASS_ON_INIT_DEFAULT = false`.
 - `src/wasm_api.rs` → `WorldHandle`, `WorldHandle::set_slider`,
-  `WorldHandle::write_snapshot_to`, free functions `max_pop_for_sim`,
+  `WorldHandle::write_snapshot_to`,
+  `WorldHandle::sliders_defaults_json`,
+  free functions `max_pop_for_sim`,
   `rayon_current_num_threads`.
 
 ## Update when

@@ -115,13 +115,19 @@ async function simLoop(): Promise<void> {
 5. Call `rayon_current_num_threads()`; if `<= 1`, log a loud warning
    (silent single-thread mode would otherwise look identical to a
    correct threaded boot — making it observable is a hard requirement).
-6. Construct the `WorldHandle` via `newWithFounderCount(seed, ...)`.
+6. Construct the `WorldHandle` via `newWithFounderCount(seed,
+   initial_grass_seed_count, energy_max, founder_count,
+   full_grass_on_init)`. The four construction-only args plumb through
+   to `World::new_with_sliders`; `full_grass_on_init=true` makes the
+   constructor fill the grass grid to `GRASS_MAX` instead of seeding N
+   cells.
 7. Apply every entry in `boot.initial_sliders` via `world.set_slider(name,
    value)` — bools encoded as `0|1`.
 8. Allocate `controlSab` + `snapshotSab`.
 9. **Run one tick + write one snapshot to slot 0.** This guarantees main's
    first RAF reads a populated live slot.
-10. Post `boot_ready` carrying both SAB handles + `max_pop_for_sim()`.
+10. Post `boot_ready` carrying both SAB handles, `max_pop_for_sim()`,
+    and `world.sliders_defaults_json()` (the Wave D drift-guard payload).
 11. `void simLoop()`.
 
 Main asserts `reply.max_pop_for_sim === MAX_POP_FOR_SIM` from

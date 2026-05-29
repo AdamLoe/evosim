@@ -124,6 +124,62 @@ Decisions that bind more than one architecture doc.
   `architecture/shared-memory-and-protocol.md`.
 - **Code anchors**: `web/src/sim-worker.ts → handleBoot`.
 
+### Settings tab is stage-then-apply for sim sliders; live-apply for run/display
+
+- **Decision**: Sim sliders (Energy / Grass / Eat / Lifecycle /
+  Curriculum groups) stage edits and reconcile via the Settings tab's
+  Apply / Cancel / Reset footer. Run + Display widgets (`autoRun`,
+  `showProfiler`, `showPopGraph`, `showGrass`, `grassOpacity`) skip
+  staging and apply immediately.
+- **Why**: Sim sliders perturb the running world; users want to set up
+  a batch of changes (e.g. raise mut rate AND lower energy max) and
+  commit them atomically. Display toggles are page-side render flips
+  with no sim cost — staging them would block live preview.
+- **Tradeoffs**: Two interaction tiers means more code than a uniform
+  rule. The carve-out is small and load-bearing for both UX goals.
+- **Applies to**: `architecture/app-shell.md`.
+- **Code anchors**: `web/src/widgets/devpanel.ts → makeStagedSlider`,
+  `makeLiveSlider`, `CONSTRUCTION_ONLY_SLIDERS`.
+
+### Rust owns canonical slider defaults; settings.ts mirrors them; drift is asserted at e2e time
+
+- **Decision**: `src/world/mod.rs → DevSliders::default()` is the
+  single source of truth for every slider default. `settings.ts →
+  DEFAULTS` mirrors them so localStorage has something to write before
+  the worker exists. `WorldHandle::sliders_defaults_json()` exposes
+  the Rust map; a Playwright e2e (`tests/e2e/defaults-drift.spec.ts`)
+  asserts the two sides agree.
+- **Why**: Rust tests construct `World` directly without the boot
+  payload and need defaults *somewhere*; moving the source of truth to
+  TS would force noisy test-only fallbacks. The drift guard makes the
+  mirror provable instead of relying on convention.
+- **Applies to**: `architecture/simulation-core.md`,
+  `architecture/app-shell.md`,
+  `architecture/shared-memory-and-protocol.md`.
+- **Code anchors**: `src/world/mod.rs → DevSliders::default`,
+  `src/wasm_api.rs → sliders_defaults_json`,
+  `web/src/settings.ts → DEFAULTS`,
+  `web/tests/e2e/defaults-drift.spec.ts`.
+
+### Construction-only sliders are committed via `set_slider` but only shape the next world
+
+- **Decision**: `founder_count`, `energy_max`,
+  `grass_initial_seed_count`, and `full_grass_on_init` ride the same
+  staged path as live-tunable sliders. Apply persists + pushes them to
+  the worker's `DevSliders`, but the *current* world keeps whatever
+  values it spawned with — a manual restart is needed to see them.
+  The Settings tab fires a toast ("Some changes only take effect on
+  new simulations.") whenever any construction-only knob commits.
+- **Why**: Mid-run construction changes can't safely re-shape the
+  running world (e.g. founder_count is meaningless after pop ≠
+  founder_count). Surfacing the constraint via the toast keeps the
+  user aware without forcing an auto-restart.
+- **Applies to**: `architecture/app-shell.md`,
+  `architecture/shared-memory-and-protocol.md`.
+- **Code anchors**: `web/src/widgets/devpanel.ts →
+  CONSTRUCTION_ONLY_SLIDERS`, `TOAST_CONSTRUCTION`,
+  `applyAll`, `resetAll`.
+
 ### Hammer-restart is allowed; old rayon workers GC with the terminated parent
 
 - **Decision**: 5× restart in 5 seconds must not leak threads or fail
