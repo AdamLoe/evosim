@@ -22,7 +22,6 @@
 import type { SimBridge } from "../sim-bridge";
 import { getTargetTPS, setTpsChangeListener } from "../main";
 import { getSettings, setSetting, resetSettings, DEFAULTS, type Settings } from "../settings";
-import { setProfilerVisible } from "./perf-panel";
 import { showToast } from "../toast";
 import { THEMES, applyTheme } from "../themes";
 
@@ -466,11 +465,9 @@ export function installDevPanel(simBridge: SimBridge): void {
   box.appendChild(runSec);
 
   // ── Display (live) ──
+  // Profiler visibility lives on the floating monitor-icon button at the
+  // bottom-right of the canvas, not in Settings. See widgets/perf-panel.ts.
   const displaySec = section("Display");
-  displaySec.appendChild(makeLiveToggle(
-    { label: "Show profiler", simName: null, settingKey: "showProfiler" },
-    (v) => setProfilerVisible(v),
-  ));
   displaySec.appendChild(makeLiveToggle(
     { label: "Show population graph", simName: null, settingKey: "showPopGraph" },
     () => { /* graph lives in Monitor tab — toggle is informational for now */ },

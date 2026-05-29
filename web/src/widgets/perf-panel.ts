@@ -60,6 +60,11 @@ export function setProfilerVisible(visible: boolean): void {
   panelVisible = visible;
   const box = document.getElementById("perf-box");
   if (box) box.style.display = visible ? "" : "none";
+  // The floating "open profiler" button at canvas-wrap bottom-right is the
+  // inverse of the panel — hidden when the panel is shown, visible when
+  // the panel is collapsed.
+  const openBtn = document.getElementById("perf-open");
+  if (openBtn) openBtn.style.display = visible ? "none" : "";
   // Keep the TS-side frame tree recording at all times so the panel has data
   // to show the moment it becomes visible again. Mirrors the always-on Rust
   // side (see sim-worker.ts handleBoot).
@@ -102,6 +107,14 @@ export function installProfilerPanel(simBridge: SimBridge): void {
     closeBtn.addEventListener("click", () => {
       setSetting("showProfiler", false);
       setProfilerVisible(false);
+    });
+  }
+
+  const openBtn = document.getElementById("perf-open");
+  if (openBtn) {
+    openBtn.addEventListener("click", () => {
+      setSetting("showProfiler", true);
+      setProfilerVisible(true);
     });
   }
 
