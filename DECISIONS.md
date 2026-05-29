@@ -534,3 +534,38 @@ Known limitations carried over (not v1.7 work; flagged for future):
 - **Late-enabling the profiler at high pop has a ~3 s lag** before the worker's first `profile_reply` shows `enabled: true`. This is the 1 Hz request-reply cadence + worker tick batching, not v1.7 behavior. Enabling at startup or waiting ≥ 4 s before sampling gets clean data.
 
 Worktree branches left from this run can be pruned via `git worktree prune` + `git branch -D worktree-agent-*` after Claude releases the locks.
+
+## v1.7.1 — `Atomics.waitAsync(timeoutMs=0)` dark-hole fix + e2e test suite (2026-05-28)
+
+User report after v1.7 shipped: "The web side seems disconnected from the API. Pausing, changing ticks per seconds, updating sliders, profile all seem to not work. It's as if the web is just viewing the backend but not actually interacting." Pause, TPS dropdown, every DevSlider, and the profile toggle all silently dropped on the floor — main posted the messages, the worker queued them, but `onmessage` callbacks never dispatched.
+
+**Root cause** (latent since Wave D landed at `d48df4f`, surfaced when pop+TPS combinations pushed per-tick budget below per-tick cost): the sim loop's pacing formula `Math.max(0, 1000/targetTPS - elapsedThisIter)` bottoms out at exactly 0 whenever `step_n(1)` overruns its budget. Per the Web Atomics spec, `Atomics.waitAsync(ta, idx, expected, 0)` returns **synchronously** with `{ async: false, value: "timed-out" }` — no Promise, no microtask, no event-loop yield. The loop's `if (r.async) await r.value` branch therefore never fires, the loop spins synchronously without yielding, and `onmessage` cannot be dispatched. Every `postMessage` from main queues indefinitely as a never-dispatched task on the worker.
+
+This is the **third** Wave-D message-path regression in this codebase's short life:
+1. The original plan-review C1 caught a buggy pseudocode draft that used synchronous `Atomics.wait` — would have dark-holed everything.
+2. The `tickBudget` batching (locked decision 4) made the SAB freshness invisible at high pop — reverted in `5187d72`.
+3. This one — `Atomics.waitAsync(0)`'s synchronous-return edge case, missed by plan-review C1 and by every Playwright probe I ran during Wave D / Wave E / v1.7 verification because all of them tested at default TPS=60 / low pop where the budget never bottomed out.
+
+The shipped Playwright probes were ALSO buggy: they pressed spacebar to test pause, but the page lost focus to the canvas (or the regex shape happened to align with concurrent tick advancement during the wait window), so "pass" was a false positive. The agent's report calls this out — see notes below.
+
+Commits:
+
+- 7b139b0 `fix(arch): clamp simLoop timeoutMs to >=1ms + macrotask-yield on sync waitAsync` — two-line behavioural change in `web/src/sim-worker.ts::simLoop`:
+  - `timeoutMs = paused ? Infinity : Math.max(1, 1000/targetTPS - elapsedThisIter)` (was `Math.max(0, ...)`). The 1 ms floor forces `Atomics.waitAsync` onto its async path.
+  - On the residual `r.async === false` ("not-equal" race when main mutated the futex between our `Atomics.load(before)` and `waitAsync` call) path, `await new Promise(r => setTimeout(r, 0))` for a real macrotask boundary — otherwise that branch could still bypass the event-loop yield.
+- 25a4985 `test(e2e): Playwright smoke suite for sim-bridge message dispatch` — durable repo-level Playwright suite at `web/tests/e2e/sim-bridge.spec.ts`. Five tests, every one of which forces `targetTPS = 1000` before its interaction (to stay in the bug regime):
+  - `pause + resume — stops and starts the tick counter at high TPS`
+  - `target TPS dropdown — observed throughput tracks the selected value`
+  - `slider change — devpanel slider input fires without rejection at high TPS`
+  - `profile toggle — all 4 trees populate within 4 s`
+  - `restart 'r' key — tick counter resets, no console errors`
+  - Run via `pnpm test:e2e` (script + `@playwright/test ^1.60.0` devDep added to `web/package.json`). `web/playwright.config.ts` boots Vite via the `webServer` hook so the suite is one command. `web/tests/README.md` documents how to run + how to add new tests that catch this bug class.
+  - **Catch verified**: agent checked out `ef4f5d0` (the pre-fix HEAD), reran `pnpm test:e2e`, 4 of 5 tests failed (the same 4 the user reported broken). After restoring the fix, all 5 pass. The 5th (restart `r`) passes on both commits because it respawns the worker entirely, bypassing the sim loop — kept as a smoke check that the hotkey stays bound.
+
+**Recommendation**: wire `pnpm test:e2e` into a pre-push or pre-commit hook. This is the third Wave-D message-path regression; the test suite needs to run automatically or it will rot.
+
+**Residual edge cases noted by the agent**:
+- The fix's `setTimeout(0)` macrotask yield has a Web Worker 4 ms min-clamp in some browsers. That only matters on the rare "not-equal" race path; user-perceived latency is still ≤ 1 ms via the futex-wake/timeout path.
+- The 1 ms minimum timeout floor caps the worker loop at ≤ 1000 iterations/sec on the pacing-bound path. Only matters at target TPS > 1000 (the slider tops out at 1000) — documented in-source.
+
+**Local restart needed**: existing dev servers running before this fix landed still hold the buggy worker bundle in memory. Restart `pnpm dev` after pulling.
