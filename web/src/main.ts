@@ -114,6 +114,10 @@ async function main(): Promise<void> {
   installMonitorTab(simBridge);
   installSettingsButton(rail);
 
+  // v1.9.1: apply persisted rail open/closed state on boot. The class drives
+  // the grid track collapse + #right-rail display:none (see styles.css).
+  applyRailOpen(getSettings().railOpen);
+
   async function restart(): Promise<void> {
     const oldBridge = simBridge;
     simBridge = await spawnSimWorker("");
@@ -132,13 +136,14 @@ async function main(): Promise<void> {
     void restart();
   });
 
-  // ~ hotkey → focus rail on Settings tab.
+  // ~ hotkey → toggle the right rail open/closed (v1.9.1; previously
+  // switched to the Settings tab).
   window.addEventListener("keydown", (e) => {
     if (e.key !== "~") return;
     if (e.target instanceof HTMLInputElement) return;
     if (e.target instanceof HTMLTextAreaElement) return;
     e.preventDefault();
-    rail.switchTab("settings");
+    toggleRailOpen();
   });
 
   let autoRestartPending = false;
@@ -331,15 +336,35 @@ function installPacingControls(getBridge: () => SimBridge): void {
   }
 }
 
-function installSettingsButton(rail: { switchTab(name: "settings"): void }): void {
+// v1.9.1: rail open/closed helpers. Both the ⚙ button and the `~` hotkey
+// route through `toggleRailOpen`; the canvas click handler calls
+// `applyRailOpen(true)` to force the rail open before switching to Inspector.
+function applyRailOpen(open: boolean): void {
+  const shell = document.getElementById("app-shell");
+  if (!shell) return;
+  shell.classList.toggle("rail-collapsed", !open);
+}
+
+export function setRailOpen(open: boolean): void {
+  setSetting("railOpen", open);
+  applyRailOpen(open);
+}
+
+function toggleRailOpen(): void {
+  setRailOpen(!getSettings().railOpen);
+}
+
+function installSettingsButton(_rail: { switchTab(name: "settings"): void }): void {
   const bar = document.getElementById("top-bar");
   if (!bar) return;
   const btn = document.createElement("button");
   btn.id = "settings-btn";
   btn.className = "topbar-btn";
   btn.textContent = "⚙";
-  btn.title = "Settings (~ hotkey)";
-  btn.addEventListener("click", () => rail.switchTab("settings"));
+  btn.title = "Toggle rail (~ hotkey)";
+  // v1.9.1: ⚙ now toggles the rail open/closed instead of switching to the
+  // Settings tab; users open Settings via the in-rail tab bar.
+  btn.addEventListener("click", () => toggleRailOpen());
   bar.appendChild(btn);
 }
 

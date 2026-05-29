@@ -61,6 +61,17 @@ button {
   background: var(--bg-app);
 }
 
+/* v1.9.1: the Settings ⚙ button / `~` hotkey collapse the rail to a zero
+ * grid track so the canvas fills the viewport. `display: none` on the rail
+ * itself keeps its contents from rendering (and stops the tab-bar from
+ * trapping focus). */
+#app-shell.rail-collapsed {
+  grid-template-columns: 1fr 0;
+}
+#app-shell.rail-collapsed #right-rail {
+  display: none;
+}
+
 #left-col {
   display: grid;
   grid-template-rows: var(--topbar-h) 1fr auto;

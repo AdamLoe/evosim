@@ -11,6 +11,7 @@ import {
 } from "../sim-bridge";
 import type { Camera } from "../render";
 import { screenToWorld } from "../render";
+import { setRailOpen } from "../main";
 import { highlights, HIGHLIGHT_PERMANENT } from "./highlight";
 import type { RailState } from "./index";
 
@@ -278,6 +279,10 @@ export function installCanvasClickHandler(
         renderInspectorSoA(latestSoA, idx, id);
         set("ins-action", "…");
         lastInspectReplyMs = 0;
+        // v1.9.1: force the rail open so the Inspector tab is actually
+        // visible — a creature click on the canvas while the rail is
+        // collapsed would otherwise silently switch to a hidden tab.
+        setRailOpen(true);
         rail.switchTab("inspector");
         const mySeq = ++lastInspectIdRequestSeq;
         void simBridge.requestInspectId(id).then((jsonStr) => {
@@ -300,6 +305,8 @@ export function installCanvasClickHandler(
     state = { kind: "pending" };
     showEmptyState(false);
     set("ins-action", "selecting…");
+    // v1.9.1: same rail-open guarantee on the fallback path.
+    setRailOpen(true);
     rail.switchTab("inspector");
     void simBridge.requestInspectAt(wx, wy, toleranceWorld).then((jsonStr) => {
       if (state.kind !== "pending") return;

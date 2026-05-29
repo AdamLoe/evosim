@@ -19,6 +19,9 @@ export interface Settings {
   showPopGraph: boolean;
   showGrass: boolean;
   grassOpacity: number;
+  // v1.9.1: right-rail open/closed; toggled by the ⚙ button + `~` hotkey.
+  // Forced back open by a creature click (inspector flow).
+  railOpen: boolean;
   // Energy economy
   upkeepMultiplier: number;
   moveCostMultiplier: number;
@@ -56,6 +59,7 @@ export const DEFAULTS: Settings = {
   showPopGraph: true,
   showGrass: true,
   grassOpacity: 1.0,
+  railOpen: true,
   upkeepMultiplier: 1.0,
   moveCostMultiplier: 1.0,
   energyMax: 100,
