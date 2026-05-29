@@ -49,6 +49,17 @@ const rayonCurrentNumThreads = (_wasmMod as unknown as Record<string, unknown>)[
   "rayon_current_num_threads"
 ] as (() => number) | undefined;
 
+/**
+ * Target rayon worker count. Capped at hardware threads so small machines
+ * aren't forced past their limit, but otherwise pinned low — at v1.7 pop
+ * (~1500) the per-chunk work is too small to amortize rayon dispatch
+ * overhead above ~8 workers (observed: `nn.forward / tick.nn ≈ 0.18` on a
+ * 20-thread box). Going below hardware concurrency leaves cycles for the
+ * main render thread + browser rendering. Bump this if you regularly run
+ * pop > 8000 where per-chunk work dominates dispatch overhead.
+ */
+const TARGET_RAYON_WORKERS = 8;
+
 // ─── Worker-local state ─────────────────────────────────────────────────────
 
 let world: WorldHandle | null = null;
@@ -102,11 +113,11 @@ async function handleBoot(boot: SimMessageBoot): Promise<void> {
   let threads = 1;
   if (initThreadPool && isolated) {
     try {
-      const hwConc = navigator.hardwareConcurrency;
-      await initThreadPool(hwConc);
-      threads = hwConc;
+      const workers = Math.min(TARGET_RAYON_WORKERS, navigator.hardwareConcurrency);
+      await initThreadPool(workers);
+      threads = workers;
       rayonOk = true;
-      console.log(`[sim] rayon workers: ${hwConc}`);
+      console.log(`[sim] rayon workers: ${workers} (hardware: ${navigator.hardwareConcurrency})`);
     } catch (err) {
       console.warn("[sim] initThreadPool failed; continuing single-threaded:", err);
     }
