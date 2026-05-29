@@ -1,18 +1,20 @@
 # evosim
 
 Browser-deployed idle evolution sandbox. Rust → wasm sim, plain-TS Vite shell,
-WebGL2 instanced rendering. See [docs/README.md](docs/README.md) for the full
-documentation index.
+WebGL2 instanced rendering. See [docs/index.md](docs/index.md) for the full
+documentation index, or [docs/overview.md](docs/overview.md) for the system at
+a glance.
 
-v1.5 state: no save/resume, no carrion, no genome (only NN-weight evolution),
-no species tracking, no events or Hall of Fame. Walled world. 3-action enum
-(`Graze / Eat / Split`). Multi-founder spawn (default 8). Brain is a
-`32 → 48 → 24 → 5` pyramid with Leaky ReLU hidden layers and per-layer He init;
-inputs are semantic (self/memory + 4-wall + 8-sector creature + 8-sector grass).
-Creature color is a per-creature action EMA — green = grazing, red = biting
-prey, blue = splitting. Grass cells 1.25 world-units (480×480 grid), R8 GPU
-upload. Population-feedback curriculum factor (default floor 0.0) relieves
-upkeep pressure when population is fragile.
+The sim runs in a dedicated Web Worker with one wasm instance and a rayon
+thread pool; the main thread holds no wasm and reads snapshots from two
+SharedArrayBuffers. Walled world. 3-action enum (`Graze / Eat / Split`).
+Multi-founder spawn (default 8). Brain is a `32 → 48 → 24 → 5` pyramid with
+Leaky ReLU hidden layers and per-layer He init; inputs are semantic
+(self/memory + 4-wall + 8-sector creature + 8-sector grass). Creature color
+is a per-creature action EMA — green = grazing, red = biting prey, blue =
+splitting. Grass cells 1.25 world-units (960×960 grid), R8 GPU upload.
+Population-feedback curriculum factor (default floor 0.0) relieves upkeep
+pressure when population is fragile.
 
 ## Repo layout
 
@@ -21,10 +23,11 @@ upkeep pressure when population is fragile.
 /src                   simulation engine
 /web                   Vite + TypeScript shell
 /web/wasm              wasm-pack output (gitignored, regenerated each build)
-/docs                  README, architecture, development, contributing guides
-/docs/plans            mission + plan + review docs per pass (v1.3, v1.4, v1.5)
-/DECISIONS.md          running log of orchestrator decisions
+/docs                  current-state documentation tree (see docs/index.md)
 ```
+
+See [docs/repository-layout.md](docs/repository-layout.md) for one-line
+purpose per directory.
 
 ## Local development
 
@@ -69,4 +72,5 @@ cargo test --lib --features threads       # unit tests (threaded build)
 cd web && pnpm typecheck
 ```
 
-See [docs/development.md](docs/development.md) for full details.
+See [docs/agent-context/testing-how-to.md](docs/agent-context/testing-how-to.md)
+for how to run the Playwright e2e suite and add new tests.
