@@ -95,6 +95,35 @@
 - **Code anchors**: `web/src/render-gl.ts → renderWorldImpl`
   (the highlight pass with the `idView` build), `web/src/rail/highlight.ts`.
 
+### Status bar updates every RAF; TPS + FPS rendered into `#status`
+
+- **Decision**: The top-left `#status` text rewrites unconditionally on
+  every RAF as
+  `seed: … · tick N · pop N · NN TPS · NN FPS[(world ended)]`. TPS
+  comes straight from `header.tps` in the per-frame SAB snapshot; FPS
+  is a 1 s rolling main-side counter (`framesThisSecond++` each RAF,
+  sampled and reset when `now - fpsWindowStart >= 1000`). FPS shows
+  `—` until the first 1 s window closes.
+- **Why**: Reading the tick from `header.tick` is a 4-byte
+  typed-array load — there is nothing to throttle. The canvas already
+  paints at full RAF cadence; throttling only the text was the lone
+  reason the tick counter visibly jumped. TPS belongs on the
+  always-visible bar because the bottom-left perf widget can scroll
+  off-screen; FPS belongs on main because the worker can't observe
+  RAF cadence. A "frames in the last 1 s" counter (not a rolling
+  average) matches the conventional games-industry meaning and lets
+  FPS trend naturally to 0 while paused or world-ended without a
+  misleading transient.
+- **Applies to**: `architecture/render-pipeline.md`,
+  `architecture/worker-runtime.md`.
+- **Tradeoffs**: Writing `textContent` every RAF is essentially free
+  on a single DOM node with no layout impact; the throttle saved
+  nothing real. `#perf-tps` in the bottom-left perf widget stays as
+  belt-and-suspenders for heavy debugging.
+- **Code anchors**: `web/src/main.ts → frame` (the RAF loop,
+  `framesThisSecond` / `fpsWindowStart` / `lastFps` closure state),
+  `web/src/sim-bridge.ts → readSnapshotHeader` (`header.tps`).
+
 ### `clampCamera` keeps zoom in `[0.5, 16]` and center in world bounds
 
 - **Decision**: Camera zoom clamps to `[0.5, 16]`; center clamps to

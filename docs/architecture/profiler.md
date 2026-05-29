@@ -51,11 +51,16 @@ grass_step           ← sum-busy across all rayon workers, per tick
 - The Rust profiler API (`Profiler::push`, `push_root`,
   `push_root_named`, `record_under_root`, `ensure_root`,
   `report_json`).
+- The honest-call-count contract: every sample carries an underlying
+  invocation count so `ms/call` reflects per-creature / per-row cost,
+  not per-tick cost. RAII spans contribute 1; sum-of-workers drains
+  contribute N (the real per-creature or per-row work count).
 - The TS-side `frame` mirror in `web/src/perf.ts` (independent state,
   same shape, stitched in by the perf panel).
 - The 1 Hz worker→main poll cadence for the profile report.
 - The display rules: insertion-order stable, indent by dotted-prefix
-  depth, `(no samples yet)` placeholder for an empty tree, default OFF.
+  depth, `(no samples yet)` placeholder for an empty tree, a single
+  `window: X.X s` header above the four trees, default OFF.
 
 ## What it does NOT own
 
@@ -85,6 +90,14 @@ grass_step           ← sum-busy across all rayon workers, per tick
 - **Every node uses its full dotted prefix.** A leaf under `nn.forward`
   is recorded as `nn.forward.l1`, not as a bare `l1` somewhere else
   that the panel has to guess at.
+- **Honest per-work-unit call counts.** Every sample carries a
+  `call_count` field naming the number of underlying invocations the
+  sample represents. RAII spans (push/drop) record 1. Sum-of-workers
+  drains record the real per-creature or per-row count: `nn.forward.l1`
+  at pop 1500 records 1500 per tick, not 1. The panel's `calls` column
+  and `ms/call` divisor both use the summed honest count, so a sub-µs
+  per-creature cost reads as a sub-µs per-creature cost — not as a
+  millisecond per-tick number that hides the real shape.
 - **Outer `frame` is a real RAII span** around the whole RAF callback
   body. Unaccounted-for time inside RAF shows up as
   `frame.total - sum(frame.*.total)` — the diagnostic value the
@@ -97,19 +110,49 @@ grass_step           ← sum-busy across all rayon workers, per tick
 - **`tick`** — `crate::profile_span!(&self.profile, "tick.<phase>")` at
   every numbered phase in `World::step` (see
   [`simulation-core.md`](simulation-core.md)).
-- **`nn`** — `Profiler::record_under_root("nn", "<path>", dur_us)` from
-  inside `World::step` after the parallel block returns. The
-  per-worker atomic accumulators (`NnStats::tick_build_input_total_us`,
-  `tick_proximity_total_us`, `tick_forward_l1_total_us`, etc.) are
+- **`nn`** — `Profiler::record_under_root("nn", "<path>", dur_us,
+  call_count)` from inside `World::step` after the parallel block
+  returns. The per-worker atomic accumulators come in `_us` / `_calls`
+  pairs (`tick_build_input_total_us` + `tick_build_input_total_calls`,
+  `tick_proximity_total_us` + `tick_proximity_total_calls`,
+  `tick_forward_l1_us` + `tick_forward_l1_calls`, …) — each worker
+  `fetch_add`s into both atomics inside the chunk loop, and the
+  post-tick drain passes both numbers to `record_under_root` so the
+  panel's `ms/call` divides honest per-creature totals. Atomics are
   reset before dispatch and read out after.
-- **`grass_step`** — same pattern with the atomic counters on
-  `GrassGrid` (`par_chunks_us`, `chunks_mut_us`, `row_body_us`,
-  `row_body_self_us`). `par_chunks_us` and `chunks_mut_us` are
-  mutually exclusive at build time (only one is non-zero depending on
-  `--features threads`), and `record_under_root` collapses them under
-  the unified `grass_step.dispatch` name.
+- **`grass_step`** — same pattern with `GrassGrid`'s `_us` / `_calls`
+  pairs (`par_chunks_us` + `dispatch_calls`, `chunks_mut_us` +
+  `dispatch_calls`, `row_body_us` + `row_body_calls`,
+  `row_body_self_us` + `row_body_calls`). `par_chunks_us` and
+  `chunks_mut_us` are mutually exclusive at build time (only one is
+  non-zero depending on `--features threads`); `record_under_root`
+  collapses them under the unified `grass_step.dispatch` name and the
+  shared `dispatch_calls` counter records 1 per tick.
 - **`frame`** — TS-side `span("frame")` at the top of the RAF callback
   in `web/src/main.ts`, with inner spans in `web/src/render-gl.ts`.
+  Every TS span is one RAII invocation → `call_count = 1`.
+
+## JSON node shape
+
+Every node in the report (Rust trees and the TS `frame` mirror) carries:
+
+```text
+{
+  name: string,
+  total_us: u64,             // sum of dur_us across ring samples
+  call_count: u64,           // number of distinct ring-buffer samples
+  total_call_count: u64,     // sum of per-sample call_count fields
+  parent_call_count: u64 | null,  // parent's total_call_count, for ratios
+  effective_window_ms: u32,  // now_ms - oldest_sample_ts, capped at WINDOW_MS
+  children: Node[],
+}
+```
+
+`call_count` keeps the legacy meaning (sample count in the ring) for
+backward compatibility — older readers continue to render. New readers
+divide `total_us / total_call_count` for honest `ms/call`. Stale wasm +
+new TS panel still works (the panel falls back to `call_count` when
+`total_call_count` is missing).
 
 ## Worker → main delivery
 
@@ -133,6 +176,13 @@ panel renders four `.profiler-tree-section` blocks in the order
 renders at the bottom in JSON-insertion order so a future fifth tree
 is not dropped.
 
+A single `window: X.X s` header sits above the four trees, computed
+from `max(effective_window_ms)` across every populated node in the
+merged report. Per-tick aggregation makes the window uniform across
+nodes (every tree gets one drained sample per tick), so one number
+describes the whole panel and `tick.total_ms = 40 s` is interpretable
+without guessing what window backed it.
+
 ## Known limitation: the dead `worker.snapshot.write` span
 
 `web/src/sim-worker.ts` opens a TS-side `worker.snapshot.write` span
@@ -148,25 +198,36 @@ flagged for a future pass.
 
 - `src/profiler.rs` → `Profiler`, `Profiler::push`,
   `Profiler::push_root`, `Profiler::push_root_named`,
-  `Profiler::record_under_root`, `ProfilerInner::ensure_root`,
-  `report_json`, `clock_now_us_threadsafe`, `SpanGuard`, `ROOT_TICK`,
+  `Profiler::record_under_root` (signature
+  `(root_name, path, dur_us, call_count)`),
+  `Profiler::record_external`, `ProfilerInner::ensure_root`,
+  `report_json`, `serialize_node` (writes `total_call_count`),
+  `clock_now_us_threadsafe`, `SpanGuard`, `ROOT_TICK`,
   `ROOT_FRAME`, `WINDOW_MS`, `SAMPLES_PER_NODE`, `MAX_NODES`.
 - `src/world/mod.rs` → the `record_under_root("grass_step", ...)` calls
-  and the `tick.color_ema` sibling lift.
+  (passing paired `_us` + `_calls`) and the `tick.color_ema` sibling
+  lift.
 - `src/world/nn.rs` → `nn_forward_all_chunks`,
   `nn_stats.reset_tick`, the per-worker atomic-accumulator bracket
-  ordering.
-- `src/world/nn_stats.rs` → `NnStats`, `tick_build_input_total_us`,
-  `tick_proximity_total_us`, the `tick.*` and `worker.*` fields.
+  ordering, the `creatures_in_chunk` argument threaded into
+  `record_chunk_subphases`.
+- `src/world/nn_stats.rs` → `NnStats`, `tick_build_input_total_us` +
+  `tick_build_input_total_calls`, `tick_proximity_total_us` +
+  `tick_proximity_total_calls`, `tick_forward_calls`,
+  `tick_forward_l1_calls` / `_l2_calls` / `_l3_calls`,
+  `tick_chunk_wall_calls`, `record_chunk_subphases`, `record_chunk_lite`.
 - `src/grass.rs` → `par_chunks_us`, `chunks_mut_us`, `row_body_us`,
-  `row_body_self_us` atomic counters.
+  `row_body_self_us`, `dispatch_calls`, `row_body_calls` atomic
+  counters.
 - `web/src/perf.ts` → `span`, `setProfilerEnabled`,
-  `isProfilerEnabled`, `reportJson`, the empty-stack `frame`
-  special-case.
+  `isProfilerEnabled`, `reportJson`, `recordSample` (3-tuple
+  `[ts, dur, call_count]`), the empty-stack `frame` special-case.
 - `web/src/render-gl.ts` → the `frame.render_world*` span calls.
 - `web/src/main.ts` → the outer `span("frame")` and
   `span("frame.snapshot.read")` brackets.
-- `web/src/widgets/perf-panel.ts` → `TREE_ORDER`, the panel render.
+- `web/src/widgets/perf-panel.ts` → `TREE_ORDER`, the
+  `total_call_count` divisor in the `ms/call` formula, the
+  `window: X.X s` header render.
 - `web/src/sim-worker.ts` → `worker.snapshot.write` span (dead;
   see Known limitation).
 
@@ -178,8 +239,18 @@ flagged for a future pass.
   and one of the worker-sum trees (`nn` / `grass_step`).
 - A new top-level tree is minted (add to `TREE_ORDER` in the panel and
   document it in this doc's diagram).
+- A new per-worker `_us` accumulator is added without a paired `_calls`
+  counter (every drain into `record_under_root` owes an honest
+  invocation count — RAII spans record 1, sum-of-workers samples
+  record the real per-creature / per-row count).
+- The JSON node shape gains or loses a field (`total_call_count` is
+  load-bearing for honest `ms/call`; `call_count` is retained as a
+  back-compat alias for sample count).
+- The window header derivation changes (currently
+  `max(effective_window_ms)` across populated nodes).
 - The 1 Hz poll cadence changes.
-- The Rust profiler API gains or loses an entry point.
+- The Rust profiler API gains or loses an entry point, or
+  `record_under_root`'s signature changes.
 
 ## Why is it shaped this way
 

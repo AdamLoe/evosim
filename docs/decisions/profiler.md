@@ -123,6 +123,74 @@
 - **Revisit when**: a profile pass needs the SAB write cost visible
   somewhere; that's the time to plumb the worker's perf state to main.
 
+### Per-worker `_calls` atomics paired with every `_us` accumulator
+
+- **Decision**: Every per-tick sum-of-workers `_us` accumulator in
+  `NnStats` and `GrassGrid` has a paired `_calls: AtomicU64` that
+  workers `fetch_add` in lockstep with the timing. The post-tick drain
+  reads both and passes them to `record_under_root`.
+- **Why**: The drain records one sample per tick into the ring, so the
+  legacy sample-count `call_count` measured "ticks where the phase
+  fired" not the underlying per-creature / per-row invocation count.
+  Paired atomics are the smallest change that carries the truthful
+  count from the worker that owns it through to the panel's `ms/call`
+  divisor. Without them, `nn.forward.l1` at pop 1500 reads as
+  millisecond per-tick cost and hides the real microsecond per-creature
+  shape.
+- **Applies to**: `architecture/profiler.md`,
+  `architecture/simulation-core.md`.
+- **Alternatives considered**: A single `AtomicU128` carrying
+  `(dur_us, call_count)` was rejected because the wasm32 atomics
+  surface tops out at 64-bit CAS, which would force the worker hot
+  path into a fallback. A new `record_drained` API alongside
+  `record_under_root` was rejected because every drain caller is
+  paired anyway — splitting the API doubles the surface for no win.
+- **Code anchors**: `src/world/nn_stats.rs → NnStats`,
+  `record_chunk_subphases`, `record_chunk_lite`;
+  `src/grass.rs → GrassGrid` (`dispatch_calls`, `row_body_calls`);
+  `src/world/mod.rs → step` (the drain into `record_under_root`).
+
+### JSON adds `total_call_count`; legacy `call_count` retained as sample count
+
+- **Decision**: `profile_report_json` and `web/src/perf.ts::reportJson`
+  emit a `total_call_count` field on every node (sum of per-sample
+  call counts). The existing `call_count` field keeps its meaning —
+  sample count in the ring buffer — so any reader on the old shape
+  keeps rendering. New readers divide `total_us / total_call_count`
+  for honest `ms/call`.
+- **Why**: An in-place semantic change to `call_count` would silently
+  break the perf panel and any external consumer. Adding a new field
+  with a clear name keeps the shape forward-compatible, and the panel
+  falls back to `call_count` when `total_call_count` is missing so a
+  stale wasm bundle still renders.
+- **Applies to**: `architecture/profiler.md`.
+- **Tradeoffs**: Sample tuple grows from `(u32, u32)` to
+  `(u32, u32, u32)` — +33% per-sample memory. At
+  `SAMPLES_PER_NODE = 4096` × `MAX_NODES = 256` that's ~4 MB worst
+  case, acceptable for a runtime-toggleable dev tool.
+- **Code anchors**: `src/profiler.rs → serialize_node`, `Node.samples`
+  (the 3-tuple shape); `web/src/perf.ts → recordSample`,
+  `serializeNode`.
+
+### Panel renders a single `window: X.X s` header above the four trees
+
+- **Decision**: The perf panel computes
+  `windowSec = max(effective_window_ms) / 1000` across every populated
+  node in the merged report and renders one header line above the
+  stacked trees.
+- **Why**: Per-tick aggregation makes the window uniform across nodes
+  — every tree gets one drained sample per tick — so one number
+  describes the whole panel. Without it, `tick.total_ms = 40 s` is
+  uninterpretable: the reader has to guess whether the window is
+  17 s, 40 s, or 60 s. Reading from `effective_window_ms` reuses the
+  per-node field already in the JSON instead of plumbing a new
+  top-level value.
+- **Applies to**: `architecture/profiler.md`.
+- **Revisit when**: A tree adopts a non-per-tick sampling rate (the
+  single header becomes a lie at that point — switch to per-tree
+  headers).
+- **Code anchors**: `web/src/widgets/perf-panel.ts → renderTreesStacked`.
+
 ### 1 Hz worker→main poll cadence; profiler default OFF
 
 - **Decision**: `request_profile_report` polls at ~1 s; profile state
