@@ -1,28 +1,22 @@
-// Rail orchestrator: boot + pollRail. Called from main.ts each RAF frame.
-// E.23: Stats sampling.
-// E.24: Inspector refresh.
-//
-// v1.6 Wave B: signatures drop the `WorldHandle` param. `pollRail` takes a
-// `SnapshotHeader` (for stats sampling) + `SimBridge` (for inspector refresh).
+// Rail orchestrator: three persistent tabs (Inspector / Monitor / Settings).
+// Called from main.ts each RAF via `pollRail`.
 
 import type { SnapshotHeader, SimBridge } from "../sim-bridge";
 import { maybeSampleStats } from "./stats";
 import { refreshInspector, updateLatestSoA } from "./inspector";
 import { pruneHighlights, highlights } from "./highlight";
 
-// ---- Rail state (opaque to main.ts) ----
+export type RailTab = "inspector" | "monitor" | "settings";
 
 export interface RailState {
-  switchTab(name: string): void;
-  activeTab: string;
+  switchTab(name: RailTab): void;
+  readonly activeTab: RailTab;
 }
 
-// ---- Tab switching ----
-
 function installTabs(): RailState {
-  let activeTab = "stats"; // Events tab hidden; Stats is default for v1.1 revisit
+  let activeTab: RailTab = "settings";
 
-  function switchTab(name: string): void {
+  function switchTab(name: RailTab): void {
     activeTab = name;
     document.querySelectorAll(".rail-tab").forEach((btn) => {
       const b = btn as HTMLButtonElement;
@@ -37,7 +31,7 @@ function installTabs(): RailState {
 
   document.querySelectorAll(".rail-tab").forEach((btn) => {
     const b = btn as HTMLButtonElement;
-    b.addEventListener("click", () => switchTab(b.dataset.tab!));
+    b.addEventListener("click", () => switchTab(b.dataset.tab as RailTab));
   });
 
   return {
@@ -46,13 +40,9 @@ function installTabs(): RailState {
   };
 }
 
-// ---- installRail ----
-
 export function installRail(): RailState {
   return installTabs();
 }
-
-// ---- pollRail (called each RAF frame) ----
 
 export function pollRail(
   rail: RailState,
@@ -61,19 +51,9 @@ export function pollRail(
   creatures: Float32Array,
   pop: number,
 ): void {
-  // 1. Stats sample (E.23). Reads from the snapshot header now.
   maybeSampleStats(snapshot);
-
-  // 2. Wave D: refresh the inspector's SAB SoA cache BEFORE refreshInspector
-  //    so the per-frame fast-path sees the current snapshot. Also feeds the
-  //    canvas-click hit-test installed in `installCanvasClickHandler`.
   updateLatestSoA(creatures, pop);
-
-  // 3. Inspector refresh (E.24). Sends async `inspect_id` requests via the
-  //    SimBridge; replies render the panel when they arrive.
   refreshInspector(simBridge, rail);
-
-  // 4. Highlight prune.
   pruneHighlights(performance.now());
 }
 

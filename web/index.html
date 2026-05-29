@@ -8,82 +8,95 @@
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body>
-    <canvas id="aquarium"></canvas>
+    <div id="app-shell">
+      <!-- Left column: top-bar + canvas + optional profiler bottom panel. -->
+      <div id="left-col">
+        <div id="top-bar">
+          <span id="status">Booting…</span>
+        </div>
 
-    <div id="top-bar">
-      <span id="status">booting…</span>
-    </div>
+        <div id="canvas-wrap">
+          <canvas id="aquarium"></canvas>
+        </div>
 
-    <!-- ui-stats: free-standing Stats widget, top-left, always visible. -->
-    <div id="stats-box" class="overlay-widget">
-      <canvas id="chart-pop" width="260" height="80"></canvas>
-    </div>
-
-    <!-- ui-inspector: Inspector pop-up. Hidden by default; shown by
-         canvas click handler on creature hit. -->
-    <div id="inspector-box" class="overlay-widget" style="display:none">
-      <button id="inspector-close" type="button" aria-label="Close">×</button>
-      <dl>
-        <dt>ID</dt><dd id="ins-id"></dd>
-        <dt>Pos</dt><dd id="ins-pos"></dd>
-        <dt>Action</dt><dd id="ins-action"></dd>
-        <dt>Age</dt><dd id="ins-age"></dd>
-        <dt>Energy</dt><dd id="ins-energy"></dd>
-        <dt>Cooldown</dt><dd id="ins-cooldown">—</dd>
-        <dt>EMA</dt><dd>
-          <span id="ins-ema-swatch" class="ema-swatch"></span>
-          <span id="ins-ema-values">—</span>
-        </dd>
-        <dt>Walls (N/S/E/W)</dt><dd id="ins-walls">—</dd>
-        <dt>Recent</dt><dd id="ins-history">—</dd>
-        <dt>NN mut rate</dt><dd id="ins-nn-rate">—</dd>
-        <dt>NN weights</dt><dd id="ins-nn-count">—</dd>
-      </dl>
-    </div>
-
-    <!-- E.21: right rail shell -->
-    <!-- v1.1: rail hidden via CSS (#right-rail { display: none; }) per
-         master plan §8.1; DOM kept for future re-enable. Stats charts
-         moved out into #stats-box (see ui-stats plan). -->
-    <aside id="right-rail">
-      <nav id="rail-tabs" role="tablist">
-        <button data-tab="stats" class="rail-tab is-active">Stats</button>
-        <!-- Inspector tab injected dynamically when a creature is selected -->
-      </nav>
-
-      <section id="rail-stats" class="rail-panel is-active">
-      </section>
-      <!-- Inspector content evicted to #inspector-box (ui-inspector). -->
-      <section id="rail-inspector" class="rail-panel"></section>
-    </aside>
-
-    <!-- v1.5 settings overlay (right-edge, 320px). Toggle via ~ hotkey or
-         ⚙ top-bar button. The dev panel lives inside this container. -->
-    <aside id="settings-overlay" style="display:none">
-      <button id="settings-close" type="button" aria-label="Close">×</button>
-      <div id="devpanel-box"></div>
-    </aside>
-
-    <!-- ui-perf: free-standing perf widget (bottom-left, always visible) -->
-    <div id="perf-box" class="overlay-widget perf-widget">
-      <div class="perf-header-row">
-        <label class="profiler-toggle">
-          <input type="checkbox" id="profiler-enable" />
-          profiler
-        </label>
-        <span id="perf-tps" class="perf-stat">— TPS</span>
-        <span id="perf-jank" class="perf-stat">0 jank</span>
-        <button id="jank-reset" class="jank-reset-btn" title="Reset jank counter">↺</button>
+        <!-- Profiler bottom panel. Width follows the left column; height
+             grows only when the panel is visible (display:none when off). -->
+        <div id="perf-box" class="perf-widget" style="display:none">
+          <button id="perf-close" type="button" aria-label="Close profiler">×</button>
+          <div class="perf-header-row">
+            <span id="perf-tps" class="perf-stat">— TPS</span>
+            <span id="perf-jank" class="perf-stat">0 jank</span>
+            <button id="jank-reset" class="jank-reset-btn" title="Reset jank counter">↺</button>
+          </div>
+          <div class="perf-obs-row">
+            <span id="perf-grass-cells" class="perf-stat perf-obs">grass cells: —</span>
+            <span id="perf-grass-total" class="perf-stat perf-obs">grass total: —</span>
+          </div>
+          <div id="profiler-stabilizing" class="profiler-stabilizing" style="display:none"></div>
+          <div id="profiler-trees"></div>
+        </div>
       </div>
-      <!-- P3d: observability counters -->
-      <div class="perf-obs-row">
-        <span id="perf-grass-cells" class="perf-stat perf-obs">grass cells: —</span>
-        <span id="perf-grass-total" class="perf-stat perf-obs">grass total: —</span>
-      </div>
-      <div id="profiler-stabilizing" class="profiler-stabilizing" style="display:none"></div>
-      <!-- v1.7: four stacked tables (frame, tick, nn, grass_step) injected by perf-panel.ts -->
-      <div id="profiler-trees"></div>
+
+      <!-- Right rail: Inspector | Monitor | Settings -->
+      <aside id="right-rail">
+        <nav id="rail-tabs" role="tablist">
+          <button data-tab="inspector" class="rail-tab">Inspector</button>
+          <button data-tab="monitor" class="rail-tab">Monitor</button>
+          <button data-tab="settings" class="rail-tab is-active">Settings</button>
+        </nav>
+
+        <!-- Inspector tab: empty-state by default; populated on creature
+             click. The existing #ins-* dl rows live inside this panel so
+             the inspector module's getElementById calls keep working. -->
+        <section id="rail-inspector" class="rail-panel">
+          <div id="inspector-empty" class="rail-empty">Click a creature to inspect.</div>
+          <div id="inspector-body" style="display:none">
+            <dl>
+              <dt>ID</dt><dd id="ins-id"></dd>
+              <dt>Pos</dt><dd id="ins-pos"></dd>
+              <dt>Action</dt><dd id="ins-action"></dd>
+              <dt>Age</dt><dd id="ins-age"></dd>
+              <dt>Energy</dt><dd id="ins-energy"></dd>
+              <dt>Cooldown</dt><dd id="ins-cooldown">—</dd>
+              <dt>EMA</dt><dd>
+                <span id="ins-ema-swatch" class="ema-swatch"></span>
+                <span id="ins-ema-values">—</span>
+              </dd>
+              <dt>Walls (N/S/E/W)</dt><dd id="ins-walls">—</dd>
+              <dt>Recent</dt><dd id="ins-history">—</dd>
+              <dt>NN mut rate</dt><dd id="ins-nn-rate">—</dd>
+              <dt>NN weights</dt><dd id="ins-nn-count">—</dd>
+            </dl>
+          </div>
+        </section>
+
+        <!-- Monitor tab: pop graph + worker/process stats. -->
+        <section id="rail-monitor" class="rail-panel">
+          <div class="rail-monitor-section">
+            <div class="rail-section-title">Population</div>
+            <canvas id="chart-pop" width="380" height="120"></canvas>
+          </div>
+          <div class="rail-monitor-section">
+            <div class="rail-section-title">Process</div>
+            <div id="worker-stats-host"></div>
+          </div>
+        </section>
+
+        <!-- Settings tab: dev panel content + Apply / Cancel / Reset footer. -->
+        <section id="rail-settings" class="rail-panel is-active">
+          <div id="devpanel-box"></div>
+          <div id="settings-footer">
+            <button id="settings-apply" type="button" disabled>Apply</button>
+            <button id="settings-cancel" type="button" disabled>Cancel</button>
+            <button id="settings-reset" type="button">Reset</button>
+          </div>
+        </section>
+      </aside>
     </div>
+
+    <!-- Toast host for transient notifications (construction-only-changes,
+         etc.). Pinned to the bottom-center of the viewport. -->
+    <div id="toast-host"></div>
 
     <script type="module" src="/src/main.ts"></script>
   </body>

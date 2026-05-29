@@ -148,6 +148,7 @@ async function handleBoot(boot: SimMessageBoot): Promise<void> {
     boot.initial_grass_seed_count,
     boot.energy_max,
     boot.founder_count,
+    boot.full_grass_on_init,
   );
 
   // Apply every persisted slider via the name-dispatcher. Per v1.6-plan.md
@@ -187,6 +188,7 @@ async function handleBoot(boot: SimMessageBoot): Promise<void> {
     max_pop_for_sim: max_pop_for_sim(),
     snapshot_sab: snapshotSab,
     control_sab: controlSab,
+    sliders_defaults_json: world.sliders_defaults_json(),
   };
   post(reply);
 

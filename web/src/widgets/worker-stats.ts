@@ -53,12 +53,6 @@ export function installWorkerStatsPanel(
   simBridge: SimBridge,
   container: HTMLElement,
 ): () => void {
-  // Header.
-  const hdr = document.createElement("div");
-  hdr.className = "devpanel-section-header";
-  hdr.textContent = "nn threads";
-  container.appendChild(hdr);
-
   // Summary line (pool / seen / used).
   const summary = document.createElement("div");
   summary.className = "worker-stats-summary";
@@ -77,7 +71,7 @@ export function installWorkerStatsPanel(
   profileBox.addEventListener("change", () => {
     simBridge.postMessage({ kind: "profile_enable", on: profileBox.checked });
   });
-  profileRow.append(profileBox, document.createTextNode(" sub-phase timing"));
+  profileRow.append(profileBox, document.createTextNode(" Sub-phase timing"));
   container.appendChild(profileRow);
 
   // Workers table.
@@ -93,7 +87,7 @@ export function installWorkerStatsPanel(
   // Pool ceiling line at the bottom — static, won't change after boot.
   const poolLine = document.createElement("div");
   poolLine.className = "worker-stats-pool";
-  poolLine.textContent = `pool ceiling: ${navigator.hardwareConcurrency} (navigator.hardwareConcurrency)`;
+  poolLine.textContent = `Pool ceiling: ${navigator.hardwareConcurrency} (navigator.hardwareConcurrency)`;
   container.appendChild(poolLine);
 
   let intervalId: number | null = null;

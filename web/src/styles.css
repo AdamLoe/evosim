@@ -1,15 +1,31 @@
+/* ───────────────────────────────────────────────────────────────────────────
+   evosim app shell — left column (top-bar + canvas + optional profiler)
+   and right rail (Inspector / Monitor / Settings tabs).
+   ─────────────────────────────────────────────────────────────────────────── */
+
 :root {
   color-scheme: dark;
-  --bg: #0b0f14;
-  --fg: #e6edf3;
-  --rail-bg: rgba(15, 22, 32, 0.85);
-  /* Width of the settings overlay when open. Right-anchored UI (top-bar,
-     aquarium canvas, inspector) reserves this much room on the right edge so
-     the overlay never paints over the game. Set to 0 when overlay is closed. */
-  --settings-w: 0px;
-}
-body.settings-open {
-  --settings-w: 420px;
+
+  /* Palette tokens. Warm-neutral charcoal, soft off-white, muted teal accent.
+     One small named set; every component reaches in here instead of mixing
+     ad-hoc rgba() literals. */
+  --bg-app: #181613;
+  --bg-panel: #221f1a;
+  --bg-panel-alt: #2a2620;
+  --bg-canvas: #0c0a08;
+  --fg: #e8e3da;
+  --fg-muted: rgba(232, 227, 218, 0.62);
+  --fg-faint: rgba(232, 227, 218, 0.42);
+  --border: rgba(232, 227, 218, 0.08);
+  --border-strong: rgba(232, 227, 218, 0.16);
+  --accent: #67b3a9;
+  --accent-dirty: #d49b54;
+  --danger: #c87063;
+
+  --rail-w: 420px;
+  --tab-h: 36px;
+  --topbar-h: 36px;
+  --profiler-h: 240px;
 }
 
 html,
@@ -17,7 +33,7 @@ body {
   margin: 0;
   padding: 0;
   height: 100%;
-  background: var(--bg);
+  background: var(--bg-app);
   color: var(--fg);
   font-family:
     system-ui,
@@ -25,275 +41,137 @@ body {
     "Segoe UI",
     Roboto,
     sans-serif;
+  font-size: 13px;
   overflow: hidden;
 }
 
-#aquarium {
+button {
+  font: inherit;
+  color: var(--fg);
+}
+
+/* ── App shell ────────────────────────────────────────────────────────────── */
+
+#app-shell {
   position: fixed;
-  top: 0;
-  left: 0;
-  width: calc(100vw - var(--settings-w));
-  height: 100vh;
+  inset: 0;
+  display: grid;
+  grid-template-columns: 1fr var(--rail-w);
+  grid-template-rows: 100%;
+  background: var(--bg-app);
+}
+
+#left-col {
+  display: grid;
+  grid-template-rows: var(--topbar-h) 1fr auto;
+  min-width: 0;
+  min-height: 0;
+}
+
+#top-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 12px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+#top-bar > * { flex-shrink: 0; }
+#status {
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-muted);
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+}
+
+#canvas-wrap {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  background: var(--bg-canvas);
+}
+#aquarium {
+  width: 100%;
+  height: 100%;
   display: block;
   touch-action: none;
 }
 
-#top-bar {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: var(--settings-w);
-  padding: 8px 12px;
-  font-size: 13px;
-  display: flex;
-  gap: 12px;
-  pointer-events: none;
-  background: linear-gradient(180deg, rgba(0, 0, 0, 0.55), transparent);
-}
+/* ── Profiler bottom panel ────────────────────────────────────────────────── */
 
-#top-bar > * {
-  pointer-events: auto;
-}
-
-/* ui-stats: free-standing overlay widget convention used by the three
-   evicted-from-rail boxes. Default pointer-events: auto so opaque
-   widgets (ui-inspector, ui-perf) capture clicks correctly without any
-   override. ui-stats and ui-perf set pointer-events: none on their own
-   outer IDs because they are non-interactive display surfaces that must
-   not block camera-drag events on their padded margins; ui-inspector
-   inherits auto (no override needed). */
-.overlay-widget {
-  position: fixed;
-  padding: 8px 10px;
-  background: var(--rail-bg);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 4px;
-  font: 12px ui-monospace, monospace;
-  color: var(--fg);
-  z-index: 5;
-  pointer-events: auto;
-}
-
-/* ui-stats: top-left, under the top-bar gradient.
-   pointer-events: none so the padded box area doesn't block
-   camera-drag events; the chart canvases are pure render targets that
-   don't need click handling, so no child opt-back is required. */
-#stats-box {
-  top: 8px;
-  left: 8px;
-  pointer-events: none;
-}
-#stats-box canvas {
-  display: block;
-  margin-bottom: 6px;
-}
-#stats-box canvas:last-child {
-  margin-bottom: 0;
-}
-
-/* E.21: Right rail shell (v5 §11 — 280px, overlays aquarium). */
-#right-rail {
-  position: fixed;
-  top: 36px; /* clear the top-bar */
-  bottom: 0;  /* stretch to viewport bottom */
-  right: 0;
-  width: 280px;
-  background: var(--rail-bg);
-  border-left: 1px solid rgba(255, 255, 255, 0.08);
-  font-size: 12px;
-  display: flex;
-  flex-direction: column;
-  z-index: 5;
-  overflow: hidden;
-}
-/* v1.1: rail hidden by default (master plan §8.1).
-   DOM stays so installRail/pollRail and the inspector tab-injection
-   code path don't break; re-enable by removing this rule. */
-#right-rail {
-  display: none;
-}
-#rail-tabs {
-  display: flex;
-  gap: 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-  flex-shrink: 0;
-}
-.rail-tab {
-  flex: 1;
-  padding: 6px 10px;
-  background: transparent;
-  color: var(--fg);
-  border: 0;
-  border-right: 1px solid rgba(255, 255, 255, 0.05);
-  cursor: pointer;
-  font: inherit;
-  opacity: 0.55;
-}
-.rail-tab.is-active {
-  opacity: 1;
-  background: rgba(255, 255, 255, 0.05);
-}
-.rail-tab.hidden {
-  display: none;
-}
-.rail-panel {
-  display: none;
-  overflow-y: auto;
-  padding: 8px 10px;
-  flex: 1 1 0;
-  min-height: 0;
-}
-.rail-panel.is-active {
-  display: block;
-}
-
-.event-row {
-  padding: 2px 0;
-  opacity: 0.9;
-  font-family: ui-monospace, monospace;
-  font-size: 11px;
-}
-.event-row .tick {
-  opacity: 0.5;
-  margin-right: 6px;
-}
-
-/* ui-inspector: top-right overlay widget (content evicted from #rail-inspector). */
-#inspector-box {
-  top: 8px;
-  right: calc(8px + var(--settings-w));
-  max-width: 280px;       /* mirrors current rail width */
-  max-height: calc(100vh - 16px);
-  overflow-y: auto;
-  /* keep .overlay-widget's position: fixed (do NOT override to relative —
-     that breaks viewport pinning). #inspector-close uses position: absolute,
-     which already anchors against the nearest positioned ancestor, and a
-     fixed-positioned box is a valid containing block for absolute children. */
-}
-
-#inspector-box dl {
-  display: grid;
-  grid-template-columns: 110px 1fr;   /* mirrors existing #rail-inspector dl */
-  gap: 2px 6px;
-  margin: 0;
-}
-#inspector-box dt { opacity: 0.55; }
-#inspector-box dd { margin: 0; word-break: break-all; }
-
-#inspector-close {
-  position: absolute;
-  top: 2px;
-  right: 4px;
-  width: 20px;
-  height: 20px;
-  padding: 0;
-  background: transparent;
-  border: 0;
-  color: var(--fg);
-  font: inherit;
-  font-size: 16px;
-  line-height: 18px;
-  cursor: pointer;
-  opacity: 0.55;
-}
-#inspector-close:hover { opacity: 1; }
-
-/* v1.5 S3: EMA color swatch inline with the inspector EMA row. */
-.ema-swatch {
-  display: inline-block;
-  width: 14px;
-  height: 14px;
-  margin-right: 6px;
-  vertical-align: middle;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  border-radius: 2px;
-  background-color: rgb(38, 38, 38);
-}
-
-/* E.23: Stats charts */
-#rail-stats canvas {
-  display: block;
-  margin-bottom: 8px;
-}
-
-/* ui-perf: free-standing perf widget (bottom-left, always visible).
-   Builds on .overlay-widget (defined by ui-stats). */
 #perf-box {
-  bottom: 8px;
-  left: 8px;
-  min-width: 560px;
-  max-width: 760px;
-  overflow-x: auto;
-  pointer-events: none;
+  position: relative;
+  min-height: 0;
+  max-height: var(--profiler-h);
+  overflow: auto;
+  background: var(--bg-panel);
+  border-top: 1px solid var(--border);
+  padding: 8px 12px;
+  font: 11px ui-monospace, monospace;
 }
-/* Interactive children opt back in; the text/layout regions
-   (padding, stabilizing banner) remain pointer-events: none so
-   canvas pan-through works on all non-interactive areas (M4/M5). */
-.profiler-toggle,
-.profiler-table,
-.jank-reset-btn {
-  pointer-events: auto;
+#perf-close {
+  position: absolute;
+  top: 4px;
+  right: 8px;
+  width: 22px;
+  height: 22px;
+  background: transparent;
+  border: 0;
+  color: var(--fg-muted);
+  font-size: 18px;
+  line-height: 20px;
+  padding: 0;
+  cursor: pointer;
 }
+#perf-close:hover { color: var(--fg); }
 
-/* TPS + jank header row: flex layout aligns toggle + stats + reset. */
 .perf-header-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 12px;
   flex-wrap: nowrap;
+  padding-right: 28px;
 }
 .perf-stat {
   font: 11px ui-monospace, monospace;
-  color: rgba(255, 255, 255, 0.7);
+  color: var(--fg-muted);
   white-space: nowrap;
 }
-/* P3d: observability counters row (grass cells, grass total, mean nose, mean eye). */
 .perf-obs-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 12px;
   flex-wrap: nowrap;
   margin-top: 3px;
 }
 .perf-obs {
   font: 11px ui-monospace, monospace;
-  color: rgba(255, 255, 255, 0.55);
+  color: var(--fg-faint);
   white-space: nowrap;
 }
 .jank-reset-btn {
   background: none;
-  border: 1px solid rgba(255, 255, 255, 0.25);
+  border: 1px solid var(--border-strong);
   border-radius: 3px;
-  color: rgba(255, 255, 255, 0.6);
+  color: var(--fg-muted);
   font-size: 10px;
   line-height: 1;
   padding: 1px 4px;
   cursor: pointer;
-  user-select: none;
   margin-left: auto;
 }
 .jank-reset-btn:hover {
-  border-color: rgba(255, 255, 255, 0.5);
-  color: rgba(255, 255, 255, 0.9);
-}
-
-.profiler-toggle {
-  display: inline-flex;
-  gap: 4px;
-  align-items: center;
-  font-size: 11px;
-  cursor: pointer;
-  user-select: none;
+  border-color: var(--fg-muted);
+  color: var(--fg);
 }
 .profiler-stabilizing {
   font-size: 10px;
   font-family: ui-monospace, monospace;
-  color: rgba(255, 200, 100, 0.85);
+  color: var(--accent-dirty);
   margin: 3px 0;
 }
 
-/* Widened: auto column sizing, nowrap to prevent mid-cell wrap,
-   generous horizontal padding so columns don't visually collide. */
 .profiler-table {
   table-layout: auto;
   width: 100%;
@@ -309,152 +187,140 @@ body {
   text-align: right;
 }
 .profiler-table th:first-child,
-.profiler-table td.pf-name {
-  text-align: left;
-}
-.profiler-table th { opacity: 0.55; font-weight: normal; }
-.profiler-table tr.pf-depth-0 td.pf-name { font-weight: bold; }
+.profiler-table td.pf-name { text-align: left; }
+.profiler-table th { color: var(--fg-faint); font-weight: normal; }
+.profiler-table tr.pf-depth-0 td.pf-name { font-weight: 500; }
 .profiler-table tr.pf-depth-1 td.pf-name { padding-left: 12px; }
 .profiler-table tr.pf-depth-2 td.pf-name { padding-left: 24px; }
 .profiler-table tr.pf-depth-3 td.pf-name { padding-left: 36px; }
 .profiler-table tr.pf-depth-4 td.pf-name { padding-left: 48px; }
-
-/* D5: empty-state hint inside tbody when no samples are recorded. */
 .profiler-table tr td.pf-empty-hint {
   text-align: center;
-  opacity: 0.45;
+  color: var(--fg-faint);
   font-style: italic;
   padding: 8px 0;
 }
-
-/* v1.7: four stacked tree tables in the perf panel. Each section has a header
-   strip with the tree's top-level name (frame / tick / nn / grass_step). */
-.profiler-tree-section {
-  margin-top: 6px;
-}
-.profiler-tree-section:first-child {
-  margin-top: 0;
-}
+.profiler-tree-section { margin-top: 8px; }
+.profiler-tree-section:first-child { margin-top: 0; }
 .profiler-tree-header {
-  font: 10px ui-monospace, monospace;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  opacity: 0.6;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  font: 11px ui-monospace, monospace;
+  letter-spacing: 0.02em;
+  color: var(--fg-muted);
+  border-bottom: 1px solid var(--border);
   padding-bottom: 2px;
   margin-bottom: 2px;
 }
 
-/* v1.5: Right-edge settings overlay containing the dev panel. Occupies the
-   full-height column on the right; the top-bar is narrowed via `right:
-   var(--settings-w)` so it sits to the left of the overlay instead of
-   bleeding under it. */
-#settings-overlay {
-  position: fixed;
-  top: 0;
-  bottom: 0;
-  right: 0;
-  /* Width is driven by the same CSS variable the canvas/top-bar reserve room
-     against, so they can never drift apart. Change the body.settings-open
-     value above to resize the column. */
-  width: var(--settings-w);
-  /* border-box so `width` INCLUDES the padding + border. Without it the box
-     renders ~24px wider than --settings-w (12px padding × 2 + border) and
-     overlaps the canvas/top-bar on the right. */
-  box-sizing: border-box;
-  background: var(--rail-bg);
-  border-left: 1px solid rgba(255, 255, 255, 0.08);
-  z-index: 10;
-  overflow-y: auto;
-  padding: 8px 12px;
-  font: 12px ui-monospace, monospace;
-  color: var(--fg);
-}
-#settings-close {
-  position: absolute;
-  top: 4px;
-  right: 6px;
-  width: 22px;
-  height: 22px;
-  padding: 0;
-  background: transparent;
-  border: 0;
-  color: var(--fg);
-  font: inherit;
-  font-size: 18px;
-  line-height: 20px;
-  cursor: pointer;
-  opacity: 0.55;
-}
-#settings-close:hover { opacity: 1; }
+/* ── Right rail ───────────────────────────────────────────────────────────── */
 
-/* TPS <select> dropdown popup — without this the OS-rendered options are
-   white-on-white on Linux/Firefox. (Misc UX, v1.5.) */
-select option {
-  background: #1a1a1a;
-  color: #eee;
-}
-
-/* P3b: dev-panel content (now nested inside #settings-overlay). */
-#devpanel-box {
+#right-rail {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  min-height: 0;
+  background: var(--bg-panel);
+  border-left: 1px solid var(--border);
 }
-.devpanel-row {
-  display: grid;
-  grid-template-columns: 110px 1fr 60px 56px;
-  gap: 6px;
-  align-items: center;
-  font-size: 11px;
-  font-family: ui-monospace, monospace;
+#rail-tabs {
+  display: flex;
+  flex-shrink: 0;
+  height: var(--tab-h);
+  background: var(--bg-panel-alt);
+  border-bottom: 1px solid var(--border);
 }
-.devpanel-row label { opacity: 0.7; }
-.devpanel-row input[type=range] { width: 100%; }
-.devpanel-numinput {
-  width: 100%;
-  font-size: 11px;
-  font-family: ui-monospace, monospace;
-  background: #1a1a1a;
-  color: #eee;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  padding: 1px 4px;
-  border-radius: 2px;
+.rail-tab {
+  flex: 1;
+  background: transparent;
+  color: var(--fg-muted);
+  border: 0;
+  border-right: 1px solid var(--border);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 400;
+  height: 100%;
+  position: relative;
 }
-/* Hide the spinner buttons on the number input — they're noisy at this size. */
-.devpanel-numinput::-webkit-outer-spin-button,
-.devpanel-numinput::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
-.devpanel-numinput { -moz-appearance: textfield; }
-.devpanel-readout {
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-  opacity: 0.85;
+.rail-tab:last-child { border-right: 0; }
+.rail-tab:hover { color: var(--fg); background: rgba(255, 255, 255, 0.02); }
+.rail-tab.is-active {
+  color: var(--fg);
+  background: var(--bg-panel);
 }
-.devpanel-section-header {
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  opacity: 0.4;
-  margin-top: 4px;
+.rail-tab.is-active::after {
+  content: "";
+  position: absolute;
+  bottom: -1px;
+  left: 0; right: 0;
+  height: 2px;
+  background: var(--accent);
+}
+.rail-panel {
+  display: none;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+.rail-panel.is-active { display: flex; flex-direction: column; }
+
+.rail-empty {
+  padding: 24px 16px;
+  color: var(--fg-faint);
+  font-size: 13px;
+  text-align: center;
 }
 
-/* NN worker-stats panel (top of settings overlay). */
+/* Inspector */
+#rail-inspector { padding: 12px 16px; }
+#rail-inspector dl {
+  display: grid;
+  grid-template-columns: 140px 1fr;
+  gap: 4px 8px;
+  margin: 0;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+}
+#rail-inspector dt { color: var(--fg-muted); }
+#rail-inspector dd { margin: 0; word-break: break-all; }
+.ema-swatch {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  margin-right: 6px;
+  vertical-align: middle;
+  border: 1px solid var(--border-strong);
+  border-radius: 2px;
+  background-color: rgb(38, 38, 38);
+}
+
+/* Monitor */
+#rail-monitor { padding: 0; }
+.rail-monitor-section {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.rail-monitor-section:last-child { border-bottom: 0; }
+.rail-section-title {
+  font-size: 11px;
+  color: var(--fg-muted);
+  letter-spacing: 0.02em;
+  margin-bottom: 6px;
+}
+#chart-pop { display: block; width: 100%; height: auto; }
 .worker-stats-summary,
 .worker-stats-subphase,
 .worker-stats-pool {
   font: 11px ui-monospace, monospace;
-  opacity: 0.8;
+  color: var(--fg-muted);
   margin: 2px 0;
 }
-.worker-stats-subphase { opacity: 0.6; }
-.worker-stats-pool { opacity: 0.45; font-size: 10px; }
+.worker-stats-subphase { color: var(--fg-faint); }
+.worker-stats-pool { color: var(--fg-faint); font-size: 10px; }
 .worker-stats-profile-toggle {
   display: flex;
   align-items: center;
   gap: 4px;
   font: 11px ui-monospace, monospace;
-  opacity: 0.7;
-  margin: 2px 0 4px;
+  color: var(--fg-muted);
+  margin: 4px 0;
   cursor: pointer;
   user-select: none;
 }
@@ -467,9 +333,9 @@ select option {
 .worker-stats-table th {
   text-align: right;
   font-weight: normal;
-  opacity: 0.5;
+  color: var(--fg-faint);
   padding: 1px 3px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid var(--border);
 }
 .worker-stats-table th:first-child { text-align: left; }
 .worker-stats-table td {
@@ -477,13 +343,202 @@ select option {
   font-variant-numeric: tabular-nums;
   padding: 1px 3px;
 }
-.worker-stats-table td:first-child { text-align: left; opacity: 0.6; }
-#devpanel-toggle {
-  background: rgba(255,255,255,0.08);
+.worker-stats-table td:first-child { text-align: left; color: var(--fg-muted); }
+
+/* ── Settings tab + dev panel ─────────────────────────────────────────────── */
+
+#rail-settings { padding: 0; }
+#rail-settings.is-active { display: flex; flex-direction: column; }
+#devpanel-box {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 16px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.devpanel-section {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.devpanel-section:first-of-type { margin-top: 0; padding-top: 0; border-top: 0; }
+.devpanel-section-header {
+  font-size: 12px;
+  font-weight: 500;
   color: var(--fg);
-  border: 1px solid rgba(255,255,255,0.15);
-  padding: 2px 8px;
+  margin-bottom: 6px;
+}
+.devpanel-section-note {
+  font-size: 11px;
+  color: var(--fg-faint);
+  margin-top: -2px;
+  margin-bottom: 6px;
+}
+
+.devpanel-row {
+  display: grid;
+  grid-template-columns: 130px 1fr 56px 60px;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+  padding: 4px 0 4px 8px;
+  margin-left: -8px;
+  border-left: 3px solid transparent;
+  transition: border-color 0.12s ease;
+}
+.devpanel-row.is-dirty {
+  border-left-color: var(--accent-dirty);
+}
+.devpanel-row label {
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+.devpanel-row label.next-world::after {
+  content: " (next world)";
+  color: var(--fg-faint);
+  font-size: 10px;
+}
+.devpanel-row input[type=range] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+.devpanel-numinput {
+  width: 100%;
+  font-size: 11px;
+  font-family: ui-monospace, monospace;
+  background: var(--bg-canvas);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  padding: 2px 4px;
+  border-radius: 3px;
+}
+.devpanel-numinput:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.devpanel-numinput::-webkit-outer-spin-button,
+.devpanel-numinput::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.devpanel-numinput { -moz-appearance: textfield; }
+.devpanel-readout {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+.devpanel-row.is-disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+.devpanel-row.is-disabled input[type=range],
+.devpanel-row.is-disabled .devpanel-numinput {
+  filter: grayscale(0.6);
+}
+
+/* Settings tab footer: Apply / Cancel / Reset */
+#settings-footer {
+  flex-shrink: 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 8px;
+  padding: 12px 16px;
+  background: var(--bg-panel-alt);
+  border-top: 1px solid var(--border);
+}
+#settings-footer button {
+  background: var(--bg-canvas);
+  border: 1px solid var(--border-strong);
+  color: var(--fg);
+  padding: 7px 0;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+#settings-footer button:hover:not(:disabled) {
+  background: rgba(232, 227, 218, 0.05);
+  border-color: var(--fg-muted);
+}
+#settings-footer button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+#settings-apply:not(:disabled) {
+  background: var(--accent);
+  color: var(--bg-canvas);
+  border-color: var(--accent);
+}
+#settings-apply:not(:disabled):hover {
+  filter: brightness(1.08);
+}
+#settings-reset:hover:not(:disabled) {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+/* ── Top-bar buttons (restart, play/pause, target TPS) ────────────────────── */
+
+.topbar-btn {
+  background: var(--bg-panel-alt);
+  color: var(--fg);
+  border: 1px solid var(--border-strong);
+  padding: 4px 10px;
   border-radius: 3px;
   cursor: pointer;
-  font: inherit;
+  font-size: 12px;
+}
+.topbar-btn:hover { border-color: var(--fg-muted); }
+.topbar-label {
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+.topbar-select {
+  background: var(--bg-panel-alt);
+  color: var(--fg);
+  border: 1px solid var(--border-strong);
+  padding: 3px 6px;
+  border-radius: 3px;
+  font-size: 12px;
+}
+.topbar-spacer { flex: 1; }
+select option {
+  background: var(--bg-panel);
+  color: var(--fg);
+}
+
+/* ── Toast ────────────────────────────────────────────────────────────────── */
+
+#toast-host {
+  position: fixed;
+  bottom: 28px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  pointer-events: none;
+  z-index: 100;
+}
+.toast {
+  background: var(--bg-panel-alt);
+  color: var(--fg);
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--accent);
+  border-radius: 4px;
+  padding: 8px 14px;
+  font-size: 12px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  animation: toast-in 0.18s ease, toast-out 0.18s ease forwards;
+  animation-delay: 0s, 3.2s;
+}
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes toast-out {
+  to { opacity: 0; transform: translateY(8px); }
 }

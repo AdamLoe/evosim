@@ -145,6 +145,9 @@ export interface SimMessageBoot {
   initial_grass_seed_count: number;
   energy_max: number;
   founder_count: number;
+  /** Construction-only: if true, the worker fills the grass grid to GRASS_MAX
+   *  at world init instead of seeding `initial_grass_seed_count` cells. */
+  full_grass_on_init: boolean;
   initial_sliders: Record<string, number>;
 }
 
@@ -240,6 +243,10 @@ export interface SimReplyBootReady {
   max_pop_for_sim: number;
   snapshot_sab: SharedArrayBuffer | null;
   control_sab: SharedArrayBuffer | null;
+  /** JSON map of every slider name → its canonical Rust default value
+   *  (bools encoded as 0|1). Read once at boot; the drift-guard test
+   *  asserts it matches `web/src/settings.ts` DEFAULTS. */
+  sliders_defaults_json: string;
 }
 
 /**
