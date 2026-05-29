@@ -114,6 +114,93 @@ covers every visible body. Bodies are filled discs; the `disc` fragment
 shader switches to an annulus when `v_inner_px > 0`, which the
 highlight pass uses.
 
+## Creature appearance (v1.9.2)
+
+The body fragment shader (`DISC_FS`) keeps its annulus shortcut for
+trait rings and the highlight ring — those produce a flat fill (UI
+elements, not creatures). The filled-body branch (when `inner_px = 0`)
+runs the new shading:
+
+- **AA edge.** `alpha = 1 - smoothstep(1 - aa, 1, r)` against a per-
+  fragment `aa = fwidth(r) * 1.5`. Soft at low zoom, crisp at high.
+- **Radial shade.** `shade = mix(1.15, 0.85, r)` — 15% brighter at
+  center, 15% darker at the rim. Pure multiplication so action-EMA
+  color identity stays readable.
+- **Outline ring.** Two `smoothstep`s carve a soft annulus between
+  `u_ring_inner = 0.84` and `u_ring_outer = 0.92`. Stops are constants
+  set once at link time (not theme-owned — thickness doesn't need to
+  be themed). The color is theme-driven via the `--creature-ring`
+  rgba CSS var.
+
+A separate halo program (`HALO_VS` / `HALO_FS`) issues a second
+instanced draw against the SAME body instance buffer through its own
+VAO. The vertex shader scales the quad by 1.8 around the body center
+(a 3.6 corner multiplier in NDC space). Blend mode is `(ONE, ONE)`
+during the draw and restored to `(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)`
+immediately after. The fragment shader computes a quadratic falloff
+from the body center and caps alpha at 0.3 so a dense crowd doesn't
+wash the canvas white. The pass is skipped entirely when `pop > 8000`
+(visual + perf hygiene). Per-frame alpha comes from the
+`--creature-halo` rgba CSS var.
+
+**Draw order per frame:** grass → world-bounds frame → halo → trails →
+bodies → highlight ring. Halo runs first so each body paints over its
+own glow; trails run between halo and body so the body's leading edge
+always covers the trail's lead-in pixel.
+
+## Snapshot interpolation (v1.9.2)
+
+The renderer interpolates body positions between sim snapshot flips so
+motion is smooth at any TPS. State is module-level in `render-gl.ts`:
+
+- `prevById: Map<id, {x, y}>` — positions at the previous snapshot.
+- `currById: Map<id, {x, y}>` — positions at the current snapshot.
+- `flipTimeMs: number` — `performance.now()` when the seq counter last
+  bumped.
+- `lastSeenSeq: number` — for flip detection. Starts at `-1`.
+
+Per RAF: main reads `seq = Atomics.load(controlI32, CTRL_SEQ)` and the
+configured `targetTPS`, both passed to `renderWorld`. Inside
+`renderWorld`:
+
+1. If `seq !== lastSeenSeq`: pointer-swap `prevById ↔ currById`, clear
+   the new curr, then walk the SoA once to populate it (id-decode +
+   `Map.set`). On the very first flip (`lastSeenSeq === -1`), also
+   clear prev so the first frame after boot renders curr verbatim
+   instead of lerping from zero.
+2. `expectedIntervalMs = clamp(1000 / targetTPS, 16, 250)`. The lower
+   bound keeps a `targetTPS = 1000` setting from collapsing alpha to
+   zero between RAFs; the upper bound keeps very low TPS from gliding
+   for seconds at a time.
+3. `alpha = clamp((now - flipTimeMs) / expectedIntervalMs, 0, 1)`.
+4. Per creature: `prev = prevById.get(id)`. If present, render at
+   `lerp(prev, curr, alpha)`; else render at curr (newborn). Dead
+   creatures drop automatically because the loop iterates the current
+   SoA.
+
+Cost: the per-flip Map rebuild is ~1–2 ms at 32 k entries; the per-RAF
+`Map.get` lookup is ~0.5 ms at 32 k. Both maps are reused across flips
+(clear, don't recreate) so the heap doesn't churn.
+
+`resetInterpolation()` is exported from `render-gl.ts` and called by
+`main.ts → restart()` after `resetStats()`. It clears both maps,
+resets `lastSeenSeq` to `-1`, and stamps `flipTimeMs = now()` so the
+first post-restart frame doesn't lerp from positions in the dead
+worker's last snapshot.
+
+### Velocity trails
+
+A thin quad-as-line per moving creature draws between
+`lerp(prev, curr, max(0, alpha - 0.4))` and the current interpolated
+body position. The fragment fades alpha toward the trailing tip, so
+the body looks like it's dragging a short comet tail. Implementation:
+a dedicated `TRAIL_VS` / `TRAIL_FS` program with its own VAO and
+instance buffer (per-instance: start xy, end xy, color rgba, thickness
+in px). The instance buffer is pre-allocated to the
+`MAX_POP_FOR_SIM` ceiling so no per-frame growth. Trails are skipped
+when `dx² + dy² < 0.04` (stationary creatures) and the whole pass is
+disabled when `pop > 12000`.
+
 ## Highlight pass
 
 Triggered when `highlightMap.size > 0` and `pop > 0`. Builds a
@@ -139,13 +226,36 @@ fit in the body-pack loop.
 R8 texture, `GRASS_GRID_DIM × GRASS_GRID_DIM` (960 × 960 = ~921 KB per
 upload). Sub-image update each frame when the dim hasn't changed;
 full image upload on first use or after a worker swap. The fragment
-shader fades from white at `density=1.0` toward the dark clear color as
-density → 0; `discard` at density=0; alpha scaled by
+shader tints the field a theme-driven green
+(`var(--grass-tint)` parsed as a vec3 uniform), with alpha tracking the
+sampled density so under-blend leaves the dark clear color showing
+through where grass is thin; `discard` at density=0 stays for the
+empty-cell fast path. The overall alpha is scaled by
 `settings.grassOpacity` so the user can dial grass back without
 changing density semantics.
 
 If `settings.showGrass === false` the upload + draw is skipped entirely
 — at high cell counts this is a real perf win.
+
+### Grass shading (v1.9.2)
+
+- Texture filter is `LINEAR_MIPMAP_LINEAR` (min) / `LINEAR` (mag) so
+  the field reads as a landscape, not a pixel grid. After every
+  per-frame `texSubImage2D` upload the renderer calls
+  `gl.generateMipmap(gl.TEXTURE_2D)` so the mip chain stays current —
+  without that refresh, mip levels 1+ retain the previous frame's
+  density and produce flicker on motion. The added GPU cost is on the
+  order of 0.5–1 ms at 960 × 960; the fallback is plain `LINEAR`
+  filtering if that ever regresses.
+- `u_grass_tint` (vec3) is parsed from the `--grass-tint` CSS var via
+  `getComputedStyle` and cached against the previous string so we
+  re-parse only on theme swap.
+- `u_time` (float) = `performance.now() / 1000`. Drives a procedural
+  sin-wave term `wave = 0.08 * sin(uv.x * 18 + t * 0.6) + 0.06 *
+  sin(uv.y * 22 - t * 0.4)`. The wave multiplies the sampled density
+  before the alpha output (`d2 = clamp(d + wave * d, 0, 1)`) so empty
+  cells stay empty — the discard early-out and the multiplication
+  guarantee the wave term can't paint outside grass.
 
 ## Code anchors
 

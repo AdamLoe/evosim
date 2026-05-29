@@ -173,12 +173,26 @@ back to the default if `id` is unknown) and writes each of the
 
 Invariant: every theme must set **every** CSS var that appears in the
 `:root` block of `styles.css` — otherwise a switch from a heavier theme
-leaves a stale value painted. The current required set is the twelve
-palette tokens (`--bg-app`, `--bg-panel`, `--bg-panel-alt`,
-`--bg-canvas`, `--fg`, `--fg-muted`, `--fg-faint`, `--border`,
-`--border-strong`, `--accent`, `--accent-dirty`, `--danger`). Layout
-constants (`--rail-w`, `--tab-h`, `--topbar-h`, `--profiler-h`) live on
-`:root` only — they are not theme-owned.
+leaves a stale value painted. The current required set is the palette
+tokens (`--bg-app`, `--bg-panel`, `--bg-panel-alt`, `--bg-canvas`,
+`--fg`, `--fg-muted`, `--fg-faint`, `--border`, `--border-strong`,
+`--accent`, `--accent-2`, `--accent-dirty`, `--danger`, `--success`,
+`--warning`, `--info`, `--chart-line`, `--chart-grid`) plus three
+renderer tokens added in v1.9.2 (`--grass-tint`, `--creature-ring`,
+`--creature-halo`). Layout constants (`--rail-w`, `--tab-h`,
+`--topbar-h`, `--profiler-h`) live on `:root` only — they are not
+theme-owned.
+
+The three renderer tokens are consumed GL-side by `render-gl.ts` as
+shader uniforms (parsed via `getComputedStyle` + small `parseRgba` /
+`parseRgbVec3` helpers; the parsed value is cached against the source
+string so a theme switch re-parses and a steady state doesn't).
+`--grass-tint` is a comma-separated `r, g, b` triple in [0, 1] fed as
+a vec3 uniform (chosen so it composes cleanly with the texture's R8
+density without an extra colorspace pass). `--creature-ring` and
+`--creature-halo` are standard `rgba()` colors fed as vec4 uniforms;
+the halo's `rgb` channels are unused (the halo paints body color) but
+its alpha sets the per-theme max halo intensity.
 
 `main.ts → main()` calls `applyTheme(getSettings().theme)` before any UI
 installer runs, so the first paint uses the persisted theme rather than
