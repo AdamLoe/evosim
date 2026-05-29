@@ -32,6 +32,37 @@ output, settings).
 - **One concept per commit.** Reviewing a 12-file commit that does
   three things is much harder than reviewing three 4-file commits.
 
+## Commit completed work without asking
+
+Project override of the default Claude Code "never commit unless asked"
+rule. When a unit of work is finished and gates are green, **commit it
+proactively** — don't pause to ask. Apply this most strictly to:
+
+- **Plan files** under `docs/plans/`. Any change (creation, status
+  flip to `shipped`, mark `okay_to_delete: true`, deletion) gets its
+  own commit alongside the code/docs change it tracks. A plan that
+  shipped but lives uncommitted defeats the point of the status
+  metadata.
+- **Doc updates that accompany shipped code.** The "code + docs in the
+  same PR" rule in `maintaining-docs.md` works only if the docs
+  actually get committed.
+- **Routine sweeps** — rename passes, dead-code removal, test
+  additions. If gates pass and the change is self-contained, commit it.
+
+Still ask for the user's go-ahead when:
+
+- The change is large enough to want pre-commit review (broad refactor,
+  new top-level subsystem, anything that would benefit from human eyes
+  before it lands).
+- The change touches `.cargo/config.toml`, `Cargo.toml` profile flags,
+  `vite.config.ts`, `web/public/_headers`, or `clippy.toml` — these
+  are the build/correctness rails and warrant explicit confirmation.
+- The user said "don't commit yet" in this session.
+
+When committing without explicit instruction, still follow every rule
+above (conventional commit subject, one concept per commit, explicit
+`git add -- <paths>`, no `--no-verify`, no `--amend` on hook failure).
+
 ## Don't add a CLAUDE.md / AGENTS.md / project-specific `.claude/` instructions
 
 This project's docs live in `docs/`. Project-architecture context in
@@ -46,13 +77,27 @@ harness configuration, not project knowledge.
 ## Worktrees
 
 Multi-agent pipelines have left behind a forest of branches and worktree
-directories named `worktree-agent-*`, `worktree-a1-*`, etc. After a
-session ends:
+directories named `worktree-agent-*`, `worktree-a1-*`, etc.
+
+**Delete worktrees once their work is merged.** Project override of the
+default "ask first for destructive ops" rule, scoped to worktrees only:
+once a worktree's branch has landed on `main` (or its work has been
+absorbed and the branch is otherwise dead), remove the worktree and
+delete the branch without asking.
 
 ```bash
-git worktree prune
-git branch -D <stale-branch-names>      # only if the user explicitly asks
+# Remove a worktree whose work has landed.
+git worktree remove <path>
+git branch -D <branch>
+git worktree prune              # cleans up any stale metadata
 ```
+
+The carve-out is narrow: this applies only to worktrees the user
+themselves has not been working in. If a worktree contains uncommitted
+changes you didn't make, leave it alone and surface it instead. The
+user has stated they never use worktrees personally — anything under
+`.claude/worktrees/` or named `worktree-*` is agent-generated and safe
+to clean up once its work has merged.
 
 Worktree directories under `.claude/worktrees/` are gitignored. If one
 sneaks into staging via `git add -A`, the `.gitignore` entry covers

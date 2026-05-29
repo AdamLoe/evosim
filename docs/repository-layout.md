@@ -56,15 +56,18 @@ One-line purpose for every non-trivial path. Skim this before grepping.
 | `web/src/camera.ts` | Pointer-driven pan / zoom controls bound to the canvas. |
 | `web/src/perf.ts` | TS-side mirror of the profiler. Holds the `frame` tree; `span(name)` opens / closes a sample. The panel concatenates this with the Rust trees. |
 | `web/src/settings.ts` | `localStorage`-backed user prefs (autoRun, targetTPS, grass opacity, etc.). |
-| `web/src/widgets/devpanel.ts` | Live-tunable slider panel. Each slider posts `set_slider` via the bridge; `currentSliderState()` snapshots in-memory widget values for the boot payload. |
-| `web/src/widgets/perf-panel.ts` | Profiler checkbox + 1 Hz polled table render. Four stacked sections (`frame`, `tick`, `nn`, `grass_step`). |
-| `web/src/widgets/worker-stats.ts` | NN-worker health panel. Polls the worker for `nn_worker_stats_json` at ~750 ms. |
-| `web/src/rail/index.ts` | Right-rail tab orchestrator. `installRail()` + `pollRail(rail, header, simBridge, ...)` called from main's RAF. |
-| `web/src/rail/inspector.ts` | Click → `inspect_at`. Per-frame refresh → `inspect_id`. Fast-path reads the SAB id column locally before round-tripping. |
-| `web/src/rail/stats.ts` | Population time-series sampler. Reads from `SnapshotHeader.tick / pop`; guard is "≥ 10 ticks since last sample" (not `tick % 10 === 0`). |
+| `web/src/widgets/devpanel.ts` | Settings tab installer. Stage-then-apply for sim sliders + live-apply for run/display toggles. `currentSliderState()` + the construction-only ctor accessors feed the boot payload. |
+| `web/src/widgets/perf-panel.ts` | Profiler bottom panel + 1 Hz polled tables (`frame` / `tick` / `nn` / `grass_step`). `setProfilerVisible()` is the single source of truth for visibility — Settings checkbox and the panel's ✕ both call it. |
+| `web/src/widgets/worker-stats.ts` | NN-worker health panel. Installs into the Monitor tab; polls `nn_worker_stats_json` at ~750 ms. |
+| `web/src/rail/index.ts` | Three-tab right-rail orchestrator (Inspector / Monitor / Settings). `installRail()` + `pollRail(rail, header, simBridge, ...)` from main's RAF. |
+| `web/src/rail/inspector.ts` | Inspector tab. Click → `inspect_at` + tab switch + empty-state toggle. Per-frame refresh → `inspect_id`. SAB id-column fast-path. |
+| `web/src/rail/monitor.ts` | Monitor tab installer. Wires `worker-stats.ts` into `#worker-stats-host`; pop graph paints itself via the rail poller. |
+| `web/src/rail/stats.ts` | Population time-series sampler. Reads from `SnapshotHeader.tick / pop`; guard is "≥ 10 ticks since last sample". Paints to `#chart-pop` inside the Monitor tab. |
 | `web/src/rail/highlight.ts` | Highlight-ring book-keeping. Inspector selection + transient highlights with TTL. |
+| `web/src/toast.ts` | Transient-notice helper. Used by the Settings tab to surface "construction-only changes" after Apply / Reset. |
 | `web/tests/README.md` | How to run the Playwright e2e suite. |
 | `web/tests/e2e/sim-bridge.spec.ts` | Smoke tests for pause / TPS / slider / profile-toggle / restart — every one runs at `targetTPS = 1000` to catch the `Atomics.waitAsync(0)` regression class. |
+| `web/tests/e2e/defaults-drift.spec.ts` | Wave D drift-guard. Asserts Rust `sliders_defaults_json()` agrees with `settings.ts` DEFAULTS for every shared slider. |
 
 ## See also
 

@@ -39,6 +39,12 @@ they are not stylistic preferences.
 - Use `HashMap` or `HashSet` iteration (`iter`, `iter_mut`,
   `into_iter`) in sim-critical files. `clippy.toml` rejects it. Use
   `BTreeMap` / `BTreeSet` / sorted `Vec` if iteration is needed.
+- Bare-name a constant that's only used as the default seed for a
+  live-tunable slider. Suffix it with `_DEFAULT` so the role is
+  obvious at the use site and the drift-guard pairing is grep-stable.
+  Example: `SPLIT_THRESHOLD_DEFAULT`, not `SPLIT_THRESHOLD`. Fixed
+  constants that are *not* slider defaults (e.g. `UPKEEP_BASE`,
+  `WORLD_SIZE`) stay bare.
 - Add per-typed wasm-bindgen setters. `set_slider(name, value)` is the
   sole external mutation entry point — add a `apply_X` helper and a
   `try_set_slider` arm instead.
@@ -75,6 +81,11 @@ they are not stylistic preferences.
   in the worker). Don't round-trip through wasm.
 - Run `pnpm typecheck` + `pnpm build` before committing TS changes. The
   build runs `tsc --noEmit && vite build`.
+- For new persisted settings, add the key to `web/src/settings.ts →
+  Settings` AND `DEFAULTS`. The loader picks only keys present in
+  `DEFAULTS`, so a missing key in the type silently drops the value
+  on load. The unknown-key filter at the same site is the migration
+  path for removed keys — no further cleanup needed.
 
 **Don't:**
 
@@ -96,6 +107,11 @@ they are not stylistic preferences.
 - Use `BigInt` for creature ids. They come out of wasm as `f64`;
   reassemble u32 pairs via `idHi * 4294967296 + idLo` if you need to
   decode the SAB stride directly.
+- Use `text-transform: uppercase` or all-lowercase labels in user-
+  facing UI. Section headers and slider labels are sentence-case
+  ("Energy max", "Show profiler"). The dev panel's earlier
+  `text-transform: uppercase` rule was removed in v1.9; don't
+  re-introduce it.
 
 ## Commits
 

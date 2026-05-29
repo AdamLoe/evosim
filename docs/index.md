@@ -38,6 +38,7 @@ whichever subsystem doc matches the user's request.
 | Where files live | [`repository-layout.md`](repository-layout.md) |
 | World / SoA / tick model / NN / grass mechanic | [`architecture/simulation-core.md`](architecture/simulation-core.md) |
 | Web Worker lifecycle, boot handshake, pacing | [`architecture/worker-runtime.md`](architecture/worker-runtime.md) |
+| Main-thread UI shell: DOM layout, right-rail tabs, Settings stage-then-apply | [`architecture/app-shell.md`](architecture/app-shell.md) |
 | Every main↔worker message kind, SAB layout, snapshot stride | [`architecture/shared-memory-and-protocol.md`](architecture/shared-memory-and-protocol.md) |
 | GL renderer, camera, frustum cull, snapshot read | [`architecture/render-pipeline.md`](architecture/render-pipeline.md) |
 | Profiler shape, the no-rollup rule, four-tree layout | [`architecture/profiler.md`](architecture/profiler.md) |

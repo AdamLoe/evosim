@@ -95,7 +95,7 @@ mantissa is exact up to 2^53 — well above any v1 session's id count.
 
 | `kind` | Payload | Freq |
 |---|---|---|
-| `boot` | `{ seed, initial_grass_seed_count, energy_max, founder_count, initial_sliders }` | once per worker lifetime |
+| `boot` | `{ seed, initial_grass_seed_count, energy_max, founder_count, full_grass_on_init, initial_sliders }` | once per worker lifetime |
 | `set_slider` | `{ name: string, value: number }` (bools as `0|1`) | per slider input event (debounced 16 ms) |
 | `set_target_tps` | `{ tps: number }` | per TPS dropdown change |
 | `set_paused` | `{ paused: boolean }` | per space / play-pause click |
@@ -115,7 +115,7 @@ worker's `Atomics.waitAsync` wakes immediately (the `add` returns
 
 | `kind` | Payload | Notes |
 |---|---|---|
-| `boot_ready` | `{ world_size, grass_dim, threads, rayon_ok, max_pop_for_sim, snapshot_sab, control_sab }` | Posted **after** the worker runs one tick + writes one snapshot to slot 0, guaranteeing main a valid first frame. |
+| `boot_ready` | `{ world_size, grass_dim, threads, rayon_ok, max_pop_for_sim, snapshot_sab, control_sab, sliders_defaults_json }` | Posted **after** the worker runs one tick + writes one snapshot to slot 0, guaranteeing main a valid first frame. `sliders_defaults_json` carries `DevSliders::default()` as a `{name: f32}` map for the Wave D drift-guard e2e. |
 | `inspect_reply` | `{ request_id, json: string | null }` | `json === null` means no creature at that point / id. |
 | `nn_stats_reply` | `{ request_id, json }` | |
 | `profile_reply` | `{ request_id, json }` | Bundles `{profile, tps, jank_count, live_grass_cell_count, total_grass_density}` so main does not need four round-trips per second. |
