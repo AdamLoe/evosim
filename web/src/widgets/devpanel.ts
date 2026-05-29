@@ -372,7 +372,7 @@ function makeLiveSlider(
  */
 function makeThemeRow(): HTMLDivElement {
   const row = document.createElement("div");
-  row.className = "devpanel-row";
+  row.className = "devpanel-row devpanel-row-wide";
 
   const labelEl = document.createElement("label");
   labelEl.textContent = "Theme";
@@ -386,9 +386,6 @@ function makeThemeRow(): HTMLDivElement {
   }
   select.value = getSettings().theme;
 
-  const spacer1 = document.createElement("span");
-  const spacer2 = document.createElement("span");
-
   select.addEventListener("change", () => {
     setSetting("theme", select.value);
     applyTheme(select.value);
@@ -399,7 +396,7 @@ function makeThemeRow(): HTMLDivElement {
     applyTheme(select.value);
   });
 
-  row.append(labelEl, spacer1, spacer2, select);
+  row.append(labelEl, select);
   return row;
 }
 

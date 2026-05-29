@@ -99,9 +99,9 @@ function drawChart(): void {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.scale(dpr, dpr);
 
-  const borderColor = readCssVar("--border", "rgba(255,255,255,0.15)");
+  const gridColor = readCssVar("--chart-grid", "rgba(255,255,255,0.10)");
   const fgFaint = readCssVar("--fg-faint", "rgba(255,255,255,0.5)");
-  const accent = readCssVar("--accent", "#7fc4ff");
+  const lineColor = readCssVar("--chart-line", "#7fc4ff");
 
   if (samples.length < 2) {
     ctx.fillStyle = fgFaint;
@@ -110,7 +110,7 @@ function drawChart(): void {
     return;
   }
 
-  // v1.9.1: Y axis pinned at 0; the current sample range determines ymax.
+  // Y axis pinned at 0; sample range determines ymax.
   const ymax = Math.max(1, ...samples.map((s) => s.population));
   const xmin = samples[0].tick;
   const xmax = samples[samples.length - 1].tick;
@@ -118,13 +118,13 @@ function drawChart(): void {
 
   const padLeft = 4;
   const padRight = 4;
-  const padTop = 16; // leaves room for the max/now labels
-  const padBottom = 4;
+  const padTop = 16;     // room for max / now labels
+  const padBottom = 14;  // room for x-axis tick labels
   const plotW = Math.max(1, Wcss - padLeft - padRight);
   const plotH = Math.max(1, Hcss - padTop - padBottom);
 
   // Subtle gridline at y = ymax / 2.
-  ctx.strokeStyle = borderColor;
+  ctx.strokeStyle = gridColor;
   ctx.lineWidth = 1;
   ctx.beginPath();
   const midY = padTop + plotH * 0.5;
@@ -133,7 +133,7 @@ function drawChart(): void {
   ctx.stroke();
 
   // Data line.
-  ctx.strokeStyle = accent;
+  ctx.strokeStyle = lineColor;
   ctx.lineWidth = 1.5;
   ctx.beginPath();
   for (let i = 0; i < samples.length; i++) {
@@ -144,7 +144,7 @@ function drawChart(): void {
   }
   ctx.stroke();
 
-  // Labels: max top-left, current (now) top-right.
+  // Top labels: max (left), now (right).
   const last = samples[samples.length - 1];
   ctx.fillStyle = fgFaint;
   ctx.font = "10px ui-monospace, monospace";
@@ -153,4 +153,11 @@ function drawChart(): void {
   ctx.fillText(`max: ${ymax.toFixed(0)}`, padLeft, 2);
   ctx.textAlign = "right";
   ctx.fillText(`now: ${last.population.toFixed(0)}`, Wcss - padRight, 2);
+
+  // Bottom x-axis labels: first tick (left), last tick (right).
+  ctx.textBaseline = "bottom";
+  ctx.textAlign = "left";
+  ctx.fillText(`t=${xmin}`, padLeft, Hcss - 2);
+  ctx.textAlign = "right";
+  ctx.fillText(`t=${xmax}`, Wcss - padRight, Hcss - 2);
 }

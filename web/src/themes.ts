@@ -1,4 +1,4 @@
-// v1.9.1: theme palettes for the app shell. A theme is a name + a map of
+// Theme palettes for the app shell. A theme is a name + a map of
 // CSS-variable → value pairs. `applyTheme(id)` writes the tokens onto the
 // `<html>` element via inline `style.setProperty`, overriding the `:root`
 // fallbacks defined in `styles.css`.
@@ -20,10 +20,18 @@ export interface Theme {
 export const DEFAULT_THEME_ID = "charcoal";
 
 /**
- * Required CSS-var tokens — every theme must define each of these. The
- * applyTheme() guard logs in dev if a theme is missing a token. Kept as a
- * runtime list so the Display dropdown can verify completeness without TS
- * reflection. Mirrors the `:root` block in styles.css.
+ * Required CSS-var tokens — every theme must define each of these.
+ *
+ * Categories:
+ *   - bg-*       background shades (app, panel, panel-alt, canvas)
+ *   - fg / fg-*  text foreground shades (full, muted, faint)
+ *   - border*    panel separator lines
+ *   - accent*    primary brand colors (accent, accent-2 secondary, dirty)
+ *   - danger     destructive-action color (Reset hover, errors)
+ *   - success    positive feedback (reserved — not yet wired)
+ *   - warning    in-flight / stabilizing state
+ *   - info       informational hints (reserved — not yet wired)
+ *   - chart-*    population graph rendering
  */
 export const REQUIRED_TOKENS = [
   "--bg-app",
@@ -36,12 +44,18 @@ export const REQUIRED_TOKENS = [
   "--border",
   "--border-strong",
   "--accent",
+  "--accent-2",
   "--accent-dirty",
   "--danger",
+  "--success",
+  "--warning",
+  "--info",
+  "--chart-line",
+  "--chart-grid",
 ] as const;
 
 // Charcoal mirrors the current :root fallback values exactly — so users on
-// the default theme see no visual change after v1.9.1 ships.
+// the default theme see no visual change when they upgrade.
 const CHARCOAL: Theme = {
   id: "charcoal",
   name: "Charcoal",
@@ -56,8 +70,14 @@ const CHARCOAL: Theme = {
     "--border": "rgba(232, 227, 218, 0.08)",
     "--border-strong": "rgba(232, 227, 218, 0.16)",
     "--accent": "#67b3a9",
+    "--accent-2": "#b07ad4",
     "--accent-dirty": "#d49b54",
     "--danger": "#c87063",
+    "--success": "#7fbf73",
+    "--warning": "#e8b85d",
+    "--info": "#7fa8d4",
+    "--chart-line": "#67b3a9",
+    "--chart-grid": "rgba(232, 227, 218, 0.10)",
   },
 };
 
@@ -75,8 +95,14 @@ const SLATE: Theme = {
     "--border": "rgba(217, 227, 241, 0.08)",
     "--border-strong": "rgba(217, 227, 241, 0.18)",
     "--accent": "#5fb7d4",
+    "--accent-2": "#9c8ce0",
     "--accent-dirty": "#cf9a55",
     "--danger": "#d3667a",
+    "--success": "#73c79b",
+    "--warning": "#e8c266",
+    "--info": "#6ec4d4",
+    "--chart-line": "#5fb7d4",
+    "--chart-grid": "rgba(217, 227, 241, 0.10)",
   },
 };
 
@@ -94,8 +120,14 @@ const LIGHT: Theme = {
     "--border": "rgba(29, 28, 26, 0.10)",
     "--border-strong": "rgba(29, 28, 26, 0.22)",
     "--accent": "#3a8479",
+    "--accent-2": "#7a4ea3",
     "--accent-dirty": "#9b6a26",
     "--danger": "#a64537",
+    "--success": "#3f8a3a",
+    "--warning": "#b07a18",
+    "--info": "#3e6f9e",
+    "--chart-line": "#3a8479",
+    "--chart-grid": "rgba(29, 28, 26, 0.12)",
   },
 };
 
@@ -113,14 +145,48 @@ const VIVID: Theme = {
     "--border": "rgba(241, 236, 255, 0.10)",
     "--border-strong": "rgba(241, 236, 255, 0.22)",
     "--accent": "#e85ad1",
+    "--accent-2": "#5ed4e8",
     "--accent-dirty": "#f0a23a",
     "--danger": "#ff5876",
+    "--success": "#5ee896",
+    "--warning": "#ffd34a",
+    "--info": "#7fb6ff",
+    "--chart-line": "#e85ad1",
+    "--chart-grid": "rgba(241, 236, 255, 0.12)",
+  },
+};
+
+// New in this patch: pure-black background, very dim panels, electric blue
+// accent. Designed for OLED screens / "lights off" night use.
+const MIDNIGHT: Theme = {
+  id: "midnight",
+  name: "Midnight",
+  tokens: {
+    "--bg-app": "#000000",
+    "--bg-panel": "#050507",
+    "--bg-panel-alt": "#0c0c10",
+    "--bg-canvas": "#000000",
+    "--fg": "#dfe6f2",
+    "--fg-muted": "rgba(223, 230, 242, 0.58)",
+    "--fg-faint": "rgba(223, 230, 242, 0.36)",
+    "--border": "rgba(223, 230, 242, 0.06)",
+    "--border-strong": "rgba(223, 230, 242, 0.14)",
+    "--accent": "#4f9eff",
+    "--accent-2": "#a06bff",
+    "--accent-dirty": "#d4a64a",
+    "--danger": "#ff6478",
+    "--success": "#5ee0a8",
+    "--warning": "#ffc857",
+    "--info": "#7fb6ff",
+    "--chart-line": "#4f9eff",
+    "--chart-grid": "rgba(223, 230, 242, 0.08)",
   },
 };
 
 export const THEMES: Record<string, Theme> = {
   [CHARCOAL.id]: CHARCOAL,
   [SLATE.id]: SLATE,
+  [MIDNIGHT.id]: MIDNIGHT,
   [LIGHT.id]: LIGHT,
   [VIVID.id]: VIVID,
 };

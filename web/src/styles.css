@@ -19,8 +19,14 @@
   --border: rgba(232, 227, 218, 0.08);
   --border-strong: rgba(232, 227, 218, 0.16);
   --accent: #67b3a9;
+  --accent-2: #b07ad4;
   --accent-dirty: #d49b54;
   --danger: #c87063;
+  --success: #7fbf73;
+  --warning: #e8b85d;
+  --info: #7fa8d4;
+  --chart-line: #67b3a9;
+  --chart-grid: rgba(232, 227, 218, 0.10);
 
   --rail-w: 420px;
   --tab-h: 36px;
@@ -179,7 +185,7 @@ button {
 .profiler-stabilizing {
   font-size: 10px;
   font-family: ui-monospace, monospace;
-  color: var(--accent-dirty);
+  color: var(--warning);
   margin: 3px 0;
 }
 
@@ -262,7 +268,7 @@ button {
   bottom: -1px;
   left: 0; right: 0;
   height: 2px;
-  background: var(--accent);
+  background: var(--accent-2);
 }
 .rail-panel {
   display: none;
@@ -402,6 +408,27 @@ button {
 }
 .devpanel-row.is-dirty {
   border-left-color: var(--accent-dirty);
+}
+/* Wide variant for rows with a single control (e.g. theme picker) that
+   needs more horizontal room than the 60 px readout column. The label
+   keeps its 130 px column; the control fills the rest. */
+.devpanel-row.devpanel-row-wide {
+  grid-template-columns: 130px 1fr;
+}
+.devpanel-row-wide select {
+  background: var(--bg-canvas);
+  color: var(--fg);
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  padding: 5px 8px;
+  font: inherit;
+  font-size: 12px;
+  width: 100%;
+  cursor: pointer;
+}
+.devpanel-row-wide select:focus {
+  outline: none;
+  border-color: var(--accent);
 }
 .devpanel-row label {
   color: var(--fg-muted);
