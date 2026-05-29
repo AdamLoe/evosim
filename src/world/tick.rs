@@ -1,9 +1,9 @@
 //! Per-tick step bodies that mutate `World`. All as `impl World` blocks; private to the `crate::world` parent.
 //!
 //! D3: Genome removed. All body trait reads replaced with constants:
-//!   g_graze_eff → 1.0, g_size → FOUNDER_SIZE,
+//!   g_graze_eff → 1.0, g_size → CREATURE_SIZE,
 //!   g_move_speed → MOVE_SPEED_MAX,
-//!   g_eat_eff → 1.0 (always enabled), armor/bite_reach → 0.0/FOUNDER_BITE_REACH.
+//!   g_eat_eff → 1.0 (always enabled), armor/bite_reach → 0.0.
 //! D9: Scavenge action removed; eat_and_scavenge renamed to eat.
 
 use super::World;
@@ -27,7 +27,7 @@ impl World {
             return;
         }
 
-        let ri = FOUNDER_SIZE * BODY_RADIUS_PER_SIZE; // D3: size = FOUNDER_SIZE always
+        let ri = CREATURE_SIZE * BODY_RADIUS_PER_SIZE; // D3: size = CREATURE_SIZE always
         let bites_per_block = self.sliders.grass_bites_per_block.max(1) as f32;
         let density_chunk = GRASS_MAX / bites_per_block;
         let energy_per_bite = self.sliders.grass_energy_per_bite;
@@ -90,7 +90,7 @@ impl World {
         self.grid.rebuild(&self.creatures.x, &self.creatures.y);
 
         // D3: ri is constant for all creatures.
-        let ri = FOUNDER_SIZE * BODY_RADIUS_PER_SIZE;
+        let ri = CREATURE_SIZE * BODY_RADIUS_PER_SIZE;
         let search = ri + ri; // rsum_max = 2 * ri (all same size)
         let rep_max = self.sliders.repulsion_max;
 
@@ -145,9 +145,9 @@ impl World {
         }
 
         // S31: track whether any position changed to skip the final grid rebuild.
-        // D7: wall-clamp (no wrap). D3: ri is constant FOUNDER_SIZE * BODY_RADIUS_PER_SIZE.
+        // D7: wall-clamp (no wrap). D3: ri is constant CREATURE_SIZE * BODY_RADIUS_PER_SIZE.
         let mut any_moved = false;
-        let ri = FOUNDER_SIZE * BODY_RADIUS_PER_SIZE;
+        let ri = CREATURE_SIZE * BODY_RADIUS_PER_SIZE;
         let lo = ri;
         let hi = WORLD_SIZE - ri;
         for i in 0..n {
@@ -186,11 +186,11 @@ impl World {
         self.scratch_attempted_eat.fill(false);
         self.scratch_got_a_bite.fill(false);
 
-        // D3: all creatures have eat_eff = 1.0, armor = 0.0,
-        //     bite_reach = FOUNDER_BITE_REACH, size = FOUNDER_SIZE (all constant).
+        // D3: all creatures have eat_eff = 1.0, armor = 0.0, bite_reach = 0.0,
+        // size = CREATURE_SIZE (all constant).
         let eat_eff = 1.0_f32;
-        let size = FOUNDER_SIZE;
-        let bite_reach = FOUNDER_BITE_REACH;
+        let size = CREATURE_SIZE;
+        let bite_reach = 0.0_f32;
         let armor = 0.0_f32;
 
         for i in 0..n {
@@ -247,13 +247,9 @@ impl World {
             }
         }
 
-        let eat_mult = self.sliders.eat_cost_multiplier * self.current_curriculum_factor;
         for i in 0..n {
-            if self.scratch_attempted_eat[i] {
-                self.creatures.energy[i] -= COST_EAT_ATTEMPT * eat_mult;
-                if self.scratch_cooldown_set[i] {
-                    self.creatures.digestion_cooldown[i] = self.sliders.digestion_cooldown_ticks;
-                }
+            if self.scratch_attempted_eat[i] && self.scratch_cooldown_set[i] {
+                self.creatures.digestion_cooldown[i] = self.sliders.digestion_cooldown_ticks;
             }
             self.creatures.energy[i] += self.scratch_gain[i];
             self.creatures.energy[i] -= self.scratch_damage[i];
@@ -278,7 +274,7 @@ impl World {
                 up *= age_mult.min(1e6);
             }
 
-            // D3: max_size_reached removed (was always FOUNDER_SIZE anyway).
+            // D3: max_size_reached removed (was always CREATURE_SIZE anyway).
             self.creatures.energy[i] -= up;
             // Live-tunable energy cap (clamp gains at end of tick).
             if self.creatures.energy[i] > energy_cap {
@@ -408,7 +404,7 @@ mod tests {
     fn scratch_grows_with_population() {
         let mut w = World::new("perf2-grow");
         // Give infinite energy so creatures survive; check scratch vec sizes each tick.
-        w.creatures.energy[0] = SPLIT_THRESHOLD + 10_000.0;
+        w.creatures.energy[0] = SPLIT_THRESHOLD_DEFAULT + 10_000.0;
 
         for _ in 0..50 {
             w.tick_once();
@@ -478,7 +474,7 @@ mod tests {
 
         let x = w.creatures.x[0];
         // D7: position must be clamped to [lo, hi] where lo=ri, hi=WORLD_SIZE-ri.
-        let ri = FOUNDER_SIZE * BODY_RADIUS_PER_SIZE;
+        let ri = CREATURE_SIZE * BODY_RADIUS_PER_SIZE;
         assert!(
             x >= ri && x <= WORLD_SIZE - ri,
             "position must be within wall bounds [ri, WORLD_SIZE-ri]; x={x}"
@@ -498,7 +494,7 @@ mod tests {
         let mut w = World::new("p1a-jitter");
         w.creatures.x[0] = 5.0;
         w.creatures.y[0] = WORLD_SIZE * 0.5;
-        w.creatures.energy[0] = SPLIT_THRESHOLD + 100.0;
+        w.creatures.energy[0] = SPLIT_THRESHOLD_DEFAULT + 100.0;
         w.creatures.action_this_tick[0] = Action::Split;
         w.handle_births();
 
@@ -533,7 +529,7 @@ mod tests {
         let b2 = Brain::founder(&mut rng);
         let n_before = w.creatures.len();
         w.creatures
-            .push(1, 598.0, WORLD_SIZE * 0.5, FOUNDER_ENERGY, 0, b2);
+            .push(1, 598.0, WORLD_SIZE * 0.5, START_ENERGY_DEFAULT, 0, b2);
         w.creatures.vx[n_before] = 0.0;
         w.creatures.vy[n_before] = 0.0;
 
@@ -572,7 +568,7 @@ mod tests {
     }
 
     /// P1e test 2: creature overlapping seeded cells sums deltas correctly.
-    /// D3: FOUNDER_SIZE=1.0, BODY_RADIUS_PER_SIZE=1.0 → body radius=1.0.
+    /// D3: CREATURE_SIZE=1.0, BODY_RADIUS_PER_SIZE=1.0 → body radius=1.0.
     /// We position the creature exactly at cell (30,30)'s center so it
     /// overlaps at least one cell.
     #[test]
@@ -583,7 +579,7 @@ mod tests {
         };
 
         let mut w = World::new("graze-patch");
-        // D3: size = FOUNDER_SIZE always. Position creature at cell (30,30) center.
+        // D3: size = CREATURE_SIZE always. Position creature at cell (30,30) center.
         let cell_ix: usize = 30;
         let cell_iy: usize = 30;
         let cx = (cell_ix as f32 + 0.5) * GRASS_CELL_SIZE;
@@ -595,15 +591,15 @@ mod tests {
         // Seed the entire grass grid with GRASS_MAX.
         w.grass.density.fill(GRASS_MAX);
 
-        // Count how many cells overlap using FOUNDER_SIZE body radius.
-        let ri = FOUNDER_SIZE * BODY_RADIUS_PER_SIZE;
+        // Count how many cells overlap using CREATURE_SIZE body radius.
+        let ri = CREATURE_SIZE * BODY_RADIUS_PER_SIZE;
         let mut overlap_count = 0usize;
         w.grass.for_each_cell_overlapping_circle(cx, cy, ri, |_| {
             overlap_count += 1;
         });
         assert!(
             overlap_count > 0,
-            "creature positioned at cell center with FOUNDER_SIZE should overlap at least one cell (ri={ri}, cell_size={})",
+            "creature positioned at cell center with CREATURE_SIZE should overlap at least one cell (ri={ri}, cell_size={})",
             GRASS_CELL_SIZE
         );
 
@@ -764,7 +760,7 @@ mod tests {
         );
 
         // Sanity: creature should have gained at least one bite's worth.
-        let ri = FOUNDER_SIZE * BODY_RADIUS_PER_SIZE;
+        let ri = CREATURE_SIZE * BODY_RADIUS_PER_SIZE;
         let mut overlap_count = 0usize;
         w.grass
             .for_each_cell_overlapping_circle(cx, cy, ri, |_| overlap_count += 1);
@@ -805,7 +801,7 @@ mod tests {
         let prey_brain = Brain::founder(&mut rng);
         let pred_x = w.creatures.x[0];
         let pred_y = w.creatures.y[0];
-        // Place prey within bite reach (FOUNDER_BITE_REACH * FOUNDER_SIZE).
+        // Place prey within bite reach (0.0 since bite_reach = 0).
         w.creatures
             .push(1, pred_x + 1.5, pred_y, 100.0, 0, prey_brain);
 
@@ -820,9 +816,9 @@ mod tests {
         let prey_energy_after = w.creatures.energy[1];
 
         // transfer = 0.5 * 100.0 * (1.0 - 0.0) = 50.0
-        // predator gain = transfer * eat_eff - COST_EAT_ATTEMPT
+        // predator gain = transfer * eat_eff
         // prey loss = transfer
-        let expected_gain = 50.0 - COST_EAT_ATTEMPT;
+        let expected_gain = 50.0_f32;
         let prey_loss = prey_energy_before - prey_energy_after;
         let pred_gain = pred_energy_after - pred_energy_before;
 
@@ -832,7 +828,7 @@ mod tests {
         );
         assert!(
             (pred_gain - expected_gain).abs() < 1e-3,
-            "predator should gain {expected_gain} (50 - COST_EAT_ATTEMPT={COST_EAT_ATTEMPT}); gained {pred_gain}"
+            "predator should gain {expected_gain}; gained {pred_gain}"
         );
     }
 
@@ -870,10 +866,10 @@ mod tests {
             prey_change < 1e-6,
             "prey energy must be unchanged when predator is in cooldown; change = {prey_change}"
         );
-        // Predator should only lose the attempt cost.
+        // Predator energy unchanged (no attempt cost in v1.9+).
         assert!(
-            (pred_change - COST_EAT_ATTEMPT).abs() < 1e-4,
-            "predator should only lose COST_EAT_ATTEMPT ({COST_EAT_ATTEMPT}); lost {pred_change}"
+            pred_change.abs() < 1e-4,
+            "predator energy must be unchanged when bite gated; lost {pred_change}"
         );
     }
 

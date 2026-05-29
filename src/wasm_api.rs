@@ -9,7 +9,7 @@ use wasm_bindgen::prelude::*;
 pub const JANK_BUDGET_MS: f64 = 16.0;
 
 /// Rolling window size (in ticks) for the TPS average.
-const TPS_WINDOW: usize = 60;
+const TPS_WINDOW: usize = 10;
 
 #[wasm_bindgen]
 pub struct WorldHandle {
@@ -30,7 +30,7 @@ pub struct WorldHandle {
 #[wasm_bindgen]
 impl WorldHandle {
     /// Construct from a string seed; empty string → random per build.
-    /// Uses the multi-founder default (`FOUNDER_COUNT_DEFAULT`).
+    /// Uses the multi-founder default (`STARTING_POP_DEFAULT`).
     #[wasm_bindgen(constructor)]
     pub fn new(seed: &str) -> Self {
         let actual_seed = if seed.is_empty() {
@@ -51,28 +51,17 @@ impl WorldHandle {
         }
     }
 
-    /// Construct from a string seed with explicit initial grass seed count
-    /// and energy-max cap. Both override the corresponding DevSliders defaults
-    /// for world creation; founders spawn at `min(FOUNDER_ENERGY, energy_max)`.
-    /// Kept for backwards compat — uses the default founder count.
-    #[wasm_bindgen(js_name = newWithGrassSeed)]
-    pub fn new_with_grass_seed(seed: &str, initial_grass_seed_count: u32, energy_max: f32) -> Self {
-        Self::new_with_founder_count(
-            seed,
-            initial_grass_seed_count,
-            energy_max,
-            FOUNDER_COUNT_DEFAULT,
-        )
-    }
-
-    /// Construct with explicit initial grass seed count, energy-max cap, and
-    /// founder count (clamped to [1, 32] inside `new_with_sliders`).
+    /// Construct with explicit initial grass seed count, energy-max cap,
+    /// founder count, and the `full_grass_on_init` flag. Sole construction
+    /// path used by the sim worker — sets the construction-only DevSliders
+    /// fields and lets `World::new_with_sliders` shape the world from there.
     #[wasm_bindgen(js_name = newWithFounderCount)]
     pub fn new_with_founder_count(
         seed: &str,
         initial_grass_seed_count: u32,
         energy_max: f32,
         founder_count: u32,
+        full_grass_on_init: bool,
     ) -> Self {
         let actual_seed = if seed.is_empty() {
             let mut bytes = [0u8; 8];
@@ -86,6 +75,7 @@ impl WorldHandle {
             grass_initial_seed_count: initial_grass_seed_count,
             energy_max: energy_max.max(1.0),
             founder_count: founder_count.clamp(1, 32),
+            full_grass_on_init,
             ..Default::default()
         };
         let inner = World::new_with_sliders(actual_seed, sliders);
@@ -286,9 +276,6 @@ impl WorldHandle {
     fn apply_move_cost_multiplier(&mut self, value: f32) {
         self.inner.sliders.move_cost_multiplier = value.max(0.0);
     }
-    fn apply_eat_cost_multiplier(&mut self, value: f32) {
-        self.inner.sliders.eat_cost_multiplier = value.max(0.0);
-    }
     fn apply_energy_max(&mut self, value: f32) {
         // Guard against pathological values; the slider UI already clamps to [50, 400].
         self.inner.sliders.energy_max = value.max(1.0);
@@ -314,9 +301,17 @@ impl WorldHandle {
     fn apply_split_gift(&mut self, value: f32) {
         self.inner.sliders.split_gift = value.max(0.0);
     }
+    fn apply_split_jitter(&mut self, value: f32) {
+        self.inner.sliders.split_jitter = value.max(0.0);
+    }
     fn apply_founder_count(&mut self, value: u32) {
         // Stored for next world construction (active world keeps its current population).
         self.inner.sliders.founder_count = value.clamp(1, 32);
+    }
+    fn apply_full_grass_on_init(&mut self, value: bool) {
+        // Construction-only: only affects the next world. Stored on DevSliders
+        // so the boot payload can round-trip it via set_slider.
+        self.inner.sliders.full_grass_on_init = value;
     }
     fn apply_curriculum_min_pop(&mut self, value: u32) {
         self.inner.sliders.curriculum_min_pop = value;
@@ -357,7 +352,6 @@ impl WorldHandle {
             "grass_in_cell_growth_r" => self.apply_grass_in_cell_growth_r(value),
             "upkeep_multiplier" => self.apply_upkeep_multiplier(value),
             "move_cost_multiplier" => self.apply_move_cost_multiplier(value),
-            "eat_cost_multiplier" => self.apply_eat_cost_multiplier(value),
             "energy_max" => self.apply_energy_max(value),
             "grass_energy_per_bite" => self.apply_grass_energy_per_bite(value),
             // grass_bites_per_block is u32; round the float input. Below-1
@@ -368,14 +362,15 @@ impl WorldHandle {
             "max_age" => self.apply_max_age(value.max(0.0) as u32),
             "split_threshold" => self.apply_split_threshold(value),
             "split_gift" => self.apply_split_gift(value),
+            "split_jitter" => self.apply_split_jitter(value),
             "founder_count" => self.apply_founder_count(value.max(0.0) as u32),
             "curriculum_min_pop" => self.apply_curriculum_min_pop(value.max(0.0) as u32),
             "curriculum_max_pop" => self.apply_curriculum_max_pop(value.max(0.0) as u32),
             "curriculum_min_factor" => self.apply_curriculum_min_factor(value),
-            // v1.6 Wave B: bools ride `set_slider` too (encoded as 0/1) so the
-            // protocol surface stays minimal — no dedicated `set_auto_curriculum`
-            // message kind. Per v1.6-plan.md §"Sim-bridge message protocol".
+            // Bools ride `set_slider` as 0/1 so the protocol surface stays
+            // minimal — no dedicated bool message kinds.
             "auto_curriculum" => self.apply_auto_curriculum(value != 0.0),
+            "full_grass_on_init" => self.apply_full_grass_on_init(value != 0.0),
             _ => return false,
         }
         true
@@ -402,8 +397,8 @@ impl WorldHandle {
         // S20: grid-backed scan. Query radius = tolerance + max possible body radius
         // (SIZE_MAX * BODY_RADIUS_PER_SIZE = 10.0) to ensure all candidates are
         // visited; we then filter by the exact per-creature distance check.
-        // D3: body radius is constant — FOUNDER_SIZE * BODY_RADIUS_PER_SIZE.
-        let query_r = tolerance_world + FOUNDER_SIZE * BODY_RADIUS_PER_SIZE;
+        // D3: body radius is constant — CREATURE_SIZE * BODY_RADIUS_PER_SIZE.
+        let query_r = tolerance_world + CREATURE_SIZE * BODY_RADIUS_PER_SIZE;
         let mut found: Option<f64> = None;
         self.inner
             .grid
@@ -411,7 +406,7 @@ impl WorldHandle {
                 if found.is_some() {
                     return;
                 }
-                let body_r = FOUNDER_SIZE * BODY_RADIUS_PER_SIZE;
+                let body_r = CREATURE_SIZE * BODY_RADIUS_PER_SIZE;
                 let r = body_r + tolerance_world;
                 // Walled: raw Euclidean distance (no torus seam).
                 let ddx = world_x - self.inner.creatures.x[i];
@@ -477,7 +472,7 @@ impl WorldHandle {
             "max_age": self.inner.sliders.max_age,
             "energy": self.inner.creatures.energy[i],
             "energy_frac": (self.inner.creatures.energy[i] / 100.0).clamp(0.0, 1.0),
-            "size": FOUNDER_SIZE,
+            "size": CREATURE_SIZE,
             "current_action": action_name,
             "move_speed": MOVE_SPEED_MAX,
             "cooldown_remaining": self.inner.creatures.digestion_cooldown[i],
@@ -532,6 +527,41 @@ impl WorldHandle {
     #[wasm_bindgen]
     pub fn profile_report_json(&self) -> String {
         self.inner.profile.report_json()
+    }
+
+    /// JSON map of every live-tunable + construction-only slider name → its
+    /// canonical default value (the value `DevSliders::default()` returns).
+    /// Bools encode as 0/1 so the map is uniformly `{name: f32}` — TS side
+    /// compares against its own defaults to catch Rust ↔ TS drift.
+    #[wasm_bindgen]
+    pub fn sliders_defaults_json(&self) -> String {
+        let d = crate::world::DevSliders::default();
+        let json = serde_json::json!({
+            "mutation_rate_multiplier": d.mutation_rate_multiplier,
+            "nn_mutation_sigma": d.nn_mutation_sigma,
+            "eat_bite_fraction": d.eat_bite_fraction,
+            "grass_propagation_rate_k": d.grass_propagation_rate_k,
+            "grass_in_cell_growth_r": d.grass_in_cell_growth_r,
+            "upkeep_multiplier": d.upkeep_multiplier,
+            "move_cost_multiplier": d.move_cost_multiplier,
+            "energy_max": d.energy_max,
+            "grass_energy_per_bite": d.grass_energy_per_bite,
+            "grass_bites_per_block": d.grass_bites_per_block as f32,
+            "digestion_cooldown": d.digestion_cooldown_ticks as f32,
+            "repulsion_max": d.repulsion_max,
+            "max_age": d.max_age as f32,
+            "split_threshold": d.split_threshold,
+            "split_gift": d.split_gift,
+            "split_jitter": d.split_jitter,
+            "founder_count": d.founder_count as f32,
+            "grass_initial_seed_count": d.grass_initial_seed_count as f32,
+            "curriculum_min_pop": d.curriculum_min_pop as f32,
+            "curriculum_max_pop": d.curriculum_max_pop as f32,
+            "curriculum_min_factor": d.curriculum_min_factor,
+            "auto_curriculum": if d.auto_curriculum { 1.0_f32 } else { 0.0 },
+            "full_grass_on_init": if d.full_grass_on_init { 1.0_f32 } else { 0.0 },
+        });
+        serde_json::to_string(&json).unwrap_or_else(|_| "{}".into())
     }
 
     /// Per-worker + per-sub-phase health snapshot for the parallel NN pass.
@@ -589,7 +619,7 @@ impl WorldHandle {
             "pop={pop} exceeds MAX_POP_FOR_SIM={MAX_POP_FOR_SIM} — sim cull broke",
         );
         let n = pop;
-        let body_r = FOUNDER_SIZE * BODY_RADIUS_PER_SIZE;
+        let body_r = CREATURE_SIZE * BODY_RADIUS_PER_SIZE;
         let mut buf = [0u8; 32];
         for i in 0..n {
             let x = self.inner.creatures.x[i];
@@ -712,7 +742,7 @@ mod tests {
     /// drives so the SAB layout is testable off-wasm.
     #[test]
     fn write_snapshot_to_layout_matches_stride() {
-        let mut handle = WorldHandle::new_with_founder_count("a1-snapshot", 0, 100.0, 3);
+        let mut handle = WorldHandle::new_with_founder_count("a1-snapshot", 0, 100.0, 3, false);
         let mut creatures = Vec::new();
         let mut grass = Vec::new();
         let mut stats = Vec::new();
@@ -739,7 +769,7 @@ mod tests {
             let body = f32::from_le_bytes(creatures[base + 8..base + 12].try_into().unwrap());
             assert_eq!(x, handle.inner.creatures.x[i]);
             assert_eq!(y, handle.inner.creatures.y[i]);
-            assert_eq!(body, FOUNDER_SIZE * BODY_RADIUS_PER_SIZE);
+            assert_eq!(body, CREATURE_SIZE * BODY_RADIUS_PER_SIZE);
             // Id round-trips via u32-halves.
             let id_lo = u32::from_le_bytes(creatures[base + 24..base + 28].try_into().unwrap());
             let id_hi = u32::from_le_bytes(creatures[base + 28..base + 32].try_into().unwrap());
@@ -775,7 +805,7 @@ mod tests {
     /// halton position. Uses a 1-founder world so we control placement exactly.
     #[test]
     fn creature_at_returns_stable_id() {
-        let handle = WorldHandle::new_with_founder_count("e21-creature-at", 0, 100.0, 1);
+        let handle = WorldHandle::new_with_founder_count("e21-creature-at", 0, 100.0, 1, false);
         let founder_id = handle.inner.creatures.id[0] as f64;
         let cx = handle.inner.creatures.x[0];
         let cy = handle.inner.creatures.y[0];

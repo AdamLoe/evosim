@@ -766,7 +766,7 @@ mod tests {
     #[test]
     fn decode_action_valid_fallthrough_split_invalid() {
         let logits = [0.0f32, 0.0, 10.0];
-        let act = decode_action(&logits, 10.0, 0, SPLIT_THRESHOLD);
+        let act = decode_action(&logits, 10.0, 0, SPLIT_THRESHOLD_DEFAULT);
         assert_ne!(act, Action::Split, "Split must be invalid when energy < 50");
         assert!(matches!(act, Action::Graze | Action::Eat), "got {:?}", act);
     }
@@ -774,7 +774,7 @@ mod tests {
     #[test]
     fn decode_action_first_index_tiebreak() {
         let logits = [5.0f32; 3];
-        let act = decode_action(&logits, 100.0, 0, SPLIT_THRESHOLD);
+        let act = decode_action(&logits, 100.0, 0, SPLIT_THRESHOLD_DEFAULT);
         assert_eq!(act, Action::ALL[0], "lower index must win on ties");
         assert_eq!(act, Action::Graze, "Graze is index 0 after D9");
     }
@@ -782,7 +782,7 @@ mod tests {
     #[test]
     fn decode_action_eat_invalid_in_cooldown() {
         let logits = [0.0f32, 10.0, 0.0];
-        let act = decode_action(&logits, 100.0, 5, SPLIT_THRESHOLD);
+        let act = decode_action(&logits, 100.0, 5, SPLIT_THRESHOLD_DEFAULT);
         assert_ne!(act, Action::Eat, "Eat must be invalid when cooldown > 0");
         assert_eq!(act, Action::Graze, "should fall through to Graze");
     }
@@ -790,7 +790,7 @@ mod tests {
     #[test]
     fn decode_action_split_invalid_when_low_energy() {
         let logits = [0.0f32, 0.0, 10.0];
-        let act = decode_action(&logits, 0.0, 0, SPLIT_THRESHOLD);
+        let act = decode_action(&logits, 0.0, 0, SPLIT_THRESHOLD_DEFAULT);
         assert_ne!(
             act,
             Action::Split,
@@ -801,7 +801,7 @@ mod tests {
     #[test]
     fn decode_action_graze_always_valid_as_fallback() {
         let logits = [-5.0f32, 2.0, 10.0];
-        let act = decode_action(&logits, 0.0, 1, SPLIT_THRESHOLD);
+        let act = decode_action(&logits, 0.0, 1, SPLIT_THRESHOLD_DEFAULT);
         assert!(
             matches!(act, Action::Graze),
             "Expected Graze fallback, got {:?}",
@@ -812,11 +812,11 @@ mod tests {
     #[test]
     fn nan_logits_return_graze_via_decode() {
         let nan_logits = [f32::NAN, 0.0, 0.0];
-        let act = decode_action(&nan_logits, 100.0, 0, SPLIT_THRESHOLD);
+        let act = decode_action(&nan_logits, 100.0, 0, SPLIT_THRESHOLD_DEFAULT);
         assert_eq!(act, Action::Graze, "NaN logit must produce Graze");
 
         let inf_logits = [f32::INFINITY, 0.0, 0.0];
-        let act2 = decode_action(&inf_logits, 100.0, 0, SPLIT_THRESHOLD);
+        let act2 = decode_action(&inf_logits, 100.0, 0, SPLIT_THRESHOLD_DEFAULT);
         assert_eq!(act2, Action::Graze, "+Inf logit must produce Graze");
     }
 

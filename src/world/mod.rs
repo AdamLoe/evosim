@@ -37,8 +37,6 @@ pub struct DevSliders {
     pub upkeep_multiplier: f32,
     /// Live-tunable multiplier on per-tick *movement* cost. 0 = free move.
     pub move_cost_multiplier: f32,
-    /// Live-tunable multiplier on the per-tick *eat-attempt* cost. 0 = free eat-tries.
-    pub eat_cost_multiplier: f32,
     /// Live-tunable maximum energy per creature. Energy is clamped at the end of every
     /// tick, and new creatures spawn capped at this value.
     pub energy_max: f32,
@@ -53,8 +51,16 @@ pub struct DevSliders {
     pub split_threshold: f32,
     /// Energy gifted to each newborn at split (clamped at parent's residual).
     pub split_gift: f32,
-    /// Number of founders seeded at world init (clamped to [1, 32]).
+    /// Position jitter applied at split — children spawn at parent ± random[-v, v]
+    /// per axis (world-units). Live-tunable.
+    pub split_jitter: f32,
+    /// Number of creatures seeded at world init (clamped to [1, 32]).
     pub founder_count: u32,
+    /// Construction-only: when true, world init fills the grass grid to
+    /// `GRASS_MAX` instead of seeding `grass_initial_seed_count` cells.
+    /// Stored on `DevSliders` so it round-trips through the boot payload via
+    /// `set_slider("full_grass_on_init", 0|1)` and shapes the *next* world.
+    pub full_grass_on_init: bool,
     /// Curriculum: population at/below which the cost factor equals `curriculum_min_factor`.
     pub curriculum_min_pop: u32,
     /// Curriculum: population at/above which the cost factor equals 1.0.
@@ -85,14 +91,15 @@ impl Default for DevSliders {
             eat_bite_fraction: EAT_BITE_FRACTION_DEFAULT,
             upkeep_multiplier: 1.0,
             move_cost_multiplier: 1.0,
-            eat_cost_multiplier: 1.0,
             energy_max: 100.0,
             grass_energy_per_bite: GRASS_ENERGY_PER_BITE_DEFAULT,
             grass_bites_per_block: GRASS_BITES_PER_BLOCK_DEFAULT,
-            max_age: FOUNDER_MAX_AGE,
-            split_threshold: SPLIT_THRESHOLD,
-            split_gift: SPLIT_GIFT_MAX,
-            founder_count: FOUNDER_COUNT_DEFAULT,
+            max_age: MAX_AGE_DEFAULT,
+            split_threshold: SPLIT_THRESHOLD_DEFAULT,
+            split_gift: SPLIT_GIFT_MAX_DEFAULT,
+            split_jitter: SPLIT_JITTER_DEFAULT,
+            founder_count: STARTING_POP_DEFAULT,
+            full_grass_on_init: FULL_GRASS_ON_INIT_DEFAULT,
             curriculum_min_pop: CURRICULUM_MIN_POP_DEFAULT,
             curriculum_max_pop: CURRICULUM_MAX_POP_DEFAULT,
             curriculum_min_factor: CURRICULUM_MIN_FACTOR_DEFAULT,
@@ -195,11 +202,17 @@ impl World {
     pub fn new_with_sliders(seed: impl Into<String>, sliders: DevSliders) -> Self {
         let seed_string = seed.into();
         let mut rng = SimRng::from_string(&seed_string);
-        let grass = GrassGrid::new(&mut rng, sliders.grass_initial_seed_count);
+        let mut grass = GrassGrid::new(&mut rng, sliders.grass_initial_seed_count);
+        if sliders.full_grass_on_init {
+            for d in grass.density.iter_mut() {
+                *d = GRASS_MAX;
+            }
+            grass.rebuild_row_bitset();
+        }
         let mut creatures = CreatureSoA::with_capacity(2048);
         let founder_count = sliders.founder_count.clamp(1, 32);
-        let founder_energy = FOUNDER_ENERGY.min(sliders.energy_max);
-        let body_r = FOUNDER_SIZE * BODY_RADIUS_PER_SIZE;
+        let founder_energy = START_ENERGY_DEFAULT.min(sliders.energy_max);
+        let body_r = CREATURE_SIZE * BODY_RADIUS_PER_SIZE;
         let lo = body_r;
         let hi = WORLD_SIZE - body_r;
         for k in 0..founder_count {
@@ -516,10 +529,9 @@ impl World {
                 self.sliders.nn_mutation_sigma,
                 self.sliders.mutation_rate_multiplier,
             );
-            let jitter_x = self.rng.symm() * FOUNDER_SPLIT_JITTER;
-            let jitter_y = self.rng.symm() * FOUNDER_SPLIT_JITTER;
-            // D3: size is constant FOUNDER_SIZE for all creatures.
-            let radius = FOUNDER_SIZE * BODY_RADIUS_PER_SIZE;
+            let jitter_x = self.rng.symm() * self.sliders.split_jitter;
+            let jitter_y = self.rng.symm() * self.sliders.split_jitter;
+            let radius = CREATURE_SIZE * BODY_RADIUS_PER_SIZE;
             let clamp_lo = radius;
             let clamp_hi = WORLD_SIZE - radius;
             let cx = (self.creatures.x[i] + jitter_x).clamp(clamp_lo, clamp_hi);
@@ -655,7 +667,7 @@ mod tests {
     #[test]
     fn world_initializes_with_default_multi_founder() {
         let w = World::new_with_sliders("multi-seed", DevSliders::default());
-        assert_eq!(w.population(), FOUNDER_COUNT_DEFAULT);
+        assert_eq!(w.population(), STARTING_POP_DEFAULT);
     }
 
     #[test]
@@ -751,7 +763,7 @@ mod tests {
             let b = Brain::founder(&mut seeder);
             let x = seeder.uniform(10.0, WORLD_SIZE - 10.0);
             let y = seeder.uniform(10.0, WORLD_SIZE - 10.0);
-            w.creatures.push(k + 1, x, y, FOUNDER_ENERGY, 0, b);
+            w.creatures.push(k + 1, x, y, START_ENERGY_DEFAULT, 0, b);
         }
 
         let energy_start: f32 = w.creatures.energy.iter().sum();

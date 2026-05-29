@@ -2,7 +2,7 @@
 //!
 //! D3: Genome entirely deleted. All body traits are constants from constants.rs.
 //! Only NN weights vary across the population.
-//! Body radius = FOUNDER_SIZE * BODY_RADIUS_PER_SIZE (constant for every creature).
+//! Body radius = CREATURE_SIZE * BODY_RADIUS_PER_SIZE (constant for every creature).
 //! Move speed cap = MOVE_SPEED_MAX.
 //! v1.5 S5b: vision raycast removed; `eye_trig`, `last2_action`, `prev_energy`
 //! columns deleted (no consumer after the 32-input semantic rewrite).
