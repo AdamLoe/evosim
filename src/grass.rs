@@ -47,6 +47,15 @@ pub struct GrassGrid {
     /// `row_body_us` by excluding the per-chunk `chunks_mut` dispatch overhead;
     /// also summed across rayon workers via `fetch_add`.
     pub row_body_self_us: AtomicU64,
+    /// Per-tick count of row-body closure invocations. Always equals
+    /// `GRASS_GRID_DIM` (one per row) regardless of how rows are partitioned
+    /// across rayon workers. Paired with `row_body_us` / `row_body_self_us`
+    /// so the profiler can report honest per-row `ms/call`. (v1.7.2)
+    pub row_body_calls: AtomicU64,
+    /// Per-tick count of dispatch invocations — exactly one per
+    /// `compute_propagation` call. Paired with `par_chunks_us` + `chunks_mut_us`
+    /// so the `grass_step.dispatch` row has a meaningful `ms/call`. (v1.7.2)
+    pub dispatch_calls: AtomicU64,
 }
 
 impl Clone for GrassGrid {
@@ -59,6 +68,8 @@ impl Clone for GrassGrid {
             chunks_mut_us: AtomicU64::new(0),
             row_body_us: AtomicU64::new(0),
             row_body_self_us: AtomicU64::new(0),
+            row_body_calls: AtomicU64::new(0),
+            dispatch_calls: AtomicU64::new(0),
         }
     }
 }
@@ -82,6 +93,8 @@ impl GrassGrid {
             chunks_mut_us: AtomicU64::new(0),
             row_body_us: AtomicU64::new(0),
             row_body_self_us: AtomicU64::new(0),
+            row_body_calls: AtomicU64::new(0),
+            dispatch_calls: AtomicU64::new(0),
         };
         g.rebuild_row_bitset();
         g
@@ -157,11 +170,15 @@ impl GrassGrid {
         self.chunks_mut_us.store(0, Ordering::Relaxed);
         self.row_body_us.store(0, Ordering::Relaxed);
         self.row_body_self_us.store(0, Ordering::Relaxed);
+        self.row_body_calls.store(0, Ordering::Relaxed);
+        // v1.7.2: one dispatch per `compute_propagation` call.
+        self.dispatch_calls.store(1, Ordering::Relaxed);
 
         let dim = GRASS_GRID_DIM;
         let inv_max = 1.0 / GRASS_MAX;
         let d = &self.density;
         let row_body_self_us = &self.row_body_self_us;
+        let row_body_calls = &self.row_body_calls;
 
         // Single-row body: writes into `s_row` (one dim-long slice of scratch)
         // by reading the (iy-1, iy, iy+1) rows from `d`. Ghost-zero N/S/E/W.
@@ -205,6 +222,8 @@ impl GrassGrid {
                 clock_now_us_threadsafe().saturating_sub(body_self_start),
                 Ordering::Relaxed,
             );
+            // v1.7.2: one row_body invocation per call.
+            row_body_calls.fetch_add(1, Ordering::Relaxed);
         };
 
         #[cfg(feature = "threads")]
@@ -378,6 +397,8 @@ mod tests {
             chunks_mut_us: AtomicU64::new(0),
             row_body_us: AtomicU64::new(0),
             row_body_self_us: AtomicU64::new(0),
+            row_body_calls: AtomicU64::new(0),
+            dispatch_calls: AtomicU64::new(0),
         }
     }
 
@@ -443,6 +464,8 @@ mod tests {
             chunks_mut_us: AtomicU64::new(0),
             row_body_us: AtomicU64::new(0),
             row_body_self_us: AtomicU64::new(0),
+            row_body_calls: AtomicU64::new(0),
+            dispatch_calls: AtomicU64::new(0),
         };
         for _ in 0..100 {
             g.step(0.005, 0.05);
