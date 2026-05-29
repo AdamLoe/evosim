@@ -9,8 +9,10 @@
 //!
 //! 2. **Per-tick sub-phase aggregates** — reset at the top of each NN pass.
 //!    After the parallel block returns to the main thread, these are read out
-//!    and pushed into the profiler tree under `tick.nn.*` so the existing
-//!    perf panel picks them up.
+//!    and pushed into the profiler tree as siblings under the top-level `nn`
+//!    root (`nn.build_input`, `nn.proximity`, `nn.forward`, etc. — v1.7), so
+//!    the perf panel renders the sum-across-workers breakdown next to the
+//!    `tick` tree's main-worker wall-clock leaf.
 //!
 //! All counters are `AtomicU64` with `Relaxed` ordering — chunks contend
 //! through `fetch_add` but the ordering only needs to be commutative
@@ -44,7 +46,15 @@ pub struct NnStats {
     pub worker_busy_us: [AtomicU64; MAX_TRACKED_WORKERS],
 
     // ── Per-tick sub-phase aggregates (reset each tick) ───────────────────
+    /// Per-tick sum-across-workers wall-clock bracket of the whole
+    /// `build_nn_input` call (parent of `build_input.other` + the proximity
+    /// sub-children). v1.7: parents are real measurements, not children
+    /// rollups — this is the timer the `nn.build_input` row reads.
+    pub tick_build_input_total_us: AtomicU64,
     pub tick_build_input_other_us: AtomicU64,
+    /// Per-tick sum-across-workers bracket of the proximity-scan portion of
+    /// `build_nn_input` (creature_sectors + grass_sectors). v1.7 parent.
+    pub tick_proximity_total_us: AtomicU64,
     pub tick_proximity_creatures_us: AtomicU64,
     pub tick_proximity_grass_us: AtomicU64,
     pub tick_forward_us: AtomicU64,
@@ -72,7 +82,9 @@ impl NnStats {
             worker_chunks: zero_array(),
             worker_creatures: zero_array(),
             worker_busy_us: zero_array(),
+            tick_build_input_total_us: AtomicU64::new(0),
             tick_build_input_other_us: AtomicU64::new(0),
+            tick_proximity_total_us: AtomicU64::new(0),
             tick_proximity_creatures_us: AtomicU64::new(0),
             tick_proximity_grass_us: AtomicU64::new(0),
             tick_forward_us: AtomicU64::new(0),
@@ -86,7 +98,9 @@ impl NnStats {
 
     /// Reset only the per-tick aggregates. Lifetime counters are preserved.
     pub fn reset_tick(&self) {
+        self.tick_build_input_total_us.store(0, Ordering::Relaxed);
         self.tick_build_input_other_us.store(0, Ordering::Relaxed);
+        self.tick_proximity_total_us.store(0, Ordering::Relaxed);
         self.tick_proximity_creatures_us.store(0, Ordering::Relaxed);
         self.tick_proximity_grass_us.store(0, Ordering::Relaxed);
         self.tick_forward_us.store(0, Ordering::Relaxed);
@@ -134,10 +148,18 @@ impl NnStats {
 
     /// Add per-creature sub-phase timings to this tick's aggregates. Called in
     /// addition to `record_chunk_lite` when the profiler is enabled.
+    ///
+    /// `build_input_total_us` and `proximity_total_us` are the parent brackets
+    /// (the full `build_nn_input` wall-clock and the creature+grass scan portion
+    /// respectively) — v1.7 requires every parent row to be a real measurement,
+    /// not a sum of children. Workers bracket the parent operation directly and
+    /// fetch_add into these counters alongside the leaf timings.
     #[allow(clippy::too_many_arguments)]
     pub fn record_chunk_subphases(
         &self,
+        build_input_total_us: u64,
         build_input_other_us: u64,
+        proximity_total_us: u64,
         proximity_creatures_us: u64,
         proximity_grass_us: u64,
         forward_us: u64,
@@ -145,8 +167,12 @@ impl NnStats {
         forward_l2_us: u64,
         forward_l3_us: u64,
     ) {
+        self.tick_build_input_total_us
+            .fetch_add(build_input_total_us, Ordering::Relaxed);
         self.tick_build_input_other_us
             .fetch_add(build_input_other_us, Ordering::Relaxed);
+        self.tick_proximity_total_us
+            .fetch_add(proximity_total_us, Ordering::Relaxed);
         self.tick_proximity_creatures_us
             .fetch_add(proximity_creatures_us, Ordering::Relaxed);
         self.tick_proximity_grass_us
@@ -247,12 +273,13 @@ mod tests {
     #[test]
     fn record_chunk_accumulates_per_worker() {
         let s = NnStats::new(0);
+        // (build_total, build_other, prox_total, prox_creatures, prox_grass, fwd, l1, l2, l3)
         s.record_chunk_lite(0, 100, 250, 50);
-        s.record_chunk_subphases(30, 40, 50, 20, 5, 10, 5);
+        s.record_chunk_subphases(120, 30, 90, 40, 50, 20, 5, 10, 5);
         s.record_chunk_lite(0, 300, 500, 80);
-        s.record_chunk_subphases(60, 70, 50, 40, 15, 20, 5);
+        s.record_chunk_subphases(180, 60, 120, 70, 50, 40, 15, 20, 5);
         s.record_chunk_lite(2, 110, 180, 30);
-        s.record_chunk_subphases(10, 20, 30, 15, 5, 5, 5);
+        s.record_chunk_subphases(60, 10, 50, 20, 30, 15, 5, 5, 5);
 
         assert_eq!(s.worker_chunks[0].load(Ordering::Relaxed), 2);
         assert_eq!(s.worker_creatures[0].load(Ordering::Relaxed), 130);
@@ -285,7 +312,7 @@ mod tests {
     fn reset_tick_clears_per_tick_only() {
         let s = NnStats::new(0);
         s.record_chunk_lite(0, 100, 200, 50);
-        s.record_chunk_subphases(10, 20, 30, 40, 5, 10, 25);
+        s.record_chunk_subphases(60, 10, 50, 20, 30, 40, 5, 10, 25);
         s.reset_tick();
         assert_eq!(s.worker_chunks[0].load(Ordering::Relaxed), 1); // preserved
         assert_eq!(s.tick_forward_us.load(Ordering::Relaxed), 0); // cleared

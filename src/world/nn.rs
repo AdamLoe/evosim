@@ -112,7 +112,9 @@ impl World {
                             );
                             if timed {
                                 stats_ref.record_chunk_subphases(
+                                    chunk_pick.build_input_total_us,
                                     chunk_pick.build.other_us,
+                                    chunk_pick.build.proximity_total_us,
                                     chunk_pick.build.creature_sectors_us,
                                     chunk_pick.build.grass_sectors_us,
                                     chunk_pick.forward_us,
@@ -179,7 +181,9 @@ impl World {
                     .record_chunk_lite(0, chunk_start_us, chunk_end_us, (hi - lo) as u64);
                 if timed {
                     self.nn_stats.record_chunk_subphases(
+                        chunk_pick.build_input_total_us,
                         chunk_pick.build.other_us,
+                        chunk_pick.build.proximity_total_us,
                         chunk_pick.build.creature_sectors_us,
                         chunk_pick.build.grass_sectors_us,
                         chunk_pick.forward_us,
@@ -191,42 +195,77 @@ impl World {
             }
         } // end #[cfg(not(feature = "threads"))]
 
-        // Drain per-tick aggregates into the profiler tree as siblings under
-        // `tick.nn`. Skipped when the profiler is off (record_under_tick no-ops).
+        // Drain per-tick aggregates into the top-level `nn` profile tree as
+        // sum-across-workers values. v1.7: this lives in the sibling `nn` root
+        // (NOT under `tick`), and every parent row (`nn.build_input`,
+        // `nn.proximity`, `nn.forward`) has its OWN per-worker bracket so the
+        // panel's parent column is a real measurement, not a children rollup.
+        // The wall-clock time the sim worker spent waiting for these workers
+        // is recorded by the `tick.nn` RAII span in `World::step` — that one
+        // stays a leaf in the `tick` tree.
         if timed {
             use std::sync::atomic::Ordering;
-            self.profile.record_under_tick(
-                "nn.build_input.other",
+            // Root: sum-busy of every worker chunk this tick. `record_chunk_lite`
+            // accumulates this unconditionally, which is what the `nn` top-level
+            // row reads — a real per-worker bracket, not a rollup of children.
+            self.profile.record_under_root(
+                "nn",
+                "",
+                self.nn_stats.tick_chunk_wall_us.load(Ordering::Relaxed) as u32,
+            );
+            self.profile.record_under_root(
+                "nn",
+                "build_input",
+                self.nn_stats
+                    .tick_build_input_total_us
+                    .load(Ordering::Relaxed) as u32,
+            );
+            self.profile.record_under_root(
+                "nn",
+                "build_input.other",
                 self.nn_stats
                     .tick_build_input_other_us
                     .load(Ordering::Relaxed) as u32,
             );
-            self.profile.record_under_tick(
-                "nn.proximity.creatures",
+            self.profile.record_under_root(
+                "nn",
+                "proximity",
+                self.nn_stats
+                    .tick_proximity_total_us
+                    .load(Ordering::Relaxed) as u32,
+            );
+            self.profile.record_under_root(
+                "nn",
+                "proximity.creatures",
                 self.nn_stats
                     .tick_proximity_creatures_us
                     .load(Ordering::Relaxed) as u32,
             );
-            self.profile.record_under_tick(
-                "nn.proximity.grass",
+            self.profile.record_under_root(
+                "nn",
+                "proximity.grass",
                 self.nn_stats
                     .tick_proximity_grass_us
                     .load(Ordering::Relaxed) as u32,
             );
-            self.profile.record_under_tick(
-                "nn.forward",
+            self.profile.record_under_root(
+                "nn",
+                "forward",
                 self.nn_stats.tick_forward_us.load(Ordering::Relaxed) as u32,
             );
-            self.profile.record_under_tick(
-                "nn.forward.l1",
+            self.profile.record_under_root(
+                "nn",
+                "forward.l1",
                 self.nn_stats.tick_forward_l1_us.load(Ordering::Relaxed) as u32,
             );
-            self.profile.record_under_tick(
-                "nn.forward.l2",
+            self.profile.record_under_root(
+                "nn",
+                "forward.l2",
                 self.nn_stats.tick_forward_l2_us.load(Ordering::Relaxed) as u32,
             );
-            self.profile.record_under_tick(
-                "nn.forward.l3",
+            self.profile.record_under_root(
+                "nn",
+                "forward.l3",
                 self.nn_stats.tick_forward_l3_us.load(Ordering::Relaxed) as u32,
             );
         }
@@ -282,12 +321,18 @@ pub(crate) fn chunk_ranges(n: usize, chunks: usize) -> Vec<(usize, usize)> {
 /// All durations are in microseconds. The `other` bucket covers everything that
 /// isn't a creature- or grass-sector scan: self/memory slots, wall arithmetic,
 /// bilinear sampling, bias slot, padding. The two proximity scans are the
-/// expensive parts and get their own buckets.
+/// expensive parts and get their own buckets. v1.7 adds a `proximity_total_us`
+/// parent bracket so the `nn.proximity` row in the panel reports its own
+/// measured time, not a rollup of its children.
 #[derive(Default)]
 pub(crate) struct BuildTimings {
     pub other_us: u64,
     pub creature_sectors_us: u64,
     pub grass_sectors_us: u64,
+    /// Wall-clock from the start of the creature-sector scan to the end of
+    /// the grass-sector scan (i.e. the parent bracket of the two proximity
+    /// children). v1.7: parent rows must be real measurements.
+    pub proximity_total_us: u64,
 }
 
 /// Build the 32-input NN input vector for creature `i` (v1.5 S5b).
@@ -415,6 +460,11 @@ pub(crate) fn build_nn_input(
         t.creature_sectors_us = t.creature_sectors_us.saturating_add(t2.saturating_sub(t1));
         t.grass_sectors_us = t.grass_sectors_us.saturating_add(t3.saturating_sub(t2));
         t.other_us = t.other_us.saturating_add(t4.saturating_sub(t3));
+        // Parent bracket: full proximity portion (creature + grass scans). The
+        // children sum here equals the parent because the bracket is exactly
+        // (t3 - t1); v1.7 still records both — the panel reads the parent row
+        // from this counter rather than rolling up its children's totals.
+        t.proximity_total_us = t.proximity_total_us.saturating_add(t3.saturating_sub(t1));
     }
 
     buf
@@ -476,9 +526,16 @@ pub(crate) fn decode_action(
 /// `forward_us` covers the NN forward pass. Per-creature accumulators
 /// are summed into a chunk-level total before being merged into the
 /// world's `NnStats`.
+///
+/// v1.7 adds `build_input_total_us` — the bracket around the whole
+/// `build_nn_input` call so the `nn.build_input` parent row in the perf panel
+/// is a real measurement, not a children rollup.
 #[derive(Default)]
 pub(crate) struct PickTimings {
     pub build: BuildTimings,
+    /// Wall-clock bracket around the entire `build_nn_input` call (parent of
+    /// `nn.build_input.other` plus the proximity-scan subtree).
+    pub build_input_total_us: u64,
     pub forward_us: u64,
     pub forward_l1_us: u64,
     pub forward_l2_us: u64,
@@ -507,6 +564,7 @@ pub(crate) fn pick_action_d(
     use crate::profiler::clock_now_us_threadsafe;
     let timed = timings.is_some();
     let build_arg = timings.as_deref_mut().map(|t| &mut t.build);
+    let t_build_start = if timed { clock_now_us_threadsafe() } else { 0 };
     *input_buf = build_nn_input(
         i,
         creatures,
@@ -520,6 +578,12 @@ pub(crate) fn pick_action_d(
         max_age,
         build_arg,
     );
+    let t_build_end = if timed { clock_now_us_threadsafe() } else { 0 };
+    if let Some(t) = timings.as_deref_mut() {
+        t.build_input_total_us = t
+            .build_input_total_us
+            .saturating_add(t_build_end.saturating_sub(t_build_start));
+    }
     let t_fwd_start = if timed { clock_now_us_threadsafe() } else { 0 };
     creatures.brains[i].forward(
         input_buf,

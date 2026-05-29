@@ -327,6 +327,24 @@ body {
   padding: 8px 0;
 }
 
+/* v1.7: four stacked tree tables in the perf panel. Each section has a header
+   strip with the tree's top-level name (frame / tick / nn / grass_step). */
+.profiler-tree-section {
+  margin-top: 6px;
+}
+.profiler-tree-section:first-child {
+  margin-top: 0;
+}
+.profiler-tree-header {
+  font: 10px ui-monospace, monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  opacity: 0.6;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  padding-bottom: 2px;
+  margin-bottom: 2px;
+}
+
 /* v1.5: Right-edge settings overlay containing the dev panel. Occupies the
    full-height column on the right; the top-bar is narrowed via `right:
    var(--settings-w)` so it sits to the left of the overlay instead of
