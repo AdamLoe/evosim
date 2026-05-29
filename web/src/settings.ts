@@ -52,7 +52,7 @@ export const DEFAULTS: Settings = {
   v: SCHEMA_VERSION,
   targetTPS: 60,
   autoRun: false,
-  showProfiler: false,
+  showProfiler: true,
   showPopGraph: true,
   showGrass: true,
   grassOpacity: 1.0,

@@ -147,6 +147,15 @@ impl Profiler {
         }
     }
 
+    /// Clear all accumulated samples and reset the epoch, preserving node
+    /// topology and the enabled flag. Used by the panel's reset button to
+    /// drop accumulated profile data without disabling recording.
+    pub fn clear(&self) {
+        let mut inner = self.inner.borrow_mut();
+        inner.clear_samples();
+        inner.epoch_ms = clock_now_ms();
+    }
+
     /// Push a span by name. Returns a SpanGuard whose Drop records the duration.
     /// Caller MUST check `enabled()` first — this method does no guard.
     /// The guard uses a raw pointer internally so the caller's `&mut self`

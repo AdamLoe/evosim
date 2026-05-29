@@ -188,9 +188,10 @@ test("profile toggle — all 4 trees populate within 4 s", async ({ page }) => {
   await page.selectOption("#target-tps-input", "1000");
   await page.waitForTimeout(500);
 
-  // The profiler panel is gated by the "Show profiler" toggle in the Settings
-  // tab's Display group (live-apply since v1.9). Clicking it enables Rust
-  // profiling AND makes #perf-box visible — single source of truth.
+  // v1.9.1: the Rust profiler is always-on (the worker enables it at boot),
+  // and the panel defaults to visible (showProfiler default flipped to true).
+  // The "Show profiler" toggle in Settings is visibility-only. Make sure it
+  // ends up checked-on so #perf-box is visible for the subsequent assertions.
   await page.evaluate(() => {
     const rows = Array.from(document.querySelectorAll(".devpanel-row"));
     const row = rows.find(

@@ -10,7 +10,12 @@
 // off stops `profile_enable` so the sim doesn't pay the timer cost.
 
 import type { SimBridge } from "../sim-bridge";
-import { setProfilerEnabled, isProfilerEnabled, reportJson as tsPerfReport } from "../perf";
+import {
+  isProfilerEnabled,
+  reportJson as tsPerfReport,
+  resetFrameTree,
+  setProfilerEnabled,
+} from "../perf";
 import { getSettings, setSetting } from "../settings";
 
 const POLL_INTERVAL_MS = 1000;
@@ -43,20 +48,22 @@ interface BundledProfile {
 const TREE_ORDER = ["frame", "tick", "nn", "grass_step"];
 
 let lastBundle: BundledProfile | null = null;
-let panelBridge: SimBridge | null = null;
 let panelVisible = false;
 
 /** Set whether the profiler panel is visible. Single source of truth for both
- *  the Settings checkbox and the panel's own ✕ button. Also drives Rust-side
- *  profile recording: invisible → no timing overhead. */
+ *  the Settings checkbox and the panel's own ✕ button. v1.9.1: visibility-only
+ *  — the Rust profiler is always-on (set by the worker at boot), the TS-side
+ *  frame tree stays enabled too so samples accumulate even when the panel is
+ *  hidden. Toggling visibility just shows/hides the DOM and skips the 1 Hz
+ *  poll's tree render. */
 export function setProfilerVisible(visible: boolean): void {
   panelVisible = visible;
   const box = document.getElementById("perf-box");
   if (box) box.style.display = visible ? "" : "none";
-  setProfilerEnabled(visible);
-  if (panelBridge) {
-    panelBridge.postMessage({ kind: "profile_enable", on: visible });
-  }
+  // Keep the TS-side frame tree recording at all times so the panel has data
+  // to show the moment it becomes visible again. Mirrors the always-on Rust
+  // side (see sim-worker.ts handleBoot).
+  if (!isProfilerEnabled()) setProfilerEnabled(true);
   if (!visible) {
     clearTrees();
   } else if (lastBundle) {
@@ -65,8 +72,6 @@ export function setProfilerVisible(visible: boolean): void {
 }
 
 export function installProfilerPanel(simBridge: SimBridge): void {
-  panelBridge = simBridge;
-
   // Initial visibility from persisted setting.
   setProfilerVisible(getSettings().showProfiler);
 
@@ -102,12 +107,19 @@ export function installProfilerPanel(simBridge: SimBridge): void {
 
   const jankReset = document.getElementById("jank-reset") as HTMLButtonElement | null;
   if (jankReset) {
+    // v1.9.1: the reset button is no longer "jank-only" — it also wipes the
+    // accumulated profile data on both sides so a single click gives the user
+    // a fully clean slate. Title updated to reflect the broader scope.
+    jankReset.title = "Reset profiler + jank";
     jankReset.addEventListener("click", () => {
       simBridge.postMessage({ kind: "reset_jank" });
+      simBridge.postMessage({ kind: "reset_profile" });
+      resetFrameTree();
       if (lastBundle) {
         lastBundle.jank_count = 0;
         renderTpsJank(lastBundle);
       }
+      clearTrees();
     });
   }
 }

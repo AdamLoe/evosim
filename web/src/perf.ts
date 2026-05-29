@@ -62,6 +62,17 @@ export function isProfilerEnabled(): boolean {
   return enabled;
 }
 
+/**
+ * Clear the TS-side frame tree's accumulated samples and the open span stack
+ * but preserve node topology and the enabled flag. v1.9.1: paired with the
+ * Rust-side `profile_clear` by the perf-panel's reset button.
+ */
+export function resetFrameTree(): void {
+  clearSamples();
+  stack.length = 0;
+  epochMs = performance.now();
+}
+
 /** Open a named span. Returns a handle with a close() method.
  *
  * v1.7: when called at the top of the stack with a name that exactly matches

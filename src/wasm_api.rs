@@ -513,9 +513,20 @@ impl WorldHandle {
 
     /// Enable or disable the in-app profiler. Default: false (D9).
     /// The toggle state is NOT persisted — every page load returns to OFF.
+    /// v1.9.1: the worker sends `profile_enable(true)` once at boot and
+    /// leaves it on; the Settings panel toggle is visibility-only.
     #[wasm_bindgen]
     pub fn profile_enable(&self, on: bool) {
         self.inner.profile.set_enabled(on);
+    }
+
+    /// Clear all accumulated profiler samples (per-node ring buffers and the
+    /// current span stack) and reset the epoch. Preserves the node tree and
+    /// the enabled flag. v1.9.1: invoked by the panel's "Reset profiler +
+    /// jank" button alongside `reset_jank` and the TS-side frame-tree clear.
+    #[wasm_bindgen]
+    pub fn profile_clear(&self) {
+        self.inner.profile.clear();
     }
 
     /// JSON report of the current rolling 60-second profile tree.

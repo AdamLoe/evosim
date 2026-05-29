@@ -150,6 +150,10 @@ async function handleBoot(boot: SimMessageBoot): Promise<void> {
     boot.founder_count,
     boot.full_grass_on_init,
   );
+  // v1.9.1: profiler is always-on for the worker's lifetime. The Settings
+  // panel toggle controls visibility only; the Rust ring buffers keep
+  // accumulating either way so the panel has fresh data when it appears.
+  world.profile_enable(true);
 
   // Apply every persisted slider via the name-dispatcher. Per v1.6-plan.md
   // §"Step C": per-typed `set_*` wasm exports are gone; `set_slider(name,
@@ -226,6 +230,9 @@ function handle(msg: SimMessage): void {
       return;
     case "reset_jank":
       world.reset_jank();
+      return;
+    case "reset_profile":
+      world.profile_clear();
       return;
     case "inspect_at": {
       const id = world.creature_at(msg.wx, msg.wy, msg.tolerance_world);

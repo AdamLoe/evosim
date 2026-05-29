@@ -209,6 +209,15 @@ export interface SimMessageResetJank {
   kind: "reset_jank";
 }
 
+/**
+ * Clear all accumulated profiler samples (Rust side). v1.9.1: paired with
+ * `reset_jank` by the perf-panel's reset button, alongside a TS-side
+ * `resetFrameTree()` call.
+ */
+export interface SimMessageResetProfile {
+  kind: "reset_profile";
+}
+
 /** Discriminated union of every main → worker message shape. */
 export type SimMessage =
   | SimMessageBoot
@@ -220,7 +229,8 @@ export type SimMessage =
   | SimMessageRequestNnStats
   | SimMessageRequestProfileReport
   | SimMessageProfileEnable
-  | SimMessageResetJank;
+  | SimMessageResetJank
+  | SimMessageResetProfile;
 
 // ---------------------------------------------------------------------------
 // worker → main replies
