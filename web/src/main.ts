@@ -43,12 +43,21 @@ let viewW = 0;
 let viewH = 0;
 function resize(): void {
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  viewW = canvas.clientWidth || window.innerWidth;
-  viewH = canvas.clientHeight || window.innerHeight;
+  const w = canvas.clientWidth;
+  const h = canvas.clientHeight;
+  // If layout hasn't flushed yet (clientWidth=0), don't paint garbage. The
+  // ResizeObserver will fire again once the box has real dimensions.
+  if (w === 0 || h === 0) return;
+  viewW = w;
+  viewH = h;
   canvas.width = Math.floor(viewW * dpr);
   canvas.height = Math.floor(viewH * dpr);
 }
-window.addEventListener("resize", resize);
+const canvasWrap = document.getElementById("canvas-wrap");
+if (canvasWrap) {
+  const observer = new ResizeObserver(resize);
+  observer.observe(canvasWrap);
+}
 resize();
 
 // Pacing controls — TPS dropdown + play/pause toggle. Both forward to the
