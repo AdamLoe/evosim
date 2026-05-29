@@ -134,37 +134,32 @@ test("target TPS dropdown — observed throughput tracks the selected value", as
 test("slider change — devpanel slider input fires without rejection at high TPS", async ({
   page,
 }) => {
-  // Open the settings overlay so the devpanel sliders are reachable.
-  await page.click("#devpanel-toggle");
-  await expect(page.locator("#settings-overlay")).toBeVisible();
-
+  // Settings tab is always visible in the right rail since v1.9.
   // Same as above: stress-regime so a failing yield manifests.
   await page.selectOption("#target-tps-input", "1000");
   await page.waitForTimeout(500);
 
-  // The "basic upkeep" row is rust-named "upkeep_multiplier". Fire a real
-  // input event on the numeric input so the dev-panel's onChange runs and
-  // the debounced postMessage lands.
-  const rejected = await page.evaluate(async () => {
+  // Edit the "Basic upkeep" row (Rust name: upkeep_multiplier). Sliders now
+  // stage; Apply fires the debounced set_slider postMessage.
+  const status1 = await page.evaluate(async () => {
     const rows = Array.from(document.querySelectorAll(".devpanel-row"));
     const row = rows.find(
-      (r) => r.querySelector("label")?.textContent === "basic upkeep",
+      (r) => r.querySelector("label")?.textContent === "Basic upkeep",
     );
     if (!row) return "row-not-found";
     const num = row.querySelector(
       'input[type="number"]',
     ) as HTMLInputElement | null;
     if (!num) return "input-not-found";
-    // Track console warns/errors that arrive during the change.
-    const baselineWarnsKey = "__pwBaselineWarns";
-    (window as unknown as Record<string, number>)[baselineWarnsKey] = 0;
     num.value = "1.75";
     num.dispatchEvent(new Event("input", { bubbles: true }));
-    // Wait long enough for the debounce (16 ms) + futex wake + worker drain.
-    await new Promise((r) => setTimeout(r, 400));
     return "ok";
   });
-  expect(rejected).toBe("ok");
+  expect(status1).toBe("ok");
+
+  // Apply commits the staged change.
+  await page.click("#settings-apply");
+  await page.waitForTimeout(400);
 
   // If the message arrived, no `[sim] set_slider("upkeep_multiplier", …)
   // rejected` warning should appear in the page console (the bridge wraps
@@ -193,13 +188,13 @@ test("profile toggle — all 4 trees populate within 4 s", async ({ page }) => {
   await page.selectOption("#target-tps-input", "1000");
   await page.waitForTimeout(500);
 
-  // The profiler panel is gated by the "show profiler" devpanel toggle.
-  await page.click("#devpanel-toggle");
-  await expect(page.locator("#settings-overlay")).toBeVisible();
+  // The profiler panel is gated by the "Show profiler" toggle in the Settings
+  // tab's Display group (live-apply since v1.9). Clicking it enables Rust
+  // profiling AND makes #perf-box visible — single source of truth.
   await page.evaluate(() => {
     const rows = Array.from(document.querySelectorAll(".devpanel-row"));
     const row = rows.find(
-      (r) => r.querySelector("label")?.textContent === "show profiler",
+      (r) => r.querySelector("label")?.textContent === "Show profiler",
     );
     const cb = row?.querySelector('input[type="checkbox"]') as
       | HTMLInputElement
@@ -207,8 +202,6 @@ test("profile toggle — all 4 trees populate within 4 s", async ({ page }) => {
     if (cb && !cb.checked) cb.click();
   });
   await expect(page.locator("#perf-box")).toBeVisible();
-
-  await page.click("#profiler-enable");
 
   // Profiler polls at 1 Hz and needs a few samples to populate. 4 s gives
   // enough cushion even on a slow CI box.
