@@ -61,13 +61,37 @@ RAF callback (wrapped in `span("frame")`):
   5. pollRail(rail, header, simBridge, creatures, pop)
   6. renderWorld(gl, cam, viewW, viewH, creatures, grass, pop,
                  worldSize, grassDim, highlights, now)
-  7. update status bar (throttled 200 ms)
+  7. update status bar (every RAF — TPS from header, FPS from a
+     1 s rolling main-side frame counter)
 ```
 
 `renderWorld` opens `frame.render_world` and inside it
 `frame.render_world.grass` and `frame.render_world.creatures` children.
 `frame` is a real RAII span (not a rollup), so any unaccounted-for RAF
 overhead shows up as `frame.total - sum(frame.*.total)`.
+
+## Top-left status bar
+
+The `#status` div is rewritten every RAF with the freshest snapshot
+header. The format is:
+
+```text
+seed: <cachedSeed>  ·  tick <N>  ·  pop <N>  ·  <TPS> TPS  ·  <FPS> FPS[  (world ended)]
+```
+
+- **TPS** is rounded from `header.tps` (the worker's rolling-avg TPS
+  written into the SAB header each snapshot). Shows `—` until the
+  first positive non-NaN value lands.
+- **FPS** is a "frames in the last 1 s" counter maintained entirely on
+  main: `framesThisSecond++` each RAF; when
+  `now - fpsWindowStart >= 1000`, sample → `lastFps`, reset counter
+  and window. Shows `—` until the first 1 s window closes; naturally
+  trends toward 0 while paused or world-ended without a misleading
+  transient.
+
+The `#perf-tps` readout inside the bottom-left perf widget is kept
+deliberately as belt-and-suspenders — the always-visible top bar is
+the discoverable surface, the perf widget is for heavy debugging.
 
 ## Per-creature instance pack
 
@@ -150,6 +174,9 @@ If `settings.showGrass === false` the upload + draw is skipped entirely
   `frame.snapshot.read` span will inflate and the
   `grass.upload.read` ghost will reappear; both are noted in the
   decisions/render doc).
+- The status-bar format string or its update cadence changes (currently
+  every RAF, with TPS from `header.tps` and a 1 s rolling FPS counter
+  on main).
 
 ## Why is it shaped this way
 
