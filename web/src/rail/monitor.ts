@@ -5,9 +5,12 @@
 
 import type { SimBridge } from "../sim-bridge";
 import { installWorkerStatsPanel } from "../widgets/worker-stats";
+import { installPopChart } from "./stats";
 
 export function installMonitorTab(simBridge: SimBridge): void {
   const host = document.getElementById("worker-stats-host");
   if (!host) return;
   installWorkerStatsPanel(simBridge, host);
+  // v1.9.1: hook up the DPR-aware ResizeObserver for the population chart.
+  installPopChart();
 }

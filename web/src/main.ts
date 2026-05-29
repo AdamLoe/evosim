@@ -21,6 +21,7 @@ import { resetStats } from "./rail/stats";
 import { installMonitorTab } from "./rail/monitor";
 import { span } from "./perf";
 import { getSettings, setSetting } from "./settings";
+import { applyTheme } from "./themes";
 import {
   SimBridge,
   MAX_POP_FOR_SIM,
@@ -80,6 +81,11 @@ let snapshotView: DataView | null = null;
 let cachedSeed = "";
 
 async function main(): Promise<void> {
+  // v1.9.1: apply the persisted theme before any UI installer runs so the
+  // first paint uses the user's chosen palette instead of flashing the
+  // :root fallback (charcoal).
+  applyTheme(getSettings().theme);
+
   const sabAvail = typeof SharedArrayBuffer !== "undefined";
   const isolated =
     (globalThis as unknown as { crossOriginIsolated?: boolean }).crossOriginIsolated ?? false;

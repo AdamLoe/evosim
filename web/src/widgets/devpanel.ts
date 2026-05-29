@@ -24,6 +24,7 @@ import { getTargetTPS, setTpsChangeListener } from "../main";
 import { getSettings, setSetting, resetSettings, DEFAULTS, type Settings } from "../settings";
 import { setProfilerVisible } from "./perf-panel";
 import { showToast } from "../toast";
+import { THEMES, applyTheme } from "../themes";
 
 // Construction-only sim slider names. Edits land in DevSliders via
 // set_slider so they round-trip through restart, but the active world keeps
@@ -363,6 +364,45 @@ function makeLiveSlider(
   return row;
 }
 
+/**
+ * v1.9.1: Display-group theme dropdown. Reads options from `THEMES`, persists
+ * to `settings.theme`, and live-applies via `applyTheme` so the palette
+ * switches the moment the user changes the selection. No Rust side — themes
+ * are pure CSS-var swaps.
+ */
+function makeThemeRow(): HTMLDivElement {
+  const row = document.createElement("div");
+  row.className = "devpanel-row";
+
+  const labelEl = document.createElement("label");
+  labelEl.textContent = "Theme";
+
+  const select = document.createElement("select");
+  for (const t of Object.values(THEMES)) {
+    const opt = document.createElement("option");
+    opt.value = t.id;
+    opt.textContent = t.name;
+    select.appendChild(opt);
+  }
+  select.value = getSettings().theme;
+
+  const spacer1 = document.createElement("span");
+  const spacer2 = document.createElement("span");
+
+  select.addEventListener("change", () => {
+    setSetting("theme", select.value);
+    applyTheme(select.value);
+  });
+
+  liveSyncers.push(() => {
+    select.value = getSettings().theme;
+    applyTheme(select.value);
+  });
+
+  row.append(labelEl, spacer1, spacer2, select);
+  return row;
+}
+
 function makeLiveToggle(
   spec: ToggleSpec,
   onApply: (v: boolean) => void,
@@ -449,6 +489,7 @@ export function installDevPanel(simBridge: SimBridge): void {
     min: 0, max: 1, step: 0.05,
     formatValue: (v) => v.toFixed(2),
   }));
+  displaySec.appendChild(makeThemeRow());
   box.appendChild(displaySec);
 
   // ── Energy ──

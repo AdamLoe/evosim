@@ -22,6 +22,9 @@ export interface Settings {
   // v1.9.1: right-rail open/closed; toggled by the ⚙ button + `~` hotkey.
   // Forced back open by a creature click (inspector flow).
   railOpen: boolean;
+  // v1.9.1: active theme id; valid ids live in web/src/themes.ts. Unknown
+  // values fall back to the default theme on apply.
+  theme: string;
   // Energy economy
   upkeepMultiplier: number;
   moveCostMultiplier: number;
@@ -60,6 +63,7 @@ export const DEFAULTS: Settings = {
   showGrass: true,
   grassOpacity: 1.0,
   railOpen: true,
+  theme: "charcoal",
   upkeepMultiplier: 1.0,
   moveCostMultiplier: 1.0,
   energyMax: 100,
