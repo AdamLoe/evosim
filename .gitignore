@@ -4,6 +4,9 @@
 /web/node_modules
 /web/dist
 /web/.vite
+/web/test-results
+/web/playwright-report
+/web/.playwright
 **/*.rs.bk
 Cargo.lock.bak
 .DS_Store
