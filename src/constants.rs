@@ -105,16 +105,25 @@ pub const FOUNDER_SPLIT_JITTER: f32 = 50.0;
 /// Default number of founders seeded at world init (multi-founder v1.5).
 pub const FOUNDER_COUNT_DEFAULT: u32 = 8;
 
-/// v1.6 SAB snapshot creature cap. The two-slot snapshot SAB allocates
-/// `MAX_POP_FOR_SAB × 32 B` per slot for the creature SoA; population that
-/// would overflow is log-warned + truncated (the frame still renders).
+/// v1.6 sim-side population cap. The cap is a *simulation* invariant — when
+/// births would push pop above this number, `World::handle_births` randomly
+/// culls existing creatures back to the cap so the sim never holds more state
+/// than the snapshot SAB can carry. The two-slot snapshot SAB derives its
+/// per-slot creature region size from this constant (`MAX_POP_FOR_SIM × 32 B`
+/// each), so the SAB sizing follows the cap, not the other way around.
+///
+/// Naming history: this was `MAX_POP_FOR_SAB` through Wave C — at that point
+/// the SAB carried the cap and `write_snapshot_to` silently truncated on
+/// overflow (sim ran past the cap, renderer didn't see the extras, hard to
+/// debug). Renamed during the post-v1.6 polish pass when the cull moved into
+/// the sim itself; the constant now represents the real population invariant.
 ///
 /// The compile-assert below pins this above `FOUNDER_COUNT_DEFAULT × 32`,
 /// guaranteeing the cap is never tighter than the founder seeding ceiling.
 /// The single source of truth lives here; `web/src/sim-bridge.ts` mirrors
 /// the same value and the worker handshake-asserts they agree.
-pub const MAX_POP_FOR_SAB: usize = 8000;
-const _: () = assert!(MAX_POP_FOR_SAB >= FOUNDER_COUNT_DEFAULT as usize * 32);
+pub const MAX_POP_FOR_SIM: usize = 32_000;
+const _: () = assert!(MAX_POP_FOR_SIM >= FOUNDER_COUNT_DEFAULT as usize * 32);
 
 // ---- Deterministic chunking (v6 §J) ----
 /// Chunk-count clamps. Per-tick count = `clamp(pop/32, MIN, min(MAX, workers))`.

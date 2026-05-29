@@ -9,8 +9,8 @@
 //   - docs/plans/v1.6-plan.md §"Step A2" (this file's spec).
 //
 // Cross-language sync:
-//   `MAX_POP_FOR_SAB` must equal the Rust constant `src/constants.rs`.
-//   Wave B's `boot_ready` reply carries `max_pop_for_sab: u32` sourced from
+//   `MAX_POP_FOR_SIM` must equal the Rust constant `src/constants.rs`.
+//   Wave B's `boot_ready` reply carries `max_pop_for_sim: u32` sourced from
 //   Rust; main asserts equality with this TS constant at handshake time and
 //   throws on mismatch. Drift is fatal — rebuild wasm + restart pnpm dev.
 
@@ -18,13 +18,16 @@
 export const SIM_BRIDGE_VERSION = 1;
 
 /**
- * Maximum population the SAB creature SoA slot can hold.
+ * Maximum simulation population.
  *
- * Matches the Rust constant `MAX_POP_FOR_SAB` in `src/constants.rs`.
- * Pop exceeding this cap is log-warned and truncated by the snapshot writer
- * (deterministic — dead creatures simply aren't rendered that frame).
+ * Matches the Rust constant `MAX_POP_FOR_SIM` in `src/constants.rs`. The cap
+ * is enforced sim-side — `World::handle_births` randomly culls back to this
+ * number after every birth phase, so the snapshot SAB never has to truncate.
+ * The two-slot snapshot SAB sizes its creature region from this constant
+ * (`MAX_POP_FOR_SIM × 32 B` per slot); change the value here AND in the Rust
+ * constant, then rebuild wasm — the boot handshake throws on mismatch.
  */
-export const MAX_POP_FOR_SAB = 8000;
+export const MAX_POP_FOR_SIM = 32_000;
 
 /**
  * Number of f32 lanes per creature in the snapshot SoA.
@@ -54,7 +57,7 @@ export const CREATURE_STRIDE = 8;
 export const SNAPSHOT_HEADER_BYTES = 32;
 
 /** Bytes per creature SoA region in one snapshot slot (= 256_000). */
-export const CREATURE_SOA_BYTES = MAX_POP_FOR_SAB * CREATURE_STRIDE * 4;
+export const CREATURE_SOA_BYTES = MAX_POP_FOR_SIM * CREATURE_STRIDE * 4;
 
 /** Bytes per grass density region in one snapshot slot. Matches `GRASS_CELL_COUNT`. */
 export const GRASS_BYTES = 921_600;
@@ -225,8 +228,8 @@ export type SimMessage =
  * written one snapshot. Stage 1 leaves `snapshot_sab` and `control_sab` as
  * `null` — they are populated from Stage 2 onward (Wave C).
  *
- * `max_pop_for_sab` is sourced from the Rust constant; main asserts it equals
- * the TS `MAX_POP_FOR_SAB` constant and throws on mismatch.
+ * `max_pop_for_sim` is sourced from the Rust constant; main asserts it equals
+ * the TS `MAX_POP_FOR_SIM` constant and throws on mismatch.
  */
 export interface SimReplyBootReady {
   kind: "boot_ready";
@@ -234,7 +237,7 @@ export interface SimReplyBootReady {
   grass_dim: number;
   threads: number;
   rayon_ok: boolean;
-  max_pop_for_sab: number;
+  max_pop_for_sim: number;
   snapshot_sab: SharedArrayBuffer | null;
   control_sab: SharedArrayBuffer | null;
 }

@@ -25,10 +25,6 @@ pub struct WorldHandle {
     tick_durations_ms: std::collections::VecDeque<f64>,
     /// Count of ticks whose wall-clock duration exceeded JANK_BUDGET_MS.
     jank_count: u32,
-    /// One-shot guard for the `write_snapshot_to` truncation warning. Latches
-    /// `true` the first time population exceeds `MAX_POP_FOR_SAB` so we don't
-    /// flood the console at every snapshot write.
-    snapshot_truncation_warned: bool,
 }
 
 #[wasm_bindgen]
@@ -52,7 +48,6 @@ impl WorldHandle {
             grass_buf_u8: Vec::new(),
             tick_durations_ms: std::collections::VecDeque::new(),
             jank_count: 0,
-            snapshot_truncation_warned: false,
         }
     }
 
@@ -99,7 +94,6 @@ impl WorldHandle {
             grass_buf_u8: Vec::new(),
             tick_durations_ms: std::collections::VecDeque::new(),
             jank_count: 0,
-            snapshot_truncation_warned: false,
         }
     }
 
@@ -217,10 +211,11 @@ impl WorldHandle {
     ///                 no encoding decision (plan-review I4).
     ///   - `[16..20)` `jank_count: u32`
     ///
-    /// `creatures_dst` (≥ `MAX_POP_FOR_SAB × 32` bytes):
+    /// `creatures_dst` (≥ `MAX_POP_FOR_SIM × 32` bytes):
     ///   Creature SoA at 32-byte stride, identical layout to `creatures_buffer`:
     ///   `[x, y, body_r, r, g, b, f32::from_bits(id_lo), f32::from_bits(id_hi)]`.
-    ///   Up to `MAX_POP_FOR_SAB` creatures; the first overflow is `log::warn`ed.
+    ///   All `pop` creatures written — `World::handle_births` keeps
+    ///   `pop <= MAX_POP_FOR_SIM` as a sim invariant.
     ///
     /// `grass_dst` (≥ `GRASS_CELL_COUNT` bytes):
     ///   Quantized density `(d * 255.0).clamp(0, 255) as u8` per cell.
@@ -580,25 +575,20 @@ impl WorldHandle {
 
 impl WorldHandle {
     /// Per-creature 32-byte serializer. Invokes `sink(i, &buf)` for each
-    /// creature in `[0, min(pop, MAX_POP_FOR_SAB))`, then returns the number
-    /// of creatures actually written. Logs once per `WorldHandle` lifetime
-    /// the first time population exceeds the SAB cap.
+    /// creature in `[0, pop)`, then returns the number of creatures written.
+    /// `World::handle_births` keeps `pop <= MAX_POP_FOR_SIM` as a sim
+    /// invariant, so no truncation or warning lives here — a `debug_assert!`
+    /// surfaces the bug immediately in dev if that invariant ever breaks.
     fn write_creatures_each<F>(&mut self, mut sink: F) -> usize
     where
         F: FnMut(usize, &[u8]),
     {
         let pop = self.inner.creatures.len();
-        let n = pop.min(MAX_POP_FOR_SAB);
-        if pop > MAX_POP_FOR_SAB && !self.snapshot_truncation_warned {
-            self.snapshot_truncation_warned = true;
-            let msg = format!(
-                "write_snapshot_to: pop={pop} exceeds MAX_POP_FOR_SAB={MAX_POP_FOR_SAB}; truncating (first {n} creatures rendered, remainder dropped this frame and going forward)"
-            );
-            #[cfg(target_arch = "wasm32")]
-            web_sys::console::warn_1(&JsValue::from_str(&msg));
-            #[cfg(not(target_arch = "wasm32"))]
-            eprintln!("{msg}");
-        }
+        debug_assert!(
+            pop <= MAX_POP_FOR_SIM,
+            "pop={pop} exceeds MAX_POP_FOR_SIM={MAX_POP_FOR_SIM} — sim cull broke",
+        );
+        let n = pop;
         let body_r = FOUNDER_SIZE * BODY_RADIUS_PER_SIZE;
         let mut buf = [0u8; 32];
         for i in 0..n {
@@ -685,12 +675,12 @@ fn wasm_now_ms() -> f64 {
     epoch.elapsed().as_secs_f64() * 1000.0
 }
 
-/// v1.6 SAB snapshot creature cap, mirrored from `constants::MAX_POP_FOR_SAB`.
+/// v1.6 sim population cap, mirrored from `constants::MAX_POP_FOR_SIM`.
 /// Sourced from Rust so the worker can pass it to main in `boot_ready`; main
-/// asserts it matches the TS `MAX_POP_FOR_SAB` constant (rebuild-wasm guard).
+/// asserts it matches the TS `MAX_POP_FOR_SIM` constant (rebuild-wasm guard).
 #[wasm_bindgen]
-pub fn max_pop_for_sab() -> u32 {
-    MAX_POP_FOR_SAB as u32
+pub fn max_pop_for_sim() -> u32 {
+    MAX_POP_FOR_SIM as u32
 }
 
 /// v1.6 Wave D: runtime rayon thread-count probe. The sim worker calls this
@@ -766,10 +756,10 @@ mod tests {
         }
     }
 
-    /// v1.6 S A1: `max_pop_for_sab()` mirrors the Rust constant.
+    /// v1.6: `max_pop_for_sim()` mirrors the Rust constant.
     #[test]
-    fn max_pop_for_sab_matches_constant() {
-        assert_eq!(max_pop_for_sab(), MAX_POP_FOR_SAB as u32);
+    fn max_pop_for_sim_matches_constant() {
+        assert_eq!(max_pop_for_sim(), MAX_POP_FOR_SIM as u32);
     }
 
     /// E.21: creature_inspect_json returns None for out-of-range idx.

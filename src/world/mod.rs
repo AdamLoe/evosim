@@ -149,6 +149,12 @@ pub struct World {
     /// S27: promoted dead-indices buffer from collect_deaths.
     /// Cleared and refilled each call; caller reads it via &self.scratch_dead.
     pub(crate) scratch_dead: Vec<usize>,
+    /// v1.6 cap-cull: promoted candidate-index pool for the post-births random
+    /// sample in `handle_births`. Refilled with `0..post_birth_pop` each time
+    /// the cull fires (which is every tick a birth would push pop above
+    /// `MAX_POP_FOR_SIM`). Caching here lets the cull reuse the same
+    /// allocation tick-after-tick instead of re-allocating ~256 KB per call.
+    pub(crate) scratch_cull_pool: Vec<usize>,
     /// Curriculum factor recomputed at the top of each `step()` and applied to
     /// move/eat/upkeep costs. Init 1.0 so pre-tick reads (tests) see "normal".
     pub current_curriculum_factor: f32,
@@ -230,6 +236,7 @@ impl World {
             scratch_got_a_bite: Vec::new(),
             scratch_eat_candidates: Vec::new(),
             scratch_dead: Vec::new(),
+            scratch_cull_pool: Vec::new(),
             current_curriculum_factor: 1.0,
             scratch_argmax_pre: Vec::new(),
             sector_lut,
@@ -474,6 +481,50 @@ impl World {
             self.creatures
                 .push(new_id, cx, cy, child_energy, self.tick, child_brain);
         }
+
+        // Population-cap cull. Every split that could fire has fired (parents
+        // got reproductive success); now if pop exceeds the SAB-bound cap,
+        // randomly cull the excess. Newborns are eligible — the "splitters get
+        // prioritized" property is structural (they reproduced before the
+        // sample fired), not via newborn protection. RNG is deterministic so
+        // seed→outcome stays reproducible.
+        let post_birth = self.creatures.len();
+        if post_birth > MAX_POP_FOR_SIM {
+            let excess = post_birth - MAX_POP_FOR_SIM;
+            // Reservoir-style sample without replacement: walk the index pool
+            // and swap-pop one at a time. O(post_birth) memory for the pool,
+            // O(excess) RNG draws. Pool is promoted (`scratch_cull_pool`) so
+            // the ~256 KB high-water-mark allocation gets reused across ticks.
+            self.scratch_dead.clear();
+            self.scratch_cull_pool.clear();
+            self.scratch_cull_pool.extend(0..post_birth);
+            for _ in 0..excess {
+                let pick = self.rng.index(self.scratch_cull_pool.len());
+                self.scratch_dead
+                    .push(self.scratch_cull_pool.swap_remove(pick));
+            }
+            self.scratch_dead.sort_unstable();
+
+            // Mirror swap_remove on scratch columns the same way collect_deaths
+            // does. For positions where a newborn (no scratch entry) gets
+            // pulled into a culled existing slot, scratch[k] holds stale data
+            // for one tick — color_ema_update folds it into a small EMA delta,
+            // and the next tick's NN phase rebuilds scratch cleanly.
+            for &k in self.scratch_dead.iter().rev() {
+                if k < self.scratch_argmax_pre.len() {
+                    self.scratch_argmax_pre.swap_remove(k);
+                }
+                if k < self.scratch_got_a_bite.len() {
+                    self.scratch_got_a_bite.swap_remove(k);
+                }
+                if k < self.scratch_sector_accum.len() {
+                    self.scratch_sector_accum.swap_remove(k);
+                }
+            }
+            let dead = std::mem::take(&mut self.scratch_dead);
+            self.creatures.remove_indices(&dead);
+            self.scratch_dead = dead;
+        }
     }
 
     pub fn tick_once(&mut self) -> bool {
@@ -531,6 +582,7 @@ impl World {
             scratch_got_a_bite: Vec::new(),
             scratch_eat_candidates: Vec::new(),
             scratch_dead: Vec::new(),
+            scratch_cull_pool: Vec::new(),
             current_curriculum_factor: self.current_curriculum_factor,
             scratch_argmax_pre: Vec::new(),
             sector_lut,

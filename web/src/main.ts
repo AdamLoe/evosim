@@ -35,7 +35,7 @@ import { span } from "./perf";
 import { getSettings, setSetting } from "./settings";
 import {
   SimBridge,
-  MAX_POP_FOR_SAB,
+  MAX_POP_FOR_SIM,
   CTRL_CURRENT_SLOT,
   CREATURE_STRIDE,
   GRASS_BYTES,
@@ -196,7 +196,7 @@ async function main(): Promise<void> {
       // alias the SAB — no copy. They are scoped to this frame; next frame
       // builds new ones (cheap, ~30 ns each) so a mid-frame slot flip doesn't
       // leak across frames.
-      const pop = Math.min(header.pop, MAX_POP_FOR_SAB);
+      const pop = Math.min(header.pop, MAX_POP_FOR_SIM);
       const creatures = pop > 0
         ? new Float32Array(snapshotSab, creatureSoAOffset(slot), pop * CREATURE_STRIDE)
         : new Float32Array(0);
@@ -281,10 +281,10 @@ async function spawnSimWorker(seed: string): Promise<SimBridge> {
   const ready = await bootReady;
   // gotcha 5: handshake assertion. Mismatch means Rust constant drifted from
   // the TS const; only recovery is to rebuild wasm.
-  if (ready.max_pop_for_sab !== MAX_POP_FOR_SAB) {
+  if (ready.max_pop_for_sim !== MAX_POP_FOR_SIM) {
     throw new Error(
-      `[boot] max_pop_for_sab mismatch: worker reported ${ready.max_pop_for_sab}, ` +
-      `main expects ${MAX_POP_FOR_SAB}. Rebuild wasm (rustup run nightly wasm-pack ` +
+      `[boot] max_pop_for_sim mismatch: worker reported ${ready.max_pop_for_sim}, ` +
+      `main expects ${MAX_POP_FOR_SIM}. Rebuild wasm (rustup run nightly wasm-pack ` +
       `build --target web --out-dir web/wasm --dev --features threads) — ` +
       `Rust/TS const drift.`,
     );

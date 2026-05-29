@@ -16,7 +16,7 @@
 
 import init, {
   WorldHandle,
-  max_pop_for_sab,
+  max_pop_for_sim,
 } from "../wasm/evosim";
 import * as _wasmMod from "../wasm/evosim";
 import {
@@ -173,7 +173,7 @@ async function handleBoot(boot: SimMessageBoot): Promise<void> {
     grass_dim: world.grass_dim,
     threads,
     rayon_ok: rayonOk,
-    max_pop_for_sab: max_pop_for_sab(),
+    max_pop_for_sim: max_pop_for_sim(),
     snapshot_sab: snapshotSab,
     control_sab: controlSab,
   };
