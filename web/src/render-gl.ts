@@ -84,62 +84,6 @@ void main() {
   out_color = vec4(col, v_color.a * alpha);
 }`;
 
-// Halo program (v1.9.2 Wave 2.5): reuses the disc instance buffer but
-// scales the quad to outer_px * 1.8 and renders with additive blending
-// for a bloom-like glow. Body color × falloff alpha; clamped to keep
-// dense-pop scenes from washing out.
-const HALO_VS = `#version 300 es
-precision highp float;
-layout(location = 0) in vec2 a_corner;
-layout(location = 1) in vec2 a_center;
-layout(location = 2) in vec2 a_radii_px;
-layout(location = 3) in vec4 a_color;
-
-uniform vec2 u_viewport;
-uniform vec2 u_cam_pos;
-uniform float u_zoom;
-
-out vec2 v_local;
-out vec4 v_color;
-
-void main() {
-  // v_local stays in [-1, 1] over the bounding quad — same convention as
-  // DISC_VS. The fragment shader discards outside the inscribed circle so
-  // the halo is round, not square.
-  v_local = a_corner * 2.0;
-  v_color = a_color;
-  vec2 center_px = (a_center - u_cam_pos) * u_zoom + u_viewport * 0.5;
-  // 2.8 = 2.0 (quad half-extent → full) × 1.4 (halo scale). Tightened from
-  // 1.8 → 1.4 in the bug-fix patch since the broken square halo had felt
-  // very large; the inscribed-circle halo at 1.4 is appropriately subtle.
-  vec2 pos_px = center_px + a_corner * 2.8 * a_radii_px.x;
-  vec2 ndc = (pos_px / u_viewport) * 2.0 - 1.0;
-  ndc.y = -ndc.y;
-  gl_Position = vec4(ndc, 0.0, 1.0);
-}`;
-
-const HALO_FS = `#version 300 es
-precision highp float;
-in vec2 v_local;
-in vec4 v_color;
-out vec4 out_color;
-
-uniform float u_halo_alpha;
-
-void main() {
-  // v_local is in [-1, 1] over the bounding quad. Discard outside the
-  // inscribed circle so the halo silhouette is round — the previous code
-  // divided by 1.8 here, which kept r < 1 across the entire quad and
-  // produced visible square corners against dark backgrounds.
-  float r = length(v_local);
-  if (r > 1.0) discard;
-  float falloff = pow(1.0 - r, 2.0);
-  // Cap tightened from 0.3 → 0.15 so dense formations don't pile up into
-  // colored mush on dark themes.
-  float a = min(falloff * u_halo_alpha, 0.15);
-  out_color = vec4(v_color.rgb, a);
-}`;
-
 // Grass: one quad spanning the world, samples an R8 density texture
 // (v1.5 S6 — was R32F) and fades green by density. Quantization to u8 happens
 // Rust-side in the sim worker's `write_snapshot_to`; the shader treats `.r`
@@ -283,14 +227,6 @@ interface GLState {
   };
   discVao: WebGLVertexArrayObject;
   discInstanceBuf: WebGLBuffer;
-  haloProgram: WebGLProgram;
-  haloU: {
-    viewport: WebGLUniformLocation;
-    camPos: WebGLUniformLocation;
-    zoom: WebGLUniformLocation;
-    haloAlpha: WebGLUniformLocation;
-  };
-  haloVao: WebGLVertexArrayObject;
   trailProgram: WebGLProgram;
   trailU: {
     viewport: WebGLUniformLocation;
@@ -410,43 +346,6 @@ function initRenderer(gl: WebGL2RenderingContext): GLState {
   gl.uniform1f(discU.ringInner, 0.84);
   gl.uniform1f(discU.ringOuter, 0.92);
 
-  // ─── Halo program (Wave 2.5) ───
-  const haloProgram = link(
-    gl,
-    compile(gl, gl.VERTEX_SHADER, HALO_VS),
-    compile(gl, gl.FRAGMENT_SHADER, HALO_FS),
-  );
-
-  // Halo reuses the same instance attribute layout as disc, but bound to
-  // its own VAO so the static unit-quad attribute index can stay (0).
-  const haloVao = mustGet(gl.createVertexArray(), "createVertexArray");
-  gl.bindVertexArray(haloVao);
-  const haloQuadBuf = mustGet(gl.createBuffer(), "createBuffer");
-  gl.bindBuffer(gl.ARRAY_BUFFER, haloQuadBuf);
-  gl.bufferData(gl.ARRAY_BUFFER, unitQuad, gl.STATIC_DRAW);
-  gl.enableVertexAttribArray(0);
-  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
-  // Bind the SAME instance buffer as disc — halo reads the body instance
-  // stream verbatim and just scales the quad 1.8× in the vertex shader.
-  gl.bindBuffer(gl.ARRAY_BUFFER, discInstanceBuf);
-  gl.enableVertexAttribArray(1);
-  gl.vertexAttribPointer(1, 2, gl.FLOAT, false, INSTANCE_STRIDE_BYTES, 0);
-  gl.vertexAttribDivisor(1, 1);
-  gl.enableVertexAttribArray(2);
-  gl.vertexAttribPointer(2, 2, gl.FLOAT, false, INSTANCE_STRIDE_BYTES, 8);
-  gl.vertexAttribDivisor(2, 1);
-  gl.enableVertexAttribArray(3);
-  gl.vertexAttribPointer(3, 4, gl.FLOAT, false, INSTANCE_STRIDE_BYTES, 16);
-  gl.vertexAttribDivisor(3, 1);
-  gl.bindVertexArray(null);
-
-  const haloU = {
-    viewport: mustGet(gl.getUniformLocation(haloProgram, "u_viewport"), "u_viewport"),
-    camPos: mustGet(gl.getUniformLocation(haloProgram, "u_cam_pos"), "u_cam_pos"),
-    zoom: mustGet(gl.getUniformLocation(haloProgram, "u_zoom"), "u_zoom"),
-    haloAlpha: mustGet(gl.getUniformLocation(haloProgram, "u_halo_alpha"), "u_halo_alpha"),
-  };
-
   // ─── Trail program (Wave 3) ───
   const trailProgram = link(
     gl,
@@ -564,7 +463,6 @@ function initRenderer(gl: WebGL2RenderingContext): GLState {
   return {
     gl,
     discProgram, discU, discVao, discInstanceBuf,
-    haloProgram, haloU, haloVao,
     trailProgram, trailU, trailVao, trailInstanceBuf,
     trailScratch: new Float32Array(MAX_POP_FOR_SIM * TRAIL_FLOATS_PER_INSTANCE),
     grassProgram, grassU, grassVao, grassTex, grassTexDim: 0,
@@ -651,16 +549,6 @@ function readRingColor(): [number, number, number, number] {
   ringColorCacheKey = raw;
   ringColorCacheVal = raw ? parseRgba(raw) : [0, 0, 0, 0.6];
   return ringColorCacheVal;
-}
-
-let haloColorCacheKey = "";
-let haloColorCacheVal: [number, number, number, number] = [0, 0, 0, 0.25];
-function readHaloColor(): [number, number, number, number] {
-  const raw = readCssVar("--creature-halo");
-  if (raw === haloColorCacheKey) return haloColorCacheVal;
-  haloColorCacheKey = raw;
-  haloColorCacheVal = raw ? parseRgba(raw) : [0, 0, 0, 0.25];
-  return haloColorCacheVal;
 }
 
 export function renderWorld(
@@ -909,32 +797,13 @@ function renderWorldImpl(
     const bodyCount = (off / FLOATS_PER_INSTANCE) | 0;
     const trailCount = (trailOff / TRAIL_FLOATS_PER_INSTANCE) | 0;
     if (bodyCount > 0) {
-      // Upload instance data once; both halo and body draws consume the
-      // same buffer (halo via its own VAO that re-binds the same buffer).
       gl.bindBuffer(gl.ARRAY_BUFFER, s.discInstanceBuf);
       gl.bufferData(gl.ARRAY_BUFFER, scratch.subarray(0, off), gl.DYNAMIC_DRAW);
 
-      // ─── Halo pass (Wave 2.5) ───
-      // Additive blend behind the body draw so bodies paint over their
-      // own halo on the leading edge. Skipped at high pop to keep dense
-      // crowds from washing the canvas and to save fragment cost.
-      const haloColor = readHaloColor();
-      if (pop <= 8000 && haloColor[3] > 0.0) {
-        gl.useProgram(s.haloProgram);
-        gl.uniform2f(s.haloU.viewport, viewW, viewH);
-        gl.uniform2f(s.haloU.camPos, cam.cx, cam.cy);
-        gl.uniform1f(s.haloU.zoom, cam.zoom);
-        gl.uniform1f(s.haloU.haloAlpha, haloColor[3]);
-        gl.blendFunc(gl.ONE, gl.ONE);
-        gl.bindVertexArray(s.haloVao);
-        gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, bodyCount);
-        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-      }
-
       // ─── Trail pass (Wave 3) ───
-      // Drawn between halo and body so the body always paints over its
-      // own trail's leading edge. Alpha blend (the global default), with
-      // per-fragment alpha fade toward the trailing tip.
+      // Drawn under the body so the body always paints over its own trail's
+      // leading edge. Alpha blend (the global default), with per-fragment
+      // alpha fade toward the trailing tip.
       if (trailCount > 0) {
         gl.bindBuffer(gl.ARRAY_BUFFER, s.trailInstanceBuf);
         gl.bufferData(
