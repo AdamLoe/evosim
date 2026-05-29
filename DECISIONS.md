@@ -490,6 +490,15 @@ Deferred to v1.7+ (per `v1.6-mission.md` §"Non-goals"):
 
 Wave E follow-ups for the user (not blockers; orchestrator-deferred):
 - Visually confirm inspector click → panel populate ≤ 2 frames at 60 TPS.
-- Induce `MAX_POP_FOR_SAB` mismatch (edit `web/src/sim-bridge.ts` to a wrong value, reload, confirm main throws at handshake with both values referenced). Revert.
+- Induce `MAX_POP_FOR_SIM` mismatch (edit `web/src/sim-bridge.ts` to a wrong value, reload, confirm main throws at handshake with both values referenced). Revert.
 - Toggle "show profiler" + capture `profile_report_json()` at pop=1500 for the v1.5 vs v1.6 perf comparison.
 - Worktree branches left from this run (`worktree-agent-*`, `worktree-a{1,2}-…`, `worktree-{b,c,d}-…`) can be pruned via `git worktree prune` + `git branch -D worktree-agent-*` after Claude releases the locks.
+
+### v1.6 post-Wave-D polish
+
+Two corrections to locked-decisions surfaced once the user ran the shipped build against real workloads. Captured in detail in `docs/plans/v1.6-plan.md` §"Section 5 — Post-Wave-D polish".
+
+- 5187d72 `fix(arch): revert Wave D batching — step_n(1) per loop iteration` — drops the `tickBudget` fractional-budget accumulator + the `MAX_FRAME_DELTA_MS = 100` clamp. Wave D had lifted main.ts's pre-decoupling batching math verbatim (locked decision 4), but main.ts batched because it shared the render thread and the worker doesn't. At pop=8000 the clamp pinned batches at 6 ticks → SAB flipped every ~1.2 s → renderer repainted the same stale slot in between. The revert restores the mission's `loop { step_n(1); writeSnapshot(SAB); sleep(...); }` shape — one tick = one snapshot, renderer always sees the freshest view vsync allows. Other Wave D wins (`Atomics.waitAsync`, futex wake, slider debounce, inspector fast-path, rayon-thread guard) are untouched.
+- 065c6f2 `feat(sim): MAX_POP_FOR_SIM cap with random cull-on-overflow (replaces MAX_POP_FOR_SAB truncation)` — renames the constant (`MAX_POP_FOR_SAB` → `MAX_POP_FOR_SIM`) across `src/constants.rs`, `web/src/sim-bridge.ts`, the boot_ready field, and the wasm export. Value bumped 8_000 → 32_000. New cull at the end of `World::handle_births`: after every eligible split has fired, if `pop > MAX_POP_FOR_SIM` the excess is sampled uniformly at random from the post-birth population (newborns included) and removed via the same `swap_remove + remove_indices` path `collect_deaths` uses. RNG draws come from `self.rng` so seed→outcome stays reproducible. The "splitters get prioritized" property is structural — they reproduced before the random sample. `write_snapshot_to` loses its truncation + one-shot warning (replaced by `debug_assert!(pop <= MAX_POP_FOR_SIM)`). `scratch_cull_pool: Vec<usize>` promoted to a cached `World` field so the ~256 KB sample-pool allocation reuses across ticks. Closes the silent-state-divergence bug where the sim ran past the SAB cap and the renderer just didn't show the extras.
+
+After this polish, the canonical surface pointers from earlier are stale in one spot: the boot_ready field is `max_pop_for_sim` (not `max_pop_for_sab`) and the WorldHandle wasm-bindgen surface exposes `max_pop_for_sim()` (not `max_pop_for_sab()`).
