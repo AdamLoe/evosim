@@ -27,6 +27,6 @@ route:
 - Looking for where a file or subsystem lives →
   `docs/repository-layout.md`.
 
-If you were linked this prompt outside of the evosim repo folder structure, you can find the github repo at https://github.com/adamloe/evosim
+If you were linked this prompt outside of the evosim repo folder structure, you can find the github repo at https://github.com/adamloe/evosim and fetch the files from there. Do not make the user download the repo locally
 
 The user's first message is below.
