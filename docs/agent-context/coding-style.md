@@ -128,6 +128,7 @@ they are not stylistic preferences.
 
 ## See also
 
+- [`index.md`](index.md)
 - [`repo-rules.md`](repo-rules.md)
 - [`dev-loop.md`](dev-loop.md)
 - [`testing-how-to.md`](testing-how-to.md)

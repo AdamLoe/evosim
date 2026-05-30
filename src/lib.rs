@@ -4,6 +4,7 @@
 
 pub(crate) mod brain;
 pub(crate) mod constants;
+pub mod control_sab;
 pub(crate) mod creature;
 pub(crate) mod grass;
 pub(crate) mod grid;

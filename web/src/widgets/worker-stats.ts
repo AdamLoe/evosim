@@ -69,7 +69,8 @@ export function installWorkerStatsPanel(
   const profileBox = document.createElement("input");
   profileBox.type = "checkbox";
   profileBox.addEventListener("change", () => {
-    simBridge.postMessage({ kind: "profile_enable", on: profileBox.checked });
+    // v1.10: profiler is always-on Rust-side; the visibility toggle lives in
+    // perf-panel. This checkbox is a holdover and only changes panel reveal.
   });
   profileRow.append(profileBox, document.createTextNode(" Sub-phase timing"));
   container.appendChild(profileRow);

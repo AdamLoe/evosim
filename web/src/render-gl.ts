@@ -84,11 +84,17 @@ void main() {
   out_color = vec4(col, v_color.a * alpha);
 }`;
 
-// Halo program: soft Gaussian-falloff glow with per-creature breathing
-// pulse. Quad scaled 2× body radius; the FS discards outside the inscribed
-// circle so the silhouette is round. Pulse phase derived from instance
-// color so different creatures breathe out-of-sync (no synchronized
-// flicker). Additive blend.
+// Halo program: rim-light glow. A narrow Gaussian band centered just
+// outside the body edge (r ≈ 0.55 in halo-quad coords) — peaks at the
+// silhouette, falls off in both directions. Reads as a bioluminescent
+// edge rather than a cloud around each creature, which is what the
+// earlier `pow(1-r,n)` / centered-Gaussian designs converged toward at
+// high pop (overlapping clouds → saturated blobs).
+//
+// Blend mode is `SRC_ALPHA, ONE` (not pure additive) so the alpha gates
+// how much each rim adds to the framebuffer — dense clusters don't blow
+// out. The pulse animation was dropped because at pop > 1000 it reads
+// as flicker, not life.
 const HALO_VS = `#version 300 es
 precision highp float;
 layout(location = 0) in vec2 a_corner;
@@ -124,30 +130,34 @@ in vec2 v_local;
 in vec4 v_color;
 out vec4 out_color;
 
-uniform float u_time;        // seconds since boot
 uniform float u_strength;    // peak alpha, theme-driven via --creature-halo
 
 void main() {
+  // v_local ∈ [-1, 1] over the halo quad; body occupies r ∈ [0, 0.5]
+  // since the halo quad is scaled 2× body radius.
   float r = length(v_local);
   if (r > 1.0) discard;
 
-  // Gaussian falloff — much softer than the pow(1-r,n) family. exp(-r²·k)
-  // hits 0.37 at r=0.5, 0.018 at r=1.0; combined with the discard above,
-  // produces a smooth outer-glow gradient that fades naturally to black.
-  float falloff = exp(-r * r * 4.0);
+  // Narrow Gaussian band centered at r = 0.55 (just outside body edge).
+  // exp(-d²·90) hits ~0.37 at d=0.105, ~0.01 at d=0.22 — a thin glowing
+  // band hugging the silhouette.
+  float d = r - 0.55;
+  float rim = exp(-d * d * 90.0);
 
-  // Per-creature pulse: phase derived from the instance color so each
-  // creature breathes on its own clock. The hash multipliers are
-  // arbitrary primes chosen to spread phases across [0, 2π) for any
-  // plausible RGB distribution. Pulse rate ~1.4 Hz.
-  float phase = dot(v_color.rgb, vec3(17.3, 31.1, 7.7));
-  float pulse = 0.6 + 0.4 * sin(u_time * 1.4 + phase);
+  // Mask the body interior so the glow stays outside the silhouette.
+  // Smoothstep over (0.48, 0.53) tracks the body's AA edge.
+  float outside = smoothstep(0.48, 0.53, r);
 
-  // u_strength comes from --creature-halo alpha. Final alpha is gated
-  // entirely by the Gaussian × pulse so dense overlap reads as soft
-  // luminance instead of paint.
-  float a = falloff * pulse * u_strength;
-  out_color = vec4(v_color.rgb, a);
+  // Fade toward the halo-quad boundary so the discard at r=1 never
+  // shows up as a hard ring.
+  float outerFade = 1.0 - smoothstep(0.80, 1.0, r);
+
+  float a = rim * outside * outerFade * u_strength;
+
+  // Tint the glow slightly toward cool blue-white so it reads as
+  // bioluminescence rather than just "creature color, but transparent."
+  vec3 glow = mix(v_color.rgb, vec3(0.55, 0.75, 1.0), 0.25);
+  out_color = vec4(glow, a);
 }`;
 
 // Grass: one quad spanning the world, samples an R8 density texture
@@ -298,7 +308,6 @@ interface GLState {
     viewport: WebGLUniformLocation;
     camPos: WebGLUniformLocation;
     zoom: WebGLUniformLocation;
-    time: WebGLUniformLocation;
     strength: WebGLUniformLocation;
   };
   haloVao: WebGLVertexArrayObject;
@@ -325,6 +334,8 @@ interface GLState {
   grassVao: WebGLVertexArrayObject;
   grassTex: WebGLTexture;
   grassTexDim: number;
+  /** v1.11: OES_texture_float_linear available. Gates mipmap + linear. */
+  grassFloatLinear: boolean;
   frameProgram: WebGLProgram;
   frameU: {
     viewport: WebGLUniformLocation;
@@ -455,7 +466,6 @@ function initRenderer(gl: WebGL2RenderingContext): GLState {
     viewport: mustGet(gl.getUniformLocation(haloProgram, "u_viewport"), "u_viewport"),
     camPos: mustGet(gl.getUniformLocation(haloProgram, "u_cam_pos"), "u_cam_pos"),
     zoom: mustGet(gl.getUniformLocation(haloProgram, "u_zoom"), "u_zoom"),
-    time: mustGet(gl.getUniformLocation(haloProgram, "u_time"), "u_time"),
     strength: mustGet(gl.getUniformLocation(haloProgram, "u_strength"), "u_strength"),
   };
 
@@ -537,14 +547,22 @@ function initRenderer(gl: WebGL2RenderingContext): GLState {
     tint: mustGet(gl.getUniformLocation(grassProgram, "u_grass_tint"), "u_grass_tint"),
   };
 
+  // v1.11 (D): grass texture is R32F (raw f32 density per cell, no quantize).
+  // Linear filtering on f32 textures requires OES_texture_float_linear; we
+  // enable it explicitly. If the extension isn't available on a given device,
+  // we fall back to nearest filter — the grass would look pixelated but
+  // still functional. Widely supported (Chrome/Firefox/Safari on modern HW).
+  const floatLinearOk = gl.getExtension("OES_texture_float_linear") !== null;
   const grassTex = mustGet(gl.createTexture(), "createTexture");
   gl.bindTexture(gl.TEXTURE_2D, grassTex);
-  // v1.9.2: bilinear + mipmaps so grass reads as a landscape, not a pixel
-  // grid. `gl.generateMipmap` is called after every per-frame sub-image
-  // upload below; the cost (~0.5–1 ms at 960×960) is acceptable for the
-  // visual win. If perf regresses, drop back to plain `LINEAR`.
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  if (floatLinearOk) {
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  } else {
+    console.warn("[render] OES_texture_float_linear unavailable; grass will use nearest filter");
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  }
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
 
@@ -579,7 +597,7 @@ function initRenderer(gl: WebGL2RenderingContext): GLState {
     haloProgram, haloU, haloVao,
     trailProgram, trailU, trailVao, trailInstanceBuf,
     trailScratch: new Float32Array(MAX_POP_FOR_SIM * TRAIL_FLOATS_PER_INSTANCE),
-    grassProgram, grassU, grassVao, grassTex, grassTexDim: 0,
+    grassProgram, grassU, grassVao, grassTex, grassTexDim: 0, grassFloatLinear: floatLinearOk,
     frameProgram, frameU, frameVao, frameBuf,
     instanceScratch: new Float32Array(4096 * FLOATS_PER_INSTANCE),
   };
@@ -646,12 +664,12 @@ function readCssVar(name: string): string {
 }
 
 let grassTintCacheKey = "";
-let grassTintCacheVal: [number, number, number] = [0.55, 0.85, 0.45];
+let grassTintCacheVal: [number, number, number] = [0.08, 0.32, 0.08];
 function readGrassTint(): [number, number, number] {
   const raw = readCssVar("--grass-tint");
   if (raw === grassTintCacheKey) return grassTintCacheVal;
   grassTintCacheKey = raw;
-  grassTintCacheVal = raw ? parseRgbVec3(raw) : [0.55, 0.85, 0.45];
+  grassTintCacheVal = raw ? parseRgbVec3(raw) : [0.08, 0.32, 0.08];
   return grassTintCacheVal;
 }
 
@@ -683,7 +701,7 @@ export function renderWorld(
   viewW: number,
   viewH: number,
   creatures: Float32Array,
-  grass: Uint8Array,
+  grass: Float32Array,
   pop: number,
   world_size: number,
   grass_dim: number,
@@ -723,7 +741,7 @@ function renderWorldImpl(
   viewW: number,
   viewH: number,
   creatures: Float32Array,
-  grass: Uint8Array,
+  grass: Float32Array,
   pop: number,
   world_size: number,
   grass_dim: number,
@@ -753,16 +771,22 @@ function renderWorldImpl(
       const dim = grass_dim;
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, s.grassTex);
+      // v1.11 (D): grass is now f32 per cell, uploaded as R32F. WebGL2
+      // supports R32F natively. No more (d * 255) as u8 quantize on the
+      // sim-worker side — the texture sees the exact density value.
       if (dim !== s.grassTexDim) {
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, dim, dim, 0, gl.RED, gl.UNSIGNED_BYTE, grass);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, dim, dim, 0, gl.RED, gl.FLOAT, grass);
         s.grassTexDim = dim;
       } else {
-        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, dim, dim, gl.RED, gl.UNSIGNED_BYTE, grass);
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, dim, dim, gl.RED, gl.FLOAT, grass);
       }
-      // v1.9.2: refresh the mip chain after every upload so the bilinear
-      // min-filter has current data. Without this, mip levels 1+ retain
-      // the previous frame's density and produce flicker on motion.
-      gl.generateMipmap(gl.TEXTURE_2D);
+      // Mipmap generation requires OES_texture_float_linear for R32F. We
+      // gated the min-filter on extension presence at init; only regenerate
+      // mips when it's available, otherwise NEAREST sampling reads level 0
+      // directly.
+      if (s.grassFloatLinear) {
+        gl.generateMipmap(gl.TEXTURE_2D);
+      }
       gl.useProgram(s.grassProgram);
       gl.uniform2f(s.grassU.viewport, viewW, viewH);
       gl.uniform2f(s.grassU.camPos, cam.cx, cam.cy);
@@ -857,7 +881,6 @@ function renderWorldImpl(
     // both prev and curr and is actually moving.
     const trailScratch = s.trailScratch;
     let trailOff = 0;
-    const trailThicknessPx = 1.5;
     const enableTrails = pop <= 12000;
 
     let off = 0;
@@ -884,9 +907,23 @@ function renderWorldImpl(
       if (x < minX - margin || x > maxX + margin ||
           y < minY - margin || y > maxY + margin) continue;
       const radiusPx = Math.max(1, radiusWorld * PX_PER_SIZE * cam.zoom);
-      const cr = creatures[base + 3];
-      const cg = creatures[base + 4];
-      const cb = creatures[base + 5];
+      let cr = creatures[base + 3];
+      let cg = creatures[base + 4];
+      let cb = creatures[base + 5];
+      // Brightness floor: creatures whose action-EMA leaves them
+      // near-black are invisible against the canvas. Lift the max
+      // channel to ~125/255 while preserving hue; true zero (no
+      // history at all) becomes mid-gray.
+      const COLOR_FLOOR = 125 / 255;
+      const maxC = Math.max(cr, cg, cb);
+      if (maxC < COLOR_FLOOR) {
+        if (maxC < 1e-4) {
+          cr = cg = cb = COLOR_FLOOR;
+        } else {
+          const scale = COLOR_FLOOR / maxC;
+          cr *= scale; cg *= scale; cb *= scale;
+        }
+      }
       scratch[off    ] = x;
       scratch[off + 1] = y;
       scratch[off + 2] = radiusPx;
@@ -898,24 +935,25 @@ function renderWorldImpl(
       off += FLOATS_PER_INSTANCE;
 
       // Trail: only when we have a prev and the creature actually moved.
+      // Start = prev (one full tick behind), end = interpolated body
+      // position. Length = the full last-tick displacement; the FS fades
+      // alpha from 0 at the back to v_color.a at the front, producing a
+      // comet tail one tick long at any TPS. Thickness scales with body
+      // radius so big creatures get visible tails; min 2 px so small
+      // ones aren't lost at low zoom.
       if (enableTrails && prev !== undefined) {
         const dx = cx_raw - prev.x;
         const dy = cy_raw - prev.y;
         if (dx * dx + dy * dy > 0.04) {
-          // Start = where the body was 40 % of the interval ago;
-          // End = current interpolated body position.
-          const a0 = Math.max(0, alpha - 0.4);
-          const sx = prev.x + dx * a0;
-          const sy = prev.y + dy * a0;
-          trailScratch[trailOff    ] = sx;
-          trailScratch[trailOff + 1] = sy;
+          trailScratch[trailOff    ] = prev.x;
+          trailScratch[trailOff + 1] = prev.y;
           trailScratch[trailOff + 2] = x;
           trailScratch[trailOff + 3] = y;
           trailScratch[trailOff + 4] = cr;
           trailScratch[trailOff + 5] = cg;
           trailScratch[trailOff + 6] = cb;
-          trailScratch[trailOff + 7] = 0.5;
-          trailScratch[trailOff + 8] = trailThicknessPx;
+          trailScratch[trailOff + 7] = 0.6;
+          trailScratch[trailOff + 8] = Math.max(2, radiusPx * 0.6);
           trailOff += TRAIL_FLOATS_PER_INSTANCE;
         }
       }
@@ -936,9 +974,8 @@ function renderWorldImpl(
         gl.uniform2f(s.haloU.viewport, viewW, viewH);
         gl.uniform2f(s.haloU.camPos, cam.cx, cam.cy);
         gl.uniform1f(s.haloU.zoom, cam.zoom);
-        gl.uniform1f(s.haloU.time, performance.now() / 1000);
         gl.uniform1f(s.haloU.strength, haloStrength);
-        gl.blendFunc(gl.ONE, gl.ONE);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
         gl.bindVertexArray(s.haloVao);
         gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, bodyCount);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);

@@ -1,21 +1,70 @@
-// Sim-bridge message protocol + SAB layout types.
+// Sim-bridge: main↔worker transport.
 //
-// This file is the single source of truth for the main-thread ↔ sim-worker
-// boundary. Wave A2 ships the types only — the runtime `SimBridge` class
-// lands in Wave B. Wave C extends the SAB layout helpers.
+// v1.10 makes the control surface SAB-only. The Web Worker hot loop never
+// reads `onmessage` during steady state. Only `boot` round-trips through
+// postMessage; every other control message — sliders, pause, target TPS,
+// inspector requests, profile/NN stats requests, reset-jank, reset-profile —
+// is a Shared-Array-Buffer write on the main thread and a read at the top of
+// each tick on the worker. Responses (inspector / profile / NN stats) are
+// length-prefixed byte buffers in the same SAB; main reads via epoch advance.
 //
-// References:
-//   - docs/plans/v1.6-plan.md §"Sim-bridge message protocol" (canonical).
-//   - docs/plans/v1.6-plan.md §"Step A2" (this file's spec).
+// Why: `postMessage` requires the worker's event loop to run, which means
+// every tick must `await` to drain the macrotask queue. The historical
+// `Atomics.waitAsync(..., 1ms)` floor capped real TPS at ≈ 1000/(tick_ms+1).
+// With control on SAB, the worker loop is synchronous; `Atomics.wait` is
+// legal again because there is no postMessage to dark-hole.
 //
-// Cross-language sync:
-//   `MAX_POP_FOR_SIM` must equal the Rust constant `src/constants.rs`.
-//   Wave B's `boot_ready` reply carries `max_pop_for_sim: u32` sourced from
-//   Rust; main asserts equality with this TS constant at handshake time and
-//   throws on mismatch. Drift is fatal — rebuild wasm + restart pnpm dev.
+// Cross-language sync: the SAB byte layout lives in `src/control_sab.rs` and
+// is mirrored verbatim into `web/src/generated/control-sab.ts` by
+// `cargo run --bin gen-bindings`. The slider name → index table is in
+// `web/src/generated/slider-ids.ts` from the same source. A Rust unit test
+// fails CI on drift.
+
+import {
+  CONTROL_SAB_BYTES,
+  CTRL_CONTROL_EPOCH,
+  CTRL_CURRENT_SLOT,
+  CTRL_FUTEX,
+  CTRL_INSPECT_REQ_EPOCH,
+  CTRL_INSPECT_REQ_ID_HI,
+  CTRL_INSPECT_REQ_ID_LO,
+  CTRL_INSPECT_REQ_KIND,
+  CTRL_INSPECT_REQ_TOL_BITS,
+  CTRL_INSPECT_REQ_WX_BITS,
+  CTRL_INSPECT_REQ_WY_BITS,
+  CTRL_INSPECT_RESP_EPOCH,
+  CTRL_INSPECT_RESP_LEN,
+  CTRL_INSPECT_RESP_REQ_EPOCH,
+  CTRL_NN_STATS_EPOCH,
+  CTRL_NN_STATS_LEN,
+  CTRL_PAUSED,
+  CTRL_PROFILE_CLEAR_EPOCH,
+  CTRL_PROFILE_REPORT_EPOCH,
+  CTRL_PROFILE_REPORT_LEN,
+  CTRL_PROFILE_WINDOW_MS,
+  CTRL_RESET_JANK_EPOCH,
+  CTRL_SEQ,
+  CTRL_SLIDERS_BASE,
+  CTRL_TARGET_TPS_BITS,
+  INSPECT_RESP_CAP,
+  INSPECT_RESP_OFFSET,
+  NN_STATS_CAP,
+  NN_STATS_OFFSET,
+  PROFILE_REPORT_CAP,
+  PROFILE_REPORT_OFFSET,
+} from "./generated/control-sab";
+import { SLIDER_INDEX } from "./generated/slider-ids";
+
+// Re-export hot SAB constants for the snapshot read path in main.ts.
+export {
+  CONTROL_SAB_BYTES,
+  CTRL_CURRENT_SLOT,
+  CTRL_FUTEX,
+  CTRL_SEQ,
+};
 
 /** Protocol version. Bump on a breaking change to either message union. */
-export const SIM_BRIDGE_VERSION = 1;
+export const SIM_BRIDGE_VERSION = 2;
 
 /**
  * Maximum simulation population.
@@ -35,8 +84,6 @@ export const MAX_POP_FOR_SIM = 32_000;
  * Layout: `[x, y, body_radius, color_r, color_g, color_b, id_lo, id_hi]`
  * where `id_lo` / `id_hi` are the u32 halves of the creature id reinterpreted
  * as f32 via `f32::from_bits` (Rust side) and `Uint32Array` view (JS side).
- *
- * Matches `creature_stride()` post-Wave A1.
  */
 export const CREATURE_STRIDE = 8;
 
@@ -56,29 +103,37 @@ export const CREATURE_STRIDE = 8;
  */
 export const SNAPSHOT_HEADER_BYTES = 32;
 
-/** Bytes per creature SoA region in one snapshot slot (= 256_000). */
+/** Bytes per creature SoA region in one snapshot slot. */
 export const CREATURE_SOA_BYTES = MAX_POP_FOR_SIM * CREATURE_STRIDE * 4;
 
-/** Bytes per grass density region in one snapshot slot. Matches `GRASS_CELL_COUNT`. */
-export const GRASS_BYTES = 921_600;
+/**
+ * Bytes per grass density region in one snapshot slot.
+ *
+ * v1.11 (A+D): raw f32 per cell instead of `(d * 255) as u8`. 4× more bytes,
+ * but no per-cell quantize work in the sim worker — the loop is gone. The
+ * renderer uploads as `R32F` instead of `R8`. Matches `GRASS_CELL_COUNT × 4`.
+ */
+export const GRASS_BYTES = 921_600 * 4;
+
+/**
+ * Number of f32 grass cells per snapshot slot. Equals `GRASS_BYTES / 4` and
+ * `GRASS_CELL_COUNT` on the Rust side. The renderer's `Float32Array` view
+ * size is this number, not `GRASS_BYTES`.
+ */
+export const GRASS_CELL_COUNT = GRASS_BYTES / 4;
 
 /** Bytes per snapshot slot (header + creatures + grass). */
 export const SLOT_BYTES = SNAPSHOT_HEADER_BYTES + CREATURE_SOA_BYTES + GRASS_BYTES;
 
-/** Total snapshot SAB size — two double-buffered slots. */
+/**
+ * Total snapshot region size — two double-buffered slots.
+ *
+ * v1.11 (A): the snapshot region lives in wasm linear memory (not a separate
+ * SharedArrayBuffer). The constant is kept for size validation and tests;
+ * the actual base offset within wasm memory comes from
+ * `WorldHandle.snapshot_buf_byte_offset` in the boot reply.
+ */
 export const SNAPSHOT_SAB_BYTES = SLOT_BYTES * 2;
-
-/** Control SAB length in i32 words (16 bytes). */
-export const CONTROL_SAB_I32_LEN = 4;
-
-/** Control SAB word index: current live snapshot slot (0 or 1), atomic. */
-export const CTRL_CURRENT_SLOT = 0;
-
-/** Control SAB word index: monotone seq counter, incremented after every slot flip. */
-export const CTRL_SEQ = 1;
-
-/** Control SAB word index: futex word the sim worker `Atomics.waitAsync`s on. */
-export const CTRL_FUTEX = 2;
 
 /** Byte offset of snapshot slot `slot` (0 or 1) within the snapshot SAB. */
 export function slotOffset(slot: 0 | 1): number {
@@ -99,7 +154,6 @@ export function grassOffset(slot: 0 | 1): number {
 // Snapshot stats header
 // ---------------------------------------------------------------------------
 
-/** Decoded view of the 20-byte stats header at the start of a snapshot slot. */
 export interface SnapshotHeader {
   tick: number;
   pop: number;
@@ -108,13 +162,6 @@ export interface SnapshotHeader {
   jank_count: number;
 }
 
-/**
- * Decode a snapshot stats header at `byteOffset` within `view`.
- *
- * `tick`/`pop`/`world_ended`/`jank_count` are decoded as little-endian u32.
- * `tps` is decoded as a little-endian f32, matching Rust's `f32::to_bits`
- * write (same 4 bytes, exact round-trip).
- */
 export function readSnapshotHeader(view: DataView, byteOffset: number): SnapshotHeader {
   return {
     tick: view.getUint32(byteOffset + 0, true),
@@ -126,18 +173,16 @@ export function readSnapshotHeader(view: DataView, byteOffset: number): Snapshot
 }
 
 // ---------------------------------------------------------------------------
-// main → worker messages
+// Boot handshake (the only surviving postMessage path)
 // ---------------------------------------------------------------------------
 
 /**
- * Boot payload sent once per worker lifetime, immediately after the worker is
- * spawned. The worker initializes wasm + rayon, runs one tick + writes one
- * snapshot, then replies with `boot_ready` — guaranteeing main a valid first
- * frame.
- *
- * `initial_sliders` is a name→value map (bools encoded as 0|1) drawn from the
- * in-memory dev-panel widget state (NOT localStorage) so a mid-drag restart
- * carries the dragged value.
+ * Boot payload sent once per worker lifetime. Initial slider values are
+ * delivered by name so the SAB layout doesn't have to leak into the boot
+ * message (and so a stale localStorage key doesn't desync the array index).
+ * The worker applies each via `set_slider(name, value)` before its first
+ * tick, then writes the canonical values into the control SAB so main's
+ * post-boot view of `CTRL_SLIDERS` matches the actually-applied state.
  */
 export interface SimMessageBoot {
   kind: "boot";
@@ -145,104 +190,19 @@ export interface SimMessageBoot {
   initial_grass_seed_count: number;
   energy_max: number;
   founder_count: number;
-  /** Construction-only: if true, the worker fills the grass grid to GRASS_MAX
-   *  at world init instead of seeding `initial_grass_seed_count` cells. */
   full_grass_on_init: boolean;
   initial_sliders: Record<string, number>;
+  initial_target_tps: number;
+  initial_paused: boolean;
 }
 
-/** Set one named slider. Bools ride this as `value: 0 | 1`. */
-export interface SimMessageSetSlider {
-  kind: "set_slider";
-  name: string;
-  value: number;
-}
-
-/** Set the target ticks-per-second pacing budget. */
-export interface SimMessageSetTargetTps {
-  kind: "set_target_tps";
-  tps: number;
-}
-
-/** Pause / resume sim stepping. Render keeps painting the last-good frame. */
-export interface SimMessageSetPaused {
-  kind: "set_paused";
-  paused: boolean;
-}
-
-/** Locate the creature nearest `(wx, wy)` in world space within tolerance. */
-export interface SimMessageInspectAt {
-  kind: "inspect_at";
-  wx: number;
-  wy: number;
-  tolerance_world: number;
-  request_id: number;
-}
-
-/** Refresh inspector JSON for a known creature id. */
-export interface SimMessageInspectId {
-  kind: "inspect_id";
-  id: number;
-  request_id: number;
-}
-
-/** Request a JSON dump of the NN worker stats. Polled at ~750 ms cadence. */
-export interface SimMessageRequestNnStats {
-  kind: "request_nn_stats";
-  request_id: number;
-}
-
-/** Request a JSON profile report. Polled at ~1 s cadence. */
-export interface SimMessageRequestProfileReport {
-  kind: "request_profile_report";
-  request_id: number;
-}
-
-/** Enable or disable profile sampling. */
-export interface SimMessageProfileEnable {
-  kind: "profile_enable";
-  on: boolean;
-}
-
-/** Reset the jank counter in the snapshot header to zero. */
-export interface SimMessageResetJank {
-  kind: "reset_jank";
-}
+/** Discriminated union of every main → worker message shape. v1.10: just boot. */
+export type SimMessage = SimMessageBoot;
 
 /**
- * Clear all accumulated profiler samples (Rust side). v1.9.1: paired with
- * `reset_jank` by the perf-panel's reset button, alongside a TS-side
- * `resetFrameTree()` call.
- */
-export interface SimMessageResetProfile {
-  kind: "reset_profile";
-}
-
-/** Discriminated union of every main → worker message shape. */
-export type SimMessage =
-  | SimMessageBoot
-  | SimMessageSetSlider
-  | SimMessageSetTargetTps
-  | SimMessageSetPaused
-  | SimMessageInspectAt
-  | SimMessageInspectId
-  | SimMessageRequestNnStats
-  | SimMessageRequestProfileReport
-  | SimMessageProfileEnable
-  | SimMessageResetJank
-  | SimMessageResetProfile;
-
-// ---------------------------------------------------------------------------
-// worker → main replies
-// ---------------------------------------------------------------------------
-
-/**
- * Sent once per worker lifetime, **after** the worker has run one tick and
- * written one snapshot. Stage 1 leaves `snapshot_sab` and `control_sab` as
- * `null` — they are populated from Stage 2 onward (Wave C).
- *
- * `max_pop_for_sim` is sourced from the Rust constant; main asserts it equals
- * the TS `MAX_POP_FOR_SIM` constant and throws on mismatch.
+ * Worker → main boot acknowledgment. Carries the two SABs main needs to
+ * attach. After this, the worker never sends another postMessage — every
+ * worker→main signal is a SAB epoch bump.
  */
 export interface SimReplyBootReady {
   kind: "boot_ready";
@@ -251,92 +211,30 @@ export interface SimReplyBootReady {
   threads: number;
   rayon_ok: boolean;
   max_pop_for_sim: number;
-  snapshot_sab: SharedArrayBuffer | null;
+  /**
+   * v1.11 (A): the wasm `WebAssembly.Memory` handle. Main builds a
+   * `Uint8Array` / `Float32Array` view over `wasm_memory.buffer` at the
+   * `snapshot_buf_byte_offset` returned below. With shared memory enabled,
+   * `WebAssembly.Memory` round-trips via `postMessage` and the underlying
+   * SharedArrayBuffer is observed identically by both threads.
+   */
+  wasm_memory: WebAssembly.Memory;
+  /** Byte offset of the snapshot region within `wasm_memory.buffer`. */
+  snapshot_buf_byte_offset: number;
+  /** Byte length of the snapshot region (== `SNAPSHOT_SAB_BYTES`). */
+  snapshot_buf_byte_len: number;
   control_sab: SharedArrayBuffer | null;
-  /** JSON map of every slider name → its canonical Rust default value
-   *  (bools encoded as 0|1). Read once at boot; the drift-guard test
-   *  asserts it matches `web/src/settings.ts` DEFAULTS. */
+  /** JSON map of every slider name → Rust default. Drift-guard input. */
   sliders_defaults_json: string;
 }
 
-/**
- * Stage 1 only: snapshot payload posted once per batch (NOT once per tick).
- * Replaced by SAB writes in Stage 2 — the message goes away in Wave C.
- *
- * The typed arrays alias wasm memory; structured-clone is eager in
- * Chrome + Firefox, so it's safe to mutate wasm memory on the next iteration.
- */
-export interface SimReplySnapshot {
-  kind: "snapshot";
-  tick: number;
-  pop: number;
-  tps: number;
-  world_ended: boolean;
-  jank_count: number;
-  creatures: Uint8Array;
-  grass: Uint8Array;
-  ids: Float64Array;
-}
-
-/** Reply to `inspect_at` / `inspect_id`. `json` is `null` if no creature matched. */
-export interface SimReplyInspectReply {
-  kind: "inspect_reply";
-  request_id: number;
-  json: string | null;
-}
-
-/** Reply to `request_nn_stats`. */
-export interface SimReplyNnStatsReply {
-  kind: "nn_stats_reply";
-  request_id: number;
-  json: string;
-}
-
-/**
- * Reply to `request_profile_report`. Worker bundles `tps`, `jank_count`,
- * `live_grass_cell_count`, `total_grass_density` into the same JSON to avoid
- * round-tripping each separately.
- */
-export interface SimReplyProfileReply {
-  kind: "profile_reply";
-  request_id: number;
-  json: string;
-}
-
-/** Discriminated union of every worker → main reply shape. */
-export type SimReply =
-  | SimReplyBootReady
-  | SimReplySnapshot
-  | SimReplyInspectReply
-  | SimReplyNnStatsReply
-  | SimReplyProfileReply;
+export type SimReply = SimReplyBootReady;
 
 // ---------------------------------------------------------------------------
-// Runtime SimBridge (Wave B)
+// SimBridge — owns the worker + the control SAB writer/reader views
 // ---------------------------------------------------------------------------
 
-/**
- * Wave B runtime: owns the Web Worker, the request_id correlation table for
- * async replies, and an emitter for the latest snapshot. Lives in this file
- * (next to the discriminated unions) per v1.6-plan.md §4 ambiguity 4.
- *
- * Stage-1 contract: `postMessage` is fire-and-forget for set_slider /
- * set_paused / set_target_tps / profile_enable / reset_jank; `request*`
- * methods return a Promise that resolves when the matching reply
- * arrives (correlated by `request_id`). Entries older than 5 s are dropped so
- * the map can't leak when the worker is busy.
- *
- * Wave D adds a futex-notify on top of postMessage; Wave B does not.
- */
-
-const REQUEST_TIMEOUT_MS = 5_000;
-
-interface PendingRequest {
-  resolve: (json: string | null) => void;
-  deadlineMs: number;
-}
-
-/** Wave D: per-name slider debounce trailing-edge delay (ms). */
+/** Per-name trailing-edge slider debounce delay (ms). */
 const SLIDER_DEBOUNCE_MS = 16;
 
 interface DebouncedSliderEntry {
@@ -344,110 +242,62 @@ interface DebouncedSliderEntry {
   value: number;
 }
 
+/** Resolves to a JSON string (the inspector response) or null on timeout. */
+type PendingInspect = (json: string | null) => void;
+
+/** Max time main will wait for a worker response before resolving to null. */
+const REQUEST_TIMEOUT_MS = 5_000;
+
 export class SimBridge {
   private worker: Worker;
-  private nextRequestId = 1;
-  private pending = new Map<number, PendingRequest>();
-  private snapshotHandler: ((snap: SimReplySnapshot) => void) | null = null;
+
+  // Boot handshake.
   private bootReadyHandler: ((reply: SimReplyBootReady) => void) | null = null;
-  private gcTimer: ReturnType<typeof setInterval> | null = null;
-  /**
-   * Wave D: per-name trailing-edge debouncer for `set_slider` writes. A 100 Hz
-   * `pointermove` on a slider track would otherwise flood the worker with
-   * postMessages (and futex wakes). 16 ms trailing-edge collapses bursts to
-   * roughly one per RAF tick; "last value wins" so the released value is the
-   * one that lands.
-   */
+
+  // Control SAB views (attached post-boot).
+  private ctrlI32: Int32Array | null = null;
+  private ctrlF32: Float32Array | null = null;
+  private ctrlBytes: Uint8Array | null = null;
+
+  // Per-name 16ms trailing-edge debounce for slider writes — prevents a
+  // 100 Hz pointermove drag from flooding the SAB + epoch counter.
   private sliderDebounceTimers = new Map<string, DebouncedSliderEntry>();
-  /**
-   * Wave D: control SAB futex word view, populated when main wires up
-   * `attachControlSab` after `boot_ready`. Used by `postMessage` to wake the
-   * sim worker out of `Atomics.waitAsync(ctrl, CTRL_FUTEX, before, ...)`.
-   * Null until the SAB handshake completes; postMessage falls back to
-   * fire-and-forget while null (worker still wakes via the JS event loop on
-   * each `setTimeout(0)` iteration during Wave B/C, and Wave D's loop drains
-   * incoming messages at the top of every iteration regardless).
-   */
-  private controlI32: Int32Array | null = null;
+
+  // Inspector request correlation. Each inspect call advances
+  // CTRL_INSPECT_REQ_EPOCH; the resolver is parked here. The next response
+  // epoch advance whose CTRL_INSPECT_RESP_REQ_EPOCH matches our last request
+  // resolves the promise. We only keep the latest pending request — superseded
+  // ones resolve to null immediately.
+  private inspectPending: { reqEpoch: number; resolve: PendingInspect; deadlineMs: number } | null = null;
+
+  // Polled response trackers — we remember the last epoch we read from each
+  // response slot so we can detect advance without re-reading the same bytes.
+  private lastInspectRespEpoch = 0;
+  private lastProfileReportEpoch = 0;
+  private lastNnStatsEpoch = 0;
+
+  // Cached latest payload bytes per response slot. Filled by the response poller.
+  private latestProfileReportJson: string | null = null;
+  private latestNnStatsJson: string | null = null;
+
+  // Drives the per-frame poll of all SAB response slots. Started on attach,
+  // stopped on terminate. Uses `setInterval` at 60 Hz so inspector responses
+  // feel snappy without burning CPU.
+  private responsePoller: ReturnType<typeof setInterval> | null = null;
 
   constructor(worker: Worker) {
     this.worker = worker;
     this.worker.onmessage = (e: MessageEvent<SimReply>) => {
-      this.dispatch(e.data);
+      // v1.10: the only worker→main message is `boot_ready`.
+      if (e.data.kind === "boot_ready" && this.bootReadyHandler) {
+        this.bootReadyHandler(e.data);
+      }
     };
-    // Periodic GC of stale request entries. Cheap (≤ 100 entries typically).
-    this.gcTimer = setInterval(() => this.gcPending(), 1_000);
   }
 
-  /**
-   * Wave D: attach the control SAB so subsequent `postMessage` calls also
-   * notify the worker's futex. Called by main from `boot_ready` once the
-   * control SAB is available; safe to call again on restart.
-   */
-  attachControlSab(controlSab: SharedArrayBuffer): void {
-    this.controlI32 = new Int32Array(controlSab);
-  }
-
-  /** Issue a fresh u32 request id. */
-  mintRequestId(): number {
-    const id = this.nextRequestId;
-    this.nextRequestId = (this.nextRequestId + 1) >>> 0;
-    if (this.nextRequestId === 0) this.nextRequestId = 1;
-    return id;
-  }
-
-  /** Fire-and-forget send. Used for set_slider / set_paused / set_target_tps. */
-  postMessage(msg: SimMessage): void {
-    this.worker.postMessage(msg);
-    // Wave D: futex wake. The `add` mutates `CTRL_FUTEX` so the worker's
-    // `Atomics.waitAsync(ctrl, CTRL_FUTEX, before, timeoutMs)` resolves
-    // synchronously with `"not-equal"` if it was about to park; the `notify`
-    // covers the case where the worker is already parked. Wraparound at u32
-    // max is harmless (the futex value is opaque — only equality matters).
-    if (this.controlI32 !== null) {
-      Atomics.add(this.controlI32, CTRL_FUTEX, 1);
-      Atomics.notify(this.controlI32, CTRL_FUTEX, 1);
-    }
-  }
-
-  /**
-   * Wave D: debounced `set_slider` write. Per-name 16 ms trailing-edge
-   * debouncer; last value wins. Prevents pointermove flooding the worker
-   * during slider drags. Final value lands within `SLIDER_DEBOUNCE_MS` of the
-   * last input event.
-   *
-   * Use this for high-frequency dev-panel slider drags. Boot's
-   * `initial_sliders` map is NOT routed through here — those are applied
-   * synchronously by the worker before its first tick.
-   */
-  debouncedSetSlider(name: string, value: number): void {
-    const existing = this.sliderDebounceTimers.get(name);
-    if (existing !== undefined) {
-      clearTimeout(existing.timer);
-    }
-    const timer = setTimeout(() => {
-      this.sliderDebounceTimers.delete(name);
-      this.postMessage({ kind: "set_slider", name, value });
-    }, SLIDER_DEBOUNCE_MS);
-    this.sliderDebounceTimers.set(name, { timer, value });
-  }
-
-  /**
-   * Wave D: flush any pending debounced slider writes immediately. Called
-   * before tearing the bridge down (restart) so the last in-flight slider
-   * value isn't dropped on the floor.
-   */
-  flushDebouncedSliders(): void {
-    for (const [name, entry] of this.sliderDebounceTimers) {
-      clearTimeout(entry.timer);
-      this.postMessage({ kind: "set_slider", name, value: entry.value });
-    }
-    this.sliderDebounceTimers.clear();
-  }
-
-  /** Register the snapshot listener (called every batch by the worker). */
-  onSnapshot(fn: (snap: SimReplySnapshot) => void): void {
-    this.snapshotHandler = fn;
+  /** Send the boot message. The only postMessage that survives v1.10. */
+  sendBoot(boot: SimMessageBoot): void {
+    this.worker.postMessage(boot);
   }
 
   /** Register the one-shot boot_ready listener. */
@@ -455,97 +305,242 @@ export class SimBridge {
     this.bootReadyHandler = fn;
   }
 
-  /** Inspector click → nearest creature in world space. */
-  requestInspectAt(wx: number, wy: number, toleranceWorld: number): Promise<string | null> {
-    const request_id = this.mintRequestId();
-    const p = this.makePending(request_id);
-    this.worker.postMessage({ kind: "inspect_at", wx, wy, tolerance_world: toleranceWorld, request_id });
-    return p;
+  /**
+   * Attach to the control SAB sent in `boot_ready`. After this point the
+   * bridge is fully wired and every control method works.
+   */
+  attachControlSab(controlSab: SharedArrayBuffer): void {
+    this.ctrlI32 = new Int32Array(controlSab);
+    this.ctrlF32 = new Float32Array(controlSab);
+    this.ctrlBytes = new Uint8Array(controlSab);
+    // Seed our "last seen" epochs from the current SAB state so we don't
+    // re-deliver pre-boot payloads as new ones.
+    this.lastInspectRespEpoch = Atomics.load(this.ctrlI32, CTRL_INSPECT_RESP_EPOCH);
+    this.lastProfileReportEpoch = Atomics.load(this.ctrlI32, CTRL_PROFILE_REPORT_EPOCH);
+    this.lastNnStatsEpoch = Atomics.load(this.ctrlI32, CTRL_NN_STATS_EPOCH);
+    this.responsePoller = setInterval(() => this.pollResponses(), 1000 / 60);
   }
 
-  /** Inspector per-frame refresh by stable creature id. */
-  requestInspectId(id: number): Promise<string | null> {
-    const request_id = this.mintRequestId();
-    const p = this.makePending(request_id);
-    this.worker.postMessage({ kind: "inspect_id", id, request_id });
-    return p;
-  }
+  // ─── Slider / pause / target-TPS writes (SAB-only) ──────────────────────
 
-  /** 750 ms poll → NN worker stats JSON. */
-  requestNnStats(): Promise<string | null> {
-    const request_id = this.mintRequestId();
-    const p = this.makePending(request_id);
-    this.worker.postMessage({ kind: "request_nn_stats", request_id });
-    return p;
-  }
-
-  /** 1 s poll → profile report JSON (bundled with tps/jank/grass counters). */
-  requestProfileReport(): Promise<string | null> {
-    const request_id = this.mintRequestId();
-    const p = this.makePending(request_id);
-    this.worker.postMessage({ kind: "request_profile_report", request_id });
-    return p;
-  }
-
-  /** Tear down the worker and clear pending state. Called on restart. */
-  terminate(): void {
-    if (this.gcTimer !== null) {
-      clearInterval(this.gcTimer);
-      this.gcTimer = null;
+  /** Per-name 16 ms debounced slider write. Latest value wins. */
+  debouncedSetSlider(name: string, value: number): void {
+    const existing = this.sliderDebounceTimers.get(name);
+    if (existing !== undefined) {
+      clearTimeout(existing.timer);
     }
-    // Resolve any in-flight promises with null so awaiters don't hang.
-    for (const { resolve } of this.pending.values()) resolve(null);
-    this.pending.clear();
-    // Drop any pending slider debounce timers — the bridge is dying; the new
-    // bridge will receive the current slider state via `boot.initial_sliders`.
+    const timer = setTimeout(() => {
+      this.sliderDebounceTimers.delete(name);
+      this.writeSliderImmediate(name, value);
+    }, SLIDER_DEBOUNCE_MS);
+    this.sliderDebounceTimers.set(name, { timer, value });
+  }
+
+  /** Flush any pending debounced slider writes immediately. Restart safety. */
+  flushDebouncedSliders(): void {
+    for (const [name, entry] of this.sliderDebounceTimers) {
+      clearTimeout(entry.timer);
+      this.writeSliderImmediate(name, entry.value);
+    }
+    this.sliderDebounceTimers.clear();
+  }
+
+  private writeSliderImmediate(name: string, value: number): void {
+    if (!this.ctrlF32 || !this.ctrlI32) return;
+    const idx = SLIDER_INDEX[name];
+    if (idx === undefined) {
+      console.warn(`[bridge] unknown slider "${name}" — drop`);
+      return;
+    }
+    // Float32Array write is atomic for aligned 32-bit lanes per the JS spec;
+    // we don't need Atomics.store for the value itself. The epoch bump is
+    // the release fence that publishes the write to the worker.
+    this.ctrlF32[CTRL_SLIDERS_BASE + idx] = value;
+    Atomics.add(this.ctrlI32, CTRL_CONTROL_EPOCH, 1);
+  }
+
+  setPaused(paused: boolean): void {
+    if (!this.ctrlI32) return;
+    Atomics.store(this.ctrlI32, CTRL_PAUSED, paused ? 1 : 0);
+    // Bump futex + notify so a paused worker parked on Atomics.wait wakes.
+    Atomics.add(this.ctrlI32, CTRL_FUTEX, 1);
+    Atomics.notify(this.ctrlI32, CTRL_FUTEX, 1);
+  }
+
+  setTargetTps(tps: number): void {
+    if (!this.ctrlI32 || !this.ctrlF32) return;
+    this.ctrlF32[CTRL_TARGET_TPS_BITS] = tps;
+    // No epoch bump — worker reads target TPS at top of every tick. Wake any
+    // futex park so the new pacing slice takes effect immediately.
+    Atomics.add(this.ctrlI32, CTRL_FUTEX, 1);
+    Atomics.notify(this.ctrlI32, CTRL_FUTEX, 1);
+  }
+
+  resetJank(): void {
+    if (!this.ctrlI32) return;
+    Atomics.add(this.ctrlI32, CTRL_RESET_JANK_EPOCH, 1);
+  }
+
+  resetProfile(): void {
+    if (!this.ctrlI32) return;
+    Atomics.add(this.ctrlI32, CTRL_PROFILE_CLEAR_EPOCH, 1);
+    // Drop the cached pre-reset report so the next `requestProfileReport`
+    // returns null until the worker writes a fresh one. Pairs with the
+    // worker-side `forceNextProfileReport` flag that bypasses the 60-tick
+    // cadence — together they make reset visually instant.
+    this.latestProfileReportJson = null;
+  }
+
+  /** Set the profiler's rolling-window length in milliseconds. Carried via
+   *  CTRL_PROFILE_WINDOW_MS; the worker reads it once per tick and forwards
+   *  to `world.profile_set_window_ms` when it changes. */
+  setProfileWindowMs(ms: number): void {
+    if (!this.ctrlI32) return;
+    Atomics.store(this.ctrlI32, CTRL_PROFILE_WINDOW_MS, Math.max(0, Math.round(ms)));
+    Atomics.add(this.ctrlI32, CTRL_FUTEX, 1);
+    Atomics.notify(this.ctrlI32, CTRL_FUTEX, 1);
+  }
+
+  // ─── Inspector request/response ─────────────────────────────────────────
+
+  requestInspectAt(wx: number, wy: number, toleranceWorld: number): Promise<string | null> {
+    return this.issueInspect((reqEpoch) => {
+      if (!this.ctrlI32 || !this.ctrlF32) return reqEpoch;
+      this.ctrlF32[CTRL_INSPECT_REQ_WX_BITS] = wx;
+      this.ctrlF32[CTRL_INSPECT_REQ_WY_BITS] = wy;
+      this.ctrlF32[CTRL_INSPECT_REQ_TOL_BITS] = toleranceWorld;
+      Atomics.store(this.ctrlI32, CTRL_INSPECT_REQ_KIND, 0); // 0 = by coord
+      return reqEpoch;
+    });
+  }
+
+  requestInspectId(id: number): Promise<string | null> {
+    return this.issueInspect((reqEpoch) => {
+      if (!this.ctrlI32) return reqEpoch;
+      // id is a positive integer up to 2^53 — split via division/modulo since
+      // JS bitwise ops are 32-bit signed.
+      const idLo = (id >>> 0) | 0; // low 32 bits
+      const idHi = Math.floor(id / 0x1_0000_0000) | 0; // high 32 bits
+      Atomics.store(this.ctrlI32, CTRL_INSPECT_REQ_ID_LO, idLo);
+      Atomics.store(this.ctrlI32, CTRL_INSPECT_REQ_ID_HI, idHi);
+      Atomics.store(this.ctrlI32, CTRL_INSPECT_REQ_KIND, 1); // 1 = by id
+      return reqEpoch;
+    });
+  }
+
+  private issueInspect(writeParams: (reqEpoch: number) => number): Promise<string | null> {
+    if (!this.ctrlI32) return Promise.resolve(null);
+    // Supersede any pending request — only the latest is delivered.
+    if (this.inspectPending !== null) {
+      this.inspectPending.resolve(null);
+      this.inspectPending = null;
+    }
+    // Compute the new request epoch BEFORE writing params so the writer
+    // closure can see it. (We bump after writeParams returns to publish.)
+    const reqEpoch = Atomics.load(this.ctrlI32, CTRL_INSPECT_REQ_EPOCH) + 1;
+    writeParams(reqEpoch);
+    Atomics.store(this.ctrlI32, CTRL_INSPECT_REQ_EPOCH, reqEpoch);
+    Atomics.add(this.ctrlI32, CTRL_FUTEX, 1);
+    Atomics.notify(this.ctrlI32, CTRL_FUTEX, 1);
+    return new Promise<string | null>((resolve) => {
+      this.inspectPending = {
+        reqEpoch,
+        resolve,
+        deadlineMs: performance.now() + REQUEST_TIMEOUT_MS,
+      };
+    });
+  }
+
+  // ─── Profile / NN-stats poll-style readers ──────────────────────────────
+
+  /**
+   * Returns the latest profile report JSON written to SAB, or null if none
+   * has been observed yet. The worker writes this every ~1 s; main is
+   * encouraged to call this from a `setInterval` of similar cadence.
+   */
+  requestProfileReport(): Promise<string | null> {
+    // Read-on-demand: the response poller already mirrored the freshest
+    // payload to `latestProfileReportJson`. Returning a resolved Promise
+    // preserves the old caller shape; callers can `await` to keep their
+    // existing code path unchanged.
+    return Promise.resolve(this.latestProfileReportJson);
+  }
+
+  requestNnStats(): Promise<string | null> {
+    return Promise.resolve(this.latestNnStatsJson);
+  }
+
+  // ─── Tear-down ──────────────────────────────────────────────────────────
+
+  terminate(): void {
+    if (this.responsePoller !== null) {
+      clearInterval(this.responsePoller);
+      this.responsePoller = null;
+    }
     for (const entry of this.sliderDebounceTimers.values()) {
       clearTimeout(entry.timer);
     }
     this.sliderDebounceTimers.clear();
-    this.controlI32 = null;
+    if (this.inspectPending !== null) {
+      this.inspectPending.resolve(null);
+      this.inspectPending = null;
+    }
+    this.ctrlI32 = null;
+    this.ctrlF32 = null;
+    this.ctrlBytes = null;
     this.worker.terminate();
   }
 
-  private makePending(request_id: number): Promise<string | null> {
-    return new Promise<string | null>((resolve) => {
-      this.pending.set(request_id, {
-        resolve,
-        deadlineMs: performance.now() + REQUEST_TIMEOUT_MS,
-      });
-    });
-  }
+  // ─── Internal: 60 Hz response polling ───────────────────────────────────
 
-  private dispatch(reply: SimReply): void {
-    switch (reply.kind) {
-      case "boot_ready":
-        if (this.bootReadyHandler) this.bootReadyHandler(reply);
-        return;
-      case "snapshot":
-        if (this.snapshotHandler) this.snapshotHandler(reply);
-        return;
-      case "inspect_reply":
-      case "nn_stats_reply":
-      case "profile_reply": {
-        const entry = this.pending.get(reply.request_id);
-        if (!entry) return; // stale (TTL'd or never registered) — ignore.
-        this.pending.delete(reply.request_id);
-        if (reply.kind === "inspect_reply") {
-          entry.resolve(reply.json);
-        } else {
-          entry.resolve(reply.json);
-        }
-        return;
+  private pollResponses(): void {
+    if (!this.ctrlI32 || !this.ctrlBytes) return;
+
+    // Inspector response.
+    const inspEpoch = Atomics.load(this.ctrlI32, CTRL_INSPECT_RESP_EPOCH);
+    if (inspEpoch !== this.lastInspectRespEpoch) {
+      const respReqEpoch = Atomics.load(this.ctrlI32, CTRL_INSPECT_RESP_REQ_EPOCH);
+      const len = Atomics.load(this.ctrlI32, CTRL_INSPECT_RESP_LEN) >>> 0;
+      const json = this.decodeBytes(INSPECT_RESP_OFFSET, INSPECT_RESP_CAP, len);
+      this.lastInspectRespEpoch = inspEpoch;
+      const pending = this.inspectPending;
+      if (pending !== null && pending.reqEpoch === respReqEpoch) {
+        this.inspectPending = null;
+        pending.resolve(len === 0 ? null : json);
       }
+    }
+
+    // Profile report.
+    const profEpoch = Atomics.load(this.ctrlI32, CTRL_PROFILE_REPORT_EPOCH);
+    if (profEpoch !== this.lastProfileReportEpoch) {
+      const len = Atomics.load(this.ctrlI32, CTRL_PROFILE_REPORT_LEN) >>> 0;
+      this.latestProfileReportJson = this.decodeBytes(PROFILE_REPORT_OFFSET, PROFILE_REPORT_CAP, len);
+      this.lastProfileReportEpoch = profEpoch;
+    }
+
+    // NN stats.
+    const nnEpoch = Atomics.load(this.ctrlI32, CTRL_NN_STATS_EPOCH);
+    if (nnEpoch !== this.lastNnStatsEpoch) {
+      const len = Atomics.load(this.ctrlI32, CTRL_NN_STATS_LEN) >>> 0;
+      this.latestNnStatsJson = this.decodeBytes(NN_STATS_OFFSET, NN_STATS_CAP, len);
+      this.lastNnStatsEpoch = nnEpoch;
+    }
+
+    // GC stale inspect request.
+    if (this.inspectPending !== null && this.inspectPending.deadlineMs < performance.now()) {
+      this.inspectPending.resolve(null);
+      this.inspectPending = null;
     }
   }
 
-  private gcPending(): void {
-    const now = performance.now();
-    for (const [id, entry] of this.pending) {
-      if (entry.deadlineMs < now) {
-        entry.resolve(null);
-        this.pending.delete(id);
-      }
-    }
+  private decodeBytes(offset: number, cap: number, len: number): string {
+    if (!this.ctrlBytes) return "";
+    const safeLen = Math.min(len, cap);
+    // TextDecoder spec rejects views into SharedArrayBuffer
+    // ("The provided ArrayBufferView value must not be shared.")
+    // Copy into a non-shared Uint8Array before decoding.
+    const buf = new Uint8Array(safeLen);
+    buf.set(this.ctrlBytes.subarray(offset, offset + safeLen));
+    return new TextDecoder().decode(buf);
   }
 }

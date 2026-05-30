@@ -4,17 +4,22 @@ The four-tree, no-rollup, per-row-real-measurement perf instrumentation.
 
 ## What it is
 
-A runtime-toggleable hierarchical profiler with **four sibling top-level
-trees** displayed as stacked tables in the perf panel:
+A runtime-toggleable hierarchical profiler with **six sibling top-level
+trees** displayed as stacked tables in the perf panel (v1.10):
 
 ```
-frame                ← outer RAF callback wall-clock (TS-side)
+frame                ← outer RAF callback wall-clock (TS-side, main)
   frame.snapshot.read
   frame.render_world
     frame.render_world.grass
     frame.render_world.creatures
 
-tick                 ← main sim worker per-tick wall-clock (Rust-side)
+sim_worker           ← outer worker-loop iteration wall-clock (TS-side, worker)
+  sim_worker.read_input_sab     ← drain CTRL_* SAB into worker locals
+  sim_worker.tick               ← world.step_n(1)
+  sim_worker.write_output_sab   ← snapshot + inspect/profile/NN-stats responses
+
+tick                 ← per-tick sim wall-clock (Rust-side)
   tick.grid.rebuild
   tick.nn                       (LEAF — wall-clock wait for rayon)
   tick.movement
@@ -27,9 +32,13 @@ tick                 ← main sim worker per-tick wall-clock (Rust-side)
   tick.color_ema
   tick.bookkeeping_tail
 
+snapshot             ← write_snapshot_to wall-clock (Rust-side)
+
 nn                   ← sum-busy across all rayon workers, per tick
   nn.build_input
-  nn.proximity
+    nn.build_input.proximity
+      nn.build_input.proximity.creatures
+      nn.build_input.proximity.grass
   nn.forward
     nn.forward.l1
     nn.forward.l2
@@ -41,6 +50,17 @@ grass_step           ← sum-busy across all rayon workers, per tick
     grass_step.row_compute.body
   grass_step.bitset_rebuild
 ```
+
+v1.10 additions:
+- The `sim_worker` tree is published from the worker via
+  `WorldHandle::record_profile_sample(root, path, dur_us,
+  call_count)`. The worker measures with `performance.now()`; the
+  Rust profiler is the always-on shared instance that reaches main.
+- The `snapshot` tree is a Rust-side external-timer entry recorded
+  inside `WorldHandle::write_snapshot_to`. Single node, root-only path.
+- The `nn.proximity*` rows moved under `nn.build_input` to reflect
+  the actual call structure (`build_nn_input` invokes the proximity
+  scans).
 
 ## What it owns
 
@@ -195,16 +215,29 @@ nodes (every tree gets one drained sample per tick), so one number
 describes the whole panel and `tick.total_ms = 40 s` is interpretable
 without guessing what window backed it.
 
-## Known limitation: the dead `worker.snapshot.write` span
+## Worker-side spans (v1.10 escape hatch)
 
-`web/src/sim-worker.ts` opens a TS-side `worker.snapshot.write` span
-inside the SAB write block, but the worker's TS perf module is a
-separate instance from main's — and main never reads worker-side TS
-spans. The span has been a silent no-op since SAB-snapshot landed.
-Fixing it requires either a worker→main perf-message channel or
-relocating the span to wrap the postMessage on the receiving side
-(which would no longer measure the same thing). Known limitation;
-flagged for a future pass.
+The worker's TS perf module is still a separate instance from main's
+— main never reads worker-side TS spans directly. v1.10 added
+`WorldHandle::record_profile_sample(root, path, dur_us, call_count)`
+so the worker can publish JS-measured durations into the always-on
+Rust profile tree, which *is* what main reads through
+`profile_report_json`.
+
+Pattern:
+
+```ts
+const t0 = performance.now();
+doWork();
+world.record_profile_sample("sim_worker", "tick",
+  Math.round((performance.now() - t0) * 1000), 1);
+```
+
+The three `sim_worker.*` spans use this pattern. Any new worker-side
+span that wants to reach the perf panel should too.
+
+(The historical TS-side `worker.snapshot.write` span has been deleted;
+the `snapshot` Rust-side tree replaces it.)
 
 ## Code anchors
 

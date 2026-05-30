@@ -104,34 +104,8 @@ sneaks into staging via `git add -A`, the `.gitignore` entry covers
 fresh ones but already-staged ones need an explicit
 `git rm --cached -r ...`.
 
-## Running tests / gates
-
-The standard per-commit gate suite for code changes:
-
-```bash
-cargo fmt --all --check
-cargo build
-cargo test --lib
-cargo test --lib --features threads
-cargo clippy --all-targets -- -D warnings
-cargo clippy --all-targets --features threads -- -D warnings
-cd web && pnpm typecheck && pnpm build && cd -
-```
-
-Threaded wasm rebuild (when Rust changed):
-
-```bash
-rustup run nightly wasm-pack build --target web --out-dir web/wasm --dev --features threads
-grep -c initThreadPool web/wasm/evosim.js   # → 2
-grep -F 'shared:true'  web/wasm/evosim.js   # → 1
-```
-
-Skip the wasm rebuild only when no Rust source files changed.
-
 ## See also
 
+- [`index.md`](index.md)
 - [`coding-style.md`](coding-style.md)
-- [`dev-loop.md`](dev-loop.md)
-- [`testing-how-to.md`](testing-how-to.md)
 - [`maintaining-docs.md`](maintaining-docs.md)
-- [`../architecture/build-and-deploy.md`](../architecture/build-and-deploy.md)

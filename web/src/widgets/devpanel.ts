@@ -114,7 +114,7 @@ function refreshDirtyState(): void {
   if (footerCancel) footerCancel.disabled = !anyDirty;
 }
 
-function applyAll(simBridge: SimBridge): void {
+function applyAll(getBridge: () => SimBridge): void {
   let anyConstructionOnly = false;
   for (const h of stagedHandles) {
     if (!isDirty(h)) continue;
@@ -126,7 +126,7 @@ function applyAll(simBridge: SimBridge): void {
     } else {
       setSetting(h.settingKey as keyof Settings, v as never);
     }
-    simBridge.debouncedSetSlider(h.simName, v);
+    getBridge().debouncedSetSlider(h.simName, v);
     h.snapshot = v;
     if (CONSTRUCTION_ONLY_SLIDERS.has(h.simName)) anyConstructionOnly = true;
   }
@@ -142,14 +142,14 @@ function cancelAll(): void {
   refreshDirtyState();
 }
 
-function resetAll(simBridge: SimBridge): void {
+function resetAll(getBridge: () => SimBridge): void {
   let anyConstructionOnly = false;
   resetSettings();
   for (const h of stagedHandles) {
     const defaultVal = (DEFAULTS as unknown as Record<string, number | boolean>)[h.settingKey];
     const v = typeof defaultVal === "boolean" ? (defaultVal ? 1 : 0) : (defaultVal as number);
     h.writeWidget(v);
-    simBridge.debouncedSetSlider(h.simName, v);
+    getBridge().debouncedSetSlider(h.simName, v);
     if (h.snapshot !== v && CONSTRUCTION_ONLY_SLIDERS.has(h.simName)) {
       anyConstructionOnly = true;
     }
@@ -452,7 +452,7 @@ const UPKEEP_PER_TICK_DEFAULT = 0.17;
 
 // ─── Install ──────────────────────────────────────────────────────────────
 
-export function installDevPanel(simBridge: SimBridge): void {
+export function installDevPanel(getBridge: () => SimBridge): void {
   const box = document.getElementById("devpanel-box") as HTMLDivElement | null;
   if (!box) return;
 
@@ -661,6 +661,17 @@ export function installDevPanel(simBridge: SimBridge): void {
     min: 0, max: 10, step: 0.1,
     formatValue: (v) => v.toFixed(1),
   }));
+  // v1.10: user-tunable population cap below the SAB-bound MAX_POP_FOR_SIM.
+  // Defaults to MAX_POP_FOR_SIM (no effective cap). Lower it to stay in the
+  // performance-smooth regime — at high pop the spatial-grid + repulsion
+  // pass scales superlinearly with creature density.
+  lifeSec.appendChild(makeStagedSlider({
+    label: "Max population",
+    simName: "max_population",
+    settingKey: "maxPopulation",
+    min: 1, max: 32_000, step: 100,
+    formatValue: (v) => String(Math.round(v)),
+  }));
   box.appendChild(lifeSec);
 
   // Dynamic split-threshold cap = energy_max - 1.
@@ -717,8 +728,8 @@ export function installDevPanel(simBridge: SimBridge): void {
   footerApply = document.getElementById("settings-apply") as HTMLButtonElement | null;
   footerCancel = document.getElementById("settings-cancel") as HTMLButtonElement | null;
   const footerReset = document.getElementById("settings-reset") as HTMLButtonElement | null;
-  if (footerApply) footerApply.addEventListener("click", () => applyAll(simBridge));
+  if (footerApply) footerApply.addEventListener("click", () => applyAll(getBridge));
   if (footerCancel) footerCancel.addEventListener("click", () => cancelAll());
-  if (footerReset) footerReset.addEventListener("click", () => resetAll(simBridge));
+  if (footerReset) footerReset.addEventListener("click", () => resetAll(getBridge));
   refreshDirtyState();
 }

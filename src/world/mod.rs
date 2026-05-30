@@ -77,6 +77,12 @@ pub struct DevSliders {
     /// historical value. Higher values make collisions look "harder" but can
     /// cause oscillation at high overlap depths.
     pub repulsion_max: f32,
+    /// User-tunable population cap. The cull in `handle_births` clamps pop
+    /// to `min(this, MAX_POP_FOR_SIM)` after every birth phase. The hard
+    /// `MAX_POP_FOR_SIM` is the SAB-sized invariant; this slider lets the
+    /// user hold pop below that in the performance-smooth regime without
+    /// changing the build.
+    pub max_population: u32,
 }
 
 impl Default for DevSliders {
@@ -106,6 +112,7 @@ impl Default for DevSliders {
             auto_curriculum: true,
             digestion_cooldown_ticks: DIGESTION_COOLDOWN_TICKS,
             repulsion_max: REPULSION_MAX,
+            max_population: MAX_POP_FOR_SIM as u32,
         }
     }
 }
@@ -543,14 +550,18 @@ impl World {
         }
 
         // Population-cap cull. Every split that could fire has fired (parents
-        // got reproductive success); now if pop exceeds the SAB-bound cap,
-        // randomly cull the excess. Newborns are eligible — the "splitters get
-        // prioritized" property is structural (they reproduced before the
-        // sample fired), not via newborn protection. RNG is deterministic so
-        // seed→outcome stays reproducible.
+        // got reproductive success); now if pop exceeds the active cap,
+        // randomly cull the excess. The effective cap is the smaller of the
+        // user-tunable `sliders.max_population` (UI slider, default
+        // `MAX_POP_FOR_SIM`) and the hard SAB-bound `MAX_POP_FOR_SIM` —
+        // the latter is a structural invariant the snapshot SAB size depends
+        // on, while the former lets users hold pop low enough to stay in a
+        // smooth performance regime without changing the build.
         let post_birth = self.creatures.len();
-        if post_birth > MAX_POP_FOR_SIM {
-            let excess = post_birth - MAX_POP_FOR_SIM;
+        let active_cap = (self.sliders.max_population as usize).min(MAX_POP_FOR_SIM);
+        let active_cap = active_cap.max(1);
+        if post_birth > active_cap {
+            let excess = post_birth - active_cap;
             // Reservoir-style sample without replacement: walk the index pool
             // and swap-pop one at a time. O(post_birth) memory for the pool,
             // O(excess) RNG draws. Pool is promoted (`scratch_cull_pool`) so

@@ -11,18 +11,92 @@ pub const JANK_BUDGET_MS: f64 = 16.0;
 /// Rolling window size (in ticks) for the TPS average.
 const TPS_WINDOW: usize = 10;
 
+/// Canonical ordered list of dev-panel slider names. Indices are stable across
+/// the SAB transport: TS writes `value` into `CTRL_SLIDERS[idx]` + bumps
+/// `CTRL_CONTROL_EPOCH`, the worker reads at top of tick and dispatches via
+/// [`WorldHandle::set_slider_by_index`]. Re-generate TS bindings after
+/// modifying this list: `cargo run --bin gen-bindings`. A drift unit test
+/// catches mismatches at `cargo test --lib`.
+pub const SLIDER_NAMES: &[&str] = &[
+    "mutation_rate_multiplier", // 0  f32
+    "nn_mutation_sigma",        // 1  f32
+    "eat_bite_fraction",        // 2  f32
+    "grass_propagation_rate_k", // 3  f32
+    "grass_in_cell_growth_r",   // 4  f32
+    "upkeep_multiplier",        // 5  f32
+    "move_cost_multiplier",     // 6  f32
+    "energy_max",               // 7  f32
+    "grass_energy_per_bite",    // 8  f32
+    "grass_bites_per_block",    // 9  u32 (carried as f32)
+    "digestion_cooldown",       // 10 u32 (carried as f32)
+    "repulsion_max",            // 11 f32
+    "max_age",                  // 12 u32 (carried as f32)
+    "split_threshold",          // 13 f32
+    "split_gift",               // 14 f32
+    "split_jitter",             // 15 f32
+    "founder_count",            // 16 u32 (carried as f32)
+    "curriculum_min_pop",       // 17 u32 (carried as f32)
+    "curriculum_max_pop",       // 18 u32 (carried as f32)
+    "curriculum_min_factor",    // 19 f32
+    "auto_curriculum",          // 20 bool (0.0 / non-zero)
+    "full_grass_on_init",       // 21 bool (0.0 / non-zero)
+    "max_population",           // 22 u32 (carried as f32) — user-tunable cap
+];
+
+/// Number of slots in `CTRL_SLIDERS`. Equal to `SLIDER_NAMES.len()`.
+pub const SLIDER_COUNT: usize = SLIDER_NAMES.len();
+
+// ─── v1.11 (A+D): wasm-memory-resident snapshot buffer ──────────────────────
+//
+// The snapshot region lives inside `WorldHandle::snapshot_buf` — a Rust-owned
+// `Vec<u8>` in wasm linear memory. Wasm memory is itself a SharedArrayBuffer
+// (we have shared memory enabled), so the main thread reads via a view over
+// `wasm.memory.buffer` at the byte offset returned by
+// `WorldHandle::snapshot_buf_byte_offset`. This eliminates the per-call
+// `js_sys::Uint8Array::copy_from` boundary crossings that dominated snapshot
+// cost (~4 ms / tick at pop 80).
+//
+// Grass density is stored as raw f32 (no `(d * 255) as u8` quantize). The
+// renderer uploads it as an `R32F` texture (WebGL2 supports this natively).
+// Trade: 4× more grass bytes per slot (3.7 MB vs 921 KB) for zero quantize
+// work in the sim worker — net win, since the wasm-internal memcpy is much
+// faster than the boundary copy plus quantize.
+
+/// Bytes per snapshot stats header (matches `SNAPSHOT_HEADER_BYTES` TS-side).
+/// 20 bytes payload + 12 bytes padding so the creature SoA that follows is
+/// 32-byte aligned (creature stride is 32 bytes).
+pub const SNAPSHOT_HEADER_BYTES: usize = 32;
+/// Bytes per creature record in the snapshot SoA (matches CREATURE_STRIDE × 4).
+pub const SNAPSHOT_CREATURE_STRIDE: usize = 32;
+/// Total creature SoA region size per slot.
+pub const SNAPSHOT_CREATURE_BYTES: usize = MAX_POP_FOR_SIM * SNAPSHOT_CREATURE_STRIDE;
+/// Total grass region size per slot — v1.11: f32 per cell (no quantize).
+pub const SNAPSHOT_GRASS_BYTES: usize = GRASS_CELL_COUNT * 4;
+/// Bytes per snapshot slot.
+pub const SNAPSHOT_SLOT_BYTES: usize =
+    SNAPSHOT_HEADER_BYTES + SNAPSHOT_CREATURE_BYTES + SNAPSHOT_GRASS_BYTES;
+/// Total snapshot region size — two double-buffered slots.
+pub const SNAPSHOT_BUF_BYTES: usize = 2 * SNAPSHOT_SLOT_BYTES;
+
 #[wasm_bindgen]
 pub struct WorldHandle {
     inner: World,
-    /// Reusable u8-quantized grass buffer used by `write_snapshot_to` to stage
-    /// the per-cell `(d * 255.0) as u8` density before the SAB copy. Only read
-    /// on wasm32 (the native `write_snapshot_to_native` test path quantizes
-    /// directly into the caller's `Vec<u8>`).
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-    grass_buf_u8: Vec<u8>,
-    /// Rolling window of per-tick wall-clock durations in milliseconds (last TPS_WINDOW ticks).
-    /// Used to compute TPS rolling average.
-    tick_durations_ms: std::collections::VecDeque<f64>,
+    /// v1.11 (A): wasm-memory-resident snapshot region. Fixed size
+    /// `SNAPSHOT_BUF_BYTES`, allocated once at construction. Main thread
+    /// reads via `new Uint8Array(wasm.memory.buffer, snapshot_buf_byte_offset,
+    /// SNAPSHOT_BUF_BYTES)`. The two double-buffered slots, the stats
+    /// header layout, the creature SoA stride, and the grass f32 format
+    /// are all locked at boot and never change for the worker's lifetime.
+    snapshot_buf: Vec<u8>,
+    /// Rolling window of wall-clock intervals (ms) between successive tick
+    /// completions — i.e. tick-end-to-tick-end, *including* whatever pacing
+    /// wait the worker imposed between iterations. This is what the
+    /// user-visible TPS counter divides into. Per-tick *work* time (used for
+    /// jank accounting) is computed inline and not stored.
+    tick_intervals_ms: std::collections::VecDeque<f64>,
+    /// Wall-clock timestamp (ms) at which the previous tick completed, or
+    /// `None` before the first tick. Drives the interval calculation above.
+    last_tick_end_ms: Option<f64>,
     /// Count of ticks whose wall-clock duration exceeded JANK_BUDGET_MS.
     jank_count: u32,
 }
@@ -45,8 +119,9 @@ impl WorldHandle {
         let inner = World::new_with_sliders(actual_seed, crate::world::DevSliders::default());
         Self {
             inner,
-            grass_buf_u8: Vec::new(),
-            tick_durations_ms: std::collections::VecDeque::new(),
+            snapshot_buf: vec![0u8; SNAPSHOT_BUF_BYTES],
+            tick_intervals_ms: std::collections::VecDeque::new(),
+            last_tick_end_ms: None,
             jank_count: 0,
         }
     }
@@ -81,8 +156,9 @@ impl WorldHandle {
         let inner = World::new_with_sliders(actual_seed, sliders);
         Self {
             inner,
-            grass_buf_u8: Vec::new(),
-            tick_durations_ms: std::collections::VecDeque::new(),
+            snapshot_buf: vec![0u8; SNAPSHOT_BUF_BYTES],
+            tick_intervals_ms: std::collections::VecDeque::new(),
+            last_tick_end_ms: None,
             jank_count: 0,
         }
     }
@@ -100,13 +176,20 @@ impl WorldHandle {
         for _ in 0..n {
             let t0 = wasm_now_ms();
             let alive = self.inner.tick_once();
-            let dur_ms = wasm_now_ms() - t0;
-            // Record in rolling window.
-            if self.tick_durations_ms.len() >= TPS_WINDOW {
-                self.tick_durations_ms.pop_front();
+            let now = wasm_now_ms();
+            let work_dur_ms = now - t0;
+            // TPS uses the wall-clock interval between consecutive tick
+            // completions so it correctly reflects pacing waits, not just
+            // computation time. Skip the very first tick (no prior anchor).
+            if let Some(prev) = self.last_tick_end_ms {
+                let interval_ms = now - prev;
+                if self.tick_intervals_ms.len() >= TPS_WINDOW {
+                    self.tick_intervals_ms.pop_front();
+                }
+                self.tick_intervals_ms.push_back(interval_ms);
             }
-            self.tick_durations_ms.push_back(dur_ms);
-            if dur_ms > JANK_BUDGET_MS {
+            self.last_tick_end_ms = Some(now);
+            if work_dur_ms > JANK_BUDGET_MS {
                 self.jank_count = self.jank_count.saturating_add(1);
             }
             if !alive {
@@ -116,15 +199,16 @@ impl WorldHandle {
         true
     }
 
-    /// Rolling average ticks-per-second over the last 60 ticks.
-    /// Returns 0.0 if fewer than 2 samples are available.
+    /// Rolling average ticks-per-second over the last `TPS_WINDOW` tick
+    /// intervals (tick-end-to-tick-end, includes pacing waits). Returns 0.0
+    /// until at least one interval has been observed.
     #[wasm_bindgen(getter)]
     pub fn tps(&self) -> f32 {
-        let n = self.tick_durations_ms.len();
-        if n < 2 {
+        let n = self.tick_intervals_ms.len();
+        if n == 0 {
             return 0.0;
         }
-        let total_ms: f64 = self.tick_durations_ms.iter().sum();
+        let total_ms: f64 = self.tick_intervals_ms.iter().sum();
         if total_ms <= 0.0 {
             return 0.0;
         }
@@ -141,6 +225,18 @@ impl WorldHandle {
     #[wasm_bindgen]
     pub fn reset_jank(&mut self) {
         self.jank_count = 0;
+    }
+
+    /// v1.10: publish a worker-side JS-measured span into the always-on Rust
+    /// profile tree so it reaches the perf panel through `profile_report_json`.
+    /// Used by the sim worker for the three `sim_worker.*` spans bracketing
+    /// one loop iteration (the worker's TS perf module is a separate instance
+    /// from main's, so we route through the Rust profiler instead).
+    #[wasm_bindgen]
+    pub fn record_profile_sample(&self, root: &str, path: &str, dur_us: u32, call_count: u32) {
+        self.inner
+            .profile
+            .record_under_root(root, path, dur_us, call_count.max(1));
     }
 
     #[wasm_bindgen(getter)]
@@ -184,72 +280,151 @@ impl WorldHandle {
         GRASS_CELL_SIZE
     }
 
-    // ─── v1.6 S A1: SAB snapshot writer ─────────────────────────────────────
+    // ─── v1.11 (A+D): wasm-memory snapshot writer ────────────────────────────
 
-    /// Write a full snapshot (stats header + creature SoA + grass density)
-    /// into three caller-provided `Uint8Array` views over a SharedArrayBuffer.
-    /// Wave C wires this from the sim worker after each `step_n(batch)`.
+    /// Byte offset of the snapshot region's first byte inside wasm linear
+    /// memory. Main thread constructs `new Uint8Array(wasm.memory.buffer,
+    /// snapshot_buf_byte_offset(), SNAPSHOT_BUF_BYTES)` after `boot_ready`
+    /// and reuses that view across frames.
+    #[wasm_bindgen(getter)]
+    pub fn snapshot_buf_byte_offset(&self) -> u32 {
+        self.snapshot_buf.as_ptr() as u32
+    }
+
+    /// Total length of the snapshot region in bytes. Stable across the
+    /// worker's lifetime — no growth, no reallocation.
+    #[wasm_bindgen(getter)]
+    pub fn snapshot_buf_byte_len(&self) -> u32 {
+        SNAPSHOT_BUF_BYTES as u32
+    }
+
+    /// Byte offset within the snapshot region for slot `slot` (0 or 1).
+    #[wasm_bindgen(getter)]
+    pub fn snapshot_slot_bytes(&self) -> u32 {
+        SNAPSHOT_SLOT_BYTES as u32
+    }
+
+    /// Bytes per snapshot stats header (header + alignment padding).
+    #[wasm_bindgen(getter)]
+    pub fn snapshot_header_bytes(&self) -> u32 {
+        SNAPSHOT_HEADER_BYTES as u32
+    }
+
+    /// Bytes per creature region per slot.
+    #[wasm_bindgen(getter)]
+    pub fn snapshot_creature_bytes(&self) -> u32 {
+        SNAPSHOT_CREATURE_BYTES as u32
+    }
+
+    /// Bytes per grass region per slot (v1.11: f32 grass, 4× per cell).
+    #[wasm_bindgen(getter)]
+    pub fn snapshot_grass_bytes(&self) -> u32 {
+        SNAPSHOT_GRASS_BYTES as u32
+    }
+
+    /// Write a full snapshot (stats header + creature SoA + f32 grass) into
+    /// the requested slot of `self.snapshot_buf` (which lives in wasm linear
+    /// memory). No JS-side `Uint8Array` parameters — main reads the same
+    /// region via a view over `wasm.memory.buffer`. The atomic flip + seq
+    /// bump on the control SAB remain the worker's responsibility.
     ///
-    /// Layout — all little-endian, all packed:
-    ///
-    /// `stats_dst` (≥ 20 bytes):
-    ///   - `[0..4)`   `tick: u32`
-    ///   - `[4..8)`   `pop: u32` (post-truncation count actually written)
-    ///   - `[8..12)`  `world_ended: u32` (0/1)
-    ///   - `[12..16)` `tps_bits: u32` = `self.tps().to_bits()` — reader does
-    ///                 `new Float32Array(buf, off + 12, 1)[0]`. f32 round-trip,
-    ///                 no encoding decision (plan-review I4).
-    ///   - `[16..20)` `jank_count: u32`
-    ///
-    /// `creatures_dst` (≥ `MAX_POP_FOR_SIM × 32` bytes):
-    ///   Creature SoA at 32-byte stride, identical layout to `creatures_buffer`:
-    ///   `[x, y, body_r, r, g, b, f32::from_bits(id_lo), f32::from_bits(id_hi)]`.
-    ///   All `pop` creatures written — `World::handle_births` keeps
-    ///   `pop <= MAX_POP_FOR_SIM` as a sim invariant.
-    ///
-    /// `grass_dst` (≥ `GRASS_CELL_COUNT` bytes):
-    ///   Quantized density `(d * 255.0).clamp(0, 255) as u8` per cell.
-    ///
-    /// **No Rust-side profile span.** The corresponding TS-side span
-    /// `worker.snapshot.write` lands in Wave C (called from JS, no Rust RAII
-    /// parent — opening a Rust span here would orphan at root level).
-    #[cfg(target_arch = "wasm32")]
+    /// Layout per slot (little-endian throughout):
+    ///   `[0..20)`   tick, pop, world_ended, tps_bits, jank_count   (u32 each)
+    ///   `[20..32)`  padding (32-byte align for creature SoA)
+    ///   `[32..32 + MAX_POP_FOR_SIM × 32)` creature SoA, 32 B stride
+    ///   `[trailing GRASS_CELL_COUNT × 4 bytes)` f32 grass density
     #[wasm_bindgen]
-    pub fn write_snapshot_to(
-        &mut self,
-        creatures_dst: js_sys::Uint8Array,
-        grass_dst: js_sys::Uint8Array,
-        stats_dst: js_sys::Uint8Array,
-    ) {
-        let pop_written = self.write_creatures_each(|i, buf32| {
-            // copy_from on a fresh subarray view — cheap (single memcpy).
-            creatures_dst
-                .subarray((i * 32) as u32, ((i + 1) * 32) as u32)
-                .copy_from(buf32);
-        });
+    pub fn write_snapshot(&mut self, slot: u32) {
+        let profile_on = self.inner.profile.enabled();
+        let snap_start = if profile_on {
+            Some(crate::profiler::clock_now_us_threadsafe())
+        } else {
+            None
+        };
 
-        // Stats header — 20 bytes LE at offset 0.
-        let mut header = [0u8; 20];
-        header[0..4].copy_from_slice(&self.inner.tick.to_le_bytes());
+        let slot_idx = (slot as usize) & 1;
+        let slot_base = slot_idx * SNAPSHOT_SLOT_BYTES;
+
+        // Creatures: write the per-creature 32 B records directly into the
+        // creature region. No JS boundary — `write_creatures_each` builds an
+        // f32x8 scratch per creature and we copy it byte-for-byte. v1.11: the
+        // dest is just a `&mut [u8]` slice inside our own wasm-memory buffer.
+        let creatures_start = if profile_on {
+            Some(crate::profiler::clock_now_us_threadsafe())
+        } else {
+            None
+        };
+        let creatures_off = slot_base + SNAPSHOT_HEADER_BYTES;
+        let pop_written = {
+            let buf = &mut self.snapshot_buf;
+            let creatures_region = &mut buf[creatures_off..creatures_off + SNAPSHOT_CREATURE_BYTES];
+            write_creatures_each_into(&self.inner, creatures_region)
+        };
+        let creatures_end = if profile_on {
+            Some(crate::profiler::clock_now_us_threadsafe())
+        } else {
+            None
+        };
+
+        // Stats header — 20 bytes LE at slot offset 0.
+        let tps_bits = self.tps().to_bits();
+        let jank = self.jank_count;
+        let tick = self.inner.tick;
+        let ended = if self.inner.world_ended { 1u32 } else { 0u32 };
+        let header = &mut self.snapshot_buf[slot_base..slot_base + 20];
+        header[0..4].copy_from_slice(&tick.to_le_bytes());
         header[4..8].copy_from_slice(&(pop_written as u32).to_le_bytes());
-        header[8..12]
-            .copy_from_slice(&(if self.inner.world_ended { 1u32 } else { 0u32 }).to_le_bytes());
-        header[12..16].copy_from_slice(&self.tps().to_bits().to_le_bytes());
-        header[16..20].copy_from_slice(&self.jank_count.to_le_bytes());
-        stats_dst.subarray(0, 20).copy_from(&header);
+        header[8..12].copy_from_slice(&ended.to_le_bytes());
+        header[12..16].copy_from_slice(&tps_bits.to_le_bytes());
+        header[16..20].copy_from_slice(&jank.to_le_bytes());
 
-        // Grass — quantized to u8. Buffer reused across snapshots to avoid the
-        // 921_600-byte re-allocation per tick.
-        let density = &self.inner.grass.density;
-        self.grass_buf_u8.clear();
-        self.grass_buf_u8.reserve(density.len());
-        for d in density {
-            let q = (d * 255.0).clamp(0.0, 255.0) as u8;
-            self.grass_buf_u8.push(q);
+        // Grass: raw f32 density bytes. No quantize, no boundary crossing.
+        // Single contiguous memcpy from the sim's internal density `Vec<f32>`
+        // into the snapshot region. ~3.7 MB at typical RAM bandwidth ≈ 0.4 ms
+        // versus the prior 2.8 ms parallel quantize + 0.65 ms boundary copy.
+        let grass_start = if profile_on {
+            Some(crate::profiler::clock_now_us_threadsafe())
+        } else {
+            None
+        };
+        let grass_off = slot_base + SNAPSHOT_HEADER_BYTES + SNAPSHOT_CREATURE_BYTES;
+        let density: &[f32] = &self.inner.grass.density;
+        let density_bytes: &[u8] = bytemuck_slice_cast(density);
+        self.snapshot_buf[grass_off..grass_off + SNAPSHOT_GRASS_BYTES]
+            .copy_from_slice(density_bytes);
+        let grass_end = if profile_on {
+            Some(crate::profiler::clock_now_us_threadsafe())
+        } else {
+            None
+        };
+
+        if let (Some(start), Some(c0), Some(c1), Some(g0), Some(g1)) = (
+            snap_start,
+            creatures_start,
+            creatures_end,
+            grass_start,
+            grass_end,
+        ) {
+            let prof = &self.inner.profile;
+            prof.record_under_root(
+                "sim_worker",
+                "write_output_sab.snapshot",
+                g1.saturating_sub(start) as u32,
+                1,
+            );
+            prof.record_under_root(
+                "sim_worker",
+                "write_output_sab.snapshot.creatures",
+                c1.saturating_sub(c0) as u32,
+                pop_written.max(1) as u32,
+            );
+            prof.record_under_root(
+                "sim_worker",
+                "write_output_sab.snapshot.grass_copy",
+                g1.saturating_sub(g0) as u32,
+                1,
+            );
         }
-        grass_dst
-            .subarray(0, self.grass_buf_u8.len() as u32)
-            .copy_from(&self.grass_buf_u8);
     }
 
     // ─── Per-slider typed setters (S17) ─────────────────────────────────────
@@ -313,6 +488,12 @@ impl WorldHandle {
         // so the boot payload can round-trip it via set_slider.
         self.inner.sliders.full_grass_on_init = value;
     }
+    fn apply_max_population(&mut self, value: u32) {
+        // Clamp into [1, MAX_POP_FOR_SIM]. The SAB-bound cap is structural —
+        // we never let the soft cap exceed it (extra births above MAX_POP_FOR_SIM
+        // would have no slot in the snapshot creature region).
+        self.inner.sliders.max_population = value.clamp(1, MAX_POP_FOR_SIM as u32);
+    }
     fn apply_curriculum_min_pop(&mut self, value: u32) {
         self.inner.sliders.curriculum_min_pop = value;
     }
@@ -340,40 +521,60 @@ impl WorldHandle {
         Ok(())
     }
 
+    /// SAB hot-path entry: apply slider by canonical index (see
+    /// [`SLIDER_NAMES`]). Indices are stable and shared with TS via
+    /// `web/src/generated/slider-ids.ts` (regenerate via
+    /// `cargo run --bin gen-bindings`). Out-of-range indices are ignored.
+    #[wasm_bindgen]
+    pub fn set_slider_by_index(&mut self, idx: u32, value: f32) {
+        self.apply_slider_by_index(idx as usize, value);
+    }
+
     /// Pure Rust helper: apply a named slider; returns `true` on success.
     /// Factored out so native tests can exercise the name-dispatch table
     /// without constructing a `JsValue` (which panics on non-wasm32 targets).
     fn try_set_slider(&mut self, name: &str, value: f32) -> bool {
-        match name {
-            "mutation_rate_multiplier" => self.apply_mutation_rate_multiplier(value),
-            "nn_mutation_sigma" => self.apply_nn_mutation_sigma(value),
-            "eat_bite_fraction" => self.apply_eat_bite_fraction(value),
-            "grass_propagation_rate_k" => self.apply_grass_propagation_rate_k(value),
-            "grass_in_cell_growth_r" => self.apply_grass_in_cell_growth_r(value),
-            "upkeep_multiplier" => self.apply_upkeep_multiplier(value),
-            "move_cost_multiplier" => self.apply_move_cost_multiplier(value),
-            "energy_max" => self.apply_energy_max(value),
-            "grass_energy_per_bite" => self.apply_grass_energy_per_bite(value),
-            // grass_bites_per_block is u32; round the float input. Below-1
-            // values are clamped by the apply_ helper.
-            "grass_bites_per_block" => self.apply_grass_bites_per_block(value.max(0.0) as u32),
-            "digestion_cooldown" => self.apply_digestion_cooldown(value.max(0.0) as u32),
-            "repulsion_max" => self.apply_repulsion_max(value),
-            "max_age" => self.apply_max_age(value.max(0.0) as u32),
-            "split_threshold" => self.apply_split_threshold(value),
-            "split_gift" => self.apply_split_gift(value),
-            "split_jitter" => self.apply_split_jitter(value),
-            "founder_count" => self.apply_founder_count(value.max(0.0) as u32),
-            "curriculum_min_pop" => self.apply_curriculum_min_pop(value.max(0.0) as u32),
-            "curriculum_max_pop" => self.apply_curriculum_max_pop(value.max(0.0) as u32),
-            "curriculum_min_factor" => self.apply_curriculum_min_factor(value),
-            // Bools ride `set_slider` as 0/1 so the protocol surface stays
-            // minimal — no dedicated bool message kinds.
-            "auto_curriculum" => self.apply_auto_curriculum(value != 0.0),
-            "full_grass_on_init" => self.apply_full_grass_on_init(value != 0.0),
-            _ => return false,
+        match SLIDER_NAMES.iter().position(|n| *n == name) {
+            Some(idx) => {
+                self.apply_slider_by_index(idx, value);
+                true
+            }
+            None => false,
         }
-        true
+    }
+
+    /// Inner dispatch shared by `set_slider` (name lookup) and
+    /// `set_slider_by_index` (direct index from SAB). Indices map to
+    /// [`SLIDER_NAMES`] in declaration order.
+    fn apply_slider_by_index(&mut self, idx: usize, value: f32) {
+        match idx {
+            0 => self.apply_mutation_rate_multiplier(value),
+            1 => self.apply_nn_mutation_sigma(value),
+            2 => self.apply_eat_bite_fraction(value),
+            3 => self.apply_grass_propagation_rate_k(value),
+            4 => self.apply_grass_in_cell_growth_r(value),
+            5 => self.apply_upkeep_multiplier(value),
+            6 => self.apply_move_cost_multiplier(value),
+            7 => self.apply_energy_max(value),
+            8 => self.apply_grass_energy_per_bite(value),
+            // u32 sliders: round float input; apply_ clamps below floor.
+            9 => self.apply_grass_bites_per_block(value.max(0.0) as u32),
+            10 => self.apply_digestion_cooldown(value.max(0.0) as u32),
+            11 => self.apply_repulsion_max(value),
+            12 => self.apply_max_age(value.max(0.0) as u32),
+            13 => self.apply_split_threshold(value),
+            14 => self.apply_split_gift(value),
+            15 => self.apply_split_jitter(value),
+            16 => self.apply_founder_count(value.max(0.0) as u32),
+            17 => self.apply_curriculum_min_pop(value.max(0.0) as u32),
+            18 => self.apply_curriculum_max_pop(value.max(0.0) as u32),
+            19 => self.apply_curriculum_min_factor(value),
+            // Bools encoded as 0|1 so protocol surface stays minimal.
+            20 => self.apply_auto_curriculum(value != 0.0),
+            21 => self.apply_full_grass_on_init(value != 0.0),
+            22 => self.apply_max_population(value.max(1.0) as u32),
+            _ => {} // out-of-range: silently ignore (forward-compat with newer TS).
+        }
     }
 
     /// Returns the SoA index of the topmost creature whose body circle (or
@@ -529,6 +730,14 @@ impl WorldHandle {
         self.inner.profile.clear();
     }
 
+    /// Set the profiler's rolling-window length in milliseconds. Clamped
+    /// inside `Profiler::set_window_ms` to [500, 600_000]. Plumbed from the
+    /// perf panel via the control SAB (`CTRL_PROFILE_WINDOW_MS`).
+    #[wasm_bindgen]
+    pub fn profile_set_window_ms(&self, ms: u32) {
+        self.inner.profile.set_window_ms(ms);
+    }
+
     /// JSON report of the current rolling 60-second profile tree.
     /// Walks ~30 nodes, prunes stale samples, writes ~5 KB string.
     /// Stable shape — see docs/plans/perf-timing.md §D5.
@@ -571,6 +780,7 @@ impl WorldHandle {
             "curriculum_min_factor": d.curriculum_min_factor,
             "auto_curriculum": if d.auto_curriculum { 1.0_f32 } else { 0.0 },
             "full_grass_on_init": if d.full_grass_on_init { 1.0_f32 } else { 0.0 },
+            "max_population": d.max_population as f32,
         });
         serde_json::to_string(&json).unwrap_or_else(|_| "{}".into())
     }
@@ -614,49 +824,63 @@ impl WorldHandle {
 // streams each creature's 32 bytes into a `js_sys::Uint8Array`) and the
 // native `write_snapshot_to_native` test (which streams into a `Vec<u8>`).
 
-impl WorldHandle {
-    /// Per-creature 32-byte serializer. Invokes `sink(i, &buf)` for each
-    /// creature in `[0, pop)`, then returns the number of creatures written.
-    /// `World::handle_births` keeps `pop <= MAX_POP_FOR_SIM` as a sim
-    /// invariant, so no truncation or warning lives here — a `debug_assert!`
-    /// surfaces the bug immediately in dev if that invariant ever breaks.
-    fn write_creatures_each<F>(&mut self, mut sink: F) -> usize
-    where
-        F: FnMut(usize, &[u8]),
-    {
-        let pop = self.inner.creatures.len();
-        debug_assert!(
-            pop <= MAX_POP_FOR_SIM,
-            "pop={pop} exceeds MAX_POP_FOR_SIM={MAX_POP_FOR_SIM} — sim cull broke",
-        );
-        let n = pop;
-        let body_r = CREATURE_SIZE * BODY_RADIUS_PER_SIZE;
-        let mut buf = [0u8; 32];
-        for i in 0..n {
-            let x = self.inner.creatures.x[i];
-            let y = self.inner.creatures.y[i];
-            // v1.5 S3: action-EMA color with 0.15 display floor.
-            let r = self.inner.creatures.color_r[i].max(0.15);
-            let g = self.inner.creatures.color_g[i].max(0.15);
-            let b = self.inner.creatures.color_b[i].max(0.15);
-            let id = self.inner.creatures.id[i];
-            let id_lo = id as u32;
-            let id_hi = (id >> 32) as u32;
-            buf[0..4].copy_from_slice(&x.to_le_bytes());
-            buf[4..8].copy_from_slice(&y.to_le_bytes());
-            buf[8..12].copy_from_slice(&body_r.to_le_bytes());
-            buf[12..16].copy_from_slice(&r.to_le_bytes());
-            buf[16..20].copy_from_slice(&g.to_le_bytes());
-            buf[20..24].copy_from_slice(&b.to_le_bytes());
-            // id_lo/id_hi as raw u32 bits — reader builds a Uint32Array view
-            // over the same 8 bytes; no float→int conversion either side.
-            buf[24..28].copy_from_slice(&id_lo.to_le_bytes());
-            buf[28..32].copy_from_slice(&id_hi.to_le_bytes());
-            sink(i, &buf);
-        }
-        n
+/// v1.11: write all creatures' 32-byte records into `dst` (must be ≥
+/// `MAX_POP_FOR_SIM * 32` bytes). Free function so callers can hold a
+/// `&mut [u8]` borrowed from a `WorldHandle` field while also reading
+/// `&World` — Rust's borrow checker forbids that pattern on a `&mut self`
+/// method. Returns the actual number of creatures written.
+fn fill_creature_bytes(world: &World, dst: &mut [u8]) -> usize {
+    let pop = world.creatures.len();
+    debug_assert!(
+        pop <= MAX_POP_FOR_SIM,
+        "pop={pop} exceeds MAX_POP_FOR_SIM={MAX_POP_FOR_SIM} — sim cull broke",
+    );
+    debug_assert!(dst.len() >= pop * 32, "dst too small for creature SoA",);
+    let body_r = CREATURE_SIZE * BODY_RADIUS_PER_SIZE;
+    for i in 0..pop {
+        let x = world.creatures.x[i];
+        let y = world.creatures.y[i];
+        // v1.5 S3: action-EMA color with 0.15 display floor.
+        let r = world.creatures.color_r[i].max(0.15);
+        let g = world.creatures.color_g[i].max(0.15);
+        let b = world.creatures.color_b[i].max(0.15);
+        let id = world.creatures.id[i];
+        let id_lo = id as u32;
+        let id_hi = (id >> 32) as u32;
+        let off = i * 32;
+        dst[off..off + 4].copy_from_slice(&x.to_le_bytes());
+        dst[off + 4..off + 8].copy_from_slice(&y.to_le_bytes());
+        dst[off + 8..off + 12].copy_from_slice(&body_r.to_le_bytes());
+        dst[off + 12..off + 16].copy_from_slice(&r.to_le_bytes());
+        dst[off + 16..off + 20].copy_from_slice(&g.to_le_bytes());
+        dst[off + 20..off + 24].copy_from_slice(&b.to_le_bytes());
+        // id_lo/id_hi as raw u32 bits — reader builds a Uint32Array view
+        // over the same 8 bytes; no float→int conversion either side.
+        dst[off + 24..off + 28].copy_from_slice(&id_lo.to_le_bytes());
+        dst[off + 28..off + 32].copy_from_slice(&id_hi.to_le_bytes());
     }
+    pop
+}
 
+/// Wrapper for `fill_creature_bytes` matching the v1.11 method-call site so
+/// the inner block can borrow `&mut self.snapshot_buf` without conflicting
+/// with `&self.inner`.
+#[inline]
+fn write_creatures_each_into(world: &World, dst: &mut [u8]) -> usize {
+    fill_creature_bytes(world, dst)
+}
+
+/// Reinterpret `&[f32]` as `&[u8]` for byte-level copy. Sound on wasm32
+/// (little-endian, no alignment trap on byte reads of f32-aligned data).
+#[inline]
+fn bytemuck_slice_cast(s: &[f32]) -> &[u8] {
+    // SAFETY: f32 is 4 bytes; wasm32 is little-endian. The bytes are read
+    // through a `*const u8`, which is always validly aligned. No mutation,
+    // no aliasing risk.
+    unsafe { std::slice::from_raw_parts(s.as_ptr() as *const u8, std::mem::size_of_val(s)) }
+}
+
+impl WorldHandle {
     /// Native (non-wasm32) twin of `write_snapshot_to` used by tests. Writes
     /// the same byte layout into three caller-provided `&mut Vec<u8>`s — the
     /// vecs are cleared and then filled to exactly the sizes the wasm path
@@ -672,10 +896,13 @@ impl WorldHandle {
         grass_dst: &mut Vec<u8>,
         stats_dst: &mut Vec<u8>,
     ) -> usize {
+        // v1.11: native test path mirrors the wasm-side layout (f32 grass,
+        // no quantize). Each Vec is sized to match exactly what main would
+        // read out of the wasm-memory snapshot region.
         creatures_dst.clear();
-        let pop_written = self.write_creatures_each(|_i, buf32| {
-            creatures_dst.extend_from_slice(buf32);
-        });
+        creatures_dst.resize(self.inner.creatures.len() * 32, 0);
+        let pop_written = fill_creature_bytes(&self.inner, creatures_dst);
+        creatures_dst.truncate(pop_written * 32);
 
         stats_dst.clear();
         stats_dst.extend_from_slice(&self.inner.tick.to_le_bytes());
@@ -686,11 +913,7 @@ impl WorldHandle {
         stats_dst.extend_from_slice(&self.jank_count.to_le_bytes());
 
         grass_dst.clear();
-        grass_dst.reserve(self.inner.grass.density.len());
-        for d in &self.inner.grass.density {
-            let q = (d * 255.0).clamp(0.0, 255.0) as u8;
-            grass_dst.push(q);
-        }
+        grass_dst.extend_from_slice(bytemuck_slice_cast(&self.inner.grass.density));
 
         pop_written
     }
@@ -788,12 +1011,21 @@ mod tests {
             assert_eq!(id, handle.inner.creatures.id[i]);
         }
 
-        // Grass: one byte per cell, quantized.
-        assert_eq!(grass.len(), crate::constants::GRASS_CELL_COUNT);
-        for (i, &q) in grass.iter().enumerate() {
-            let d = handle.inner.grass.density[i];
-            let expected = (d * 255.0).clamp(0.0, 255.0) as u8;
-            assert_eq!(q, expected, "cell {i} quantization mismatch");
+        // Grass: v1.11 ships f32 density (no quantize). One little-endian
+        // f32 per cell, contiguous.
+        assert_eq!(
+            grass.len(),
+            crate::constants::GRASS_CELL_COUNT * 4,
+            "grass region size = cells × 4 bytes per f32"
+        );
+        for i in 0..crate::constants::GRASS_CELL_COUNT {
+            let bytes: [u8; 4] = grass[i * 4..i * 4 + 4].try_into().unwrap();
+            let d_read = f32::from_le_bytes(bytes);
+            assert_eq!(
+                d_read.to_bits(),
+                handle.inner.grass.density[i].to_bits(),
+                "cell {i} f32 mismatch"
+            );
         }
     }
 

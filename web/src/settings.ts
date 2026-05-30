@@ -19,6 +19,9 @@ export interface Settings {
   showPopGraph: boolean;
   showGrass: boolean;
   grassOpacity: number;
+  // Profiler rolling-window length in ms. Drives both the Rust trees (via
+  // CTRL_PROFILE_WINDOW_MS) and the TS `frame` tree (via setProfilerWindowMs).
+  profilerWindowMs: number;
   // v1.9.1: right-rail open/closed; toggled by the ⚙ button + `~` hotkey.
   // Forced back open by a creature click (inspector flow).
   railOpen: boolean;
@@ -37,6 +40,7 @@ export interface Settings {
   grassBitesPerBlock: number;
   digestionCooldown: number;
   repulsionMax: number;
+  maxPopulation: number;
   initialGrassSeedCount: number;
   fullGrassOnInit: boolean;
   mutRate: number;
@@ -62,6 +66,7 @@ export const DEFAULTS: Settings = {
   showPopGraph: true,
   showGrass: true,
   grassOpacity: 1.0,
+  profilerWindowMs: 10_000,
   railOpen: true,
   theme: "charcoal",
   upkeepMultiplier: 1.0,
@@ -74,6 +79,7 @@ export const DEFAULTS: Settings = {
   grassBitesPerBlock: 2,
   digestionCooldown: 50,
   repulsionMax: 5.0,
+  maxPopulation: 32_000,
   initialGrassSeedCount: 100,
   fullGrassOnInit: false,
   mutRate: 1.0,

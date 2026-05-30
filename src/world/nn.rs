@@ -241,7 +241,7 @@ impl World {
             );
             self.profile.record_under_root(
                 "nn",
-                "proximity",
+                "build_input.proximity",
                 self.nn_stats
                     .tick_proximity_total_us
                     .load(Ordering::Relaxed) as u32,
@@ -251,7 +251,7 @@ impl World {
             );
             self.profile.record_under_root(
                 "nn",
-                "proximity.creatures",
+                "build_input.proximity.creatures",
                 self.nn_stats
                     .tick_proximity_creatures_us
                     .load(Ordering::Relaxed) as u32,
@@ -261,7 +261,7 @@ impl World {
             );
             self.profile.record_under_root(
                 "nn",
-                "proximity.grass",
+                "build_input.proximity.grass",
                 self.nn_stats
                     .tick_proximity_grass_us
                     .load(Ordering::Relaxed) as u32,

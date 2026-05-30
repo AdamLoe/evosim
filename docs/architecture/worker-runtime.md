@@ -1,138 +1,183 @@
 # Worker runtime
 
-The Web Worker that owns the wasm sim, the rayon pool, the message queue,
-and the `Atomics.waitAsync` tick loop.
+The Web Worker that owns the wasm sim, the rayon pool, both
+SharedArrayBuffers, and the tight synchronous tick loop.
 
 ## What it is
 
 A dedicated module worker (`web/src/sim-worker.ts`) spawned once per
-world lifetime by `web/src/main.ts`. It holds the only `WorldHandle`, the
-only rayon pool, both `SharedArrayBuffer`s, and the async tick loop.
-Main holds no wasm; every sim mutation goes through a `SimMessage`
-posted via `SimBridge`. The worker's loop is `async` and `await`s a
-futex wait between ticks so `self.onmessage` callbacks can drain into a
-JS-side message queue.
+world lifetime by `web/src/main.ts`. It holds the only `WorldHandle`,
+the only rayon pool, both `SharedArrayBuffer`s (`controlSab`,
+`snapshotSab`), and the per-tick loop.
+
+v1.10: **all main↔worker control is on SAB.** The only surviving
+`postMessage` path is the one-shot `boot` handshake and the one-shot
+`boot_ready` reply. Every other control signal — sliders, paused,
+target TPS, inspector requests, reset-jank, reset-profile, profile/NN
+report polls — is an `Atomics.store` + epoch bump on the control SAB,
+read at the top of each loop iteration. The loop body is synchronous;
+`Atomics.wait` (not `Atomics.waitAsync`) is the pacing primitive.
 
 ## What it owns
 
 - The wasm init + rayon `initThreadPool` boot sequence.
-- The `crossOriginIsolated` re-check (in addition to main's mirror check;
-  both sides read the JS global directly — there is no Rust export).
-- Allocation of the two SABs (`controlSab`, `snapshotSab`) at boot.
-- The boot handshake: run one tick, write one snapshot to slot 0, then
-  post `boot_ready` so main's first RAF reads a populated live slot.
-- The `messageQueue` and `drainMessages()` — populated by `self.onmessage`,
-  drained at the **top** of every loop iteration so a slider sent at
-  tick T takes effect for tick T+1 deterministically.
-- The `async function simLoop()` body, the pacing math, and the
-  `Atomics.waitAsync` invocation including the 1 ms floor + the
-  macrotask yield on the synchronous `not-equal` return path.
-- Inspector message handling (`inspect_at` and `inspect_id`).
-- Poll-reply bundling for `request_profile_report` (bundles `profile`,
-  `tps`, `jank_count`, `live_grass_cell_count`, `total_grass_density`
-  into one reply so main does not need four round-trips per second).
-- Restart: implemented main-side as `worker.terminate() + new Worker(...)`.
-  The worker does not have a re-boot path on a live instance; spurious
-  duplicate `boot` messages are logged and ignored.
+- The `crossOriginIsolated` re-check.
+- Allocation of the two SABs at boot. `controlSab` is sized by
+  `CONTROL_SAB_BYTES` from
+  [`../../src/control_sab.rs`](../../src/control_sab.rs); `snapshotSab`
+  is `SNAPSHOT_SAB_BYTES` from
+  [`sim-bridge.ts`](../../web/src/sim-bridge.ts).
+- The boot handshake: apply persisted sliders, seed SAB slider /
+  paused / target_tps values, run one tick, write one snapshot to slot
+  0, post `boot_ready`. Main's first RAF then reads a populated slot.
+- The tight synchronous `function simLoop()` body. No `async`, no
+  `await`, no `setTimeout` — by design.
+- Per-tick SAB read of paused / target_tps / sliders (gated on
+  `CTRL_CONTROL_EPOCH`) / inspector request (gated on
+  `CTRL_INSPECT_REQ_EPOCH`) / profile-clear + reset-jank requests.
+- Per-tick SAB write of the snapshot (always) and the inspector
+  response (when a request fires). Periodic SAB write of the profile
+  report (every `PROFILE_REPORT_EVERY_N_TICKS` ticks) and the
+  NN-worker stats (every `NN_STATS_EVERY_N_TICKS` ticks).
+- The three `sim_worker.*` profile spans —
+  `sim_worker.read_input_sab`, `sim_worker.tick`,
+  `sim_worker.write_output_sab` — measured with
+  `performance.now()` and published into the always-on Rust profiler
+  via the `WorldHandle::record_profile_sample(root, path, dur_us,
+  call_count)` wasm-bindgen export.
 
 ## What it does NOT own
 
-- **Every message shape, SAB byte layout, snapshot stride** — owned by
-  [`shared-memory-and-protocol.md`](shared-memory-and-protocol.md).
+- **The SAB byte layout** — owned by
+  [`shared-memory-and-protocol.md`](shared-memory-and-protocol.md) and
+  the canonical Rust source at
+  [`../../src/control_sab.rs`](../../src/control_sab.rs). The TS
+  mirror at [`web/src/generated/control-sab.ts`](../../web/src/generated/control-sab.ts)
+  is code-generated; a Rust unit test (`bindings_in_sync`) fails CI
+  on drift.
+- **The slider name → index table** — canonical list in
+  [`../../src/wasm_api.rs`](../../src/wasm_api.rs) `SLIDER_NAMES`;
+  TS mirror in
+  [`web/src/generated/slider-ids.ts`](../../web/src/generated/slider-ids.ts).
 - **`World::step`, NN, grass mechanic** — owned by
   [`simulation-core.md`](simulation-core.md). The worker only calls
-  `step_n(1)`.
-- **wasm-pack build incantation, COOP/COEP headers** — owned by
-  [`build-and-deploy.md`](build-and-deploy.md). The worker reads
-  `crossOriginIsolated` to decide whether to spawn the rayon pool but
-  does not own how those headers got there.
-- **The `SimBridge` runtime class** — defined in `sim-bridge.ts` and
-  used by main; the worker only consumes `SimMessage` / produces
-  `SimReply`. See the protocol doc.
+  `world.step_n(1)`.
+- **The `SimBridge` runtime class** — defined in
+  [`sim-bridge.ts`](../../web/src/sim-bridge.ts) and used by main; the
+  worker only consumes the one `SimMessageBoot` payload + produces
+  one `SimReplyBootReady`. After that, the worker reads main's writes
+  through SAB.
 
 ## Loop shape
 
 ```ts
-async function simLoop(): Promise<void> {
+function simLoop(): void {
+  let tickIdx = 0;
   while (world !== null && ctrlI32 !== null) {
-    drainMessages();                          // top-of-iter: slider drain ordering
     const iterStart = performance.now();
 
-    if (!paused && !world.world_ended) {
-      world.step_n(1);                        // exactly one tick per iteration
-      writeSnapshotToSAB();                   // write inactive slot, atomic flip
+    // ── sim_worker.read_input_sab ──
+    const readStart = performance.now();
+    readControlSab();   // pause flag, target TPS, sliders (epoch-gated),
+                        // inspect request (epoch-gated), profile-clear,
+                        // reset-jank.
+    record("read_input_sab", performance.now() - readStart);
+
+    if (paused || world.world_ended) {
+      // Sync park on the futex. Legal because no postMessage hot path
+      // exists; main wakes us via Atomics.add(CTRL_FUTEX,1) +
+      // Atomics.notify when it writes a slider / unpauses / fires an
+      // inspector request.
+      Atomics.wait(ctrlI32, CTRL_FUTEX, before, Infinity);
+      continue;
     }
 
-    const elapsed = performance.now() - iterStart;
-    const timeoutMs = paused ? Infinity : Math.max(1, 1000/targetTPS - elapsed);
-    //                                            ^^^^^^^^
-    //                  1 ms FLOOR is load-bearing — `Atomics.waitAsync(0)` returns
-    //                  synchronously with `{async: false}` and would spin the loop
-    //                  without yielding, dark-holing every postMessage.
+    // ── sim_worker.tick ──
+    const tickStart = performance.now();
+    world.step_n(1);
+    record("tick", performance.now() - tickStart);
+    tickIdx++;
 
-    const before = Atomics.load(ctrlI32, CTRL_FUTEX);
-    const r = Atomics.waitAsync(ctrlI32, CTRL_FUTEX, before, timeoutMs);
-    if (r.async) {
-      await r.value;                          // standard path: park
-    } else {
-      // not-equal race: postMessage from main mutated the futex between our load
-      // and the waitAsync. Macrotask yield needed — `onmessage` dispatches as a
-      // task; `await Promise.resolve()` (microtask) is NOT sufficient.
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    // ── sim_worker.write_output_sab ──
+    const writeStart = performance.now();
+    writeSnapshotToSAB();                            // always
+    serveInspectRequest();                            // if epoch advanced
+    maybeWriteProfileReport(tickIdx);                 // every N ticks
+    maybeWriteNnStats(tickIdx);                       // every M ticks
+    record("write_output_sab", performance.now() - writeStart);
+
+    // ── Pacing ──
+    const remainingMs = 1000/targetTPS - (performance.now() - iterStart);
+    if (remainingMs > 0.25) {
+      // Sync park; wakes early on Atomics.notify when main writes
+      // sliders / pause / inspect. Burns zero CPU during the park.
+      Atomics.wait(ctrlI32, CTRL_FUTEX, before, remainingMs);
     }
+    // Over budget? No yield needed — no event loop to feed.
   }
 }
 ```
 
-**Why this shape:**
+**Why this shape (v1.10):**
 
-- One tick per loop iteration. Batching (`step_n(floor(budget))`) sounds
-  like an optimization but hurts SAB snapshot freshness — the renderer
-  would repaint the same stale slot until the next batch landed. The
-  worker doesn't share the render thread, so it doesn't need batching.
-- `Atomics.waitAsync`, not `Atomics.wait`. Synchronous `Atomics.wait`
-  inside the loop blocks the worker event loop and prevents
-  `onmessage` from ever firing. The `await` on the wait promise is the
-  load-bearing event-loop yield.
-- 1 ms floor on `timeoutMs`. `Atomics.waitAsync(ta, idx, before, 0)`
-  returns synchronously `{async: false, value: "timed-out"}` per the
-  Web Atomics spec — no Promise, no microtask. Whenever per-tick cost
-  exceeds the per-tick budget (high pop or high target-TPS) `timeoutMs`
-  would bottom out at 0 without the floor, the loop would spin without
-  yielding, and `onmessage` would dark-hole. This regression has shipped
-  at least twice; the e2e suite covers it.
-- Macrotask yield on the `not-equal` race. A microtask yield
-  (`await Promise.resolve()`) is not enough — `onmessage` dispatches as a
-  macrotask. `setTimeout(0)` gives a real macrotask boundary.
+- **No `async`, no `await`.** With every control signal on SAB, there
+  is no `onmessage` macrotask to dispatch in steady state, so the
+  loop never has to yield to the event loop. Synchronous
+  `Atomics.wait` is the pacing primitive — it parks the OS thread,
+  burns zero CPU, and wakes on `Atomics.notify` when main writes any
+  futex-touching SAB op.
+- **One tick per loop iteration.** Batching (`step_n(N)`) would hurt
+  snapshot freshness — the renderer reads the latest snapshot on
+  every RAF, so each tick must publish.
+- **No 1 ms wait floor.** The historical floor existed because
+  `Atomics.waitAsync(0)` returned synchronously without yielding to
+  the event loop, dark-holing every postMessage. With postMessage out
+  of the hot path the failure mode evaporates — when the tick is
+  over its slice we just continue the loop immediately. This
+  uncapped TPS up to `1000 / tick_ms` per the new
+  [`tests/e2e/sim-bridge.spec.ts`](../../web/tests/e2e/sim-bridge.spec.ts).
+- **Slider drain ordering preserved.** SAB reads happen at the *top*
+  of the iteration, so a slider value main wrote at wall-clock T
+  takes effect for tick T+1 deterministically — same property the v1.6
+  postMessage version had.
 
 ## Boot handshake
 
-1. Worker receives the first `boot` message (only one allowed).
-2. `await init()` — wasm module init.
-3. Read `crossOriginIsolated` from `self`. Log `[sim] crossOriginIsolated=…`.
-4. If isolated and `initThreadPool` is exported: `await initThreadPool(N)`
-   where `N = min(TARGET_RAYON_WORKERS, navigator.hardwareConcurrency)`.
-5. Call `rayon_current_num_threads()`; if `<= 1`, log a loud warning
-   (silent single-thread mode would otherwise look identical to a
-   correct threaded boot — making it observable is a hard requirement).
-6. Construct the `WorldHandle` via `newWithFounderCount(seed,
-   initial_grass_seed_count, energy_max, founder_count,
-   full_grass_on_init)`. The four construction-only args plumb through
-   to `World::new_with_sliders`; `full_grass_on_init=true` makes the
-   constructor fill the grass grid to `GRASS_MAX` instead of seeding N
-   cells.
-7. Apply every entry in `boot.initial_sliders` via `world.set_slider(name,
-   value)` — bools encoded as `0|1`.
-8. Allocate `controlSab` + `snapshotSab`.
-9. **Run one tick + write one snapshot to slot 0.** This guarantees main's
-   first RAF reads a populated live slot.
-10. Post `boot_ready` carrying both SAB handles, `max_pop_for_sim()`,
-    and `world.sliders_defaults_json()` (the Wave D drift-guard payload).
-11. `void simLoop()`.
+1. Worker receives the one `boot` message.
+2. `await init()`. Mirror `crossOriginIsolated` log line.
+3. `initThreadPool(min(TARGET_RAYON_WORKERS, hardwareConcurrency))`.
+4. `rayon_current_num_threads()` sanity log (loud warn if `<= 1`).
+5. Construct `WorldHandle` via `newWithFounderCount(...)`.
+6. Apply every entry in `boot.initial_sliders` via
+   `world.set_slider(name, value)` (still uses the name-keyed entry
+   for forward compatibility with stale localStorage keys).
+7. Allocate `controlSab` (`CONTROL_SAB_BYTES`) + `snapshotSab`.
+8. Seed the control SAB: `CTRL_PAUSED`, `CTRL_TARGET_TPS_BITS`, every
+   `CTRL_SLIDERS[i]` lane from `boot.initial_sliders`. Stamp the
+   epoch counters so the first loop iteration is a no-op read.
+9. Run one tick + write one snapshot to slot 0.
+10. Post `boot_ready` with both SABs, `max_pop_for_sim()`, and
+    `world.sliders_defaults_json()`.
+11. Enter `simLoop()`.
 
-Main asserts `reply.max_pop_for_sim === MAX_POP_FOR_SIM` from
-`sim-bridge.ts` and throws if they disagree — Rust/TS constant drift is
-fatal and means rebuild wasm.
+Main asserts `reply.max_pop_for_sim === MAX_POP_FOR_SIM` and throws on
+mismatch (Rust/TS const drift → rebuild wasm).
+
+## Wake protocol
+
+Main wakes the worker by mutating the futex word + notifying:
+
+```ts
+Atomics.add(ctrlI32, CTRL_FUTEX, 1);
+Atomics.notify(ctrlI32, CTRL_FUTEX, 1);
+```
+
+This pattern lives in every `SimBridge.setX(...)` writer that needs
+the worker to react before the next pacing slice elapses (paused,
+target TPS, inspector request). Sliders go through it too — the
+worker might be parked when the user drags a slider, and we want
+the new value to apply on the next tick rather than after a full
+pacing-slice timeout.
 
 ## Restart
 
@@ -141,76 +186,79 @@ Implemented in `main.ts`:
 ```ts
 async function restart(): Promise<void> {
   const oldBridge = simBridge;
-  simBridge = await spawnSimWorker("");      // new worker + new SABs
-  oldBridge.terminate();                      // tear down the old worker
-  // Reset per-world UI state.
+  simBridge = await spawnSimWorker("");
+  oldBridge.terminate();
 }
 ```
 
-`worker.terminate()` is unconditional; an in-progress wasm call is
-dropped. SAB views on main remain valid (the SAB stays alive in the
-previous bridge's closures); rayon child workers are GC'd with the
-parent. Hammer-restart (5× `r` in 5 s) is tested for the orphaned-thread
-scenario; it does not produce console errors today.
-
-`initial_sliders` is sourced from `devpanel.ts::currentSliderState()`
-(in-memory widget state), **not** `getSettings()` (localStorage), so a
-mid-drag restart carries the dragged value rather than the
-last-persisted one.
+`worker.terminate()` is unconditional; any in-progress wasm call is
+dropped, and the synchronous `Atomics.wait` parked thread is killed
+along with the worker. SAB views on main remain valid until the old
+bridge is collected. Restart was the easiest path to leave outside
+the SAB transport because it's already external to the worker loop —
+no in-loop tear-down logic needed.
 
 ## Pacing
 
-The user-facing TPS dropdown is a fixed set: `[10, 30, 60, 180, 500,
-1000]`. The worker honours `set_target_tps` immediately; the next loop
-iteration uses the new value. The `1000` setting has historically been a
-regression vector (it's where the wait-async-zero bug surfaces); the e2e
-suite runs every test at TPS=1000.
+The user-facing TPS dropdown is `[10, 30, 60, 180, 500, 1000]`. The
+worker reads `CTRL_TARGET_TPS_BITS` at the top of every tick, so a
+new dropdown selection takes effect immediately (the SAB write also
+notifies the futex to wake any in-progress pacing park).
 
-When paused, `timeoutMs = Infinity`. The worker parks on the futex until
-main sends `set_paused(false)` and notifies via `Atomics.notify(..., 1)`.
-No 60 Hz idle wake, no snapshot churn nobody's reading. Main keeps
-painting the last snapshot main read while paused.
+When paused, the worker calls `Atomics.wait(..., Infinity)` and burns
+zero CPU. Main wakes it via `Atomics.notify` on the unpause SAB write.
 
 ## Code anchors
 
-- `web/src/sim-worker.ts` → `handleBoot`, `handle`, `drainMessages`,
-  `writeSnapshotToSAB`, `simLoop`, `TARGET_RAYON_WORKERS`.
-- `web/src/main.ts` → `main`, `spawnSimWorker`, `restart`,
-  `installPacingControls`, `installRestartButton`, `setSettingsOpen`.
-- `web/src/sim-bridge.ts` → `SimBridge`, `SimBridge.postMessage`,
-  `SimBridge.attachControlSab`, `SimBridge.debouncedSetSlider`,
-  `SimBridge.terminate`.
-- `web/src/widgets/devpanel.ts` → `currentSliderState`,
-  `getInitialGrassSeedCount`, `getEnergyMax`, `getFounderCount`.
-- `src/wasm_api.rs` → `WorldHandle`, `max_pop_for_sim`,
-  `rayon_current_num_threads`.
+- [`web/src/sim-worker.ts`](../../web/src/sim-worker.ts) →
+  `handleBoot`, `readControlSab`, `serveInspectRequest`,
+  `maybeWriteProfileReport`, `maybeWriteNnStats`,
+  `writeSnapshotToSAB`, `simLoop`, `TARGET_RAYON_WORKERS`,
+  `PROFILE_REPORT_EVERY_N_TICKS`, `NN_STATS_EVERY_N_TICKS`.
+- [`web/src/sim-bridge.ts`](../../web/src/sim-bridge.ts) →
+  `SimBridge`, `SimBridge.sendBoot`, `SimBridge.attachControlSab`,
+  `SimBridge.debouncedSetSlider`, `SimBridge.setPaused`,
+  `SimBridge.setTargetTps`, `SimBridge.resetJank`,
+  `SimBridge.resetProfile`, `SimBridge.requestInspectAt`,
+  `SimBridge.requestInspectId`, `SimBridge.requestProfileReport`,
+  `SimBridge.requestNnStats`, `SimBridge.terminate`.
+- [`src/wasm_api.rs`](../../src/wasm_api.rs) → `WorldHandle`,
+  `set_slider`, `set_slider_by_index`, `record_profile_sample`,
+  `creature_at`, `creature_idx_by_id`, `creature_inspect_json`,
+  `profile_report_json`, `nn_worker_stats_json`, `profile_clear`,
+  `reset_jank`, `max_pop_for_sim`, `rayon_current_num_threads`.
+- [`src/control_sab.rs`](../../src/control_sab.rs) → canonical SAB
+  byte layout. Mirror in
+  [`web/src/generated/control-sab.ts`](../../web/src/generated/control-sab.ts).
+- [`web/tests/e2e/sab-control.spec.ts`](../../web/tests/e2e/sab-control.spec.ts) —
+  regression coverage for the v1.10 transport (sim_worker tree,
+  snapshot tree, nn.build_input.proximity nesting, SAB inspector
+  round-trip).
 
 ## Update when
 
-- The pacing math changes (especially the `timeoutMs` floor — that
-  number has a footgun behind it; the comment on it is mandatory).
-- A new message kind is added or removed.
+- The pacing primitive changes (currently sync `Atomics.wait`).
+- A new SAB control epoch / response slot is added.
+- A new top-level profiler tree is added inside the worker.
 - The boot handshake gains or loses a step.
-- The rayon thread-count policy changes (currently
-  `min(TARGET_RAYON_WORKERS, hardwareConcurrency)`).
-- The restart sequence changes shape (e.g., reusing the same worker
-  instead of respawning).
-- `worker.snapshot.write` is moved or renamed.
+- The rayon thread-count policy changes.
+- The restart sequence changes shape (e.g. SAB-based tear-down).
 
 ## Why is it shaped this way
 
-See [`decisions/sim.md`](../decisions/sim.md) for the
-`Atomics.waitAsync` / 1 ms-floor / one-tick-per-iter rationale and the
-slider drain ordering decision. See
-[`decisions/cross-cutting.md`](../decisions/cross-cutting.md) for the
-boot handshake's first-snapshot guarantee and the `MAX_POP_FOR_SIM`
-parity assert.
+See [`../plans/v1.10-mission.md`](../plans/v1.10-mission.md) for the
+all-SAB control decision and the locked design choices (pacing
+primitive, restart strategy, slider table source-of-truth, response
+buffer sizes). The v1.6/v1.9 reasoning behind `Atomics.waitAsync` +
+the 1 ms floor lives in older decisions docs and is now historical.
 
 ## See also
 
 - [`shared-memory-and-protocol.md`](shared-memory-and-protocol.md)
 - [`simulation-core.md`](simulation-core.md)
+- [`profiler.md`](profiler.md)
 - [`build-and-deploy.md`](build-and-deploy.md)
+- [`../plans/v1.10-mission.md`](../plans/v1.10-mission.md)
 - [`../decisions/sim.md`](../decisions/sim.md)
 - [`../decisions/cross-cutting.md`](../decisions/cross-cutting.md)
 - [`../agent-context/dev-loop.md`](../agent-context/dev-loop.md)

@@ -1,6 +1,6 @@
-//! Spatial hash grid for neighbor queries. 5u cells over a 1200×1200 world
-//! → 240×240 = 57,600 cells. Single shared structure for raycasts and
-//! repulsion (v5 §3.3).
+//! Spatial hash grid for neighbor queries. HASH_CELL-wide cells over a
+//! 1200×1200 world (currently 2.5u → 480×480 = 230,400 cells). Single
+//! shared structure for raycasts and repulsion (v5 §3.3).
 
 use crate::constants::*;
 

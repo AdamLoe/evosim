@@ -5,7 +5,8 @@ The inner loop: rebuild wasm, restart the server, when to clear caches.
 ## When does this apply
 
 Any time you're iterating on a Rust or TS change and want to see it run
-in the browser. The facts about *which* commands live in
+in the browser. The canonical build commands, flags, and threaded-bundle
+invariants live in
 [`../architecture/build-and-deploy.md`](../architecture/build-and-deploy.md);
 this doc is the procedural version for an agent at the keyboard.
 
@@ -26,7 +27,9 @@ this doc is the procedural version for an agent at the keyboard.
    ```
 
    If `initThreadPool` count is 0, you forgot `--features threads`. Run
-   it again.
+   it again. See
+   [`../architecture/build-and-deploy.md`](../architecture/build-and-deploy.md)
+   for every flag's purpose and the full build/deploy contract.
 
 2. **TS change?** No build step needed — Vite HMR picks it up. But you
    may need to hard-reload (Ctrl+Shift+R) if the change touches the
@@ -121,6 +124,7 @@ If any of these happen, **halt and inspect** rather than retrying:
 
 ## See also
 
+- [`index.md`](index.md)
 - [`../architecture/build-and-deploy.md`](../architecture/build-and-deploy.md)
   — the canonical incantation + every flag's purpose.
 - [`../prompts/dev-server.md`](../prompts/dev-server.md) — the

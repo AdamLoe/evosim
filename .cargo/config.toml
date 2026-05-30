@@ -12,7 +12,7 @@
 # `--max-memory` is mandatory when memory is shared.
 [target.wasm32-unknown-unknown]
 rustflags = [
-    "-C", "target-feature=+atomics,+bulk-memory,+mutable-globals",
+    "-C", "target-feature=+atomics,+bulk-memory,+mutable-globals,+simd128",
     "-C", "link-arg=--shared-memory",
     "-C", "link-arg=--max-memory=4294967296",
     "-C", "link-arg=--import-memory",

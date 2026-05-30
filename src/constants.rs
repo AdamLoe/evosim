@@ -6,8 +6,14 @@ pub const WORLD_SIZE: f32 = 1200.0;
 pub const BODY_RADIUS_PER_SIZE: f32 = 1.0;
 
 // ---- Spatial hash ----
-pub const HASH_CELL: f32 = 5.0;
-pub const HASH_DIM: usize = (WORLD_SIZE / HASH_CELL) as usize; // 240
+// HASH_CELL is the only knob; HASH_DIM is derived. Constraint: WORLD_SIZE / HASH_CELL
+// must be an exact integer (e.g. 2.5 → 480, 2.0 → 600, 5.0 → 240).
+// Smaller cells = fewer creatures per cell = cheaper neighbor queries in clumps,
+// at the cost of larger `starts`/`cursors` allocations (HASH_DIM² entries).
+// Picked 2.5u so eat/repulsion (radius 2u) hit ~1-4 cells with ~4× fewer candidates
+// per cell than the legacy 5u grid.
+pub const HASH_CELL: f32 = 2.5;
+pub const HASH_DIM: usize = (WORLD_SIZE / HASH_CELL) as usize; // 480
 
 // ---- Energy economy upkeep ----
 pub const UPKEEP_BASE: f32 = 0.05;

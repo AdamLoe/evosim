@@ -134,14 +134,23 @@ runs the new shading:
 
 A separate halo program (`HALO_VS` / `HALO_FS`) issues a second
 instanced draw against the SAME body instance buffer through its own
-VAO. The vertex shader scales the quad by 1.8 around the body center
-(a 3.6 corner multiplier in NDC space). Blend mode is `(ONE, ONE)`
-during the draw and restored to `(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)`
-immediately after. The fragment shader computes a quadratic falloff
-from the body center and caps alpha at 0.3 so a dense crowd doesn't
-wash the canvas white. The pass is skipped entirely when `pop > 8000`
-(visual + perf hygiene). Per-frame alpha comes from the
-`--creature-halo` rgba CSS var.
+VAO. The vertex shader scales the quad by 2.0 around the body center
+(a 4.0 corner multiplier in NDC space). Blend mode is
+`(SRC_ALPHA, ONE)` during the draw and restored to
+`(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)` immediately after.
+
+The fragment shader is a **rim-light**, not a cloud: a narrow Gaussian
+band `exp(-(r - 0.55)² · 90)` centered just outside the body silhouette
+(body occupies r ∈ [0, 0.5] of the 2×-scaled quad), gated by an
+`outside = smoothstep(0.48, 0.53, r)` term so the glow doesn't fill the
+body interior, and an `outerFade = 1 - smoothstep(0.80, 1.0, r)` term
+so the discard at r = 1 never reads as a hard ring. The glow color is
+the creature color mixed 25% toward `vec3(0.55, 0.75, 1.0)` so it
+reads as bioluminescent rather than just translucent body color.
+There is no pulse animation — at high pop it presented as flicker.
+Per-frame alpha (peak rim brightness) comes from the
+`--creature-halo` rgba CSS var. The pass is skipped entirely when
+`pop > 8000` (perf hygiene).
 
 **Draw order per frame:** grass → world-bounds frame → halo → trails →
 bodies → highlight ring. Halo runs first so each body paints over its
@@ -190,14 +199,18 @@ worker's last snapshot.
 
 ### Velocity trails
 
-A thin quad-as-line per moving creature draws between
-`lerp(prev, curr, max(0, alpha - 0.4))` and the current interpolated
-body position. The fragment fades alpha toward the trailing tip, so
-the body looks like it's dragging a short comet tail. Implementation:
-a dedicated `TRAIL_VS` / `TRAIL_FS` program with its own VAO and
+A thin quad-as-line per moving creature draws from `prev` (one full
+tick ago) to the current interpolated body position. The fragment
+fades alpha from 0 at the back to `v_color.a` at the front, so the
+body looks like it's dragging a comet tail one tick long. The earlier
+`lerp(prev, curr, alpha - 0.4)` start point was dropped — at any
+plausible TPS the resulting segment was sub-pixel. Implementation: a
+dedicated `TRAIL_VS` / `TRAIL_FS` program with its own VAO and
 instance buffer (per-instance: start xy, end xy, color rgba, thickness
 in px). The instance buffer is pre-allocated to the
-`MAX_POP_FOR_SIM` ceiling so no per-frame growth. Trails are skipped
+`MAX_POP_FOR_SIM` ceiling so no per-frame growth. Thickness is
+`max(2, radiusPx · 0.6)` per creature so big creatures get visible
+tails and small ones stay legible at low zoom. Trails are skipped
 when `dx² + dy² < 0.04` (stationary creatures) and the whole pass is
 disabled when `pop > 12000`.
 

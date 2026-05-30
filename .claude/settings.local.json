@@ -32,7 +32,14 @@
       "Bash(git show *)",
       "Bash(git -C /home/adamg/evosim show 5214ba2 --stat)",
       "Bash(ps -fp 20503)",
-      "Bash(cargo clippy *)"
+      "Bash(cargo clippy *)",
+      "Bash(rustup --version)",
+      "Bash(command -v chromium-cli)",
+      "Bash(pkill -9 -f 'vite.*47821')",
+      "Bash(mkdir -p /home/adamg/evosim/.claude/skills/wrap-up)"
+    ],
+    "additionalDirectories": [
+      "/home/adamg/evosim/.claude/skills"
     ]
   }
 }

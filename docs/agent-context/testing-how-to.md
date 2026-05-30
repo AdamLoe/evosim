@@ -137,6 +137,7 @@ cd web && pnpm typecheck && cd -
 
 ## See also
 
+- [`index.md`](index.md)
 - [`../architecture/testing.md`](../architecture/testing.md)
 - [`coding-style.md`](coding-style.md)
 - [`repo-rules.md`](repo-rules.md)

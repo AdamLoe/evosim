@@ -42,25 +42,16 @@ tracking, no scripted scenario — every page load starts a fresh world.
   are GC'd with the previous bridge; the renderer keeps painting the
   last-good frame during the ~500 ms blip.
 
-## Tick step order (`World::step`)
+## Tick loop summary
 
-1. Curriculum factor recompute (smoothstep over population).
-2. Spatial grid rebuild.
-3. NN forward pass (chunked, optionally rayon-parallel).
-4. Movement + soft repulsion + grid rebuild.
-5. Graze (grass density consume; sequential).
-6. Eat (per-bite predator/prey energy transfer).
-7. Grass propagation (logistic growth + cross-kernel; parallel-able).
-8. Energy bookkeeping (upkeep, costs, past-lifespan penalty).
-9. Collect deaths (zero energy or world-edge wander).
-10. Handle births (split → new creature; random cull back to `MAX_POP_FOR_SIM`).
-11. Color EMA update (per-creature action-driven RGB).
-12. Bookkeeping tail (last_action promote, tick bump, world-end check).
+Each tick refreshes curriculum pressure, rebuilds neighbour lookup state,
+runs the NN/action pass, applies movement/graze/eat effects, advances grass,
+settles energy/death/birth bookkeeping, and updates display color state.
 
-Every numbered phase is bracketed by a `tick.<phase>` profile span. The
-`tick.nn` and `tick.grass_step` rows are **leaves** in the tick tree —
-their breakdown lives in the sibling top-level `nn` and `grass_step` trees
-(sum-busy across rayon workers).
+The exact step order, phase names, and `tick.*` profiler spans are owned by
+[`architecture/simulation-core.md`](architecture/simulation-core.md). The
+parallel breakdown for NN and grass work is owned by
+[`architecture/profiler.md`](architecture/profiler.md).
 
 ## Tech stack at a glance
 
@@ -76,18 +67,15 @@ their breakdown lives in the sibling top-level `nn` and `grass_step` trees
 
 ## Where to go next
 
-- For a routing pointer to every subsystem: [`index.md`](index.md).
+- For global routing: [`index.md`](index.md).
+- For current subsystem facts: [`architecture/index.md`](architecture/index.md).
 - For "what file does X live in": [`repository-layout.md`](repository-layout.md).
-- For the wasm-pack incantation:
-  [`architecture/build-and-deploy.md`](architecture/build-and-deploy.md).
-- For how to run / add tests:
-  [`agent-context/testing-how-to.md`](agent-context/testing-how-to.md).
+- For procedural work (code edits, tests, dev loop, commits, docs):
+  [`agent-context/index.md`](agent-context/index.md).
 
 ## See also
 
-- [`architecture/simulation-core.md`](architecture/simulation-core.md)
-- [`architecture/worker-runtime.md`](architecture/worker-runtime.md)
-- [`architecture/shared-memory-and-protocol.md`](architecture/shared-memory-and-protocol.md)
-- [`architecture/render-pipeline.md`](architecture/render-pipeline.md)
-- [`architecture/profiler.md`](architecture/profiler.md)
-- [`agent-context/maintaining-docs.md`](agent-context/maintaining-docs.md)
+- [`architecture/index.md`](architecture/index.md)
+- [`decisions/index.md`](decisions/index.md)
+- [`agent-context/index.md`](agent-context/index.md)
+- [`ownership.md`](ownership.md)

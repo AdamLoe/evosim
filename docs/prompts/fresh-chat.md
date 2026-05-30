@@ -1,41 +1,30 @@
 # Fresh-chat entry-point prompt
 
-Use this prompt (verbatim) at the top of any new conversation about this
-project. It loads the deterministic minimum context — about 2k tokens —
-and lets you route from there.
-
----
-
 You are working on **evosim**, a Rust → WebAssembly browser evolution
 sandbox. The project documentation lives under `docs/`. Read these
-three files first, in order:
+two files first, in order:
 
-1. `docs/index.md` — the table of contents and the ownership map.
+1. `docs/index.md` — the global documentation router.
 2. `docs/overview.md` — the system at a glance.
-3. `docs/repository-layout.md` — one-line purpose for every directory.
 
-Do not read the architecture or decisions docs proactively. Wait for the
-user to describe what they want to do, then load the subsystem doc
-that matches:
+Do not read `docs/repository-layout.md`, architecture docs, decisions
+docs, ownership docs, or agent-context docs proactively. Wait for the
+user to describe what they want to do, then load the smallest matching
+route:
 
-- Touching the simulation engine, NN, grass, or tick step →
-  `docs/architecture/simulation-core.md` (+ `docs/decisions/sim.md`).
-- Touching the sim worker, pacing, restart, message dispatch →
-  `docs/architecture/worker-runtime.md` (+ `docs/decisions/sim.md`).
-- Touching the SAB layout or any main↔worker message →
-  `docs/architecture/shared-memory-and-protocol.md`.
-- Touching the renderer, camera, GL programs, frustum cull →
-  `docs/architecture/render-pipeline.md` (+ `docs/decisions/render.md`).
-- Touching the profiler, span call sites, perf panel →
-  `docs/architecture/profiler.md` (+ `docs/decisions/profiler.md`).
-- Touching the build, wasm-pack flags, COOP/COEP, deploy →
-  `docs/architecture/build-and-deploy.md` (+ `docs/decisions/build.md`).
-- Adding/running tests → `docs/architecture/testing.md` +
-  `docs/agent-context/testing-how-to.md`.
-- Iterating live in the browser → `docs/agent-context/dev-loop.md`.
-- Committing, conventional commits, what not to do →
-  `docs/agent-context/repo-rules.md`.
-- Editing the docs themselves →
-  `docs/agent-context/maintaining-docs.md`.
+- Current subsystem facts or code work touching system behaviour →
+  `docs/architecture/index.md`, then the subsystem doc it routes to.
+- Rationale / "why is it this way?" →
+  `docs/decisions/index.md`, then the relevant domain doc.
+- Editing code in `src/` or `web/`, running commands, testing, committing,
+  iterating live, creating plans, or updating docs →
+  `docs/agent-context/index.md`, then the procedural doc it routes to.
+- Creating or updating a plan → `docs/plans/index.md`; open
+  `docs/plans/template.md` only when creating a new plan.
+- Prompt reuse or prompt maintenance → `docs/prompts/index.md`.
+- Ownership conflict or deciding where a fact belongs →
+  `docs/ownership.md`.
+- Looking for where a file or subsystem lives →
+  `docs/repository-layout.md`.
 
 The user's first message is below.

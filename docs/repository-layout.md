@@ -1,6 +1,7 @@
 # Repository layout
 
-One-line purpose for every non-trivial path. Skim this before grepping.
+Brief purpose for every non-trivial path, ideally one line. Skim this
+before grepping.
 
 ## Top level
 
@@ -15,7 +16,6 @@ One-line purpose for every non-trivial path. Skim this before grepping.
 | `src/` | Rust simulation crate. |
 | `web/` | TypeScript + Vite shell. |
 | `docs/` | This tree. |
-| `docs-old/` | Tombstoned. References inside are broken on purpose; the user deletes this tree in a later pass. |
 | `.github/workflows/` | CI: `cargo fmt/clippy/test --lib` (default + threads); `pnpm typecheck`; `wasm-pack build --release --features threads`. |
 
 ## `src/` — Rust simulation engine
@@ -56,7 +56,6 @@ One-line purpose for every non-trivial path. Skim this before grepping.
 | `web/src/camera.ts` | Pointer-driven pan / zoom controls bound to the canvas. |
 | `web/src/perf.ts` | TS-side mirror of the profiler. Holds the `frame` tree; `span(name)` opens / closes a sample. The panel concatenates this with the Rust trees. |
 | `web/src/settings.ts` | `localStorage`-backed user prefs (autoRun, targetTPS, grass opacity, etc.). |
-| `web/src/themes.ts` | Theme palette map (charcoal / slate / light / vivid). `applyTheme(id)` writes CSS-var tokens onto `<html>`. v1.9.1. |
 | `web/src/widgets/devpanel.ts` | Settings tab installer. Stage-then-apply for sim sliders + live-apply for run/display toggles. `currentSliderState()` + the construction-only ctor accessors feed the boot payload. |
 | `web/src/widgets/perf-panel.ts` | Profiler bottom panel + 1 Hz polled tables (`frame` / `tick` / `nn` / `grass_step`). `setProfilerVisible()` is the single source of truth for visibility — Settings checkbox and the panel's ✕ both call it. |
 | `web/src/widgets/worker-stats.ts` | NN-worker health panel. Installs into the Monitor tab; polls `nn_worker_stats_json` at ~750 ms. |

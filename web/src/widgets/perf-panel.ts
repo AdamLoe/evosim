@@ -15,6 +15,7 @@ import {
   reportJson as tsPerfReport,
   resetFrameTree,
   setProfilerEnabled,
+  setProfilerWindowMs,
 } from "../perf";
 import { getSettings, setSetting } from "../settings";
 
@@ -45,7 +46,11 @@ interface BundledProfile {
   total_grass_density: number;
 }
 
-const TREE_ORDER = ["frame", "tick", "nn", "grass_step"];
+// v1.10: sim_worker is the outer-loop tree (read_input_sab / tick /
+// write_output_sab.{snapshot,...}). The Rust-side write_snapshot_to cost
+// nests under sim_worker.write_output_sab.snapshot instead of being its own
+// top-level tree.
+const TREE_ORDER = ["frame", "sim_worker", "tick", "nn", "grass_step"];
 
 let lastBundle: BundledProfile | null = null;
 let panelVisible = false;
@@ -60,11 +65,10 @@ export function setProfilerVisible(visible: boolean): void {
   panelVisible = visible;
   const box = document.getElementById("perf-box");
   if (box) box.style.display = visible ? "" : "none";
-  // The floating "open profiler" button at canvas-wrap bottom-right is the
-  // inverse of the panel — hidden when the panel is shown, visible when
-  // the panel is collapsed.
+  // The floating toggle stays in place at all times; the .is-active class
+  // signals which state we're in so the user can click again to close.
   const openBtn = document.getElementById("perf-open");
-  if (openBtn) openBtn.style.display = visible ? "none" : "";
+  if (openBtn) openBtn.classList.toggle("is-active", visible);
   // Keep the TS-side frame tree recording at all times so the panel has data
   // to show the moment it becomes visible again. Mirrors the always-on Rust
   // side (see sim-worker.ts handleBoot).
@@ -77,6 +81,26 @@ export function setProfilerVisible(visible: boolean): void {
 }
 
 export function installProfilerPanel(simBridge: SimBridge): void {
+  // Apply persisted window length before the panel comes up so the first
+  // poll renders against the user's chosen window. Pushed to both halves:
+  // bridge → control SAB → Rust profiler; perf.ts directly for the TS-side
+  // `frame` tree.
+  const initialWindow = getSettings().profilerWindowMs;
+  simBridge.setProfileWindowMs(initialWindow);
+  setProfilerWindowMs(initialWindow);
+  const windowSelect = document.getElementById("perf-window-select") as
+    | HTMLSelectElement
+    | null;
+  if (windowSelect) {
+    windowSelect.value = String(initialWindow);
+    windowSelect.addEventListener("change", () => {
+      const ms = Number(windowSelect.value) || 10_000;
+      setSetting("profilerWindowMs", ms);
+      simBridge.setProfileWindowMs(ms);
+      setProfilerWindowMs(ms);
+    });
+  }
+
   // Initial visibility from persisted setting.
   setProfilerVisible(getSettings().showProfiler);
 
@@ -102,19 +126,14 @@ export function installProfilerPanel(simBridge: SimBridge): void {
   void poll();
   window.setInterval(() => void poll(), POLL_INTERVAL_MS);
 
-  const closeBtn = document.getElementById("perf-close");
-  if (closeBtn) {
-    closeBtn.addEventListener("click", () => {
-      setSetting("showProfiler", false);
-      setProfilerVisible(false);
-    });
-  }
-
+  // Single toggle: clicking #perf-open flips the persisted visibility flag
+  // and re-applies. There is no separate close button on the panel itself.
   const openBtn = document.getElementById("perf-open");
   if (openBtn) {
     openBtn.addEventListener("click", () => {
-      setSetting("showProfiler", true);
-      setProfilerVisible(true);
+      const next = !getSettings().showProfiler;
+      setSetting("showProfiler", next);
+      setProfilerVisible(next);
     });
   }
 
@@ -125,8 +144,8 @@ export function installProfilerPanel(simBridge: SimBridge): void {
     // a fully clean slate. Title updated to reflect the broader scope.
     jankReset.title = "Reset profiler + jank";
     jankReset.addEventListener("click", () => {
-      simBridge.postMessage({ kind: "reset_jank" });
-      simBridge.postMessage({ kind: "reset_profile" });
+      simBridge.resetJank();
+      simBridge.resetProfile();
       resetFrameTree();
       if (lastBundle) {
         lastBundle.jank_count = 0;

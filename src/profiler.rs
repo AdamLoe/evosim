@@ -21,10 +21,16 @@
 //! - D9: Default OFF; toggle state is never persisted.
 //! - D10: Zero RNG, excluded from hash.
 
-// profiler: rolling window duration in milliseconds
-pub const WINDOW_MS: u32 = 60_000;
+// profiler: default rolling window duration in milliseconds. Runtime-mutable
+// via `Profiler::set_window_ms` / `WorldHandle::profile_set_window_ms`; the
+// const is just the seed value used at construction.
+pub const DEFAULT_WINDOW_MS: u32 = 10_000;
+// Back-compat shim: a couple of legacy tests still spell the old name.
+// New code should read `Profiler::window_ms()`.
+#[cfg(test)]
+pub const WINDOW_MS: u32 = DEFAULT_WINDOW_MS;
 // profiler: maximum samples per node ring buffer
-pub const SAMPLES_PER_NODE: usize = 4096;
+pub const SAMPLES_PER_NODE: usize = 16_384;
 // profiler: hard cap on node count to bound memory + bugs
 pub const MAX_NODES: usize = 256;
 // profiler: stabilizing threshold: show banner if effective_window_ms < 90% of WINDOW_MS
@@ -82,6 +88,10 @@ struct ProfilerInner {
     /// Epoch in ms; subtracted from now_ms to fit timestamps in u32.
     /// Gives ~49 days of headroom.
     epoch_ms: f64,
+    /// Rolling-window length (ms). Runtime-mutable via `set_window_ms`.
+    /// Drives sample pruning and the JSON `window_ms` field. Clamped to a
+    /// sane min/max in `set_window_ms` so a bad SAB value can't break the panel.
+    window_ms: u32,
 }
 
 pub struct Profiler {
@@ -123,6 +133,7 @@ impl Profiler {
             roots,
             root_order,
             epoch_ms: clock_now_ms(),
+            window_ms: DEFAULT_WINDOW_MS,
         };
 
         Self {
@@ -154,6 +165,20 @@ impl Profiler {
         let mut inner = self.inner.borrow_mut();
         inner.clear_samples();
         inner.epoch_ms = clock_now_ms();
+    }
+
+    /// Update the rolling-window length in milliseconds. Clamped to
+    /// [500, 600_000] so a stray SAB value can't make pruning degenerate
+    /// (window=0 ⇒ everything pruned) or memory-unbounded.
+    pub fn set_window_ms(&self, ms: u32) {
+        let clamped = ms.clamp(500, 600_000);
+        self.inner.borrow_mut().window_ms = clamped;
+    }
+
+    /// Current rolling-window length (ms). Exposed for tests and inspect.
+    #[allow(dead_code)]
+    pub fn window_ms(&self) -> u32 {
+        self.inner.borrow().window_ms
     }
 
     /// Push a span by name. Returns a SpanGuard whose Drop records the duration.
@@ -278,7 +303,7 @@ impl Profiler {
         let now_ms_abs = clock_now_ms();
         inner.prune(now_ms_rel);
 
-        let window_ms = WINDOW_MS;
+        let window_ms = inner.window_ms;
         let enabled = self.enabled.load(Ordering::Relaxed);
 
         // Serialize every root in insertion order. v1.7: the panel walks the
@@ -370,7 +395,7 @@ impl ProfilerInner {
     /// Drop samples whose timestamp is outside the rolling window.
     /// VecDeque is FIFO, so we pop from front until the front is in-window.
     fn prune(&mut self, now_ms: u32) {
-        let cutoff = now_ms.saturating_sub(WINDOW_MS);
+        let cutoff = now_ms.saturating_sub(self.window_ms);
         for node in &mut self.nodes {
             while let Some(&(ts, _, _)) = node.samples.front() {
                 if ts < cutoff {
@@ -751,6 +776,9 @@ mod tests {
         set_fake_clock_us(0);
         let p = Profiler::new();
         p.set_enabled(true);
+        // Pin a 60s window so the timestamps below land in-range. The default
+        // dropped to 10s in the runtime-configurable refactor.
+        p.set_window_ms(60_000);
 
         push_with_duration(&p, "tick", 100); // dur=100us at t=0
         set_fake_clock_us(10_000_000); // +10s

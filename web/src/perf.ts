@@ -12,8 +12,12 @@
 
 // ─── Constants (mirror of src/profiler.rs) ────────────────────────────────
 
-const WINDOW_MS = 60_000;
-const SAMPLES_PER_NODE = 4096;
+// Default rolling-window length; mutable via `setProfilerWindowMs` so the
+// TS-side `frame` tree honors the same setting the user picks for the
+// Rust-side trees.
+const DEFAULT_windowMs = 10_000;
+let windowMs = DEFAULT_windowMs;
+const SAMPLES_PER_NODE = 16_384;
 const MAX_NODES = 256;
 
 // ─── Types ────────────────────────────────────────────────────────────────
@@ -60,6 +64,13 @@ export function setProfilerEnabled(on: boolean): void {
 
 export function isProfilerEnabled(): boolean {
   return enabled;
+}
+
+/** Update the TS-side rolling-window length so the `frame` tree honors the
+ *  same setting the user picks for the Rust trees. Clamped to a sane range
+ *  to mirror `Profiler::set_window_ms`. */
+export function setProfilerWindowMs(ms: number): void {
+  windowMs = Math.max(500, Math.min(600_000, Math.round(ms)));
 }
 
 /**
@@ -155,7 +166,7 @@ function recordSample(
 }
 
 function pruneAll(nowMsRel: number): void {
-  const cutoff = nowMsRel - WINDOW_MS;
+  const cutoff = nowMsRel - windowMs;
   for (const node of nodes) {
     while (node.samples.length > 0 && node.samples[0][0] < cutoff) {
       node.samples.shift();
@@ -182,7 +193,7 @@ function serializeNode(
   const totalUs = node.samples.reduce((s, [, d]) => s + d, 0);
   const totalCallCount = node.samples.reduce((s, [, , c]) => s + c, 0);
   const effectiveWindowMs =
-    callCount > 0 ? Math.min(WINDOW_MS, nowMsRel - node.samples[0][0]) : 0;
+    callCount > 0 ? Math.min(windowMs, nowMsRel - node.samples[0][0]) : 0;
 
   const childParts: string[] = [];
   for (const childId of node.children) {

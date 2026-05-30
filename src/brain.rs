@@ -29,6 +29,10 @@ const _: () = assert!(
     NN_HIDDEN_2.is_multiple_of(8),
     "NN_HIDDEN_2 must be multiple of 8 for output matmul"
 );
+// Tiling: 4 output units per outer iteration so each loaded input chunk is
+// reused across 4 weight rows. Both hidden widths must be a multiple of 4.
+const _: () = assert!(NN_HIDDEN_1.is_multiple_of(4));
+const _: () = assert!(NN_HIDDEN_2.is_multiple_of(4));
 // NOTE: NN_OUTPUTS (5) does NOT need SIMD alignment — only row stride matters.
 const _: () = assert!(
     NN_WEIGHT_COUNT
@@ -110,31 +114,71 @@ impl Brain {
     ) {
         let timed = timings.is_some();
         // --- Layer 1: input → hidden_1 (Leaky ReLU) ---
+        // Tiled 4× by output unit: each input chunk loaded once, multiplied
+        // into 4 weight rows in parallel. Cuts input-vector reload traffic 4×
+        // and gives the CPU 4 independent FMA chains to hide latency.
         let l1_start = if timed { clock_now_us_threadsafe() } else { 0 };
         let w1 = &self.weights[..W1_LEN];
-        for h in 0..NN_HIDDEN_1 {
-            let row = &w1[h * NN_INPUTS..h * NN_INPUTS + NN_INPUTS];
-            let mut acc = f32x8::ZERO;
+        let mut h = 0;
+        while h < NN_HIDDEN_1 {
+            let r0 = h * NN_INPUTS;
+            let r1 = r0 + NN_INPUTS;
+            let r2 = r1 + NN_INPUTS;
+            let r3 = r2 + NN_INPUTS;
+            let row0 = &w1[r0..r1];
+            let row1 = &w1[r1..r2];
+            let row2 = &w1[r2..r3];
+            let row3 = &w1[r3..r3 + NN_INPUTS];
+            let mut a0 = f32x8::ZERO;
+            let mut a1 = f32x8::ZERO;
+            let mut a2 = f32x8::ZERO;
+            let mut a3 = f32x8::ZERO;
             for c in 0..INPUT_CHUNKS {
-                let xv = f32x8::from(&input[c * 8..c * 8 + 8]);
-                let wv = f32x8::from(&row[c * 8..c * 8 + 8]);
-                acc += xv * wv;
+                let off = c * 8;
+                let xv = f32x8::from(&input[off..off + 8]);
+                a0 += xv * f32x8::from(&row0[off..off + 8]);
+                a1 += xv * f32x8::from(&row1[off..off + 8]);
+                a2 += xv * f32x8::from(&row2[off..off + 8]);
+                a3 += xv * f32x8::from(&row3[off..off + 8]);
             }
-            hidden_1[h] = lrelu(acc.reduce_add());
+            hidden_1[h] = lrelu(a0.reduce_add());
+            hidden_1[h + 1] = lrelu(a1.reduce_add());
+            hidden_1[h + 2] = lrelu(a2.reduce_add());
+            hidden_1[h + 3] = lrelu(a3.reduce_add());
+            h += 4;
         }
         let l1_end = if timed { clock_now_us_threadsafe() } else { 0 };
 
         // --- Layer 2: hidden_1 → hidden_2 (Leaky ReLU) ---
+        // Same 4× tiling: each hidden_1 chunk fed into 4 weight rows at once.
         let w2 = &self.weights[W1_LEN..W1_LEN + W2_LEN];
-        for h in 0..NN_HIDDEN_2 {
-            let row = &w2[h * NN_HIDDEN_1..h * NN_HIDDEN_1 + NN_HIDDEN_1];
-            let mut acc = f32x8::ZERO;
+        let mut h = 0;
+        while h < NN_HIDDEN_2 {
+            let r0 = h * NN_HIDDEN_1;
+            let r1 = r0 + NN_HIDDEN_1;
+            let r2 = r1 + NN_HIDDEN_1;
+            let r3 = r2 + NN_HIDDEN_1;
+            let row0 = &w2[r0..r1];
+            let row1 = &w2[r1..r2];
+            let row2 = &w2[r2..r3];
+            let row3 = &w2[r3..r3 + NN_HIDDEN_1];
+            let mut a0 = f32x8::ZERO;
+            let mut a1 = f32x8::ZERO;
+            let mut a2 = f32x8::ZERO;
+            let mut a3 = f32x8::ZERO;
             for c in 0..HIDDEN1_CHUNKS {
-                let hv = f32x8::from(&hidden_1[c * 8..c * 8 + 8]);
-                let wv = f32x8::from(&row[c * 8..c * 8 + 8]);
-                acc += hv * wv;
+                let off = c * 8;
+                let hv = f32x8::from(&hidden_1[off..off + 8]);
+                a0 += hv * f32x8::from(&row0[off..off + 8]);
+                a1 += hv * f32x8::from(&row1[off..off + 8]);
+                a2 += hv * f32x8::from(&row2[off..off + 8]);
+                a3 += hv * f32x8::from(&row3[off..off + 8]);
             }
-            hidden_2[h] = lrelu(acc.reduce_add());
+            hidden_2[h] = lrelu(a0.reduce_add());
+            hidden_2[h + 1] = lrelu(a1.reduce_add());
+            hidden_2[h + 2] = lrelu(a2.reduce_add());
+            hidden_2[h + 3] = lrelu(a3.reduce_add());
+            h += 4;
         }
         let l2_end = if timed { clock_now_us_threadsafe() } else { 0 };
 

@@ -1,12 +1,5 @@
 # Check-docs prompt
 
-Run this periodically (e.g., end of a development session, before a
-release) to surface doc drift. The check goes beyond "path exists" —
-it verifies named symbols, constants, and contracts the architecture
-docs claim.
-
----
-
 You are auditing the `docs/` tree of this repo for drift against the
 codebase. Treat every architecture doc's `Code anchors` section and
 every embedded constant / contract as a load-bearing claim. Report

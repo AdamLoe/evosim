@@ -183,8 +183,11 @@ impl NnStats {
         self.worker_busy_us[w].fetch_add(chunk_us, Ordering::Relaxed);
         self.tick_chunk_wall_us
             .fetch_add(chunk_us, Ordering::Relaxed);
-        // v1.7.2: one chunk wall-clock bracket per `record_chunk_lite` call.
-        self.tick_chunk_wall_calls.fetch_add(1, Ordering::Relaxed);
+        // v1.10: count per-creature so the `nn` root row's `ms/call` is
+        // directly comparable to its per-creature children (build_input,
+        // forward, etc). Pre-v1.10 this was `fetch_add(1, ...)` per chunk.
+        self.tick_chunk_wall_calls
+            .fetch_add(creatures_in_chunk, Ordering::Relaxed);
 
         if w < 64 {
             self.tick_workers_used_bitset
@@ -240,11 +243,13 @@ impl NnStats {
         self.tick_forward_l3_us
             .fetch_add(forward_l3_us, Ordering::Relaxed);
 
-        // Paired call counters (v1.7.2). `build_input_total` is one bracket
-        // per chunk; everything inside `build_nn_input` and `pick_action_d`
-        // runs once per creature in the chunk.
+        // Paired call counters. v1.10: every counter under the `nn` tree is
+        // per-creature so `ms/call` is directly comparable across rows at the
+        // same indent depth (previously `nn` and `nn.build_input` reported
+        // per-chunk costs, leaving the perf panel with two mutually-unscaled
+        // unit systems in the same table — confusing in the UI).
         self.tick_build_input_total_calls
-            .fetch_add(1, Ordering::Relaxed);
+            .fetch_add(creatures_in_chunk, Ordering::Relaxed);
         self.tick_build_input_other_calls
             .fetch_add(creatures_in_chunk, Ordering::Relaxed);
         self.tick_proximity_total_calls
@@ -369,12 +374,14 @@ mod tests {
         let used = s.tick_workers_used_bitset.load(Ordering::Relaxed);
         assert_eq!(used.count_ones(), 2);
 
-        // v1.7.2: paired call counters accumulate creatures_in_chunk per chunk
-        // for per-creature counters and 1 per chunk for the per-chunk bracket.
+        // v1.10: every `_calls` counter accumulates creatures_in_chunk per
+        // chunk. Pre-v1.10 the `nn` root and `nn.build_input` rows recorded
+        // per-chunk counts (3 here), leaving the perf panel with two unit
+        // systems in the same `ms/call` column. Made consistent now.
         assert_eq!(s.tick_forward_calls.load(Ordering::Relaxed), 160);
-        assert_eq!(s.tick_build_input_total_calls.load(Ordering::Relaxed), 3);
+        assert_eq!(s.tick_build_input_total_calls.load(Ordering::Relaxed), 160);
         assert_eq!(s.tick_build_input_other_calls.load(Ordering::Relaxed), 160);
-        assert_eq!(s.tick_chunk_wall_calls.load(Ordering::Relaxed), 3);
+        assert_eq!(s.tick_chunk_wall_calls.load(Ordering::Relaxed), 160);
     }
 
     #[test]

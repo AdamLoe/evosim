@@ -34,7 +34,7 @@
      --creature-ring uses standard rgba() syntax. --creature-halo also
      uses rgba() but only its alpha channel is read (the halo paints
      in the creature's own color). */
-  --grass-tint: 0.55, 0.85, 0.45;
+  --grass-tint: 0.08, 0.32, 0.08;
   --creature-ring: rgba(0, 0, 0, 0.6);
   --creature-halo: rgba(0, 0, 0, 0.18);
 
@@ -149,6 +149,12 @@ button {
 #perf-open:active {
   transform: scale(0.96);
 }
+/* When the panel is open, the toggle stays in place but reads as "lit". */
+#perf-open.is-active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--bg-panel);
+}
 
 /* ── Profiler bottom panel ────────────────────────────────────────────────── */
 
@@ -162,28 +168,11 @@ button {
   padding: 8px 12px;
   font: 11px ui-monospace, monospace;
 }
-#perf-close {
-  position: absolute;
-  top: 4px;
-  right: 8px;
-  width: 22px;
-  height: 22px;
-  background: transparent;
-  border: 0;
-  color: var(--fg-muted);
-  font-size: 18px;
-  line-height: 20px;
-  padding: 0;
-  cursor: pointer;
-}
-#perf-close:hover { color: var(--fg); }
-
 .perf-header-row {
   display: flex;
   align-items: center;
   gap: 12px;
   flex-wrap: nowrap;
-  padding-right: 28px;
 }
 .perf-stat {
   font: 11px ui-monospace, monospace;
@@ -203,19 +192,42 @@ button {
   white-space: nowrap;
 }
 .jank-reset-btn {
-  background: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: var(--bg-panel-alt);
   border: 1px solid var(--border-strong);
-  border-radius: 3px;
+  border-radius: 5px;
   color: var(--fg-muted);
-  font-size: 10px;
-  line-height: 1;
-  padding: 1px 4px;
   cursor: pointer;
   margin-left: auto;
+  transition: color 0.12s ease, border-color 0.12s ease, transform 0.06s ease;
 }
 .jank-reset-btn:hover {
-  border-color: var(--fg-muted);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.jank-reset-btn:active {
+  transform: scale(0.94);
+}
+.perf-window-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font: 11px ui-monospace, monospace;
+  color: var(--fg-muted);
+}
+.perf-window-select {
+  background: var(--bg-panel-alt);
   color: var(--fg);
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  padding: 1px 4px;
+  font: 11px ui-monospace, monospace;
+  cursor: pointer;
 }
 .profiler-stabilizing {
   font-size: 10px;

@@ -17,9 +17,11 @@
 
         <div id="canvas-wrap">
           <canvas id="aquarium"></canvas>
-          <!-- Floating "open profiler" button — bottom-right of the canvas
-               area. Hidden when the profiler panel is visible. -->
-          <button id="perf-open" type="button" aria-label="Open profiler" title="Open profiler">
+          <!-- Floating profiler toggle — bottom-right of the canvas area.
+               Always rendered; the .is-active class flips when the panel is
+               open so the icon hints at the toggle state (no separate close
+               button on the panel itself). -->
+          <button id="perf-open" type="button" aria-label="Toggle profiler" title="Toggle profiler">
             <svg viewBox="0 0 24 24" width="20" height="20" fill="none"
                  stroke="currentColor" stroke-width="1.6"
                  stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -33,11 +35,26 @@
         <!-- Profiler bottom panel. Width follows the left column; height
              grows only when the panel is visible (display:none when off). -->
         <div id="perf-box" class="perf-widget" style="display:none">
-          <button id="perf-close" type="button" aria-label="Close profiler">×</button>
           <div class="perf-header-row">
             <span id="perf-tps" class="perf-stat">— TPS</span>
             <span id="perf-jank" class="perf-stat">0 jank</span>
-            <button id="jank-reset" class="jank-reset-btn" title="Reset jank counter">↺</button>
+            <label class="perf-window-label" for="perf-window-select" title="Profiler rolling-window length">
+              window
+              <select id="perf-window-select" class="perf-window-select">
+                <option value="5000">5s</option>
+                <option value="10000" selected>10s</option>
+                <option value="30000">30s</option>
+                <option value="60000">60s</option>
+              </select>
+            </label>
+            <button id="jank-reset" class="jank-reset-btn" type="button" title="Reset profiler + jank" aria-label="Reset profiler + jank">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none"
+                   stroke="currentColor" stroke-width="1.8"
+                   stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M3 12a9 9 0 1 0 3-6.7"></path>
+                <path d="M3 4v5h5"></path>
+              </svg>
+            </button>
           </div>
           <div class="perf-obs-row">
             <span id="perf-grass-cells" class="perf-stat perf-obs">grass cells: —</span>

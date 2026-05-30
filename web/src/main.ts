@@ -28,7 +28,7 @@ import {
   CTRL_CURRENT_SLOT,
   CTRL_SEQ,
   CREATURE_STRIDE,
-  GRASS_BYTES,
+  GRASS_CELL_COUNT,
   creatureSoAOffset,
   grassOffset,
   slotOffset,
@@ -76,8 +76,15 @@ export function getTargetTPS(): number {
 }
 
 let controlSab: SharedArrayBuffer | null = null;
-let snapshotSab: SharedArrayBuffer | null = null;
 let controlI32: Int32Array | null = null;
+/**
+ * v1.11 (A): snapshot region lives in wasm linear memory. These are
+ * (re)constructed from the `WebAssembly.Memory.buffer` returned in
+ * `boot_ready`. Each restart spawns a new worker with new wasm memory, so
+ * we re-attach on every successful boot.
+ */
+let snapshotBuffer: ArrayBufferLike | null = null;
+let snapshotBaseOffset = 0;
 let snapshotView: DataView | null = null;
 let cachedSeed = "";
 
@@ -96,6 +103,14 @@ async function main(): Promise<void> {
 
   const params = new URLSearchParams(window.location.search);
   const urlSeed = (params.get("seed") ?? "").slice(0, 128) || "";
+
+  // v1.9.2 follow-up: install the dev panel BEFORE spawning the worker so
+  // its staged-slider widget readers are registered when
+  // `currentSliderState()` is queried inside `spawnSimWorker` for the
+  // boot payload. Otherwise `initial_sliders` is `{}` on first boot, the
+  // worker uses Rust defaults, and persisted settings only take effect
+  // after a manual restart.
+  installDevPanel(() => simBridge);
 
   let simBridge = await spawnSimWorker(urlSeed);
 
@@ -117,7 +132,6 @@ async function main(): Promise<void> {
   installCanvasClickHandler(canvas, cam, () => ({ w: viewW, h: viewH }), simBridge, rail);
 
   installProfilerPanel(simBridge);
-  installDevPanel(simBridge);
   installMonitorTab(simBridge);
   installSettingsButton(rail);
 
@@ -165,17 +179,28 @@ async function main(): Promise<void> {
   function frame(now: number): void {
     const frameSpan = span("frame");
     try {
-      if (!controlI32 || !snapshotSab || !snapshotView) return;
+      if (!controlI32 || !snapshotBuffer || !snapshotView) return;
       const readSpan = span("frame.snapshot.read");
       const rawSlot = Atomics.load(controlI32, CTRL_CURRENT_SLOT);
       const slot: 0 | 1 = rawSlot === 1 ? 1 : 0;
       const seq = Atomics.load(controlI32, CTRL_SEQ);
       const header = readSnapshotHeader(snapshotView, slotOffset(slot));
       const pop = Math.min(header.pop, MAX_POP_FOR_SIM);
+      // v1.11 (A+D): snapshot region lives inside wasm.memory.buffer at
+      // snapshotBaseOffset. Grass is now f32 per cell (no quantize) — view
+      // length is GRASS_CELL_COUNT, not GRASS_BYTES.
       const creatures = pop > 0
-        ? new Float32Array(snapshotSab, creatureSoAOffset(slot), pop * CREATURE_STRIDE)
+        ? new Float32Array(
+            snapshotBuffer,
+            snapshotBaseOffset + creatureSoAOffset(slot),
+            pop * CREATURE_STRIDE,
+          )
         : new Float32Array(0);
-      const grass = new Uint8Array(snapshotSab, grassOffset(slot), GRASS_BYTES);
+      const grass = new Float32Array(
+        snapshotBuffer,
+        snapshotBaseOffset + grassOffset(slot),
+        GRASS_CELL_COUNT,
+      );
       readSpan.close();
 
       if (header.world_ended && !paused && getSettings().autoRun && !autoRestartPending) {
@@ -242,7 +267,7 @@ async function spawnSimWorker(seed: string): Promise<SimBridge> {
 
   cachedSeed = seed === "" ? "(random)" : seed;
 
-  bridge.postMessage({
+  bridge.sendBoot({
     kind: "boot",
     seed,
     initial_grass_seed_count: getInitialGrassSeedCount(),
@@ -250,6 +275,8 @@ async function spawnSimWorker(seed: string): Promise<SimBridge> {
     founder_count: getFounderCount(),
     full_grass_on_init: getFullGrassOnInit(),
     initial_sliders: currentSliderState(),
+    initial_target_tps: targetTPS,
+    initial_paused: paused,
   });
 
   const ready = await bootReady;
@@ -261,16 +288,30 @@ async function spawnSimWorker(seed: string): Promise<SimBridge> {
       `Rust/TS const drift.`,
     );
   }
-  if (!ready.snapshot_sab || !ready.control_sab) {
+  if (!ready.control_sab) {
     throw new Error(
-      "[boot] sim worker did not deliver SAB handles (snapshot_sab/control_sab " +
-      "null). Check sim-worker.ts boot path.",
+      "[boot] sim worker did not deliver control SAB handle. " +
+      "Check sim-worker.ts boot path.",
+    );
+  }
+  if (!ready.wasm_memory) {
+    throw new Error(
+      "[boot] sim worker did not deliver wasm.memory handle. " +
+      "Check sim-worker.ts boot path.",
     );
   }
   controlSab = ready.control_sab;
-  snapshotSab = ready.snapshot_sab;
   controlI32 = new Int32Array(controlSab);
-  snapshotView = new DataView(snapshotSab);
+  // v1.11 (A): the snapshot region lives at a fixed offset inside the
+  // worker's wasm linear memory. With shared memory enabled,
+  // `wasm.memory.buffer` is a SharedArrayBuffer-compatible view both
+  // threads see identically. Build a DataView once at boot; the byte
+  // offsets returned by slotOffset/creatureSoAOffset/grassOffset are
+  // RELATIVE TO the snapshot base inside wasm memory, so we add
+  // `snapshotBaseOffset` everywhere we use them.
+  snapshotBuffer = ready.wasm_memory.buffer;
+  snapshotBaseOffset = ready.snapshot_buf_byte_offset;
+  snapshotView = new DataView(snapshotBuffer, snapshotBaseOffset, ready.snapshot_buf_byte_len);
   latestWorldSize = ready.world_size;
   latestGrassDim = ready.grass_dim;
   // Stash the Rust-side slider defaults for the Wave D drift-guard e2e to
@@ -279,9 +320,8 @@ async function spawnSimWorker(seed: string): Promise<SimBridge> {
     ready.sliders_defaults_json;
 
   bridge.attachControlSab(controlSab);
-
-  bridge.postMessage({ kind: "set_target_tps", tps: targetTPS });
-  bridge.postMessage({ kind: "set_paused", paused });
+  // Boot seeded initial paused / target TPS / sliders into the control SAB;
+  // no post-boot mirror writes needed.
 
   return bridge;
 }
@@ -297,7 +337,7 @@ function installPacingControls(getBridge: () => SimBridge): void {
   refreshToggleLabel();
   toggle.onclick = () => {
     paused = !paused;
-    getBridge().postMessage({ kind: "set_paused", paused });
+    getBridge().setPaused(paused);
     refreshToggleLabel();
   };
 
@@ -325,7 +365,7 @@ function installPacingControls(getBridge: () => SimBridge): void {
     if (!Number.isFinite(v) || v < 1) return;
     targetTPS = v;
     setSetting("targetTPS", targetTPS);
-    getBridge().postMessage({ kind: "set_target_tps", tps: targetTPS });
+    getBridge().setTargetTps(targetTPS);
     if (onTpsChange) onTpsChange(targetTPS);
   });
 
@@ -341,7 +381,7 @@ function installPacingControls(getBridge: () => SimBridge): void {
     if (e.target instanceof HTMLTextAreaElement) return;
     e.preventDefault();
     paused = !paused;
-    getBridge().postMessage({ kind: "set_paused", paused });
+    getBridge().setPaused(paused);
     refreshToggleLabel();
   });
 

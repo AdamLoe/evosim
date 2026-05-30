@@ -98,50 +98,56 @@ impl World {
         self.scratch_fy.resize(n, 0.0);
         self.scratch_fx.fill(0.0);
         self.scratch_fy.fill(0.0);
-        for i in 0..n {
-            let xi = self.creatures.x[i];
-            let yi = self.creatures.y[i];
-            let mut neighbors = std::mem::take(&mut self.scratch_neighbors);
-            neighbors.clear();
-            self.grid.for_each_in_radius(xi, yi, search, |j| {
-                if j > i {
-                    neighbors.push(j);
-                }
-            });
-            for &j in &neighbors {
-                let xj = self.creatures.x[j];
-                let yj = self.creatures.y[j];
-                // D3: rj == ri. D7: walled, raw Euclidean displacement.
-                let dx = xj - xi;
-                let dy = yj - yi;
-                let d2 = dx * dx + dy * dy;
-                let rsum = ri + ri;
-                if d2 < rsum * rsum {
-                    if d2 > 1e-8 {
-                        let d = d2.sqrt();
-                        let overlap = rsum - d;
-                        let f = (REPULSION_K * overlap).clamp(0.0, rep_max);
-                        let ux = dx / d;
-                        let uy = dy / d;
-                        self.scratch_fx[i] -= ux * f;
-                        self.scratch_fy[i] -= uy * f;
-                        self.scratch_fx[j] += ux * f;
-                        self.scratch_fy[j] += uy * f;
-                    } else {
-                        // Co-located (newborn siblings) — deterministic nudge.
-                        let angle =
-                            ((i as f32) * 0.7 + (j as f32) * 1.3).sin() * std::f32::consts::PI;
-                        let ux = angle.cos();
-                        let uy = angle.sin();
-                        let f = rep_max;
-                        self.scratch_fx[i] -= ux * f;
-                        self.scratch_fy[i] -= uy * f;
-                        self.scratch_fx[j] += ux * f;
-                        self.scratch_fy[j] += uy * f;
+        // Skip the per-creature neighbor scan entirely when repulsion is disabled.
+        // Every force computed below is clamped to [0, rep_max], so rep_max=0 yields
+        // no movement contribution — but the scan itself is O(N·K) and explodes when
+        // creatures clump (which happens precisely *because* repulsion is off).
+        if rep_max > 0.0 {
+            for i in 0..n {
+                let xi = self.creatures.x[i];
+                let yi = self.creatures.y[i];
+                let mut neighbors = std::mem::take(&mut self.scratch_neighbors);
+                neighbors.clear();
+                self.grid.for_each_in_radius(xi, yi, search, |j| {
+                    if j > i {
+                        neighbors.push(j);
+                    }
+                });
+                for &j in &neighbors {
+                    let xj = self.creatures.x[j];
+                    let yj = self.creatures.y[j];
+                    // D3: rj == ri. D7: walled, raw Euclidean displacement.
+                    let dx = xj - xi;
+                    let dy = yj - yi;
+                    let d2 = dx * dx + dy * dy;
+                    let rsum = ri + ri;
+                    if d2 < rsum * rsum {
+                        if d2 > 1e-8 {
+                            let d = d2.sqrt();
+                            let overlap = rsum - d;
+                            let f = (REPULSION_K * overlap).clamp(0.0, rep_max);
+                            let ux = dx / d;
+                            let uy = dy / d;
+                            self.scratch_fx[i] -= ux * f;
+                            self.scratch_fy[i] -= uy * f;
+                            self.scratch_fx[j] += ux * f;
+                            self.scratch_fy[j] += uy * f;
+                        } else {
+                            // Co-located (newborn siblings) — deterministic nudge.
+                            let angle =
+                                ((i as f32) * 0.7 + (j as f32) * 1.3).sin() * std::f32::consts::PI;
+                            let ux = angle.cos();
+                            let uy = angle.sin();
+                            let f = rep_max;
+                            self.scratch_fx[i] -= ux * f;
+                            self.scratch_fy[i] -= uy * f;
+                            self.scratch_fx[j] += ux * f;
+                            self.scratch_fy[j] += uy * f;
+                        }
                     }
                 }
+                self.scratch_neighbors = neighbors;
             }
-            self.scratch_neighbors = neighbors;
         }
 
         // S31: track whether any position changed to skip the final grid rebuild.
