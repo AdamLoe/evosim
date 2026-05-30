@@ -45,7 +45,7 @@ this doc is the procedural version for an agent at the keyboard.
    If down:
 
    ```bash
-   cd /home/adamg/evosim/web && rm -f /tmp/vite.log && \
+   cd /web && rm -f /tmp/vite.log && \
      nohup setsid bash -c 'PATH=$HOME/.local/bin:$PATH pnpm dev --host 0.0.0.0' \
      > /tmp/vite.log 2>&1 < /dev/null &
    disown
