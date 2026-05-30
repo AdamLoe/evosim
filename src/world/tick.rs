@@ -9,6 +9,24 @@
 use super::World;
 use crate::constants::*;
 use crate::creature::Action;
+#[cfg(feature = "threads")]
+use rayon::prelude::*;
+
+/// Per-predator outcome from the parallel scan phase of `eat()`. Applied
+/// sequentially after the parallel block since `Hit` writes touch both the
+/// predator and prey scratch lanes — a race risk under rayon.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) enum EatPick {
+    /// Creature didn't choose `Action::Eat` (or n == 0).
+    #[default]
+    Skip,
+    /// Creature chose Eat but was in digestion cooldown, or had no in-reach
+    /// target. Records the "attempt" for downstream bookkeeping (color EMA)
+    /// without applying any bite.
+    Miss,
+    /// Eat landed on prey `j`; `transfer` is the pre-eat-eff energy delta.
+    Hit { j: u32, transfer: f32 },
+}
 
 impl World {
     /// Multi-cell graze: for every creature that chose `Action::Graze` this tick,
@@ -176,6 +194,16 @@ impl World {
     }
 
     /// Eat resolution. Scavenge action removed in D9; function renamed from eat_and_scavenge.
+    ///
+    /// Parallel scan + sequential apply. The per-predator search (find the
+    /// closest in-reach prey) is the hot loop at high pop — in a clump,
+    /// every cell query returns many candidates and the inner distance
+    /// comparison runs over all of them. Splitting the search across rayon
+    /// workers takes that O(N·K) cost down by the worker count.
+    ///
+    /// The parallel phase only reads from the SoA + grid; writes that touch
+    /// shared prey lanes (`scratch_damage[j]`) happen serially afterward
+    /// from a per-predator `EatPick` buffer.
     pub(crate) fn eat(&mut self) {
         let n = self.creatures.len();
         if n == 0 {
@@ -186,67 +214,102 @@ impl World {
         self.scratch_cooldown_set.resize(n, false);
         self.scratch_attempted_eat.resize(n, false);
         self.scratch_got_a_bite.resize(n, false);
+        self.scratch_eat_picks.resize(n, EatPick::Skip);
         self.scratch_damage.fill(0.0);
         self.scratch_gain.fill(0.0);
         self.scratch_cooldown_set.fill(false);
         self.scratch_attempted_eat.fill(false);
         self.scratch_got_a_bite.fill(false);
+        self.scratch_eat_picks.fill(EatPick::Skip);
 
         // D3: all creatures have eat_eff = 1.0, armor = 0.0, bite_reach = 0.0,
         // size = CREATURE_SIZE (all constant).
-        let eat_eff = 1.0_f32;
         let size = CREATURE_SIZE;
-        let bite_reach = 0.0_f32;
+        let radius_i = size * BODY_RADIUS_PER_SIZE;
+        let max_range = radius_i + radius_i; // bite_reach = 0, rj = radius_i
+        let max_range_sq = max_range * max_range;
         let armor = 0.0_f32;
+        let bite_frac = self.sliders.eat_bite_fraction;
 
-        for i in 0..n {
-            if self.creatures.action_this_tick[i] == Action::Eat {
-                self.scratch_attempted_eat[i] = true;
-                if self.creatures.digestion_cooldown[i] > 0 {
-                    continue;
+        // Parallel scan: every per-i body only reads from xs/ys/actions/
+        // cooldowns/energies/ids/grid (immutable across threads) and writes
+        // exclusively to its own `picks[i]` slot.
+        {
+            let xs = &self.creatures.x[..n];
+            let ys = &self.creatures.y[..n];
+            let actions = &self.creatures.action_this_tick[..n];
+            let cooldowns = &self.creatures.digestion_cooldown[..n];
+            let energies = &self.creatures.energy[..n];
+            let ids = &self.creatures.id[..n];
+            let grid = &self.grid;
+            let picks = &mut self.scratch_eat_picks[..n];
+
+            let scan_one = |i: usize, slot: &mut EatPick| {
+                if actions[i] != Action::Eat {
+                    *slot = EatPick::Skip;
+                    return;
                 }
-                let radius_i = size * BODY_RADIUS_PER_SIZE;
-                let reach = bite_reach * size;
-                let max_range = radius_i + reach + size * BODY_RADIUS_PER_SIZE;
-                let xi = self.creatures.x[i];
-                let yi = self.creatures.y[i];
-                let mut best: Option<(usize, f32)> = None;
-                // S25: use pooled scratch buffer instead of per-Eat Vec::with_capacity(8).
-                let mut candidates = std::mem::take(&mut self.scratch_eat_candidates);
-                candidates.clear();
-                self.grid.for_each_in_radius(xi, yi, max_range, |j| {
-                    if j != i {
-                        candidates.push(j);
+                if cooldowns[i] > 0 {
+                    *slot = EatPick::Miss;
+                    return;
+                }
+                let xi = xs[i];
+                let yi = ys[i];
+                // First-valid-target eat: instead of scanning every candidate
+                // for the *closest* in-reach prey (O(K) per predator → O(N·K)
+                // total in clumps), bail as soon as we find any in-reach prey.
+                // The per-cell iteration starts at `i % K_cell` and wraps, so
+                // different predators in the same stack pick different
+                // cell-mates first — the bite target spreads across the pile
+                // rather than always landing on the lowest-index (oldest)
+                // resident. See decisions/sim.md "Eat picks first-valid…".
+                let _ = ids; // tiebreak field no longer used; kept for parity
+                let pick = grid.find_first_in_radius(xi, yi, max_range, i, |j| {
+                    if j == i {
+                        return false;
                     }
+                    let dx = xs[j] - xi;
+                    let dy = ys[j] - yi;
+                    let d2 = dx * dx + dy * dy;
+                    d2 <= max_range_sq
                 });
-                for j in candidates.iter().copied() {
-                    // D7: walled, raw Euclidean distance.
-                    let ddx = self.creatures.x[j] - xi;
-                    let ddy = self.creatures.y[j] - yi;
-                    let d = (ddx * ddx + ddy * ddy).sqrt();
-                    let rj = size * BODY_RADIUS_PER_SIZE; // D3: same size for all
-                    let contact = (d - radius_i - rj).max(0.0);
-                    if contact <= reach {
-                        best = match best {
-                            None => Some((j, d)),
-                            Some((_, bd)) if d < bd => Some((j, d)),
-                            Some((bj, bd))
-                                if d == bd && self.creatures.id[j] < self.creatures.id[bj] =>
-                            {
-                                Some((j, d))
-                            }
-                            other => other,
-                        };
-                    }
+                *slot = match pick {
+                    Some(j) => EatPick::Hit {
+                        j: j as u32,
+                        transfer: bite_frac * energies[j] * (1.0 - armor),
+                    },
+                    None => EatPick::Miss,
+                };
+            };
+
+            #[cfg(feature = "threads")]
+            {
+                picks
+                    .par_iter_mut()
+                    .enumerate()
+                    .for_each(|(i, slot)| scan_one(i, slot));
+            }
+            #[cfg(not(feature = "threads"))]
+            {
+                for (i, slot) in picks.iter_mut().enumerate() {
+                    scan_one(i, slot);
                 }
-                self.scratch_eat_candidates = candidates;
-                if let Some((j, _)) = best {
-                    // D3: armor = 0.0 for all prey.
-                    let bite_frac = self.sliders.eat_bite_fraction;
-                    let prey_energy = self.creatures.energy[j];
-                    let transfer = bite_frac * prey_energy * (1.0 - armor);
+            }
+        }
+
+        // Sequential apply: now safe to touch the shared damage/gain lanes.
+        for i in 0..n {
+            match self.scratch_eat_picks[i] {
+                EatPick::Skip => {}
+                EatPick::Miss => {
+                    self.scratch_attempted_eat[i] = true;
+                }
+                EatPick::Hit { j, transfer } => {
+                    let j = j as usize;
+                    self.scratch_attempted_eat[i] = true;
                     self.scratch_damage[j] += transfer;
-                    self.scratch_gain[i] += transfer * eat_eff;
+                    // eat_eff = 1.0 (D3): predator gain == transfer.
+                    self.scratch_gain[i] += transfer;
                     self.scratch_cooldown_set[i] = true;
                     self.scratch_got_a_bite[i] = true;
                 }
@@ -523,7 +586,7 @@ mod tests {
     /// and clamped to [0, WORLD_SIZE) after movement; no seam-wrap occurs.
     #[test]
     fn repulsion_clamps_to_walls_after_movement() {
-        use crate::brain::Brain;
+        use crate::brain::{Brain, NnTopology};
 
         let mut w = World::new("p1a-repulsion-seam");
         w.creatures.x[0] = 2.0;
@@ -532,7 +595,7 @@ mod tests {
         w.creatures.vy[0] = 0.0;
 
         let mut rng = SimRng::from_u64(123);
-        let b2 = Brain::founder(&mut rng);
+        let b2 = Brain::founder(&mut rng, NnTopology::legacy());
         let n_before = w.creatures.len();
         w.creatures
             .push(1, 598.0, WORLD_SIZE * 0.5, START_ENERGY_DEFAULT, 0, b2);
@@ -794,7 +857,7 @@ mod tests {
     /// D3: all creatures have eat_eff=1.0, armor=0.0 as constants.
     #[test]
     fn p3a_eat_bite_basic_transfer() {
-        use crate::brain::Brain;
+        use crate::brain::{Brain, NnTopology};
 
         let mut w = World::new("p3a-basic");
         w.creatures.energy[0] = 100.0;
@@ -804,7 +867,7 @@ mod tests {
 
         // Add prey (creature 1) adjacent.
         let mut rng = SimRng::from_u64(42);
-        let prey_brain = Brain::founder(&mut rng);
+        let prey_brain = Brain::founder(&mut rng, NnTopology::legacy());
         let pred_x = w.creatures.x[0];
         let pred_y = w.creatures.y[0];
         // Place prey within bite reach (0.0 since bite_reach = 0).
@@ -841,7 +904,7 @@ mod tests {
     /// P3a test: digestion cooldown still gates bites — only attempt cost charged, no bite.
     #[test]
     fn p3a_eat_cooldown_still_gates() {
-        use crate::brain::Brain;
+        use crate::brain::{Brain, NnTopology};
 
         let mut w = World::new("p3a-cooldown");
         w.creatures.energy[0] = 100.0;
@@ -851,7 +914,7 @@ mod tests {
         w.sliders.eat_bite_fraction = 0.5;
 
         let mut rng = SimRng::from_u64(7);
-        let prey_brain = Brain::founder(&mut rng);
+        let prey_brain = Brain::founder(&mut rng, NnTopology::legacy());
         let pred_x = w.creatures.x[0];
         let pred_y = w.creatures.y[0];
         w.creatures

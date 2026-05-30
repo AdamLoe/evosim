@@ -6,7 +6,7 @@ import { maybeSampleStats } from "./stats";
 import { refreshInspector, updateLatestSoA } from "./inspector";
 import { pruneHighlights, highlights } from "./highlight";
 
-export type RailTab = "inspector" | "monitor" | "settings";
+export type RailTab = "inspector" | "monitor" | "nn" | "settings";
 
 export interface RailState {
   switchTab(name: RailTab): void;

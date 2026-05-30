@@ -249,6 +249,61 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 - **Code anchors**: `src/world/mod.rs → color_ema_update`,
   `CreatureSoA::color_r / color_g / color_b`.
 
+### Eat picks first-valid in a per-predator-rotated cell walk
+
+- **Decision**: `World::eat` no longer scans every in-radius candidate to
+  pick the *closest* in-reach prey. Instead it takes the first prey
+  whose squared distance falls inside `max_range_sq`, with the per-cell
+  iteration starting at `predator_idx % K_cell` and wrapping. Drops the
+  closest + lowest-id tiebreak that the previous implementation used.
+- **Why**: At high pop with `repulsion_max=0` (or any large clump),
+  every predator's bbox returned dozens of candidates and the inner
+  scan dominated the tick. The cells in a clump are small enough that
+  "first valid" and "closest valid" are physically near-identical
+  bites. The rotation seed de-correlates "first" from creature-index,
+  which otherwise biases toward biting the oldest cell-mate every time
+  (SoA-index order ≈ age order).
+- **Applies to**: `architecture/simulation-core.md`,
+  `src/grid.rs → SpatialGrid::find_first_in_radius`,
+  `src/world/tick.rs → World::eat`.
+- **Tradeoffs**: Bite-target is no longer the strict argmin-distance
+  prey; in a tight stack the picked prey is whichever sits at
+  `(predator_idx + k) mod K_cell` first. Determinism is preserved
+  (rotation is a pure function of predator index + cell layout).
+- **Revisit when**: A future world is much sparser (so the
+  closest-prey scan is cheap again) or visualisation reveals an
+  unexpected pattern from the rotation bias — at that point the
+  cheapest mitigation is a starburst cell walk so "first" approximates
+  "closest" without sorting.
+- **Code anchors**: `src/grid.rs → SpatialGrid::find_first_in_radius`,
+  `src/world/tick.rs → eat`, `EatPick`.
+
+### Creature proximity scan walks cells in starburst order with sector-saturation early-bail
+
+- **Decision**: `compute_creature_proximity_sectors` walks a precomputed
+  starburst list of integer cell offsets sorted by lower-bound distance
+  from the home cell. Per sector it tracks `best_intensity` and bails
+  as soon as every sector has been lit *and* the current cell's max
+  achievable intensity (`1 - min_dist/range`) can no longer beat the
+  worst-lit sector.
+- **Why**: The naive bbox walk visits every cell in
+  `(2·PROXIMITY_RANGE)²`, which at `PROXIMITY_RANGE=20` and
+  `HASH_CELL=2.5` is ~256 cells per predator, dominated by candidates
+  in dense clumps. The aggregation is `max` per sector, so once each
+  sector has any hit, further cells whose closeness ceiling is below
+  the worst lit sector cannot improve the result. The starburst order
+  guarantees we hit the closest cells first, so the early-bail fires
+  quickly in clumps.
+- **Applies to**: `architecture/simulation-core.md`,
+  `src/world/proximity.rs → proximity_starburst`,
+  `src/world/proximity.rs → compute_creature_proximity_sectors`.
+- **Tradeoffs**: Output is bit-identical to the prior bbox walk (same
+  max-aggregation semantics, same sector LUT, same bilinear split).
+  The starburst list is built once via `OnceLock` and reused.
+- **Revisit when**: `PROXIMITY_RANGE` or `HASH_CELL` changes by enough
+  that the precomputed list needs a different cap, or a future sense
+  uses sum-aggregation (where the early-bail invariant doesn't hold).
+
 ### No save/load, no species tracking, no events, no Hall of Fame
 
 - **Decision**: Every page load is a fresh world. No persistence, no

@@ -56,12 +56,24 @@ pub const CURRICULUM_MAX_POP_DEFAULT: u32 = 2000;
 //   [30]     1.0 (bias-learning constant)
 //   [31]     padding (0.0) — SIMD alignment to 32 = 4 × 8
 pub const NN_INPUTS: usize = 32;
-pub const NN_HIDDEN_1: usize = 48;
-pub const NN_HIDDEN_2: usize = 24;
 pub const NN_OUTPUTS: usize = 5; // out[0]=vx, out[1]=vy, out[2..5]=action logits (Graze/Eat/Split)
-pub const NN_WEIGHT_COUNT: usize =
-    NN_INPUTS * NN_HIDDEN_1 + NN_HIDDEN_1 * NN_HIDDEN_2 + NN_HIDDEN_2 * NN_OUTPUTS;
-const _: () = assert!(NN_WEIGHT_COUNT == 2808);
+// v1.12: NN_HIDDEN_1/2 + NN_WEIGHT_COUNT were compile-time constants in
+// the legacy 32→48→24→5 topology. They're now derived from the
+// runtime `Brain.layer_sizes` (`src/brain.rs`). Legacy default lives in
+// `LEGACY_NN_TOPOLOGY` below.
+/// Hard upper bound on a single hidden-layer width. Drives the size of the
+/// per-chunk stack scratch buffers in the forward pass; the UI clamps width
+/// to this value too.
+pub const NN_MAX_HIDDEN_WIDTH: usize = 256;
+/// Hard upper bound on hidden-layer count. Together with `NN_MAX_HIDDEN_WIDTH`
+/// it bounds the per-tick stack scratch and the per-layer profiler counters.
+pub const NN_MAX_HIDDEN_LAYERS: usize = 8;
+/// `NN_MAX_HIDDEN_LAYERS + 1` matmuls (one per hidden + one for output).
+pub const NN_MAX_MATMULS: usize = NN_MAX_HIDDEN_LAYERS + 1;
+/// Legacy 32→48→24→5 topology. Used as the default when no
+/// `nn_topology` rides the boot payload and as a calibration anchor for the
+/// SIMD-vs-scalar drift-guard test.
+pub const LEGACY_HIDDEN_SIZES: &[usize] = &[48, 24];
 /// Number of angular sectors for creature_proximity and grass_density inputs.
 /// World-aligned: 0 = N (0°), 1 = NE (45°), …, 7 = NW (315°).
 pub const NN_SECTORS: usize = 8;
@@ -70,16 +82,18 @@ pub const PROXIMITY_RANGE: f32 = 20.0;
 pub const GRASS_PROXIMITY_RANGE: f32 = 8.0;
 /// Range used by wall_proximity inputs (world-units).
 pub const WALL_PROXIMITY_RANGE: f32 = 50.0;
-pub const NN_MUT_RATE_DEFAULT: f32 = 0.02;
-pub const NN_MUT_SIGMA_DEFAULT: f32 = 0.02;
-// Per-layer He-uniform init ranges r = sqrt(6/fan_in).
-pub const NN_INIT_RANGE_L1: f32 = 0.433;
-pub const NN_INIT_RANGE_L2: f32 = 0.354;
-pub const NN_INIT_RANGE_L3: f32 = 0.500;
+// v1.12: legacy per-layer NN_INIT_RANGE_L1/L2/L3 constants removed. Founder
+// init computes He-uniform `r = sqrt(6 / fan_in)` per layer at runtime
+// in `Brain::founder`.
 
-// ---- Brain mutation ----
-pub const MUT_RATE_OF_RATES: f32 = 0.005;
-pub const MUT_RATE_JITTER: f32 = 0.20;
+// ---- Brain mutation (v1.12 buckets) ----
+/// Fixed cap on mutation buckets. SAB-stable; under-used slots have weight=0.
+pub const MUTATION_BUCKET_COUNT: usize = 8;
+/// Default per-birth mutation: bucket 0 alone, rate=0.02, sigma=0.02 — matches
+/// pre-v1.12 single-knob behaviour exactly.
+pub const MUT_BUCKET0_WEIGHT_DEFAULT: f32 = 1.0;
+pub const MUT_BUCKET_RATE_DEFAULT: f32 = 0.02;
+pub const MUT_BUCKET_SIGMA_DEFAULT: f32 = 0.02;
 
 // ---- Trait-range constants still used as named values ----
 pub const MOVE_SPEED_MAX: f32 = 5.0;

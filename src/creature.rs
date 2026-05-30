@@ -153,7 +153,7 @@ impl CreatureSoA {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::brain::Brain;
+    use crate::brain::{Brain, NnTopology};
     use crate::rng::SimRng;
 
     /// v1.5 S5b: remove_indices keeps every SoA column length-consistent.
@@ -162,7 +162,7 @@ mod tests {
         let mut soa = CreatureSoA::with_capacity(4);
         let mut rng = SimRng::from_u64(1);
         for i in 0..4u64 {
-            let b = Brain::founder(&mut rng);
+            let b = Brain::founder(&mut rng, NnTopology::legacy());
             soa.push(i, i as f32 * 10.0, 0.0, 100.0, 0, b);
         }
         assert_eq!(soa.len(), 4);
@@ -179,7 +179,7 @@ mod tests {
         let mut soa = CreatureSoA::with_capacity(4);
         let mut rng = SimRng::from_u64(42);
         for k in 0u64..5 {
-            let b = Brain::founder(&mut rng);
+            let b = Brain::founder(&mut rng, NnTopology::legacy());
             soa.push(k, k as f32, 0.0, 100.0, 0, b);
         }
         assert_eq!(soa.len(), 5);
@@ -193,7 +193,7 @@ mod tests {
         let mut soa = CreatureSoA::with_capacity(2);
         let mut rng = SimRng::from_u64(7);
         for k in 0u64..3 {
-            let b = Brain::founder(&mut rng);
+            let b = Brain::founder(&mut rng, NnTopology::legacy());
             soa.push(k, k as f32, 0.0, 100.0, 0, b);
         }
         for i in 0..soa.len() {

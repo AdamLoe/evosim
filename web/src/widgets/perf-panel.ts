@@ -116,6 +116,11 @@ export function installProfilerPanel(simBridge: SimBridge): void {
       console.warn("profiler: failed to parse bundled report", e);
       return;
     }
+    // v1.12: publish the Rust profile tree for the NN tab's per-layer perf
+    // log (cheap pointer share — same parsed object, no re-poll). Shape
+    // matches the consumer in web/src/rail/nn-tab.ts.
+    (window as unknown as { __lastProfilerReport?: unknown }).__lastProfilerReport =
+      lastBundle.profile;
     renderTpsJank(lastBundle);
     renderObsCounters(lastBundle);
     if (isProfilerEnabled()) {

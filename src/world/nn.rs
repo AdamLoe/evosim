@@ -62,8 +62,11 @@ impl World {
                             debug_assert_eq!(vx_sub.len(), sec_sub.len());
 
                             let mut input_buf = [0.0f32; NN_INPUTS];
-                            let mut hidden_buf_1 = [0.0f32; NN_HIDDEN_1];
-                            let mut hidden_buf_2 = [0.0f32; NN_HIDDEN_2];
+                            // v1.12: stack scratch sized to the hard upper
+                            // bound (NN_MAX_HIDDEN_WIDTH * 4B = 1 KB each).
+                            // The forward pass uses `..max_width()` slices.
+                            let mut scratch_a = [0.0f32; NN_MAX_HIDDEN_WIDTH];
+                            let mut scratch_b = [0.0f32; NN_MAX_HIDDEN_WIDTH];
                             let mut output_buf = [0.0f32; NN_OUTPUTS];
                             let lo = chunk_idx * chunk_size;
 
@@ -81,8 +84,8 @@ impl World {
                                 let (vx, vy, action, argmax_pre) = pick_action_d(
                                     i,
                                     &mut input_buf,
-                                    &mut hidden_buf_1,
-                                    &mut hidden_buf_2,
+                                    &mut scratch_a,
+                                    &mut scratch_b,
                                     &mut output_buf,
                                     creatures_ref,
                                     grass_ref,
@@ -119,9 +122,7 @@ impl World {
                                     chunk_pick.build.creature_sectors_us,
                                     chunk_pick.build.grass_sectors_us,
                                     chunk_pick.forward_us,
-                                    chunk_pick.forward_l1_us,
-                                    chunk_pick.forward_l2_us,
-                                    chunk_pick.forward_l3_us,
+                                    &chunk_pick.forward_layer_us[..],
                                 );
                             }
                         },
@@ -144,8 +145,8 @@ impl World {
             let max_age = self.sliders.max_age;
             for &(lo, hi) in ranges {
                 let mut input_buf = [0.0f32; NN_INPUTS];
-                let mut hidden_buf_1 = [0.0f32; NN_HIDDEN_1];
-                let mut hidden_buf_2 = [0.0f32; NN_HIDDEN_2];
+                let mut scratch_a = [0.0f32; NN_MAX_HIDDEN_WIDTH];
+                let mut scratch_b = [0.0f32; NN_MAX_HIDDEN_WIDTH];
                 let mut output_buf = [0.0f32; NN_OUTPUTS];
                 // Always-on chunk telemetry (single virtual worker = idx 0).
                 let chunk_start_us = crate::profiler::clock_now_us_threadsafe();
@@ -157,8 +158,8 @@ impl World {
                     let (vx, vy, action, argmax_pre) = pick_action_d(
                         i,
                         &mut input_buf,
-                        &mut hidden_buf_1,
-                        &mut hidden_buf_2,
+                        &mut scratch_a,
+                        &mut scratch_b,
                         &mut output_buf,
                         &self.creatures,
                         &self.grass,
@@ -189,9 +190,7 @@ impl World {
                         chunk_pick.build.creature_sectors_us,
                         chunk_pick.build.grass_sectors_us,
                         chunk_pick.forward_us,
-                        chunk_pick.forward_l1_us,
-                        chunk_pick.forward_l2_us,
-                        chunk_pick.forward_l3_us,
+                        &chunk_pick.forward_layer_us[..],
                     );
                 }
             }
@@ -275,24 +274,19 @@ impl World {
                 self.nn_stats.tick_forward_us.load(Ordering::Relaxed) as u32,
                 self.nn_stats.tick_forward_calls.load(Ordering::Relaxed) as u32,
             );
-            self.profile.record_under_root(
-                "nn",
-                "forward.l1",
-                self.nn_stats.tick_forward_l1_us.load(Ordering::Relaxed) as u32,
-                self.nn_stats.tick_forward_l1_calls.load(Ordering::Relaxed) as u32,
-            );
-            self.profile.record_under_root(
-                "nn",
-                "forward.l2",
-                self.nn_stats.tick_forward_l2_us.load(Ordering::Relaxed) as u32,
-                self.nn_stats.tick_forward_l2_calls.load(Ordering::Relaxed) as u32,
-            );
-            self.profile.record_under_root(
-                "nn",
-                "forward.l3",
-                self.nn_stats.tick_forward_l3_us.load(Ordering::Relaxed) as u32,
-                self.nn_stats.tick_forward_l3_calls.load(Ordering::Relaxed) as u32,
-            );
+            // v1.12: emit `forward.l{k}` 1-based rows for every active matmul.
+            // The legacy 32→48→24→5 topology has 3 matmuls → l1/l2/l3, same
+            // names as pre-v1.12 so the perf panel renders identically.
+            let matmul_count = self.nn_topology.matmul_count();
+            for k in 0..matmul_count {
+                let path = format!("forward.l{}", k + 1);
+                self.profile.record_under_root(
+                    "nn",
+                    &path,
+                    self.nn_stats.tick_forward_layer_us[k].load(Ordering::Relaxed) as u32,
+                    self.nn_stats.tick_forward_layer_calls[k].load(Ordering::Relaxed) as u32,
+                );
+            }
         }
     }
 }
@@ -562,17 +556,18 @@ pub(crate) struct PickTimings {
     /// `nn.build_input.other` plus the proximity-scan subtree).
     pub build_input_total_us: u64,
     pub forward_us: u64,
-    pub forward_l1_us: u64,
-    pub forward_l2_us: u64,
-    pub forward_l3_us: u64,
+    /// v1.12: per-matmul wall clock. Length cap = `NN_MAX_MATMULS` (8 hidden
+    /// + 1 output). Only the first `topology.matmul_count()` slots are written
+    /// per pass; the rest stay zero and the drain skips them.
+    pub forward_layer_us: [u64; NN_MAX_MATMULS],
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn pick_action_d(
     i: usize,
     input_buf: &mut [f32; NN_INPUTS],
-    hidden_buf_1: &mut [f32; NN_HIDDEN_1],
-    hidden_buf_2: &mut [f32; NN_HIDDEN_2],
+    scratch_a: &mut [f32; NN_MAX_HIDDEN_WIDTH],
+    scratch_b: &mut [f32; NN_MAX_HIDDEN_WIDTH],
     output_buf: &mut [f32; NN_OUTPUTS],
     creatures: &CreatureSoA,
     grass: &GrassGrid,
@@ -613,8 +608,8 @@ pub(crate) fn pick_action_d(
     creatures.brains[i].forward(
         input_buf,
         output_buf,
-        hidden_buf_1,
-        hidden_buf_2,
+        &mut scratch_a[..],
+        &mut scratch_b[..],
         timings.as_deref_mut(),
     );
     let t_fwd_end = if timed { clock_now_us_threadsafe() } else { 0 };

@@ -82,6 +82,63 @@ impl SpatialGrid {
         }
     }
 
+    /// Find the first creature index in cells inside the bounding box around
+    /// `(x, y)` with the given radius for which `pred(idx) == true`. Within
+    /// each cell the iteration starts at `rotate_seed % K_cell` and wraps,
+    /// so callers can de-correlate "first" from creature-insertion order
+    /// (which biases toward older creatures since lower SoA indices skew
+    /// older). Cells themselves are visited in the standard `iy, ix` walk.
+    ///
+    /// Used by `World::eat` so multi-creature stacks distribute their bite
+    /// targets across the cell-mates rather than always biting the same
+    /// (oldest) slot. Determinism is preserved — the rotation is a pure
+    /// function of `rotate_seed` and the cell layout.
+    pub fn find_first_in_radius(
+        &self,
+        x: f32,
+        y: f32,
+        radius: f32,
+        rotate_seed: usize,
+        mut pred: impl FnMut(usize) -> bool,
+    ) -> Option<usize> {
+        debug_assert!(
+            radius < WORLD_SIZE * 0.5,
+            "find_first_in_radius requires radius < half-world (300u); got {radius}"
+        );
+        let dim = HASH_DIM as i32;
+        let lo_x = ((x - radius) / HASH_CELL).floor() as i32;
+        let hi_x = ((x + radius) / HASH_CELL).floor() as i32;
+        let lo_y = ((y - radius) / HASH_CELL).floor() as i32;
+        let hi_y = ((y + radius) / HASH_CELL).floor() as i32;
+        for iy in lo_y..=hi_y {
+            if iy < 0 || iy >= dim {
+                continue;
+            }
+            let row = iy as usize * HASH_DIM;
+            for ix in lo_x..=hi_x {
+                if ix < 0 || ix >= dim {
+                    continue;
+                }
+                let c = row + ix as usize;
+                let s = self.starts[c] as usize;
+                let e = self.starts[c + 1] as usize;
+                let k_cell = e - s;
+                if k_cell == 0 {
+                    continue;
+                }
+                let off0 = rotate_seed % k_cell;
+                for k in 0..k_cell {
+                    let pos = s + ((off0 + k) % k_cell);
+                    let idx = self.indices[pos] as usize;
+                    if pred(idx) {
+                        return Some(idx);
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Iterate creature indices in cells inside a bounding box around
     /// `(x, y)` with the given radius. Caller must filter by exact distance.
     ///

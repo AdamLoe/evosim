@@ -7,7 +7,7 @@
 
 export const SLIDER_NAMES = [
   "mutation_rate_multiplier",
-  "nn_mutation_sigma",
+  "_reserved_legacy_nn_mutation_sigma",
   "eat_bite_fraction",
   "grass_propagation_rate_k",
   "grass_in_cell_growth_r",
@@ -29,9 +29,33 @@ export const SLIDER_NAMES = [
   "auto_curriculum",
   "full_grass_on_init",
   "max_population",
+  "bucket_0_weight",
+  "bucket_0_rate",
+  "bucket_0_sigma",
+  "bucket_1_weight",
+  "bucket_1_rate",
+  "bucket_1_sigma",
+  "bucket_2_weight",
+  "bucket_2_rate",
+  "bucket_2_sigma",
+  "bucket_3_weight",
+  "bucket_3_rate",
+  "bucket_3_sigma",
+  "bucket_4_weight",
+  "bucket_4_rate",
+  "bucket_4_sigma",
+  "bucket_5_weight",
+  "bucket_5_rate",
+  "bucket_5_sigma",
+  "bucket_6_weight",
+  "bucket_6_rate",
+  "bucket_6_sigma",
+  "bucket_7_weight",
+  "bucket_7_rate",
+  "bucket_7_sigma",
 ] as const;
 
-export const SLIDER_COUNT = 23 as const;
+export const SLIDER_COUNT = 47 as const;
 
 export type SliderName = (typeof SLIDER_NAMES)[number];
 

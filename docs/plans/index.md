@@ -2,13 +2,19 @@
 
 Working mission docs for multi-step changes.
 
+**Plans are scratch and get deleted post-ship.** `long_lived: true` is the
+explicit exception, not the norm. Anything in a plan that needs to survive
+launch — current-state architecture, design rationale, invariants —
+**must** live in `architecture/` or `decisions/`. If it's only in a plan,
+treat it as already gone.
+
 ## What belongs here
 
 Plans are coordination artifacts: scope, waves, checklists, status, and
 open questions for work that has not fully landed. They are not canonical
-architecture or decision references. When code lands, update the owning
-`architecture/` and `decisions/` docs so the current-state snapshot stays
-accurate.
+architecture or decision references. When code lands, rewrite the owning
+`architecture/` and `decisions/` docs in place so the current-state
+snapshot stays accurate — then the plan can be deleted.
 
 Do not add lifecycle boilerplate to the top of ordinary plans. This file
 owns the lifecycle rules. Individual plans should carry compact metadata

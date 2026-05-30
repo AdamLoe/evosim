@@ -16,7 +16,9 @@ import { DEFAULTS } from "../../src/settings";
 // for comparison).
 const RUST_TO_SETTINGS: Record<string, keyof typeof DEFAULTS> = {
   mutation_rate_multiplier: "mutRate",
-  nn_mutation_sigma: "nnSigma",
+  // v1.12: legacy nn_mutation_sigma reserved no-op on the Rust side, no
+  // Settings mirror. Bucket sliders (bucket_k_*) are validated separately
+  // in this spec below.
   eat_bite_fraction: "eatBiteFrac",
   grass_propagation_rate_k: "grassPropagK",
   grass_in_cell_growth_r: "grassGrowthR",
@@ -87,6 +89,24 @@ test("Rust DevSliders defaults match settings.ts DEFAULTS", async ({ page }) => 
       mismatches.push(
         `${rustName}: Rust=${r}, settings.ts.${String(settingsKey)}=${t}`,
       );
+    }
+  }
+
+  // v1.12: bucket defaults — Rust emits flat bucket_k_{weight,rate,sigma}
+  // keys; settings.ts mirrors as a structured array.
+  for (let k = 0; k < DEFAULTS.mutationBuckets.length; k++) {
+    const b = DEFAULTS.mutationBuckets[k];
+    for (const field of ["weight", "rate", "sigma"] as const) {
+      const rustKey = `bucket_${k}_${field}`;
+      if (!(rustKey in rust)) {
+        mismatches.push(`${rustKey}: missing from Rust JSON`);
+        continue;
+      }
+      const r = rust[rustKey];
+      const t = b[field];
+      if (Math.abs(r - t) > 1e-6) {
+        mismatches.push(`${rustKey}: Rust=${r}, settings.ts.mutationBuckets[${k}].${field}=${t}`);
+      }
     }
   }
 

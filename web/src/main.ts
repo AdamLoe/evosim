@@ -19,6 +19,7 @@ import {
 import { installCanvasClickHandler, resetInspectorSelection } from "./rail/inspector";
 import { resetStats } from "./rail/stats";
 import { installMonitorTab } from "./rail/monitor";
+import { installNnTab } from "./rail/nn-tab";
 import { span } from "./perf";
 import { getSettings, setSetting } from "./settings";
 import { applyTheme } from "./themes";
@@ -133,6 +134,9 @@ async function main(): Promise<void> {
 
   installProfilerPanel(simBridge);
   installMonitorTab(simBridge);
+  // v1.12: NN tab. Topology Apply respawns the worker via restart(); bucket
+  // edits are live-applied through getBridge() inside the installer.
+  installNnTab(() => simBridge, () => restart());
   installSettingsButton(rail);
 
   // v1.9.1: apply persisted rail open/closed state on boot. The class drives
@@ -267,6 +271,13 @@ async function spawnSimWorker(seed: string): Promise<SimBridge> {
 
   cachedSeed = seed === "" ? "(random)" : seed;
 
+  // v1.12: hand the persisted NN topology to the worker as a JSON string.
+  // Rust side parses `{hidden_sizes, activations}`; "" falls back to legacy.
+  const t = getSettings().nnTopology;
+  const nn_topology_json = JSON.stringify({
+    hidden_sizes: t.layerSizes,
+    activations: t.activations,
+  });
   bridge.sendBoot({
     kind: "boot",
     seed,
@@ -277,6 +288,7 @@ async function spawnSimWorker(seed: string): Promise<SimBridge> {
     initial_sliders: currentSliderState(),
     initial_target_tps: targetTPS,
     initial_paused: paused,
+    nn_topology_json,
   });
 
   const ready = await bootReady;

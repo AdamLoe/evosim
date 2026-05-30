@@ -58,40 +58,42 @@ pub const CTRL_PROFILE_WINDOW_MS: usize = 8;
 
 /// First slider slot. Slots `[CTRL_SLIDERS_BASE, CTRL_SLIDERS_BASE + SLIDER_COUNT)`
 /// hold one f32-bits value per slider in canonical order (see `SLIDER_NAMES`).
+/// v1.12: SLIDER_COUNT bumped to 47 (23 legacy + 24 mutation-bucket slots), so
+/// the inspector block was shifted up from 48 to 64 to leave headroom.
 pub const CTRL_SLIDERS_BASE: usize = 16;
 
 /// Inspector request block: epoch + kind + 3 f32 params + 2 u32 id halves.
-pub const CTRL_INSPECT_REQ_EPOCH: usize = 48;
+pub const CTRL_INSPECT_REQ_EPOCH: usize = 64;
 /// 0 = inspect by world coord (uses wx/wy/tol), 1 = inspect by stable id.
-pub const CTRL_INSPECT_REQ_KIND: usize = 49;
+pub const CTRL_INSPECT_REQ_KIND: usize = 65;
 /// World-x for `inspect_at`, f32-bits.
-pub const CTRL_INSPECT_REQ_WX_BITS: usize = 50;
+pub const CTRL_INSPECT_REQ_WX_BITS: usize = 66;
 /// World-y for `inspect_at`, f32-bits.
-pub const CTRL_INSPECT_REQ_WY_BITS: usize = 51;
+pub const CTRL_INSPECT_REQ_WY_BITS: usize = 67;
 /// Tolerance world-radius for `inspect_at`, f32-bits.
-pub const CTRL_INSPECT_REQ_TOL_BITS: usize = 52;
+pub const CTRL_INSPECT_REQ_TOL_BITS: usize = 68;
 /// Lower 32 bits of the stable id for `inspect_id`.
-pub const CTRL_INSPECT_REQ_ID_LO: usize = 53;
+pub const CTRL_INSPECT_REQ_ID_LO: usize = 69;
 /// Upper 32 bits of the stable id for `inspect_id`.
-pub const CTRL_INSPECT_REQ_ID_HI: usize = 54;
+pub const CTRL_INSPECT_REQ_ID_HI: usize = 70;
 
 /// Inspector response epoch, bumped after the response bytes are written.
-pub const CTRL_INSPECT_RESP_EPOCH: usize = 56;
+pub const CTRL_INSPECT_RESP_EPOCH: usize = 72;
 /// Length of the inspector response JSON in bytes (0 = not-found).
-pub const CTRL_INSPECT_RESP_LEN: usize = 57;
+pub const CTRL_INSPECT_RESP_LEN: usize = 73;
 /// Echo of the request epoch the response is answering (so main can
 /// correlate if it sent multiple requests before draining).
-pub const CTRL_INSPECT_RESP_REQ_EPOCH: usize = 58;
+pub const CTRL_INSPECT_RESP_REQ_EPOCH: usize = 74;
 
 /// Profile report response: epoch bumped after the bytes are written.
-pub const CTRL_PROFILE_REPORT_EPOCH: usize = 64;
+pub const CTRL_PROFILE_REPORT_EPOCH: usize = 80;
 /// Length of the profile report JSON in bytes.
-pub const CTRL_PROFILE_REPORT_LEN: usize = 65;
+pub const CTRL_PROFILE_REPORT_LEN: usize = 81;
 
 /// NN stats response: epoch bumped after the bytes are written.
-pub const CTRL_NN_STATS_EPOCH: usize = 72;
+pub const CTRL_NN_STATS_EPOCH: usize = 88;
 /// Length of the NN stats JSON in bytes.
-pub const CTRL_NN_STATS_LEN: usize = 73;
+pub const CTRL_NN_STATS_LEN: usize = 89;
 
 /// Length of the leading i32 region in i32 slots. Byte buffers start
 /// at `CTRL_I32_REGION_LEN * 4`.

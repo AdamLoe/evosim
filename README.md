@@ -1,76 +1,120 @@
 # evosim
 
-Browser-deployed idle evolution sandbox. Rust → wasm sim, plain-TS Vite shell,
-WebGL2 instanced rendering. See [docs/index.md](docs/index.md) for the full
-documentation index, or [docs/overview.md](docs/overview.md) for the system at
-a glance.
+A browser-based evolution sandbox. Tiny creatures with tiny neural-network
+brains live in a walled world, graze a regrowing grass field, occasionally eat
+each other, and split when they have enough energy. Every page load starts a
+fresh world — there's no save, no scenario, no goal.
 
-The sim runs in a dedicated Web Worker with one wasm instance and a rayon
-thread pool; the main thread holds no wasm and reads snapshots from two
-SharedArrayBuffers. Walled world. 3-action enum (`Graze / Eat / Split`).
-Multi-founder spawn (default 8). Brain is a `32 → 48 → 24 → 5` pyramid with
-Leaky ReLU hidden layers and per-layer He init; inputs are semantic
-(self/memory + 4-wall + 8-sector creature + 8-sector grass). Creature color
-is a per-creature action EMA — green = grazing, red = biting prey, blue =
-splitting. Grass cells 1.25 world-units (960×960 grid), R8 GPU upload.
-Population-feedback curriculum factor (default floor 0.0) relieves upkeep
-pressure when population is fragile.
+![A populated world, ticking](screenshots/demo2.gif)
 
-## Repo layout
+## What you're looking at
 
+Each dot is one creature. Color is a moving average of what it's been doing —
+green for grazing, red for biting prey, blue for splitting. The darker
+splotches underneath are grass density. The whole thing is a single 1200×1200
+world rendered in one instanced WebGL2 draw call.
+
+Brains are a small `32 → 48 → 24 → 5` pyramid with Leaky ReLU hiddens. Inputs
+are semantic, not pixels: self state, a short memory vector, four wall
+distances, eight sectors of nearby creatures, and eight sectors of grass. The
+output picks one of three actions — Graze, Eat, Split — and a heading.
+
+Inheritance is just the weights. A child is a mutated copy of its parent's
+brain; over time the population drifts toward whatever works in the current
+settings.
+
+## Poking at it
+
+The right-rail tabs let you watch and edit the sim while it runs.
+
+![NN editor open over a running world](screenshots/app+nn.png)
+
+- **Inspector** — click a creature to see its inputs, outputs, age, energy,
+  lineage.
+- **Monitor** — population graph, action mix, grass stock.
+- **NN** — change the layer sizes or mutation buckets and apply to the live
+  sim. New births pick up the new shape.
+- **Settings** — every tunable in one place: energy economy, grass growth,
+  split rules, curriculum pressure, render options.
+
+![Settings stage with profiler panel](screenshots/app+settings+perf.png)
+
+There's also a profiler panel showing per-phase tick costs, which is mostly
+useful when you're changing the sim and want to know what got slower.
+
+## How it's built
+
+```mermaid
+flowchart TB
+    GPU[["GPU<br/>instanced creature + grass draw"]]
+
+    subgraph MAIN["Main thread · JS · CPU"]
+        direction LR
+        UI["DOM UI<br/>sliders · tabs · inspector"]
+        REN["WebGL2 renderer<br/>(RAF)"]
+    end
+
+    subgraph WORKER["Sim Web Worker · wasm · CPU · single wasm instance"]
+        direction LR
+        SIM["sim core<br/>(Rust → wasm)"]
+        subgraph POOL["rayon pool · 8–12 sub-workers"]
+            direction TB
+            T1["thread"]
+            T2["thread"]
+            T3["…"]
+            T4["thread"]
+        end
+        SIM --- POOL
+    end
+
+    REN -- "draw call" --> GPU
+    UI -- "send sim commands" --> SIM
+    SIM == "write game state to memory buffer" ==> REN
 ```
-/Cargo.toml            single Rust crate, builds to cdylib (wasm) + rlib
-/src                   simulation engine
-/web                   Vite + TypeScript shell
-/web/wasm              wasm-pack output (gitignored, regenerated each build)
-/docs                  current-state documentation tree (see docs/index.md)
-```
 
-See [docs/repository-layout.md](docs/repository-layout.md) for one-line
-purpose per directory.
+- **Rust** compiled to WebAssembly via `wasm-pack`, single crate at the repo
+  root. The sim core is regular Rust and runs natively for tests.
+- **One wasm instance, in a Web Worker.** The main thread holds no wasm. The
+  worker writes snapshots into a shared buffer; the renderer reads the freshest
+  slot per frame. Slider changes go the other direction as messages.
+- **rayon** + `wasm-bindgen-rayon` parallelise the hot paths inside the worker
+  — NN forward across creatures, grass propagation across rows. Needs COOP/COEP
+  headers for `SharedArrayBuffer`.
+- **TypeScript + Vite + plain DOM** for the shell. No framework. The renderer
+  is WebGL2 with instancing.
+- **Playwright** for the end-to-end suite covering the worker control path.
 
-## Local development
+The docs tree under [`docs/`](docs/) is the real reference if you want to
+understand a specific subsystem. Start at [`docs/index.md`](docs/index.md).
 
-Prereqs: Rust stable + nightly (for wasm atomics) with `wasm32-unknown-unknown`,
-`wasm-pack`, Node 20+, pnpm.
+## Performance
 
-```bash
-# 1. build the Rust → wasm package (requires nightly for atomics/build-std)
-rustup toolchain install nightly --component rust-src
-rustup target add wasm32-unknown-unknown --toolchain nightly
-rustup run nightly wasm-pack build --target web --out-dir web/wasm --dev --features threads
+Current best on this machine: roughly **8,000 creatures at ~80 ticks per
+second**, in the browser.
 
-# 2. run the dev server (serves with COOP/COEP set for SharedArrayBuffer)
-cd web
-pnpm install
-pnpm dev
-```
+Each creature carries its own brain (`32 → 48 → 24 → 5`), so a forward pass is
+`32·48 + 48·24 + 24·5` ≈ **2,800 multiply-accumulates**. At 8,000 creatures
+and 80 tps that comes out to about **1.8 billion MACs per second** for
+inference alone — before grass propagation, neighbour queries, energy
+bookkeeping, splits, deaths, and snapshot writes.
 
-The dev server prints a local URL; opening it shows a walled world with grass
-cells and evolving creatures.
+All of it runs on the CPU, parallelised across 8–12 rayon threads inside the
+wasm worker. GPU is the obvious answer for "lots of small matrix math", but it
+doesn't fit this workload:
 
-## Deployment
+- Every brain holds different weights (inheritance + mutation), so the work is
+  thousands of *independent* tiny matmuls, not one big batched one.
+- The per-tick budget at 80 tps is ~12 ms. A CPU↔GPU round trip plus readback
+  comfortably costs more than that on its own.
+- NN outputs feed straight into branchy game logic — eat, split, die, energy
+  update — that already lives on the CPU and mutates the same SoA the next
+  forward pass will read. Shipping data out to the GPU and back every tick
+  would cost more than just doing the math next to it.
 
-Static build via `pnpm build` in `web/`. Deploy `web/dist/` to Cloudflare
-Pages (or any static host that respects `_headers`). The shipped `_headers`
-file sets:
+So far, threaded wasm over a flat struct-of-arrays layout has been the cheapest
+way to keep the whole tick — inputs, NN, decisions, state mutation, snapshot —
+in one place.
 
-```
-Cross-Origin-Opener-Policy: same-origin
-Cross-Origin-Embedder-Policy: require-corp
-```
+## Using an agent or are an agent?
 
-These are required so `SharedArrayBuffer` (and therefore
-`wasm-bindgen-rayon`) is available. The sim degrades gracefully to a
-single-threaded path if isolation is unavailable.
-
-## Tests
-
-```bash
-cargo test --lib                          # unit tests (default build)
-cargo test --lib --features threads       # unit tests (threaded build)
-cd web && pnpm typecheck
-```
-
-See [docs/agent-context/testing-how-to.md](docs/agent-context/testing-how-to.md)
-for how to run the Playwright e2e suite and add new tests.
+Use the [fresh_chat.md](docs/prompts/fresh-chat.md) prompt. It will efficiently catch up your agent on all of the context of my app and answer any questions or help you with whatever you would like.

@@ -21,8 +21,16 @@ single tool call.
      captured by the git diff alone, no plan entry is needed. Say so
      out loud rather than silently skipping.
 
+   **Plans are scratch and get deleted post-ship.** A plan never
+   substitutes for a current-state doc update. After step 1, you owe
+   step 2 — for every plan touched here, the plan's `owning_docs:` is
+   your literal checklist of files to inspect in step 2.
+
 2. **Docs.** Update `docs/` for anything shipped this chat that the
-   docs don't yet reflect. **Be conservative.** The rules in
+   docs don't yet reflect. **Start from the `owning_docs:` list on
+   every plan you touched in step 1 — open each one and verify it
+   describes the current state.** Keyword grep is not sufficient;
+   read the relevant sections. **Be conservative.** The rules in
    [`../agent-context/maintaining-docs.md`](../agent-context/maintaining-docs.md)
    apply in full — in particular:
    - Architecture docs describe what **IS**. No "this chat added…",

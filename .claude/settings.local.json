@@ -36,7 +36,19 @@
       "Bash(rustup --version)",
       "Bash(command -v chromium-cli)",
       "Bash(pkill -9 -f 'vite.*47821')",
-      "Bash(mkdir -p /home/adamg/evosim/.claude/skills/wrap-up)"
+      "Bash(mkdir -p /home/adamg/evosim/.claude/skills/wrap-up)",
+      "Bash(pkill -f '/home/adamg/evosim/web/node_modules/.bin/../vite/bin/vite.js')",
+      "Bash(kill 13144 13160)",
+      "Bash(ps -p 13144 -o pid=)",
+      "Bash(ffprobe -v error -show_entries stream=width,height,r_frame_rate,duration -show_entries format=duration /home/adamg/evosim/screenshots/20260530-0941-24.4239787.mp4)",
+      "Bash(ffmpeg -version)",
+      "Bash(sudo apt install -y ffmpeg)",
+      "Bash(mkdir -p ~/.local/bin)",
+      "Bash(curl -L -o ffmpeg-static.tar.xz \"https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz\")",
+      "Bash(tar -xJf ffmpeg-static.tar.xz)",
+      "Bash(mv ffmpeg-*-static/ffmpeg ffmpeg-*-static/ffprobe ~/.local/bin/)",
+      "Bash(rm -rf ffmpeg-*-static ffmpeg-static.tar.xz)",
+      "Bash(~/.local/bin/ffmpeg -version)"
     ],
     "additionalDirectories": [
       "/home/adamg/evosim/.claude/skills"

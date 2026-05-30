@@ -144,7 +144,6 @@ function renderInspector(data: CreatureInspectJson): void {
   set("ins-walls", `${wn.toFixed(2)} / ${ws.toFixed(2)} / ${we.toFixed(2)} / ${ww.toFixed(2)}`);
   pushHistory(data.id, data.current_action);
   set("ins-history", actionHistory.slice(-30).map(a => a[0]).join(""));
-  set("ins-nn-rate", data.nn_mutation_rate.toFixed(4));
   set("ins-nn-count", `${data.nn_weight_count}`);
 }
 
@@ -163,7 +162,6 @@ export interface CreatureInspectJson {
   cooldown_remaining: number;
   color_ema: [number, number, number];
   wall_proximity: [number, number, number, number];
-  nn_mutation_rate: number;
   nn_weight_count: number;
 }
 

@@ -69,6 +69,19 @@ export function currentSliderState(): Record<string, number> {
   for (const [name, read] of widgetReaders) {
     out[name] = read();
   }
+  // v1.12: fan persisted mutation buckets into bucket_k_<field> sliders so
+  // boot/respawn re-applies the most-recently-saved policy. NN tab widgets
+  // override these via registerWidget when installed (live-edit path).
+  const buckets = getSettings().mutationBuckets;
+  for (let k = 0; k < buckets.length; k++) {
+    const b = buckets[k];
+    const wn = `bucket_${k}_weight`;
+    const rn = `bucket_${k}_rate`;
+    const sn = `bucket_${k}_sigma`;
+    if (!(wn in out)) out[wn] = b.weight;
+    if (!(rn in out)) out[rn] = b.rate;
+    if (!(sn in out)) out[sn] = b.sigma;
+  }
   return out;
 }
 
@@ -647,13 +660,8 @@ export function installDevPanel(getBridge: () => SimBridge): void {
     min: 0, max: 5, step: 0.05,
     formatValue: (v) => v.toFixed(2),
   }));
-  lifeSec.appendChild(makeStagedSlider({
-    label: "NN σ",
-    simName: "nn_mutation_sigma",
-    settingKey: "nnSigma",
-    min: 0, max: 0.2, step: 0.001,
-    formatValue: (v) => v.toFixed(3),
-  }));
+  // v1.12: legacy NN σ slider replaced by the 8-bucket mutation policy editor
+  // in the NN rail tab. See docs/plans/v1.12-mission.md.
   lifeSec.appendChild(makeStagedSlider({
     label: "Repulsion max",
     simName: "repulsion_max",

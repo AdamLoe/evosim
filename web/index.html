@@ -70,6 +70,7 @@
         <nav id="rail-tabs" role="tablist">
           <button data-tab="inspector" class="rail-tab">Inspector</button>
           <button data-tab="monitor" class="rail-tab">Monitor</button>
+          <button data-tab="nn" class="rail-tab">NN</button>
           <button data-tab="settings" class="rail-tab is-active">Settings</button>
         </nav>
 
@@ -92,7 +93,6 @@
               </dd>
               <dt>Walls (N/S/E/W)</dt><dd id="ins-walls">—</dd>
               <dt>Recent</dt><dd id="ins-history">—</dd>
-              <dt>NN mut rate</dt><dd id="ins-nn-rate">—</dd>
               <dt>NN weights</dt><dd id="ins-nn-count">—</dd>
             </dl>
           </div>
@@ -108,6 +108,13 @@
             <div class="rail-section-title">Process</div>
             <div id="worker-stats-host"></div>
           </div>
+        </section>
+
+        <!-- v1.12 NN tab: left = stage-then-apply topology editor (Apply
+             respawns the worker), right = live-apply 8-bucket mutation
+             policy editor, bottom = per-layer perf log. -->
+        <section id="rail-nn" class="rail-panel">
+          <div id="nn-tab-host"></div>
         </section>
 
         <!-- Settings tab: dev panel content + Apply / Cancel / Reset footer. -->

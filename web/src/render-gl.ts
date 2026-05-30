@@ -334,8 +334,6 @@ interface GLState {
   grassVao: WebGLVertexArrayObject;
   grassTex: WebGLTexture;
   grassTexDim: number;
-  /** v1.11: OES_texture_float_linear available. Gates mipmap + linear. */
-  grassFloatLinear: boolean;
   frameProgram: WebGLProgram;
   frameU: {
     viewport: WebGLUniformLocation;
@@ -548,15 +546,15 @@ function initRenderer(gl: WebGL2RenderingContext): GLState {
   };
 
   // v1.11 (D): grass texture is R32F (raw f32 density per cell, no quantize).
-  // Linear filtering on f32 textures requires OES_texture_float_linear; we
-  // enable it explicitly. If the extension isn't available on a given device,
-  // we fall back to nearest filter — the grass would look pixelated but
-  // still functional. Widely supported (Chrome/Firefox/Safari on modern HW).
+  // Linear filtering on f32 textures requires OES_texture_float_linear; mips
+  // would additionally require EXT_color_buffer_float for renderability, so
+  // we skip mipmapping and use plain LINEAR. NEAREST is the fallback if the
+  // float-linear extension is missing.
   const floatLinearOk = gl.getExtension("OES_texture_float_linear") !== null;
   const grassTex = mustGet(gl.createTexture(), "createTexture");
   gl.bindTexture(gl.TEXTURE_2D, grassTex);
   if (floatLinearOk) {
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
   } else {
     console.warn("[render] OES_texture_float_linear unavailable; grass will use nearest filter");
@@ -597,7 +595,7 @@ function initRenderer(gl: WebGL2RenderingContext): GLState {
     haloProgram, haloU, haloVao,
     trailProgram, trailU, trailVao, trailInstanceBuf,
     trailScratch: new Float32Array(MAX_POP_FOR_SIM * TRAIL_FLOATS_PER_INSTANCE),
-    grassProgram, grassU, grassVao, grassTex, grassTexDim: 0, grassFloatLinear: floatLinearOk,
+    grassProgram, grassU, grassVao, grassTex, grassTexDim: 0,
     frameProgram, frameU, frameVao, frameBuf,
     instanceScratch: new Float32Array(4096 * FLOATS_PER_INSTANCE),
   };
@@ -779,13 +777,6 @@ function renderWorldImpl(
         s.grassTexDim = dim;
       } else {
         gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, dim, dim, gl.RED, gl.FLOAT, grass);
-      }
-      // Mipmap generation requires OES_texture_float_linear for R32F. We
-      // gated the min-filter on extension presence at init; only regenerate
-      // mips when it's available, otherwise NEAREST sampling reads level 0
-      // directly.
-      if (s.grassFloatLinear) {
-        gl.generateMipmap(gl.TEXTURE_2D);
       }
       gl.useProgram(s.grassProgram);
       gl.uniform2f(s.grassU.viewport, viewW, viewH);

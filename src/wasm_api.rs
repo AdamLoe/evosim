@@ -1,9 +1,30 @@
 //! Thin wasm-bindgen wrapper exposing the World to JS. Stable function
 //! shapes so the web shell can iterate independently.
 
+use crate::brain::{Activation, NnTopology};
 use crate::constants::*;
 use crate::world::World;
 use wasm_bindgen::prelude::*;
+
+/// v1.12: parse the boot payload's `nn_topology_json`. Empty string → legacy
+/// 32→48→24→5 default. Otherwise expects
+/// `{"hidden_sizes":[…],"activations":[…]}`.
+fn parse_nn_topology(json: &str) -> Result<NnTopology, String> {
+    if json.is_empty() {
+        return Ok(NnTopology::legacy());
+    }
+    #[derive(serde::Deserialize)]
+    struct Raw {
+        hidden_sizes: Vec<usize>,
+        activations: Vec<String>,
+    }
+    let raw: Raw = serde_json::from_str(json).map_err(|e| format!("parse: {e}"))?;
+    let mut acts = Vec::with_capacity(raw.activations.len());
+    for a in &raw.activations {
+        acts.push(Activation::parse(a).ok_or_else(|| format!("unknown activation: {a}"))?);
+    }
+    NnTopology::new(raw.hidden_sizes, acts)
+}
 
 /// Budget for "jank" detection: ticks that take longer than this are counted.
 pub const JANK_BUDGET_MS: f64 = 16.0;
@@ -18,30 +39,43 @@ const TPS_WINDOW: usize = 10;
 /// modifying this list: `cargo run --bin gen-bindings`. A drift unit test
 /// catches mismatches at `cargo test --lib`.
 pub const SLIDER_NAMES: &[&str] = &[
-    "mutation_rate_multiplier", // 0  f32
-    "nn_mutation_sigma",        // 1  f32
-    "eat_bite_fraction",        // 2  f32
-    "grass_propagation_rate_k", // 3  f32
-    "grass_in_cell_growth_r",   // 4  f32
-    "upkeep_multiplier",        // 5  f32
-    "move_cost_multiplier",     // 6  f32
-    "energy_max",               // 7  f32
-    "grass_energy_per_bite",    // 8  f32
-    "grass_bites_per_block",    // 9  u32 (carried as f32)
-    "digestion_cooldown",       // 10 u32 (carried as f32)
-    "repulsion_max",            // 11 f32
-    "max_age",                  // 12 u32 (carried as f32)
-    "split_threshold",          // 13 f32
-    "split_gift",               // 14 f32
-    "split_jitter",             // 15 f32
-    "founder_count",            // 16 u32 (carried as f32)
-    "curriculum_min_pop",       // 17 u32 (carried as f32)
-    "curriculum_max_pop",       // 18 u32 (carried as f32)
-    "curriculum_min_factor",    // 19 f32
-    "auto_curriculum",          // 20 bool (0.0 / non-zero)
-    "full_grass_on_init",       // 21 bool (0.0 / non-zero)
-    "max_population",           // 22 u32 (carried as f32) — user-tunable cap
+    "mutation_rate_multiplier",            // 0  f32
+    "_reserved_legacy_nn_mutation_sigma",  // 1  f32 — v1.12 reserved no-op; was nn_mutation_sigma
+    "eat_bite_fraction",                   // 2  f32
+    "grass_propagation_rate_k",            // 3  f32
+    "grass_in_cell_growth_r",              // 4  f32
+    "upkeep_multiplier",                   // 5  f32
+    "move_cost_multiplier",                // 6  f32
+    "energy_max",                          // 7  f32
+    "grass_energy_per_bite",               // 8  f32
+    "grass_bites_per_block",               // 9  u32 (carried as f32)
+    "digestion_cooldown",                  // 10 u32 (carried as f32)
+    "repulsion_max",                       // 11 f32
+    "max_age",                             // 12 u32 (carried as f32)
+    "split_threshold",                     // 13 f32
+    "split_gift",                          // 14 f32
+    "split_jitter",                        // 15 f32
+    "founder_count",                       // 16 u32 (carried as f32)
+    "curriculum_min_pop",                  // 17 u32 (carried as f32)
+    "curriculum_max_pop",                  // 18 u32 (carried as f32)
+    "curriculum_min_factor",               // 19 f32
+    "auto_curriculum",                     // 20 bool (0.0 / non-zero)
+    "full_grass_on_init",                  // 21 bool (0.0 / non-zero)
+    "max_population",                      // 22 u32 (carried as f32) — user-tunable cap
+    // v1.12: 8 mutation buckets × 3 floats. Index = 23 + bucket * 3 + field.
+    // field 0 = weight, 1 = rate, 2 = sigma. See MUTATION_BUCKET_COUNT.
+    "bucket_0_weight", "bucket_0_rate", "bucket_0_sigma", // 23..26
+    "bucket_1_weight", "bucket_1_rate", "bucket_1_sigma", // 26..29
+    "bucket_2_weight", "bucket_2_rate", "bucket_2_sigma", // 29..32
+    "bucket_3_weight", "bucket_3_rate", "bucket_3_sigma", // 32..35
+    "bucket_4_weight", "bucket_4_rate", "bucket_4_sigma", // 35..38
+    "bucket_5_weight", "bucket_5_rate", "bucket_5_sigma", // 38..41
+    "bucket_6_weight", "bucket_6_rate", "bucket_6_sigma", // 41..44
+    "bucket_7_weight", "bucket_7_rate", "bucket_7_sigma", // 44..47
 ];
+
+/// First mutation-bucket slider slot. v1.12.
+pub const SLIDER_BUCKET_BASE: usize = 23;
 
 /// Number of slots in `CTRL_SLIDERS`. Equal to `SLIDER_NAMES.len()`.
 pub const SLIDER_COUNT: usize = SLIDER_NAMES.len();
@@ -127,9 +161,16 @@ impl WorldHandle {
     }
 
     /// Construct with explicit initial grass seed count, energy-max cap,
-    /// founder count, and the `full_grass_on_init` flag. Sole construction
-    /// path used by the sim worker — sets the construction-only DevSliders
-    /// fields and lets `World::new_with_sliders` shape the world from there.
+    /// founder count, the `full_grass_on_init` flag, and (v1.12) an
+    /// optional `nn_topology_json` payload. Sole construction path used by
+    /// the sim worker.
+    ///
+    /// `nn_topology_json` accepts `{"hidden_sizes":[…],"activations":[…]}`
+    /// where activation strings are `"lrelu"|"relu"|"tanh"|"sigmoid"|"linear"`
+    /// and `activations.len() == hidden_sizes.len() + 1`. Pass an empty string
+    /// for the legacy 32→48→24→5 default. Returns `Err` (throws on JS side)
+    /// if the JSON is malformed or fails `NnTopology::new` validation —
+    /// surfaces a typo immediately instead of silently falling back.
     #[wasm_bindgen(js_name = newWithFounderCount)]
     pub fn new_with_founder_count(
         seed: &str,
@@ -137,7 +178,8 @@ impl WorldHandle {
         energy_max: f32,
         founder_count: u32,
         full_grass_on_init: bool,
-    ) -> Self {
+        nn_topology_json: &str,
+    ) -> Result<WorldHandle, JsValue> {
         let actual_seed = if seed.is_empty() {
             let mut bytes = [0u8; 8];
             getrandom::getrandom(&mut bytes).ok();
@@ -153,14 +195,16 @@ impl WorldHandle {
             full_grass_on_init,
             ..Default::default()
         };
-        let inner = World::new_with_sliders(actual_seed, sliders);
-        Self {
+        let topology = parse_nn_topology(nn_topology_json)
+            .map_err(|e| JsValue::from_str(&format!("nn_topology error: {e}")))?;
+        let inner = World::new_with_sliders_topology(actual_seed, sliders, topology);
+        Ok(Self {
             inner,
             snapshot_buf: vec![0u8; SNAPSHOT_BUF_BYTES],
             tick_intervals_ms: std::collections::VecDeque::new(),
             last_tick_end_ms: None,
             jank_count: 0,
-        }
+        })
     }
 
     /// One tick. Returns true while alive.
@@ -433,8 +477,20 @@ impl WorldHandle {
     fn apply_mutation_rate_multiplier(&mut self, value: f32) {
         self.inner.sliders.mutation_rate_multiplier = value;
     }
-    fn apply_nn_mutation_sigma(&mut self, value: f32) {
-        self.inner.sliders.nn_mutation_sigma = value;
+    /// v1.12: bucket field is 0=weight, 1=rate, 2=sigma. All clamped non-negative
+    /// so the cumulative-weight scan in `Brain::child_from` is safe.
+    fn apply_mutation_bucket(&mut self, bucket: usize, field: usize, value: f32) {
+        if bucket >= MUTATION_BUCKET_COUNT {
+            return;
+        }
+        let b = &mut self.inner.sliders.mutation_policy.buckets[bucket];
+        let v = value.max(0.0);
+        match field {
+            0 => b.weight = v,
+            1 => b.rate = v.min(1.0),
+            2 => b.sigma = v,
+            _ => {}
+        }
     }
     fn apply_eat_bite_fraction(&mut self, value: f32) {
         self.inner.sliders.eat_bite_fraction = value;
@@ -549,7 +605,7 @@ impl WorldHandle {
     fn apply_slider_by_index(&mut self, idx: usize, value: f32) {
         match idx {
             0 => self.apply_mutation_rate_multiplier(value),
-            1 => self.apply_nn_mutation_sigma(value),
+            1 => { /* v1.12 reserved no-op (was nn_mutation_sigma) */ }
             2 => self.apply_eat_bite_fraction(value),
             3 => self.apply_grass_propagation_rate_k(value),
             4 => self.apply_grass_in_cell_growth_r(value),
@@ -573,6 +629,13 @@ impl WorldHandle {
             20 => self.apply_auto_curriculum(value != 0.0),
             21 => self.apply_full_grass_on_init(value != 0.0),
             22 => self.apply_max_population(value.max(1.0) as u32),
+            // v1.12: 8 mutation buckets × 3 fields = indices 23..47.
+            n if n >= SLIDER_BUCKET_BASE
+                && n < SLIDER_BUCKET_BASE + MUTATION_BUCKET_COUNT * 3 =>
+            {
+                let rel = n - SLIDER_BUCKET_BASE;
+                self.apply_mutation_bucket(rel / 3, rel % 3, value);
+            }
             _ => {} // out-of-range: silently ignore (forward-compat with newer TS).
         }
     }
@@ -684,7 +747,6 @@ impl WorldHandle {
                 self.inner.creatures.color_b[i],
             ],
             "wall_proximity": [wp_n, wp_s, wp_e, wp_w],
-            "nn_mutation_rate": brain.nn_mutation_rate,
             "nn_weight_count": brain.weights.len(),
         });
         Some(serde_json::to_string(&json).unwrap_or_else(|_| "{}".into()))
@@ -756,9 +818,9 @@ impl WorldHandle {
     #[wasm_bindgen]
     pub fn sliders_defaults_json(&self) -> String {
         let d = crate::world::DevSliders::default();
-        let json = serde_json::json!({
+        let mut json = serde_json::json!({
             "mutation_rate_multiplier": d.mutation_rate_multiplier,
-            "nn_mutation_sigma": d.nn_mutation_sigma,
+            "_reserved_legacy_nn_mutation_sigma": 0.0_f32,
             "eat_bite_fraction": d.eat_bite_fraction,
             "grass_propagation_rate_k": d.grass_propagation_rate_k,
             "grass_in_cell_growth_r": d.grass_in_cell_growth_r,
@@ -782,6 +844,13 @@ impl WorldHandle {
             "full_grass_on_init": if d.full_grass_on_init { 1.0_f32 } else { 0.0 },
             "max_population": d.max_population as f32,
         });
+        // v1.12: 8 mutation buckets × 3 fields. Names match SLIDER_NAMES.
+        let obj = json.as_object_mut().expect("json! produced an object");
+        for (i, b) in d.mutation_policy.buckets.iter().enumerate() {
+            obj.insert(format!("bucket_{i}_weight"), serde_json::json!(b.weight));
+            obj.insert(format!("bucket_{i}_rate"), serde_json::json!(b.rate));
+            obj.insert(format!("bucket_{i}_sigma"), serde_json::json!(b.sigma));
+        }
         serde_json::to_string(&json).unwrap_or_else(|_| "{}".into())
     }
 
@@ -976,7 +1045,7 @@ mod tests {
     /// drives so the SAB layout is testable off-wasm.
     #[test]
     fn write_snapshot_to_layout_matches_stride() {
-        let mut handle = WorldHandle::new_with_founder_count("a1-snapshot", 0, 100.0, 3, false);
+        let mut handle = WorldHandle::new_with_founder_count("a1-snapshot", 0, 100.0, 3, false, "").unwrap();
         let mut creatures = Vec::new();
         let mut grass = Vec::new();
         let mut stats = Vec::new();
@@ -1048,7 +1117,7 @@ mod tests {
     /// halton position. Uses a 1-founder world so we control placement exactly.
     #[test]
     fn creature_at_returns_stable_id() {
-        let handle = WorldHandle::new_with_founder_count("e21-creature-at", 0, 100.0, 1, false);
+        let handle = WorldHandle::new_with_founder_count("e21-creature-at", 0, 100.0, 1, false, "").unwrap();
         let founder_id = handle.inner.creatures.id[0] as f64;
         let cx = handle.inner.creatures.x[0];
         let cy = handle.inner.creatures.y[0];
@@ -1135,7 +1204,12 @@ mod tests {
     #[test]
     fn set_slider_known_names_dispatch_ok() {
         let mut handle = WorldHandle::new("s17-known");
-        for name in &["mutation_rate_multiplier", "nn_mutation_sigma"] {
+        for name in &[
+            "mutation_rate_multiplier",
+            "_reserved_legacy_nn_mutation_sigma",
+            "bucket_0_weight",
+            "bucket_7_sigma",
+        ] {
             assert!(handle.try_set_slider(name, 0.5), "expected true for {name}");
         }
     }

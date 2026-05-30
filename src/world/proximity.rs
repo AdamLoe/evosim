@@ -20,10 +20,67 @@
 //! from north) so positive-y world ("south") yields ~180° and positive-x
 //! ("east") yields ~90°. Sector index = `floor(angle / 45°) % 8`.
 
+use std::sync::OnceLock;
+
 use crate::constants::*;
 use crate::creature::CreatureSoA;
 use crate::grass::GrassGrid;
 use crate::grid::SpatialGrid;
+
+/// Precomputed cell-offset starburst for `compute_creature_proximity_sectors`.
+///
+/// Each entry is `(dxo, dyo, min_dist_sq)` where:
+///   - `(dxo, dyo)` is an integer cell offset from the creature's home hash
+///     cell, both in `[-MAX_OFFSET, MAX_OFFSET]`.
+///   - `min_dist_sq` is the squared *lower bound* on the world-unit distance
+///     from the creature to anything in that cell. Specifically:
+///         min_dist = sqrt((max(0, |dxo|-1) * HASH_CELL)² +
+///                         (max(0, |dyo|-1) * HASH_CELL)²)
+///     The `-1` accounts for the creature sitting anywhere inside its home
+///     cell — the home cell and any 8-neighbor overlap on at least one axis.
+///
+/// The list is sorted by `min_dist_sq` ascending, with `(|dxo|, |dyo|, dxo,
+/// dyo)` as the deterministic tiebreak. Cells whose `min_dist >= PROXIMITY_RANGE`
+/// are excluded — they can't contribute.
+///
+/// The walk consumer (creature proximity) iterates this list in order,
+/// maintains per-sector `best_intensity`, and breaks when every sector has
+/// been touched and the current cell's max possible intensity (`1 -
+/// min_dist/range`) is `≤ min(best_intensity)`.
+fn proximity_starburst() -> &'static [(i32, i32, f32)] {
+    static CELL: OnceLock<Vec<(i32, i32, f32)>> = OnceLock::new();
+    CELL.get_or_init(|| {
+        let range = PROXIMITY_RANGE;
+        // Max cell offset whose lower-bound min_dist can still be < range.
+        // min_dist ≥ (|dxo| - 1) * HASH_CELL when on-axis, so the largest
+        // useful |dxo| is `ceil(range / HASH_CELL) + 1`.
+        let max_off = ((range / HASH_CELL).ceil() as i32) + 1;
+        let mut out: Vec<(i32, i32, f32)> =
+            Vec::with_capacity(((2 * max_off + 1) * (2 * max_off + 1)) as usize);
+        let cell = HASH_CELL;
+        let range2 = range * range;
+        for dyo in -max_off..=max_off {
+            for dxo in -max_off..=max_off {
+                let mdx = (dxo.unsigned_abs() as i32 - 1).max(0) as f32 * cell;
+                let mdy = (dyo.unsigned_abs() as i32 - 1).max(0) as f32 * cell;
+                let min_dist_sq = mdx * mdx + mdy * mdy;
+                if min_dist_sq >= range2 {
+                    continue;
+                }
+                out.push((dxo, dyo, min_dist_sq));
+            }
+        }
+        out.sort_by(|a, b| {
+            a.2.partial_cmp(&b.2)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.0.abs().cmp(&b.0.abs()))
+                .then(a.1.abs().cmp(&b.1.abs()))
+                .then(a.0.cmp(&b.0))
+                .then(a.1.cmp(&b.1))
+        });
+        out
+    })
+}
 
 /// Half-cell offset window used by `build_sector_lut`. The LUT covers integer
 /// cell offsets in `-LUT_RADIUS..=+LUT_RADIUS` along each axis. At v1.5 S6's
@@ -139,6 +196,15 @@ fn adjacent_sector(dx: f32, dy: f32, primary: u8) -> u8 {
 /// and 0.22 to sector 2 (90°)). Per-sector aggregation uses `max` so two
 /// neighbors in the same sector don't push the channel above the single-
 /// neighbor saturation.
+///
+/// Performance: instead of walking every cell in the `PROXIMITY_RANGE` bbox
+/// (~256 cells at `HASH_CELL=2.5u`, `PROXIMITY_RANGE=20u`), we walk a
+/// precomputed starburst list of cell offsets ordered by lower-bound distance
+/// from the creature's home cell. Per sector we track the best intensity so
+/// far; once every sector has been touched AND the current cell's max
+/// possible intensity can no longer beat the worst surviving sector, we
+/// break. In dense clumps the walk typically stops after the home cell + a
+/// handful of neighbors, dropping the per-creature scan from O(K) to ~O(1).
 pub(crate) fn compute_creature_proximity_sectors(
     x: f32,
     y: f32,
@@ -149,35 +215,97 @@ pub(crate) fn compute_creature_proximity_sectors(
 ) {
     *out = [0.0f32; 8];
     let range = PROXIMITY_RANGE;
+    let inv_range = 1.0 / range;
     let range2 = range * range;
-    grid.for_each_in_radius(x, y, range, |j| {
-        if j == self_id {
-            return;
+    let cell = HASH_CELL;
+    let inv_cell = 1.0 / cell;
+    let dim = HASH_DIM as i32;
+
+    let ix0 = (x * inv_cell).floor() as i32;
+    let iy0 = (y * inv_cell).floor() as i32;
+
+    // Per-sector best intensity found so far.
+    let mut best = [0.0f32; 8];
+    // Count of sectors with best > 0. The early-bail condition needs every
+    // sector to have at least one hit before it can fire.
+    let mut sectors_hit: u32 = 0;
+    // Smallest best[] value among sectors we've already lit; any cell whose
+    // max-achievable intensity is ≤ this can't improve any sector once all 8
+    // are lit. Maintained incrementally so the per-cell test is one f32 cmp.
+    let mut min_best: f32 = 0.0;
+
+    for &(dxo, dyo, min_dist_sq) in proximity_starburst() {
+        // Max intensity achievable from any creature in this cell.
+        // = 1 - min_dist/range; once that ≤ 0 the rest of the starburst is
+        // also out of range (offsets are sorted ascending by min_dist).
+        let min_dist = min_dist_sq.sqrt();
+        let max_intensity = 1.0 - min_dist * inv_range;
+        if max_intensity <= 0.0 {
+            break;
         }
-        let dx = creatures.x[j] - x;
-        let dy = creatures.y[j] - y;
-        let d2 = dx * dx + dy * dy;
-        if d2 > range2 {
-            return;
+        // Once every sector is lit AND no further cell can beat the worst
+        // sector, we're done.
+        if sectors_hit == 8 && max_intensity <= min_best {
+            break;
         }
-        let d = d2.sqrt();
-        let intensity = 1.0 - d / range;
-        if intensity <= 0.0 {
-            return;
+
+        let ix = ix0 + dxo;
+        let iy = iy0 + dyo;
+        if ix < 0 || ix >= dim || iy < 0 || iy >= dim {
+            continue;
         }
-        let (primary, w) = sector_of(dx, dy);
-        let adj = adjacent_sector(dx, dy, primary);
-        let p_idx = primary as usize;
-        let a_idx = adj as usize;
-        let p_val = intensity * w;
-        let a_val = intensity * (1.0 - w);
-        if p_val > out[p_idx] {
-            out[p_idx] = p_val;
+        let c = iy as usize * HASH_DIM + ix as usize;
+        let s = grid.starts[c] as usize;
+        let e = grid.starts[c + 1] as usize;
+        for &idx_u32 in &grid.indices[s..e] {
+            let j = idx_u32 as usize;
+            if j == self_id {
+                continue;
+            }
+            let dx = creatures.x[j] - x;
+            let dy = creatures.y[j] - y;
+            let d2 = dx * dx + dy * dy;
+            if d2 > range2 {
+                continue;
+            }
+            let d = d2.sqrt();
+            let intensity = 1.0 - d * inv_range;
+            if intensity <= 0.0 {
+                continue;
+            }
+            let (primary, w) = sector_of(dx, dy);
+            let adj = adjacent_sector(dx, dy, primary);
+            let p_val = intensity * w;
+            let a_val = intensity * (1.0 - w);
+            let p_idx = primary as usize;
+            let a_idx = adj as usize;
+            if p_val > best[p_idx] {
+                if best[p_idx] == 0.0 {
+                    sectors_hit += 1;
+                }
+                best[p_idx] = p_val;
+            }
+            if a_val > best[a_idx] {
+                if best[a_idx] == 0.0 {
+                    sectors_hit += 1;
+                }
+                best[a_idx] = a_val;
+            }
         }
-        if a_val > out[a_idx] {
-            out[a_idx] = a_val;
+
+        // Recompute min_best lazily: only matters once we're trying to bail.
+        if sectors_hit == 8 {
+            let mut mb = best[0];
+            for &v in &best[1..] {
+                if v < mb {
+                    mb = v;
+                }
+            }
+            min_best = mb;
         }
-    });
+    }
+
+    *out = best;
 }
 
 /// Fill `out[0..8]` with grass-density intensities per sector. Walks the cells

@@ -9,7 +9,8 @@ pub(crate) mod proximity;
 pub(crate) mod tick;
 
 use self::nn::{chunk_ranges, dynamic_chunks};
-use crate::brain::Brain;
+use self::tick::EatPick;
+use crate::brain::{Brain, MutationPolicy, NnTopology};
 use crate::constants::*;
 use crate::creature::{Action, CreatureSoA};
 use crate::grass::GrassGrid;
@@ -21,7 +22,10 @@ use serde::{Deserialize, Serialize};
 pub struct DevSliders {
     pub mutation_rate_multiplier: f32,
     pub mouth_tax: f32,
-    pub nn_mutation_sigma: f32,
+    /// v1.12: 8-bucket mutation policy. Replaces the legacy single-knob
+    /// `nn_mutation_sigma` slider and the per-creature `nn_mutation_rate`
+    /// drift. Default = bucket 0 carries the legacy `(0.02, 0.02)`.
+    pub mutation_policy: MutationPolicy,
     /// Grass cross-kernel propagation rate (k). See v1.2 amendments §A.4.
     pub grass_propagation_rate_k: f32,
     /// Grass in-cell logistic growth rate (r). See v1.2 amendments §A.4.
@@ -90,7 +94,7 @@ impl Default for DevSliders {
         Self {
             mutation_rate_multiplier: 1.0,
             mouth_tax: UPKEEP_MOUTH_DEFAULT,
-            nn_mutation_sigma: NN_MUT_SIGMA_DEFAULT,
+            mutation_policy: MutationPolicy::default(),
             grass_propagation_rate_k: GRASS_PROPAGATION_RATE_K_DEFAULT,
             grass_in_cell_growth_r: GRASS_IN_CELL_GROWTH_R_DEFAULT,
             grass_initial_seed_count: GRASS_INITIAL_SEED_COUNT_DEFAULT,
@@ -157,18 +161,38 @@ pub struct World {
     pub(crate) scratch_cooldown_set: Vec<bool>,
     pub(crate) scratch_attempted_eat: Vec<bool>,
     pub(crate) scratch_got_a_bite: Vec<bool>,
-    /// S25: promoted eat-candidate buffer. Eliminates the per-Eat-per-tick
-    /// `Vec::with_capacity(8)` allocation in eat_and_scavenge.
-    pub(crate) scratch_eat_candidates: Vec<usize>,
+    /// Per-predator eat outcome computed in parallel by `eat()`, applied
+    /// sequentially afterward. Indexed by creature index `i`; length matches
+    /// the SoA at the top of each `eat()` call. See `EatPick`.
+    pub(crate) scratch_eat_picks: Vec<EatPick>,
     /// S27: promoted dead-indices buffer from collect_deaths.
     /// Cleared and refilled each call; caller reads it via &self.scratch_dead.
     pub(crate) scratch_dead: Vec<usize>,
     /// v1.6 cap-cull: promoted candidate-index pool for the post-births random
-    /// sample in `handle_births`. Refilled with `0..post_birth_pop` each time
+    /// sample in `handle_births`. Refilled with `0..virtual_pop` each time
     /// the cull fires (which is every tick a birth would push pop above
     /// `MAX_POP_FOR_SIM`). Caching here lets the cull reuse the same
     /// allocation tick-after-tick instead of re-allocating ~256 KB per call.
     pub(crate) scratch_cull_pool: Vec<usize>,
+    /// Per-tick splitter indices (creatures whose Action::Split fired with
+    /// enough energy). Drives the parallel child-brain phase in `handle_births`.
+    pub(crate) scratch_splitters: Vec<usize>,
+    /// Bitmask over splitters: `true` means the prospective newborn is sampled
+    /// for the cap-cull and should NOT be cloned. Saves a brain clone+free per
+    /// would-be-culled newborn.
+    pub(crate) scratch_newborn_dead: Vec<bool>,
+    /// Indices of pre-existing creatures (in [0, n_before_births)) sampled for
+    /// the cap-cull. Partitioned out of `scratch_dead` so we can apply the
+    /// SoA `remove_indices` once at the end of `handle_births`.
+    pub(crate) scratch_existing_dead: Vec<usize>,
+    /// Per-splitter RNG seeds, pre-rolled from `self.rng` in deterministic
+    /// order so each parallel worker can build its child brain from an
+    /// independent stream without contending on the shared RNG.
+    pub(crate) scratch_birth_seeds: Vec<u64>,
+    /// Per-splitter prospective child brain. `Some` for survivors after the
+    /// parallel clone phase; `None` for culled-before-birth newborns. Drained
+    /// during the sequential apply phase.
+    pub(crate) scratch_child_brains: Vec<Option<Brain>>,
     /// Curriculum factor recomputed at the top of each `step()` and applied to
     /// move/eat/upkeep costs. Init 1.0 so pre-tick reads (tests) see "normal".
     pub current_curriculum_factor: f32,
@@ -184,6 +208,10 @@ pub struct World {
     /// v1.5 S5b: per-creature 8-accumulator scratch reused across the NN input
     /// build. Resized in `step()` before the chunked input phase.
     pub(crate) scratch_sector_accum: Vec<[f32; 8]>,
+    /// v1.12: NN structure for this world's lifetime. Set at construction
+    /// (from the boot payload), used by `Brain::founder` and by the per-layer
+    /// profiler-drain loop in `nn_forward_all_chunks`.
+    pub(crate) nn_topology: NnTopology,
     /// Per-worker + per-sub-phase counters for the parallel NN forward pass.
     /// Wrapped in Arc so the parallel block can hold a thread-safe handle while
     /// `&mut self.creatures` is being mutated next to it. See `nn_stats.rs`.
@@ -207,6 +235,14 @@ impl World {
     }
 
     pub fn new_with_sliders(seed: impl Into<String>, sliders: DevSliders) -> Self {
+        Self::new_with_sliders_topology(seed, sliders, NnTopology::legacy())
+    }
+
+    pub fn new_with_sliders_topology(
+        seed: impl Into<String>,
+        sliders: DevSliders,
+        nn_topology: NnTopology,
+    ) -> Self {
         let seed_string = seed.into();
         let mut rng = SimRng::from_string(&seed_string);
         let mut grass = GrassGrid::new(&mut rng, sliders.grass_initial_seed_count);
@@ -223,7 +259,7 @@ impl World {
         let lo = body_r;
         let hi = WORLD_SIZE - body_r;
         for k in 0..founder_count {
-            let brain = Brain::founder(&mut rng);
+            let brain = Brain::founder(&mut rng, nn_topology.clone());
             // Halton (2, 3) gives a low-discrepancy 2D sequence; shift by 1 so
             // the first sample isn't (0, 0).
             let hx = halton(k + 1, 2);
@@ -254,13 +290,19 @@ impl World {
             scratch_cooldown_set: Vec::new(),
             scratch_attempted_eat: Vec::new(),
             scratch_got_a_bite: Vec::new(),
-            scratch_eat_candidates: Vec::new(),
+            scratch_eat_picks: Vec::new(),
             scratch_dead: Vec::new(),
             scratch_cull_pool: Vec::new(),
+            scratch_splitters: Vec::new(),
+            scratch_newborn_dead: Vec::new(),
+            scratch_existing_dead: Vec::new(),
+            scratch_birth_seeds: Vec::new(),
+            scratch_child_brains: Vec::new(),
             current_curriculum_factor: 1.0,
             scratch_argmax_pre: Vec::new(),
             sector_lut,
             scratch_sector_accum: Vec::new(),
+            nn_topology,
             nn_stats: std::sync::Arc::new(nn_stats::NnStats::new(
                 crate::profiler::clock_now_us_threadsafe(),
             )),
@@ -517,71 +559,138 @@ impl World {
         }
         let split_threshold = self.sliders.split_threshold;
         let split_gift_max = self.sliders.split_gift;
-        for i in 0..n {
-            if self.creatures.action_this_tick[i] != Action::Split {
-                continue;
-            }
-            if self.creatures.energy[i] < split_threshold {
-                continue;
-            }
-            let parent_energy_after_cost = self.creatures.energy[i] - split_threshold;
-            let gift = parent_energy_after_cost.clamp(0.0, split_gift_max);
-            self.creatures.energy[i] = parent_energy_after_cost - gift;
-            let child_energy = gift;
 
-            // D3: no child_genome mutation. Brain mutation only.
-            let child_brain = Brain::child_from(
-                &self.creatures.brains[i],
-                &mut self.rng,
-                self.sliders.nn_mutation_sigma,
-                self.sliders.mutation_rate_multiplier,
-            );
-            let jitter_x = self.rng.symm() * self.sliders.split_jitter;
-            let jitter_y = self.rng.symm() * self.sliders.split_jitter;
-            let radius = CREATURE_SIZE * BODY_RADIUS_PER_SIZE;
-            let clamp_lo = radius;
-            let clamp_hi = WORLD_SIZE - radius;
-            let cx = (self.creatures.x[i] + jitter_x).clamp(clamp_lo, clamp_hi);
-            let cy = (self.creatures.y[i] + jitter_y).clamp(clamp_lo, clamp_hi);
-            let new_id = self.next_creature_id;
-            self.next_creature_id += 1;
-            self.creatures
-                .push(new_id, cx, cy, child_energy, self.tick, child_brain);
+        // 1. Collect splitter indices in order (cheap O(N) scan over actions).
+        let mut splitters = std::mem::take(&mut self.scratch_splitters);
+        splitters.clear();
+        for i in 0..n {
+            if self.creatures.action_this_tick[i] == Action::Split
+                && self.creatures.energy[i] >= split_threshold
+            {
+                splitters.push(i);
+            }
+        }
+        let n_splitters = splitters.len();
+        if n_splitters == 0 {
+            self.scratch_splitters = splitters;
+            return;
         }
 
-        // Population-cap cull. Every split that could fire has fired (parents
-        // got reproductive success); now if pop exceeds the active cap,
-        // randomly cull the excess. The effective cap is the smaller of the
-        // user-tunable `sliders.max_population` (UI slider, default
-        // `MAX_POP_FOR_SIM`) and the hard SAB-bound `MAX_POP_FOR_SIM` —
-        // the latter is a structural invariant the snapshot SAB size depends
-        // on, while the former lets users hold pop low enough to stay in a
-        // smooth performance regime without changing the build.
-        let post_birth = self.creatures.len();
-        let active_cap = (self.sliders.max_population as usize).min(MAX_POP_FOR_SIM);
-        let active_cap = active_cap.max(1);
-        if post_birth > active_cap {
-            let excess = post_birth - active_cap;
-            // Reservoir-style sample without replacement: walk the index pool
-            // and swap-pop one at a time. O(post_birth) memory for the pool,
-            // O(excess) RNG draws. Pool is promoted (`scratch_cull_pool`) so
-            // the ~256 KB high-water-mark allocation gets reused across ticks.
-            self.scratch_dead.clear();
+        // 2. Decide the cull BEFORE any brain allocation. Virtual indices map:
+        //    [0..n) = pre-existing creatures, [n..n+n_splitters) = prospective
+        //    newborns in the order they'd be pushed. Sampling uniformly from
+        //    the virtual post-birth population preserves the prior semantic
+        //    (newborns and existing creatures share the same per-individual
+        //    death probability when pop exceeds the cap), but lets us skip
+        //    cloning brains for newborns the cull is about to drop.
+        let active_cap = (self.sliders.max_population as usize).clamp(1, MAX_POP_FOR_SIM);
+        let virtual_pop = n + n_splitters;
+        let excess = virtual_pop.saturating_sub(active_cap);
+
+        let mut newborn_dead = std::mem::take(&mut self.scratch_newborn_dead);
+        newborn_dead.clear();
+        newborn_dead.resize(n_splitters, false);
+        let mut existing_dead = std::mem::take(&mut self.scratch_existing_dead);
+        existing_dead.clear();
+
+        if excess > 0 {
             self.scratch_cull_pool.clear();
-            self.scratch_cull_pool.extend(0..post_birth);
+            self.scratch_cull_pool.extend(0..virtual_pop);
             for _ in 0..excess {
                 let pick = self.rng.index(self.scratch_cull_pool.len());
-                self.scratch_dead
-                    .push(self.scratch_cull_pool.swap_remove(pick));
+                let k = self.scratch_cull_pool.swap_remove(pick);
+                if k < n {
+                    existing_dead.push(k);
+                } else {
+                    newborn_dead[k - n] = true;
+                }
             }
-            self.scratch_dead.sort_unstable();
+        }
 
-            // Mirror swap_remove on scratch columns the same way collect_deaths
-            // does. For positions where a newborn (no scratch entry) gets
-            // pulled into a culled existing slot, scratch[k] holds stale data
-            // for one tick — color_ema_update folds it into a small EMA delta,
-            // and the next tick's NN phase rebuilds scratch cleanly.
-            for &k in self.scratch_dead.iter().rev() {
+        // 3. Pre-roll one RNG seed per splitter from the world RNG. Draws
+        //    happen in deterministic splitter order, so the world stream is
+        //    well-defined; each parallel worker uses its independent sub-RNG
+        //    and can't contend on `self.rng`.
+        let mut seeds = std::mem::take(&mut self.scratch_birth_seeds);
+        seeds.clear();
+        seeds.reserve(n_splitters);
+        for _ in 0..n_splitters {
+            seeds.push(self.rng.next_u64());
+        }
+
+        // 4. Parallel: clone-and-mutate the child brain for every splitter
+        //    whose prospective newborn survives the cull. The dominant cost
+        //    of `handle_births` lives here (`Brain::child_from` is a full
+        //    Vec<f32> clone of NN_WEIGHT_COUNT floats); spreading it across
+        //    rayon workers cuts birth wall-time roughly by the worker count.
+        let mut child_brains = std::mem::take(&mut self.scratch_child_brains);
+        child_brains.clear();
+        child_brains.resize_with(n_splitters, || None);
+
+        let policy = &self.sliders.mutation_policy;
+        let mut_mult = self.sliders.mutation_rate_multiplier;
+        {
+            let brains = &self.creatures.brains[..n];
+            let splitters_view = &splitters[..];
+            let seeds_view = &seeds[..];
+            let dead_mask = &newborn_dead[..];
+            let out = &mut child_brains[..];
+
+            let build_one = |k: usize, slot: &mut Option<Brain>| {
+                if dead_mask[k] {
+                    return;
+                }
+                let parent = &brains[splitters_view[k]];
+                let mut rng = SimRng::from_u64(seeds_view[k]);
+                *slot = Some(Brain::child_from(parent, &mut rng, policy, mut_mult));
+            };
+
+            #[cfg(feature = "threads")]
+            {
+                use rayon::prelude::*;
+                out.par_iter_mut()
+                    .enumerate()
+                    .for_each(|(k, slot)| build_one(k, slot));
+            }
+            #[cfg(not(feature = "threads"))]
+            {
+                for (k, slot) in out.iter_mut().enumerate() {
+                    build_one(k, slot);
+                }
+            }
+        }
+
+        // 5. Sequential apply: every splitter still pays the energy cost
+        //    (Split fired), and for each surviving newborn we draw jitter
+        //    from `self.rng`, allocate an id, and push to the SoA.
+        let radius = CREATURE_SIZE * BODY_RADIUS_PER_SIZE;
+        let clamp_lo = radius;
+        let clamp_hi = WORLD_SIZE - radius;
+        let jitter_scale = self.sliders.split_jitter;
+        for (k, &parent_i) in splitters.iter().enumerate() {
+            let parent_energy_after_cost = self.creatures.energy[parent_i] - split_threshold;
+            let gift = parent_energy_after_cost.clamp(0.0, split_gift_max);
+            self.creatures.energy[parent_i] = parent_energy_after_cost - gift;
+
+            if let Some(child_brain) = child_brains[k].take() {
+                let jitter_x = self.rng.symm() * jitter_scale;
+                let jitter_y = self.rng.symm() * jitter_scale;
+                let cx = (self.creatures.x[parent_i] + jitter_x).clamp(clamp_lo, clamp_hi);
+                let cy = (self.creatures.y[parent_i] + jitter_y).clamp(clamp_lo, clamp_hi);
+                let new_id = self.next_creature_id;
+                self.next_creature_id += 1;
+                self.creatures
+                    .push(new_id, cx, cy, gift, self.tick, child_brain);
+            }
+        }
+
+        // 6. Apply pre-existing-creature culls. Newborns that were sampled
+        //    for the cull were never pushed, so they need no removal. For the
+        //    existing-creature removals we mirror the same scratch-column
+        //    swap_remove dance the legacy path did.
+        if !existing_dead.is_empty() {
+            existing_dead.sort_unstable();
+            for &k in existing_dead.iter().rev() {
                 if k < self.scratch_argmax_pre.len() {
                     self.scratch_argmax_pre.swap_remove(k);
                 }
@@ -592,10 +701,16 @@ impl World {
                     self.scratch_sector_accum.swap_remove(k);
                 }
             }
-            let dead = std::mem::take(&mut self.scratch_dead);
-            self.creatures.remove_indices(&dead);
-            self.scratch_dead = dead;
+            self.creatures.remove_indices(&existing_dead);
         }
+
+        // Return the buffers to the World so the high-water allocations
+        // survive into the next tick.
+        self.scratch_splitters = splitters;
+        self.scratch_newborn_dead = newborn_dead;
+        self.scratch_existing_dead = existing_dead;
+        self.scratch_birth_seeds = seeds;
+        self.scratch_child_brains = child_brains;
     }
 
     pub fn tick_once(&mut self) -> bool {
@@ -651,13 +766,19 @@ impl World {
             scratch_cooldown_set: Vec::new(),
             scratch_attempted_eat: Vec::new(),
             scratch_got_a_bite: Vec::new(),
-            scratch_eat_candidates: Vec::new(),
+            scratch_eat_picks: Vec::new(),
             scratch_dead: Vec::new(),
             scratch_cull_pool: Vec::new(),
+            scratch_splitters: Vec::new(),
+            scratch_newborn_dead: Vec::new(),
+            scratch_existing_dead: Vec::new(),
+            scratch_birth_seeds: Vec::new(),
+            scratch_child_brains: Vec::new(),
             current_curriculum_factor: self.current_curriculum_factor,
             scratch_argmax_pre: Vec::new(),
             sector_lut,
             scratch_sector_accum: Vec::new(),
+            nn_topology: self.nn_topology.clone(),
             nn_stats: std::sync::Arc::new(nn_stats::NnStats::new(0)),
         }
     }
@@ -771,7 +892,7 @@ mod tests {
         // Seed in 999 extra creatures (founder is already there).
         // D3: no genome diversity — just varied brain initializations.
         for k in 0..999u64 {
-            let b = Brain::founder(&mut seeder);
+            let b = Brain::founder(&mut seeder, NnTopology::legacy());
             let x = seeder.uniform(10.0, WORLD_SIZE - 10.0);
             let y = seeder.uniform(10.0, WORLD_SIZE - 10.0);
             w.creatures.push(k + 1, x, y, START_ENERGY_DEFAULT, 0, b);
@@ -868,7 +989,7 @@ mod tests {
         use crate::brain::Brain;
         let mut rng = SimRng::from_string("pad");
         while w.creatures.len() < max + 5 {
-            let b = Brain::founder(&mut rng);
+            let b = Brain::founder(&mut rng, NnTopology::legacy());
             let id = w.next_creature_id;
             w.next_creature_id += 1;
             w.creatures.push(id, 1.0, 1.0, 10.0, 0, b);
@@ -891,7 +1012,7 @@ mod tests {
         use crate::brain::Brain;
         let mut rng = SimRng::from_string("pad");
         while w.creatures.len() < mid_pop {
-            let b = Brain::founder(&mut rng);
+            let b = Brain::founder(&mut rng, NnTopology::legacy());
             let id = w.next_creature_id;
             w.next_creature_id += 1;
             w.creatures.push(id, 1.0, 1.0, 10.0, 0, b);

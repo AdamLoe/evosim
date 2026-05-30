@@ -70,7 +70,7 @@ const rayonCurrentNumThreads = (_wasmMod as unknown as Record<string, unknown>)[
 ] as (() => number) | undefined;
 
 /** Target rayon worker count (kept from v1.9; see worker-runtime.md). */
-const TARGET_RAYON_WORKERS = 8;
+const TARGET_RAYON_WORKERS = 16;
 
 /** Tick cadence for emitting the profile-report payload (~1 Hz at 60 TPS). */
 const PROFILE_REPORT_EVERY_N_TICKS = 60;
@@ -115,7 +115,15 @@ self.onmessage = (e: MessageEvent<SimMessage>): void => {
   if (!booted && msg.kind === "boot") {
     booted = true;
     handleBoot(msg).catch((err) => {
+      // v1.12 hardening: a silent boot failure (e.g. a bad nn_topology
+      // payload) used to leave main awaiting boot_ready forever while the
+      // previous session's app shell stayed visible. Make the failure loud:
+      // throw on a setTimeout so the unhandled error surfaces in DevTools
+      // AND the page-level error handler if one's installed.
       console.error("[sim] boot failed:", err);
+      setTimeout(() => {
+        throw err instanceof Error ? err : new Error(String(err));
+      }, 0);
     });
   }
 };
@@ -167,6 +175,7 @@ async function handleBoot(boot: SimMessageBoot): Promise<void> {
     boot.energy_max,
     boot.founder_count,
     boot.full_grass_on_init,
+    boot.nn_topology_json ?? "",
   );
   world.profile_enable(true);
 

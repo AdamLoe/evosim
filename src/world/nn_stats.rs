@@ -19,6 +19,7 @@
 //! (sum-of-contributions). Reset happens on the main thread before the
 //! parallel pass dispatches, so no race with worker writes.
 
+use crate::constants::NN_MAX_MATMULS;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Hard cap on tracked workers. Matches `MAX_CHUNKS = 16` from constants.rs;
@@ -58,9 +59,10 @@ pub struct NnStats {
     pub tick_proximity_creatures_us: AtomicU64,
     pub tick_proximity_grass_us: AtomicU64,
     pub tick_forward_us: AtomicU64,
-    pub tick_forward_l1_us: AtomicU64,
-    pub tick_forward_l2_us: AtomicU64,
-    pub tick_forward_l3_us: AtomicU64,
+    /// v1.12: per-matmul wall clock. Indexed 0..matmul_count. Sized to the
+    /// hard cap so the array is fixed-shape; consumers iterate the live
+    /// `matmul_count` (== `topology.matmul_count()`).
+    pub tick_forward_layer_us: [AtomicU64; NN_MAX_MATMULS],
     /// Sum of every chunk's wall-clock duration this tick. Often larger than
     /// the tick.nn span itself (chunks run in parallel; sum-of-busy > wall).
     pub tick_chunk_wall_us: AtomicU64,
@@ -80,9 +82,8 @@ pub struct NnStats {
     pub tick_proximity_grass_calls: AtomicU64,
     /// Forward pass + layers run once per creature.
     pub tick_forward_calls: AtomicU64,
-    pub tick_forward_l1_calls: AtomicU64,
-    pub tick_forward_l2_calls: AtomicU64,
-    pub tick_forward_l3_calls: AtomicU64,
+    /// v1.12: per-matmul invocation counter (paired with `tick_forward_layer_us`).
+    pub tick_forward_layer_calls: [AtomicU64; NN_MAX_MATMULS],
     /// Chunk-wall = one bracket per chunk → calls == chunk_count.
     pub tick_chunk_wall_calls: AtomicU64,
     /// Number of distinct workers that picked up work this tick (rough
@@ -109,9 +110,7 @@ impl NnStats {
             tick_proximity_creatures_us: AtomicU64::new(0),
             tick_proximity_grass_us: AtomicU64::new(0),
             tick_forward_us: AtomicU64::new(0),
-            tick_forward_l1_us: AtomicU64::new(0),
-            tick_forward_l2_us: AtomicU64::new(0),
-            tick_forward_l3_us: AtomicU64::new(0),
+            tick_forward_layer_us: std::array::from_fn(|_| AtomicU64::new(0)),
             tick_chunk_wall_us: AtomicU64::new(0),
             tick_workers_used_bitset: AtomicU64::new(0),
             tick_build_input_total_calls: AtomicU64::new(0),
@@ -120,9 +119,7 @@ impl NnStats {
             tick_proximity_creatures_calls: AtomicU64::new(0),
             tick_proximity_grass_calls: AtomicU64::new(0),
             tick_forward_calls: AtomicU64::new(0),
-            tick_forward_l1_calls: AtomicU64::new(0),
-            tick_forward_l2_calls: AtomicU64::new(0),
-            tick_forward_l3_calls: AtomicU64::new(0),
+            tick_forward_layer_calls: std::array::from_fn(|_| AtomicU64::new(0)),
             tick_chunk_wall_calls: AtomicU64::new(0),
         }
     }
@@ -135,9 +132,9 @@ impl NnStats {
         self.tick_proximity_creatures_us.store(0, Ordering::Relaxed);
         self.tick_proximity_grass_us.store(0, Ordering::Relaxed);
         self.tick_forward_us.store(0, Ordering::Relaxed);
-        self.tick_forward_l1_us.store(0, Ordering::Relaxed);
-        self.tick_forward_l2_us.store(0, Ordering::Relaxed);
-        self.tick_forward_l3_us.store(0, Ordering::Relaxed);
+        for c in self.tick_forward_layer_us.iter() {
+            c.store(0, Ordering::Relaxed);
+        }
         self.tick_chunk_wall_us.store(0, Ordering::Relaxed);
         self.tick_workers_used_bitset.store(0, Ordering::Relaxed);
         self.tick_build_input_total_calls
@@ -149,9 +146,9 @@ impl NnStats {
             .store(0, Ordering::Relaxed);
         self.tick_proximity_grass_calls.store(0, Ordering::Relaxed);
         self.tick_forward_calls.store(0, Ordering::Relaxed);
-        self.tick_forward_l1_calls.store(0, Ordering::Relaxed);
-        self.tick_forward_l2_calls.store(0, Ordering::Relaxed);
-        self.tick_forward_l3_calls.store(0, Ordering::Relaxed);
+        for c in self.tick_forward_layer_calls.iter() {
+            c.store(0, Ordering::Relaxed);
+        }
         self.tick_chunk_wall_calls.store(0, Ordering::Relaxed);
     }
 
@@ -210,6 +207,10 @@ impl NnStats {
     /// `build_nn_input`, the proximity bracket, the forward pass, and each
     /// layer). The `build_input_total` bracket is the per-chunk call; one
     /// per `record_chunk_subphases` invocation.
+    /// v1.12: `forward_layer_us` is a `&[u64]` of length `matmul_count`,
+    /// holding per-matmul wall clock for THIS chunk's per-creature passes.
+    /// Each entry is summed into `tick_forward_layer_us[k]`, and the paired
+    /// call counter advances by `creatures_in_chunk`.
     #[allow(clippy::too_many_arguments)]
     pub fn record_chunk_subphases(
         &self,
@@ -220,9 +221,7 @@ impl NnStats {
         proximity_creatures_us: u64,
         proximity_grass_us: u64,
         forward_us: u64,
-        forward_l1_us: u64,
-        forward_l2_us: u64,
-        forward_l3_us: u64,
+        forward_layer_us: &[u64],
     ) {
         self.tick_build_input_total_us
             .fetch_add(build_input_total_us, Ordering::Relaxed);
@@ -236,18 +235,15 @@ impl NnStats {
             .fetch_add(proximity_grass_us, Ordering::Relaxed);
         self.tick_forward_us
             .fetch_add(forward_us, Ordering::Relaxed);
-        self.tick_forward_l1_us
-            .fetch_add(forward_l1_us, Ordering::Relaxed);
-        self.tick_forward_l2_us
-            .fetch_add(forward_l2_us, Ordering::Relaxed);
-        self.tick_forward_l3_us
-            .fetch_add(forward_l3_us, Ordering::Relaxed);
+        debug_assert!(forward_layer_us.len() <= NN_MAX_MATMULS);
+        for (k, &us) in forward_layer_us.iter().enumerate() {
+            self.tick_forward_layer_us[k].fetch_add(us, Ordering::Relaxed);
+            self.tick_forward_layer_calls[k].fetch_add(creatures_in_chunk, Ordering::Relaxed);
+        }
 
         // Paired call counters. v1.10: every counter under the `nn` tree is
         // per-creature so `ms/call` is directly comparable across rows at the
-        // same indent depth (previously `nn` and `nn.build_input` reported
-        // per-chunk costs, leaving the perf panel with two mutually-unscaled
-        // unit systems in the same table — confusing in the UI).
+        // same indent depth.
         self.tick_build_input_total_calls
             .fetch_add(creatures_in_chunk, Ordering::Relaxed);
         self.tick_build_input_other_calls
@@ -259,12 +255,6 @@ impl NnStats {
         self.tick_proximity_grass_calls
             .fetch_add(creatures_in_chunk, Ordering::Relaxed);
         self.tick_forward_calls
-            .fetch_add(creatures_in_chunk, Ordering::Relaxed);
-        self.tick_forward_l1_calls
-            .fetch_add(creatures_in_chunk, Ordering::Relaxed);
-        self.tick_forward_l2_calls
-            .fetch_add(creatures_in_chunk, Ordering::Relaxed);
-        self.tick_forward_l3_calls
             .fetch_add(creatures_in_chunk, Ordering::Relaxed);
     }
 
@@ -354,13 +344,13 @@ mod tests {
     #[test]
     fn record_chunk_accumulates_per_worker() {
         let s = NnStats::new(0);
-        // (creatures_in_chunk, build_total, build_other, prox_total, prox_creatures, prox_grass, fwd, l1, l2, l3)
+        // (creatures_in_chunk, build_total, build_other, prox_total, prox_creatures, prox_grass, fwd, &[l1,l2,l3])
         s.record_chunk_lite(0, 100, 250, 50);
-        s.record_chunk_subphases(50, 120, 30, 90, 40, 50, 20, 5, 10, 5);
+        s.record_chunk_subphases(50, 120, 30, 90, 40, 50, 20, &[5, 10, 5]);
         s.record_chunk_lite(0, 300, 500, 80);
-        s.record_chunk_subphases(80, 180, 60, 120, 70, 50, 40, 15, 20, 5);
+        s.record_chunk_subphases(80, 180, 60, 120, 70, 50, 40, &[15, 20, 5]);
         s.record_chunk_lite(2, 110, 180, 30);
-        s.record_chunk_subphases(30, 60, 10, 50, 20, 30, 15, 5, 5, 5);
+        s.record_chunk_subphases(30, 60, 10, 50, 20, 30, 15, &[5, 5, 5]);
 
         assert_eq!(s.worker_chunks[0].load(Ordering::Relaxed), 2);
         assert_eq!(s.worker_creatures[0].load(Ordering::Relaxed), 130);
@@ -374,14 +364,20 @@ mod tests {
         let used = s.tick_workers_used_bitset.load(Ordering::Relaxed);
         assert_eq!(used.count_ones(), 2);
 
-        // v1.10: every `_calls` counter accumulates creatures_in_chunk per
-        // chunk. Pre-v1.10 the `nn` root and `nn.build_input` rows recorded
-        // per-chunk counts (3 here), leaving the perf panel with two unit
-        // systems in the same `ms/call` column. Made consistent now.
         assert_eq!(s.tick_forward_calls.load(Ordering::Relaxed), 160);
         assert_eq!(s.tick_build_input_total_calls.load(Ordering::Relaxed), 160);
         assert_eq!(s.tick_build_input_other_calls.load(Ordering::Relaxed), 160);
         assert_eq!(s.tick_chunk_wall_calls.load(Ordering::Relaxed), 160);
+
+        // v1.12: per-matmul accumulator sums each chunk's slice element-wise.
+        // l1: 5+15+5 = 25, l2: 10+20+5 = 35, l3: 5+5+5 = 15.
+        assert_eq!(s.tick_forward_layer_us[0].load(Ordering::Relaxed), 25);
+        assert_eq!(s.tick_forward_layer_us[1].load(Ordering::Relaxed), 35);
+        assert_eq!(s.tick_forward_layer_us[2].load(Ordering::Relaxed), 15);
+        assert_eq!(
+            s.tick_forward_layer_calls[0].load(Ordering::Relaxed),
+            160
+        );
     }
 
     #[test]
@@ -402,14 +398,16 @@ mod tests {
     fn reset_tick_clears_per_tick_only() {
         let s = NnStats::new(0);
         s.record_chunk_lite(0, 100, 200, 50);
-        s.record_chunk_subphases(50, 60, 10, 50, 20, 30, 40, 5, 10, 25);
+        s.record_chunk_subphases(50, 60, 10, 50, 20, 30, 40, &[5, 10, 25]);
         s.reset_tick();
         assert_eq!(s.worker_chunks[0].load(Ordering::Relaxed), 1); // preserved
         assert_eq!(s.tick_forward_us.load(Ordering::Relaxed), 0); // cleared
         assert_eq!(s.tick_workers_used_bitset.load(Ordering::Relaxed), 0);
-        // v1.7.2: paired call counters are also reset.
         assert_eq!(s.tick_forward_calls.load(Ordering::Relaxed), 0);
         assert_eq!(s.tick_chunk_wall_calls.load(Ordering::Relaxed), 0);
+        for c in &s.tick_forward_layer_us {
+            assert_eq!(c.load(Ordering::Relaxed), 0);
+        }
     }
 
     #[test]

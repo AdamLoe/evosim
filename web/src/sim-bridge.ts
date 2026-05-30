@@ -194,6 +194,10 @@ export interface SimMessageBoot {
   initial_sliders: Record<string, number>;
   initial_target_tps: number;
   initial_paused: boolean;
+  /** v1.12: JSON-encoded `{hidden_sizes, activations}`. Empty string means
+   * "use Rust-side legacy default" (32→48→24→5). The worker passes this
+   * verbatim into `WorldHandle.newWithFounderCount`. */
+  nn_topology_json: string;
 }
 
 /** Discriminated union of every main → worker message shape. v1.10: just boot. */
