@@ -18,7 +18,6 @@
       <!-- Left column: top-bar + canvas + optional profiler bottom panel. -->
       <div id="left-col">
         <div id="top-bar">
-          <span id="status">Booting…</span>
         </div>
 
         <div id="canvas-wrap">
@@ -38,52 +37,26 @@
           </button>
         </div>
 
-        <!-- Profiler bottom panel. Width follows the left column; height
-             grows only when the panel is visible (display:none when off). -->
-        <div id="perf-box" class="perf-widget" style="display:none">
-          <div class="perf-header-row">
-            <span id="perf-tps" class="perf-stat">— TPS</span>
-            <span id="perf-jank" class="perf-stat">0 jank</span>
-            <label class="perf-window-label" for="perf-window-select" title="Profiler rolling-window length">
-              window
-              <select id="perf-window-select" class="perf-window-select">
-                <option value="5000">5s</option>
-                <option value="10000" selected>10s</option>
-                <option value="30000">30s</option>
-                <option value="60000">60s</option>
-              </select>
-            </label>
-            <button id="jank-reset" class="jank-reset-btn" type="button" title="Reset profiler + jank" aria-label="Reset profiler + jank">
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="none"
-                   stroke="currentColor" stroke-width="1.8"
-                   stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <path d="M3 12a9 9 0 1 0 3-6.7"></path>
-                <path d="M3 4v5h5"></path>
-              </svg>
-            </button>
-          </div>
-          <div class="perf-obs-row">
-            <span id="perf-grass-cells" class="perf-stat perf-obs">grass cells: —</span>
-            <span id="perf-grass-total" class="perf-stat perf-obs">grass total: —</span>
-          </div>
-          <div id="profiler-stabilizing" class="profiler-stabilizing" style="display:none"></div>
-          <div id="profiler-trees"></div>
-        </div>
+        <!-- Bottom monitor + profiler panel. Width follows the left column;
+             height grows only when the panel is visible (display:none when
+             off). v1.13 Wave 2: contents are built by widgets/perf-panel.ts
+             — status line + graphs + selectors + CPU process monitor +
+             profile trees. -->
+        <div id="perf-box" class="perf-widget" style="display:none"></div>
       </div>
 
-      <!-- Right rail: Inspector | Monitor | Settings -->
+      <!-- Right rail: Inspector | NN | Settings -->
       <aside id="right-rail">
         <nav id="rail-tabs" role="tablist">
-          <button data-tab="inspector" class="rail-tab is-active">Inspector</button>
-          <button data-tab="monitor" class="rail-tab">Monitor</button>
-          <button data-tab="nn" class="rail-tab">NN</button>
+          <button data-tab="inspector" class="rail-tab">Inspector</button>
+          <button data-tab="nn" class="rail-tab is-active">NN</button>
           <button data-tab="settings" class="rail-tab">Settings</button>
         </nav>
 
         <!-- Inspector tab: empty-state by default; populated on creature
              click. The existing #ins-* dl rows live inside this panel so
              the inspector module's getElementById calls keep working. -->
-        <section id="rail-inspector" class="rail-panel is-active">
+        <section id="rail-inspector" class="rail-panel">
           <div id="inspector-empty" class="rail-empty">Click a creature to inspect.</div>
           <div id="inspector-body" style="display:none">
             <dl>
@@ -104,22 +77,10 @@
           </div>
         </section>
 
-        <!-- Monitor tab: pop graph + worker/process stats. -->
-        <section id="rail-monitor" class="rail-panel">
-          <div class="rail-monitor-section">
-            <div class="rail-section-title">Population</div>
-            <canvas id="chart-pop" width="380" height="120"></canvas>
-          </div>
-          <div class="rail-monitor-section">
-            <div class="rail-section-title">Process</div>
-            <div id="worker-stats-host"></div>
-          </div>
-        </section>
-
         <!-- v1.12 NN tab: left = stage-then-apply topology editor (Apply
              respawns the worker), right = live-apply 8-bucket mutation
              policy editor, bottom = per-layer perf log. -->
-        <section id="rail-nn" class="rail-panel">
+        <section id="rail-nn" class="rail-panel is-active">
           <div id="nn-tab-host"></div>
         </section>
 
