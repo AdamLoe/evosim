@@ -40,17 +40,18 @@
       <!-- Right rail: Inspector | NN | Settings -->
       <aside id="right-rail">
         <nav id="rail-tabs" role="tablist">
-          <button data-tab="inspector" class="rail-tab">Inspector</button>
+          <button data-tab="inspector" class="rail-tab is-hidden">Inspector</button>
           <button data-tab="nn" class="rail-tab is-active">NN</button>
           <button data-tab="settings" class="rail-tab">Settings</button>
         </nav>
 
-        <!-- Inspector tab: empty-state by default; populated on creature
-             click. The existing #ins-* dl rows live inside this panel so
-             the inspector module's getElementById calls keep working. -->
+        <!-- Inspector tab: only present in the tab strip when a creature is
+             selected (the tab button + this section get .is-hidden when
+             nothing is selected). The existing #ins-* dl rows live inside
+             this panel so the inspector module's getElementById calls keep
+             working. -->
         <section id="rail-inspector" class="rail-panel">
-          <div id="inspector-empty" class="rail-empty">Click a creature to inspect.</div>
-          <div id="inspector-body" style="display:none">
+          <div id="inspector-body">
             <dl>
               <dt>ID</dt><dd id="ins-id"></dd>
               <dt>Pos</dt><dd id="ins-pos"></dd>

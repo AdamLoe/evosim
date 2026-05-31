@@ -460,6 +460,7 @@ button {
   height: 100%;
   position: relative;
 }
+.rail-tab.is-hidden { display: none; }
 .rail-tab:last-child { border-right: 0; }
 .rail-tab:hover { color: var(--fg); background: rgba(255, 255, 255, 0.02); }
 .rail-tab.is-active {
