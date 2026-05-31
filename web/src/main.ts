@@ -175,6 +175,16 @@ async function main(): Promise<void> {
     toggleRailOpen();
   });
 
+  // v1.13 Wave 4: Escape clears the inspector selection. The clear emits
+  // the visibility event that hides the Inspector tab + falls back to NN
+  // when Inspector was active.
+  window.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    if (e.target instanceof HTMLInputElement) return;
+    if (e.target instanceof HTMLTextAreaElement) return;
+    resetInspectorSelection(rail);
+  });
+
   let autoRestartPending = false;
 
   let framesThisSecond = 0;

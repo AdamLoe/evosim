@@ -3,7 +3,11 @@
 
 import type { SnapshotHeader, SimBridge } from "../sim-bridge";
 import { maybeSampleStats } from "./stats";
-import { refreshInspector, updateLatestSoA } from "./inspector";
+import {
+  refreshInspector,
+  subscribeInspectorVisibility,
+  updateLatestSoA,
+} from "./inspector";
 import { pruneHighlights, highlights } from "./highlight";
 
 export type RailTab = "inspector" | "monitor" | "nn" | "settings";
@@ -40,8 +44,29 @@ function installTabs(): RailState {
   };
 }
 
+// v1.13 Wave 4: the Inspector tab + panel are only present in the strip
+// while a creature is selected. The inspector module is the source of truth
+// for selection state; it pushes show/hide events here via the visibility
+// subscription set up in installRail().
+function setInspectorTabVisible(rail: RailState, visible: boolean): void {
+  const tabBtn = document.querySelector<HTMLButtonElement>(
+    '.rail-tab[data-tab="inspector"]',
+  );
+  if (tabBtn) tabBtn.classList.toggle("is-hidden", !visible);
+  // Panel visibility is implied: the inactive .rail-panel rule is
+  // display:none, and we always switch away from "inspector" below when
+  // hiding, so the panel stops painting without an explicit class.
+  if (!visible && rail.activeTab === "inspector") {
+    rail.switchTab("nn");
+  }
+}
+
 export function installRail(): RailState {
-  return installTabs();
+  const rail = installTabs();
+  subscribeInspectorVisibility((selected) =>
+    setInspectorTabVisible(rail, selected),
+  );
+  return rail;
 }
 
 export function pollRail(

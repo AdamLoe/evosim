@@ -90,11 +90,18 @@ function set(id: string, text: string): void {
   if (el) el.textContent = text;
 }
 
-function showEmptyState(visible: boolean): void {
-  const empty = document.getElementById("inspector-empty");
-  const body = document.getElementById("inspector-body");
-  if (empty) empty.style.display = visible ? "" : "none";
-  if (body) body.style.display = visible ? "none" : "";
+// v1.13 Wave 4: the rail orchestrator subscribes to selection-state changes
+// so it can show/hide the Inspector tab button + panel. Fires synchronously
+// from openInspector / clearSelection — never per-RAF.
+type VisibilityListener = (selected: boolean) => void;
+const visibilityListeners = new Set<VisibilityListener>();
+
+export function subscribeInspectorVisibility(cb: VisibilityListener): void {
+  visibilityListeners.add(cb);
+}
+
+function emitVisibility(selected: boolean): void {
+  for (const cb of visibilityListeners) cb(selected);
 }
 
 function renderInspectorSoA(soa: SoASnapshot, idx: number, id: number): void {
@@ -171,9 +178,9 @@ function openInspector(data: CreatureInspectJson, rail: RailState): void {
   }
   state = { kind: "selected", creatureId: data.id };
   highlights.set(data.id, HIGHLIGHT_PERMANENT);
-  showEmptyState(false);
   renderInspector(data);
   rail.switchTab("inspector");
+  emitVisibility(true);
 }
 
 function clearSelection(_rail: RailState): void {
@@ -181,9 +188,9 @@ function clearSelection(_rail: RailState): void {
     highlights.delete(state.creatureId);
   }
   state = { kind: "empty" };
-  showEmptyState(true);
-  // Rail stays on Inspector — empty-state takes over. Caller can switch away
-  // manually. (Per v1.9 plan.)
+  // v1.13 Wave 4: notify the rail orchestrator so it hides the Inspector
+  // tab button + panel (and falls back to NN if Inspector was active).
+  emitVisibility(false);
 }
 
 export function refreshInspector(
@@ -273,7 +280,6 @@ export function installCanvasClickHandler(
         }
         state = { kind: "selected", creatureId: id };
         highlights.set(id, HIGHLIGHT_PERMANENT);
-        showEmptyState(false);
         renderInspectorSoA(latestSoA, idx, id);
         set("ins-action", "…");
         lastInspectReplyMs = 0;
@@ -281,6 +287,10 @@ export function installCanvasClickHandler(
         // visible — a creature click on the canvas while the rail is
         // collapsed would otherwise silently switch to a hidden tab.
         setRailOpen(true);
+        // v1.13 Wave 4: emit visibility before switchTab so the rail
+        // orchestrator un-hides the tab button first; switchTab can then
+        // mark it active without flashing a hidden tab.
+        emitVisibility(true);
         rail.switchTab("inspector");
         const mySeq = ++lastInspectIdRequestSeq;
         void simBridge.requestInspectId(id).then((jsonStr) => {
@@ -301,10 +311,11 @@ export function installCanvasClickHandler(
 
     // SoA miss: fall back to authoritative grid-backed lookup.
     state = { kind: "pending" };
-    showEmptyState(false);
     set("ins-action", "selecting…");
     // v1.9.1: same rail-open guarantee on the fallback path.
     setRailOpen(true);
+    // v1.13 Wave 4: same un-hide-then-switch order as the SoA-hit path.
+    emitVisibility(true);
     rail.switchTab("inspector");
     void simBridge.requestInspectAt(wx, wy, toleranceWorld).then((jsonStr) => {
       if (state.kind !== "pending") return;
