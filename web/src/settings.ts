@@ -69,6 +69,12 @@ export interface Settings {
   // v1.9.1: active theme id; valid ids live in web/src/themes.ts. Unknown
   // values fall back to the default theme on apply.
   theme: string;
+  // v1.13 Wave 3: persisted UI layout sizes. `railW` is the right-rail width
+  // in px (clamped [280, 720] by the drag handle); `profilerH` is the
+  // bottom-panel height in px (clamped [160, 60% of innerHeight] at drag
+  // time). Both mirror the CSS vars `--rail-w` / `--profiler-h`.
+  railW: number;
+  profilerH: number;
   // Energy economy
   upkeepMultiplier: number;
   moveCostMultiplier: number;
@@ -109,6 +115,8 @@ export const DEFAULTS: Settings = {
   profilerWindowMs: 10_000,
   railOpen: false,
   theme: "midnight",
+  railW: 420,
+  profilerH: 240,
   upkeepMultiplier: 1.0,
   moveCostMultiplier: 1.0,
   energyMax: 100,

@@ -27,6 +27,12 @@
 
         <div id="canvas-wrap">
           <canvas id="aquarium"></canvas>
+          <!-- v1.13 Wave 3: drag handle for the bottom profiler panel.
+               Lives on the bottom edge of #canvas-wrap (which IS the top
+               edge of #perf-box when the panel is shown). z-indexed above
+               the canvas so pointer events don't reach camera pan/zoom.
+               Hidden when #perf-box is display:none. -->
+          <div id="perf-resize-handle" aria-hidden="true"></div>
         </div>
 
         <!-- Bottom monitor + profiler panel. Width follows the left column;
@@ -39,6 +45,10 @@
 
       <!-- Right rail: Inspector | NN | Settings -->
       <aside id="right-rail">
+        <!-- v1.13 Wave 3: drag handle for the right rail width. Lives on the
+             inner (left) edge of #right-rail. Hidden when the rail is
+             collapsed (.rail-collapsed on #app-shell). -->
+        <div id="rail-resize-handle" aria-hidden="true"></div>
         <nav id="rail-tabs" role="tablist">
           <button data-tab="inspector" class="rail-tab is-hidden">Inspector</button>
           <button data-tab="nn" class="rail-tab is-active">NN</button>
