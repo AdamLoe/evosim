@@ -17,25 +17,17 @@
     <div id="app-shell">
       <!-- Left column: top-bar + canvas + optional profiler bottom panel. -->
       <div id="left-col">
+        <!-- v1.13 Wave 1: top-bar is now an absolute-positioned overlay over
+             the canvas area, hosting five icon buttons (play/pause, restart,
+             auto-restart, settings, perf). The #status span is retained but
+             unused — Wave 2 will remove it along with the status-update path
+             in main.ts. -->
         <div id="top-bar">
-          <span id="status">Booting…</span>
+          <span id="status" hidden>Booting…</span>
         </div>
 
         <div id="canvas-wrap">
           <canvas id="aquarium"></canvas>
-          <!-- Floating profiler toggle — bottom-right of the canvas area.
-               Always rendered; the .is-active class flips when the panel is
-               open so the icon hints at the toggle state (no separate close
-               button on the panel itself). -->
-          <button id="perf-open" type="button" aria-label="Toggle profiler" title="Toggle profiler">
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="none"
-                 stroke="currentColor" stroke-width="1.6"
-                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <rect x="2.5" y="3.5" width="19" height="13" rx="1.5"></rect>
-              <path d="M8 20.5h8M12 16.5v4"></path>
-              <path d="M5.5 13.5l3-3 2.5 2.5 3.5-5 3.5 3.5"></path>
-            </svg>
-          </button>
         </div>
 
         <!-- Profiler bottom panel. Width follows the left column; height

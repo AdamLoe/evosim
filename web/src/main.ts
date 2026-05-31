@@ -6,8 +6,8 @@
 import { makeCamera } from "./render";
 import { renderWorld, resetInterpolation } from "./render-gl";
 import { attachCameraControls } from "./camera";
-import { installRail, pollRail, highlights } from "./rail/index";
-import { installProfilerPanel } from "./widgets/perf-panel";
+import { installRail, pollRail, highlights, type RailState } from "./rail/index";
+import { installProfilerPanel, setProfilerVisible } from "./widgets/perf-panel";
 import {
   installDevPanel,
   getInitialGrassSeedCount,
@@ -68,12 +68,23 @@ resize();
 let paused = false;
 let targetTPS = getSettings().targetTPS;
 
+// v1.13 Wave 1: the top-bar TPS dropdown is gone (Wave 2 puts the new
+// selector in the perf panel). `setTpsChangeListener` stays exported so
+// the devpanel's upkeep-per-second readout keeps wiring its callback;
+// nothing currently invokes the listener until Wave 2 lands a new TPS
+// control. The listener is held in a module-level slot so a future
+// caller (Wave 2 TPS pill row) can fire it without re-plumbing.
 let onTpsChange: ((tps: number) => void) | null = null;
 export function setTpsChangeListener(fn: (tps: number) => void): void {
   onTpsChange = fn;
 }
 export function getTargetTPS(): number {
   return targetTPS;
+}
+// Keep `onTpsChange` reachable to the linter; the no-op call path
+// matters once Wave 2 wires the new selector.
+export function fireTpsChangeListener(tps: number): void {
+  if (onTpsChange) onTpsChange(tps);
 }
 
 let controlSab: SharedArrayBuffer | null = null;
@@ -125,9 +136,6 @@ async function main(): Promise<void> {
 
   status.textContent = `seed: ${cachedSeed}  ·  tick 0  ·  pop 0`;
 
-  installPacingControls(() => simBridge);
-  installRestartButton(() => restart());
-
   const rail = installRail();
 
   installCanvasClickHandler(canvas, cam, () => ({ w: viewW, h: viewH }), simBridge, rail);
@@ -137,7 +145,11 @@ async function main(): Promise<void> {
   // v1.12: NN tab. Topology Apply respawns the worker via restart(); bucket
   // edits are live-applied through getBridge() inside the installer.
   installNnTab(() => simBridge, () => restart());
-  installSettingsButton(rail);
+
+  // v1.13 Wave 1: media-player top-bar buttons (play/pause, restart,
+  // auto-restart, settings, perf). All share the `.iconbtn` CSS class.
+  // Order in DOM matches left-to-right visual order.
+  installTopBarButtons(() => simBridge, () => restart(), rail);
 
   // v1.9.1: apply persisted rail open/closed state on boot. The class drives
   // the grid track collapse + #right-rail display:none (see styles.css).
@@ -338,70 +350,6 @@ async function spawnSimWorker(seed: string): Promise<SimBridge> {
   return bridge;
 }
 
-function installPacingControls(getBridge: () => SimBridge): void {
-  const bar = document.getElementById("top-bar")!;
-
-  // Play/pause toggle.
-  const toggle = document.createElement("button");
-  toggle.id = "playpause-btn";
-  toggle.className = "topbar-btn";
-  toggle.title = "Play / pause (space)";
-  refreshToggleLabel();
-  toggle.onclick = () => {
-    paused = !paused;
-    getBridge().setPaused(paused);
-    refreshToggleLabel();
-  };
-
-  // Target TPS dropdown.
-  const tpsLabel = document.createElement("span");
-  tpsLabel.className = "topbar-label";
-  tpsLabel.textContent = "Target TPS";
-
-  const tpsSelect = document.createElement("select");
-  tpsSelect.id = "target-tps-input";
-  tpsSelect.className = "topbar-select";
-  const tpsOptions = [10, 30, 60, 180, 500, 1000];
-  for (const v of tpsOptions) {
-    const opt = document.createElement("option");
-    opt.value = String(v);
-    opt.textContent = String(v);
-    tpsSelect.appendChild(opt);
-  }
-  const nearest = tpsOptions.reduce((best, v) =>
-    Math.abs(v - targetTPS) < Math.abs(best - targetTPS) ? v : best, tpsOptions[2]);
-  targetTPS = nearest;
-  tpsSelect.value = String(nearest);
-  tpsSelect.addEventListener("change", () => {
-    const v = Number(tpsSelect.value);
-    if (!Number.isFinite(v) || v < 1) return;
-    targetTPS = v;
-    setSetting("targetTPS", targetTPS);
-    getBridge().setTargetTps(targetTPS);
-    if (onTpsChange) onTpsChange(targetTPS);
-  });
-
-  // Spacer pushes pacing controls to the right.
-  const spacer = document.createElement("span");
-  spacer.className = "topbar-spacer";
-
-  bar.append(spacer, toggle, tpsLabel, tpsSelect);
-
-  window.addEventListener("keydown", (e) => {
-    if (e.key !== " " && e.code !== "Space") return;
-    if (e.target instanceof HTMLInputElement) return;
-    if (e.target instanceof HTMLTextAreaElement) return;
-    e.preventDefault();
-    paused = !paused;
-    getBridge().setPaused(paused);
-    refreshToggleLabel();
-  });
-
-  function refreshToggleLabel(): void {
-    toggle.textContent = paused ? "▶ Play" : "⏸ Pause";
-  }
-}
-
 // v1.9.1: rail open/closed helpers. Both the ⚙ button and the `~` hotkey
 // route through `toggleRailOpen`; the canvas click handler calls
 // `applyRailOpen(true)` to force the rail open before switching to Inspector.
@@ -420,29 +368,113 @@ function toggleRailOpen(): void {
   setRailOpen(!getSettings().railOpen);
 }
 
-function installSettingsButton(_rail: { switchTab(name: "settings"): void }): void {
-  const bar = document.getElementById("top-bar");
-  if (!bar) return;
+// v1.13 Wave 1: small inline SVG glyphs for the top-bar icon buttons.
+// Material/Heroicons-style line work, currentColor stroke so the
+// `.iconbtn` hover/active rules tint them. Sized 18×18 inside a 36×36
+// button.
+const SVG_ATTRS =
+  'viewBox="0 0 24 24" width="18" height="18" fill="none" ' +
+  'stroke="currentColor" stroke-width="1.8" stroke-linecap="round" ' +
+  'stroke-linejoin="round" aria-hidden="true"';
+const ICON_PLAY = `<svg ${SVG_ATTRS}><path d="M7 5l12 7-12 7V5z" fill="currentColor" stroke="none"/></svg>`;
+const ICON_PAUSE = `<svg ${SVG_ATTRS}><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>`;
+const ICON_RESTART = `<svg ${SVG_ATTRS}><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg>`;
+const ICON_AUTO_RESTART = `<svg ${SVG_ATTRS}><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/></svg>`;
+const ICON_SETTINGS = `<svg ${SVG_ATTRS}><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`;
+const ICON_PERF = `<svg ${SVG_ATTRS}><rect x="2.5" y="3.5" width="19" height="13" rx="1.5"/><path d="M8 20.5h8M12 16.5v4"/><path d="M5.5 13.5l3-3 2.5 2.5 3.5-5 3.5 3.5"/></svg>`;
+
+function makeIconBtn(id: string, title: string, html: string): HTMLButtonElement {
   const btn = document.createElement("button");
-  btn.id = "settings-btn";
-  btn.className = "topbar-btn";
-  btn.textContent = "⚙";
-  btn.title = "Toggle rail (~ hotkey)";
-  // v1.9.1: ⚙ now toggles the rail open/closed instead of switching to the
-  // Settings tab; users open Settings via the in-rail tab bar.
-  btn.addEventListener("click", () => toggleRailOpen());
-  bar.appendChild(btn);
+  btn.type = "button";
+  btn.id = id;
+  btn.className = "iconbtn";
+  btn.title = title;
+  btn.setAttribute("aria-label", title);
+  btn.innerHTML = html;
+  return btn;
 }
 
-function installRestartButton(onClick: () => void): void {
-  const bar = document.getElementById("top-bar")!;
-  const btn = document.createElement("button");
-  btn.id = "restart-btn";
-  btn.className = "topbar-btn";
-  btn.textContent = "↺ Restart";
-  btn.title = "Restart simulation with new seed (r)";
-  btn.onclick = onClick;
-  bar.appendChild(btn);
+// v1.13 Wave 1: install all five top-bar icon buttons in one pass and
+// register the keyboard shortcuts (space → pause/play). Highlight state
+// for the three "toggleable" buttons (auto-restart, settings, perf) is
+// refreshed by a low-rate interval — cheaper than wiring a subscription
+// into perf-panel / devpanel and good enough for visual sync.
+function installTopBarButtons(
+  getBridge: () => SimBridge,
+  onRestart: () => void,
+  rail: RailState,
+): void {
+  const bar = document.getElementById("top-bar");
+  if (!bar) return;
+
+  // 1. Play / pause — single button, glyph swaps with state.
+  const playBtn = makeIconBtn("playpause-btn", "Play / pause (space)", paused ? ICON_PLAY : ICON_PAUSE);
+  const refreshPlayGlyph = (): void => {
+    playBtn.innerHTML = paused ? ICON_PLAY : ICON_PAUSE;
+    playBtn.classList.toggle("is-active", paused);
+  };
+  playBtn.addEventListener("click", () => {
+    paused = !paused;
+    getBridge().setPaused(paused);
+    refreshPlayGlyph();
+  });
+  window.addEventListener("keydown", (e) => {
+    if (e.key !== " " && e.code !== "Space") return;
+    if (e.target instanceof HTMLInputElement) return;
+    if (e.target instanceof HTMLTextAreaElement) return;
+    e.preventDefault();
+    paused = !paused;
+    getBridge().setPaused(paused);
+    refreshPlayGlyph();
+  });
+
+  // 2. Restart — fires the same restart() the `r` hotkey wires to.
+  const restartBtn = makeIconBtn("restart-btn", "Restart simulation (r)", ICON_RESTART);
+  restartBtn.addEventListener("click", onRestart);
+
+  // 3. Auto-restart — toggles Settings.autoRun. Highlight follows the
+  //    persisted value (which the devpanel can also flip).
+  const autoBtn = makeIconBtn("auto-restart-btn", "Auto-restart on world end", ICON_AUTO_RESTART);
+  autoBtn.addEventListener("click", () => {
+    const next = !getSettings().autoRun;
+    setSetting("autoRun", next);
+    autoBtn.classList.toggle("is-active", next);
+  });
+
+  // 4. Settings — toggles the rail open/closed (same as `~` hotkey).
+  //    Highlighted only when the rail is open AND showing the settings
+  //    tab — otherwise the rail is acting as Inspector or NN.
+  const settingsBtn = makeIconBtn("settings-btn", "Toggle settings rail (~)", ICON_SETTINGS);
+  settingsBtn.addEventListener("click", () => toggleRailOpen());
+
+  // 5. Perf — flips Settings.showProfiler and re-applies via the
+  //    perf-panel's single source-of-truth setter.
+  const perfBtn = makeIconBtn("perf-btn", "Toggle profiler panel", ICON_PERF);
+  perfBtn.addEventListener("click", () => {
+    const next = !getSettings().showProfiler;
+    setSetting("showProfiler", next);
+    setProfilerVisible(next);
+    perfBtn.classList.toggle("is-active", next);
+  });
+
+  bar.append(playBtn, restartBtn, autoBtn, settingsBtn, perfBtn);
+
+  // Initial highlight pass + low-rate sync. Polling at 4 Hz keeps the
+  // three reactive buttons in step with state changes coming from
+  // elsewhere (devpanel autoRun row, rail tab click, etc.) without
+  // forcing us to plumb subscriptions through the perf-panel / devpanel
+  // / rail modules.
+  const refreshHighlights = (): void => {
+    autoBtn.classList.toggle("is-active", getSettings().autoRun);
+    settingsBtn.classList.toggle(
+      "is-active",
+      getSettings().railOpen && rail.activeTab === "settings",
+    );
+    perfBtn.classList.toggle("is-active", getSettings().showProfiler);
+  };
+  refreshPlayGlyph();
+  refreshHighlights();
+  window.setInterval(refreshHighlights, 250);
 }
 
 main().catch((err) => {

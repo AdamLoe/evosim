@@ -40,7 +40,10 @@
 
   --rail-w: 420px;
   --tab-h: 36px;
-  --topbar-h: 36px;
+  /* v1.13 Wave 1: top-bar is now an absolute overlay over the canvas (see
+     `#top-bar` rule below). Its grid track collapses to 0 so the canvas
+     extends behind it. */
+  --topbar-h: 0px;
   --profiler-h: 240px;
 }
 
@@ -89,27 +92,35 @@ button {
 }
 
 #left-col {
+  position: relative;
   display: grid;
   grid-template-rows: var(--topbar-h) 1fr auto;
   min-width: 0;
   min-height: 0;
 }
 
+/* v1.13 Wave 1: top-bar is an absolute-positioned overlay anchored to the
+   top of #canvas-wrap. The grid track for the top-bar row is 0 (see
+   --topbar-h) so the canvas fills the full left-column height; the bar
+   itself floats over the canvas. Background is semi-transparent so the
+   sim remains visible underneath. */
 #top-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 5;
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 0 12px;
-  background: var(--bg-panel);
-  border-bottom: 1px solid var(--border);
+  gap: 8px;
+  padding: 8px 12px;
+  background: rgba(0, 0, 0, 0.25);
   font-size: 13px;
+  pointer-events: none;
 }
-#top-bar > * { flex-shrink: 0; }
-#status {
-  font-variant-numeric: tabular-nums;
-  color: var(--fg-muted);
-  font-family: ui-monospace, monospace;
-  font-size: 12px;
+#top-bar > * {
+  flex-shrink: 0;
+  pointer-events: auto;
 }
 
 #canvas-wrap {
@@ -124,10 +135,14 @@ button {
   display: block;
   touch-action: none;
 }
-#perf-open {
-  position: absolute;
-  bottom: 12px;
-  right: 12px;
+
+/* Shared icon-button class for top-bar controls (play/pause, restart,
+   auto-restart, settings, perf). Styled after the v1.12 floating
+   #perf-open button — square, subtle background, accent border on hover.
+   The .is-active modifier lights up the icon + border when the button's
+   underlying state is on (paused, autoRun=true, rail-open + settings tab,
+   showProfiler=true). */
+.iconbtn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -140,20 +155,20 @@ button {
   color: var(--fg-muted);
   cursor: pointer;
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
-  transition: color 0.12s ease, border-color 0.12s ease, transform 0.06s ease;
+  transition: color 0.12s ease, border-color 0.12s ease,
+              background-color 0.12s ease, transform 0.06s ease;
 }
-#perf-open:hover {
+.iconbtn:hover {
   color: var(--accent);
   border-color: var(--accent);
 }
-#perf-open:active {
+.iconbtn:active {
   transform: scale(0.96);
 }
-/* When the panel is open, the toggle stays in place but reads as "lit". */
-#perf-open.is-active {
+.iconbtn.is-active {
   color: var(--accent);
   border-color: var(--accent);
-  background: var(--bg-panel);
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-panel-alt));
 }
 
 /* ── Profiler bottom panel ────────────────────────────────────────────────── */
@@ -565,31 +580,10 @@ button {
   color: var(--danger);
 }
 
-/* ── Top-bar buttons (restart, play/pause, target TPS) ────────────────────── */
-
-.topbar-btn {
-  background: var(--bg-panel-alt);
-  color: var(--fg);
-  border: 1px solid var(--border-strong);
-  padding: 4px 10px;
-  border-radius: 3px;
-  cursor: pointer;
-  font-size: 12px;
-}
-.topbar-btn:hover { border-color: var(--fg-muted); }
-.topbar-label {
-  color: var(--fg-muted);
-  font-size: 12px;
-}
-.topbar-select {
-  background: var(--bg-panel-alt);
-  color: var(--fg);
-  border: 1px solid var(--border-strong);
-  padding: 3px 6px;
-  border-radius: 3px;
-  font-size: 12px;
-}
-.topbar-spacer { flex: 1; }
+/* v1.13 Wave 1 removed the old .topbar-* text-button + dropdown classes —
+   icons live on the shared `.iconbtn` class above. Keep the option
+   background rule so other <select>s (devpanel theme picker, perf-window
+   select) still get a dark dropdown menu. */
 select option {
   background: var(--bg-panel);
   color: var(--fg);
