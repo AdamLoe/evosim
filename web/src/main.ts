@@ -95,6 +95,11 @@ async function main(): Promise<void> {
   // :root fallback (charcoal).
   applyTheme(getSettings().theme);
 
+  // v1.13 Wave 3: apply persisted layout sizes to their CSS vars before any
+  // UI installer runs so the grid uses the user's chosen widths from the
+  // first paint (no flash of the 420 / 240 defaults).
+  applyLayoutSizes();
+
   const sabAvail = typeof SharedArrayBuffer !== "undefined";
   const isolated =
     (globalThis as unknown as { crossOriginIsolated?: boolean }).crossOriginIsolated ?? false;
@@ -142,6 +147,11 @@ async function main(): Promise<void> {
   // v1.9.1: apply persisted rail open/closed state on boot. The class drives
   // the grid track collapse + #right-rail display:none (see styles.css).
   applyRailOpen(getSettings().railOpen);
+
+  // v1.13 Wave 3: drag-to-resize handles for the right rail width and the
+  // bottom profiler panel height. Installed after applyRailOpen so the
+  // initial visibility state is correct.
+  installResizeHandles();
 
   async function restart(): Promise<void> {
     const oldBridge = simBridge;
@@ -443,6 +453,96 @@ function installRestartButton(onClick: () => void): void {
   btn.title = "Restart simulation with new seed (r)";
   btn.onclick = onClick;
   bar.appendChild(btn);
+}
+
+// v1.13 Wave 3: layout-size CSS-var helpers. The two persisted Settings
+// keys (railW, profilerH) mirror the CSS vars --rail-w and --profiler-h.
+// applyLayoutSizes() runs at boot before any UI installer so the first
+// paint uses the persisted widths; installResizeHandles() wires the drag
+// strips that live-update the vars and persist on pointer-up.
+const RAIL_W_MIN = 280;
+const RAIL_W_MAX = 720;
+const PROFILER_H_MIN = 160;
+const PROFILER_H_MAX_FRAC = 0.6;
+
+function applyLayoutSizes(): void {
+  const s = getSettings();
+  const railW = clamp(s.railW, RAIL_W_MIN, RAIL_W_MAX);
+  const profilerH = clamp(s.profilerH, PROFILER_H_MIN, profilerHMax());
+  document.documentElement.style.setProperty("--rail-w", `${railW}px`);
+  document.documentElement.style.setProperty("--profiler-h", `${profilerH}px`);
+}
+
+function clamp(v: number, lo: number, hi: number): number {
+  if (!isFinite(v)) return lo;
+  return Math.min(hi, Math.max(lo, v));
+}
+
+function profilerHMax(): number {
+  return Math.max(PROFILER_H_MIN, Math.floor(window.innerHeight * PROFILER_H_MAX_FRAC));
+}
+
+function installResizeHandles(): void {
+  const railHandle = document.getElementById("rail-resize-handle");
+  const perfHandle = document.getElementById("perf-resize-handle");
+  const rail = document.getElementById("right-rail");
+
+  // Right-rail width handle. Drag-left increases width (rail grows toward
+  // the canvas). The rail's right edge is glued to the viewport; the live
+  // width is `viewport_right - pointer_x`. Persist on pointer-up only.
+  if (railHandle && rail) {
+    let dragging = false;
+    railHandle.addEventListener("pointerdown", (e) => {
+      dragging = true;
+      railHandle.classList.add("is-dragging");
+      railHandle.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    });
+    railHandle.addEventListener("pointermove", (e) => {
+      if (!dragging) return;
+      const w = clamp(window.innerWidth - e.clientX, RAIL_W_MIN, RAIL_W_MAX);
+      document.documentElement.style.setProperty("--rail-w", `${w}px`);
+    });
+    const finish = (e: PointerEvent): void => {
+      if (!dragging) return;
+      dragging = false;
+      railHandle.classList.remove("is-dragging");
+      try { railHandle.releasePointerCapture(e.pointerId); } catch { /* already released */ }
+      const w = clamp(window.innerWidth - e.clientX, RAIL_W_MIN, RAIL_W_MAX);
+      setSetting("railW", w);
+    };
+    railHandle.addEventListener("pointerup", finish);
+    railHandle.addEventListener("pointercancel", finish);
+  }
+
+  // Bottom-panel height handle. Drag-up grows the profiler (the panel's
+  // bottom is glued to the viewport bottom; the live height is
+  // `viewport_bottom - pointer_y`). Max clamps to 60% of innerHeight so a
+  // mid-drag window resize can't trap the panel covering the canvas.
+  if (perfHandle) {
+    let dragging = false;
+    perfHandle.addEventListener("pointerdown", (e) => {
+      dragging = true;
+      perfHandle.classList.add("is-dragging");
+      perfHandle.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    });
+    perfHandle.addEventListener("pointermove", (e) => {
+      if (!dragging) return;
+      const h = clamp(window.innerHeight - e.clientY, PROFILER_H_MIN, profilerHMax());
+      document.documentElement.style.setProperty("--profiler-h", `${h}px`);
+    });
+    const finish = (e: PointerEvent): void => {
+      if (!dragging) return;
+      dragging = false;
+      perfHandle.classList.remove("is-dragging");
+      try { perfHandle.releasePointerCapture(e.pointerId); } catch { /* already released */ }
+      const h = clamp(window.innerHeight - e.clientY, PROFILER_H_MIN, profilerHMax());
+      setSetting("profilerH", h);
+    };
+    perfHandle.addEventListener("pointerup", finish);
+    perfHandle.addEventListener("pointercancel", finish);
+  }
 }
 
 main().catch((err) => {

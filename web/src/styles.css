@@ -278,11 +278,62 @@ button {
 /* ── Right rail ───────────────────────────────────────────────────────────── */
 
 #right-rail {
+  position: relative;
   display: flex;
   flex-direction: column;
   min-height: 0;
   background: var(--bg-panel);
   border-left: 1px solid var(--border);
+}
+
+/* v1.13 Wave 3: drag handles for resizing the right rail width and the
+   bottom profiler panel height. Both use Pointer Events + pointer capture
+   (see installResizeHandles in main.ts). The handles are 6 px strips that
+   sit ABOVE neighbouring content (canvas, perf-box, rail tabs) so pointer
+   events on the strip never reach the underlying interactive surface. */
+#rail-resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -3px;
+  width: 6px;
+  cursor: ew-resize;
+  z-index: 5;
+  background: transparent;
+  transition: background 0.12s ease;
+  touch-action: none;
+}
+#rail-resize-handle:hover,
+#rail-resize-handle.is-dragging {
+  background: var(--accent);
+  opacity: 0.6;
+}
+#app-shell.rail-collapsed #rail-resize-handle { display: none; }
+
+#perf-resize-handle {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -3px;
+  height: 6px;
+  cursor: ns-resize;
+  z-index: 5;
+  background: transparent;
+  transition: background 0.12s ease;
+  touch-action: none;
+}
+#perf-resize-handle:hover,
+#perf-resize-handle.is-dragging {
+  background: var(--accent);
+  opacity: 0.6;
+}
+#perf-resize-handle.is-hidden { display: none; }
+/* Hide the perf-resize handle when the profiler panel is itself hidden.
+   #perf-box uses inline `display: none` (set by widgets/perf-panel.ts →
+   setProfilerVisible) so the :has() selector tracks it without extra JS. */
+#left-col:has(#perf-box[style*="display:none"]) #perf-resize-handle,
+#left-col:has(#perf-box[style*="display: none"]) #perf-resize-handle {
+  display: none;
 }
 #rail-tabs {
   display: flex;
