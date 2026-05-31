@@ -43,25 +43,41 @@
         <div id="perf-box" class="perf-widget" style="display:none"></div>
       </div>
 
-      <!-- Right rail: Inspector | NN | Settings -->
+      <!-- Right rail: Settings | NN | Inspector -->
       <aside id="right-rail">
         <!-- v1.13 Wave 3: drag handle for the right rail width. Lives on the
              inner (left) edge of #right-rail. Hidden when the rail is
              collapsed (.rail-collapsed on #app-shell). -->
         <div id="rail-resize-handle" aria-hidden="true"></div>
         <nav id="rail-tabs" role="tablist">
-          <button data-tab="inspector" class="rail-tab is-hidden">Inspector</button>
-          <button data-tab="nn" class="rail-tab is-active">NN</button>
-          <button data-tab="settings" class="rail-tab">Settings</button>
+          <button data-tab="settings" class="rail-tab is-active">Settings</button>
+          <button data-tab="nn" class="rail-tab">NN</button>
+          <button data-tab="inspector" class="rail-tab">Inspector</button>
         </nav>
 
-        <!-- Inspector tab: only present in the tab strip when a creature is
-             selected (the tab button + this section get .is-hidden when
-             nothing is selected). The existing #ins-* dl rows live inside
-             this panel so the inspector module's getElementById calls keep
-             working. -->
+        <!-- Settings tab: dev panel content + Apply / Cancel / Reset footer. -->
+        <section id="rail-settings" class="rail-panel is-active">
+          <div id="devpanel-box"></div>
+          <div id="settings-footer">
+            <button id="settings-apply" type="button" disabled>Apply</button>
+            <button id="settings-cancel" type="button" disabled>Cancel</button>
+            <button id="settings-reset" type="button">Reset</button>
+          </div>
+        </section>
+
+        <!-- v1.12 NN tab: left = stage-then-apply topology editor (Apply
+             respawns the worker), right = live-apply 8-bucket mutation
+             policy editor, bottom = per-layer perf log. -->
+        <section id="rail-nn" class="rail-panel">
+          <div id="nn-tab-host"></div>
+        </section>
+
+        <!-- Inspector tab: empty-state hint by default; populated when the
+             user clicks a creature on the canvas (only registers while the
+             Inspector tab is the active one, see rail/inspector.ts). -->
         <section id="rail-inspector" class="rail-panel">
-          <div id="inspector-body">
+          <div id="inspector-empty" class="rail-empty">Waiting for creature to be clicked.</div>
+          <div id="inspector-body" style="display:none">
             <dl>
               <dt>ID</dt><dd id="ins-id"></dd>
               <dt>Pos</dt><dd id="ins-pos"></dd>
@@ -79,23 +95,6 @@
             </dl>
           </div>
         </section>
-
-        <!-- v1.12 NN tab: left = stage-then-apply topology editor (Apply
-             respawns the worker), right = live-apply 8-bucket mutation
-             policy editor, bottom = per-layer perf log. -->
-        <section id="rail-nn" class="rail-panel is-active">
-          <div id="nn-tab-host"></div>
-        </section>
-
-        <!-- Settings tab: dev panel content + Apply / Cancel / Reset footer. -->
-        <section id="rail-settings" class="rail-panel">
-          <div id="devpanel-box"></div>
-          <div id="settings-footer">
-            <button id="settings-apply" type="button" disabled>Apply</button>
-            <button id="settings-cancel" type="button" disabled>Cancel</button>
-            <button id="settings-reset" type="button">Reset</button>
-          </div>
-        </section>
       </aside>
     </div>
 
@@ -108,7 +107,7 @@
     <div id="world-end-overlay" hidden>
       <div class="world-end-card">
         <h2>World ended</h2>
-        <p>The last creature has died. Grass is still spreading underneath.</p>
+        <p>The last creature has died.</p>
         <div class="world-end-actions">
           <button id="world-end-restart" type="button">Restart world</button>
           <button id="world-end-dismiss" type="button">Keep watching</button>

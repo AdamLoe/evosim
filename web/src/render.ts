@@ -10,8 +10,9 @@ export interface Camera {
 export const PX_PER_SIZE = 2.5; // v6 §B: render radius = size × 2.5 px at base zoom
 
 export function makeCamera(worldSize: number): Camera {
-  // v6 §C: initial zoom 4× (creature radius ≈ 10 px on screen).
-  return { zoom: 4, cx: worldSize / 2, cy: worldSize / 2 };
+  // Initial zoom ≈ 1.33× (legacy was 4×). Picked so a fresh world shows
+  // most of the canvas without dropping below the clamp floor (0.25).
+  return { zoom: 4 / 3, cx: worldSize / 2, cy: worldSize / 2 };
 }
 
 export function clampCamera(cam: Camera, worldSize: number, viewW: number, viewH: number): void {

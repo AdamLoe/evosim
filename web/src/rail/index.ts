@@ -2,11 +2,7 @@
 // Called from main.ts each RAF via `pollRail`.
 
 import type { SnapshotHeader, SimBridge } from "../sim-bridge";
-import {
-  refreshInspector,
-  subscribeInspectorVisibility,
-  updateLatestSoA,
-} from "./inspector";
+import { refreshInspector, updateLatestSoA } from "./inspector";
 import { pruneHighlights, highlights } from "./highlight";
 
 export type RailTab = "inspector" | "nn" | "settings";
@@ -17,10 +13,9 @@ export interface RailState {
 }
 
 function installTabs(): RailState {
-  // v1.13: default to "nn" — Inspector starts hidden (Wave 4) so its panel
-  // shouldn't be the boot-active tab, and Wave 0 collapsed the rail by
-  // default anyway.
-  let activeTab: RailTab = "nn";
+  // Default to Settings. Rail starts collapsed (Wave 0) so this is just the
+  // tab that's visible when the user first opens the rail via the ⚙ icon.
+  let activeTab: RailTab = "settings";
 
   function switchTab(name: RailTab): void {
     activeTab = name;
@@ -46,29 +41,8 @@ function installTabs(): RailState {
   };
 }
 
-// v1.13 Wave 4: the Inspector tab + panel are only present in the strip
-// while a creature is selected. The inspector module is the source of truth
-// for selection state; it pushes show/hide events here via the visibility
-// subscription set up in installRail().
-function setInspectorTabVisible(rail: RailState, visible: boolean): void {
-  const tabBtn = document.querySelector<HTMLButtonElement>(
-    '.rail-tab[data-tab="inspector"]',
-  );
-  if (tabBtn) tabBtn.classList.toggle("is-hidden", !visible);
-  // Panel visibility is implied: the inactive .rail-panel rule is
-  // display:none, and we always switch away from "inspector" below when
-  // hiding, so the panel stops painting without an explicit class.
-  if (!visible && rail.activeTab === "inspector") {
-    rail.switchTab("nn");
-  }
-}
-
 export function installRail(): RailState {
-  const rail = installTabs();
-  subscribeInspectorVisibility((selected) =>
-    setInspectorTabVisible(rail, selected),
-  );
-  return rail;
+  return installTabs();
 }
 
 export function pollRail(

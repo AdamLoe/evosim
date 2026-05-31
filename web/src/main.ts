@@ -515,8 +515,21 @@ function installTopBarButtons(
   // 4. Settings — toggles the rail open/closed (same as `~` hotkey).
   //    Highlighted only when the rail is open AND showing the settings
   //    tab — otherwise the rail is acting as Inspector or NN.
+  // Clicking ⚙ opens the rail to the Settings tab; clicking again (when
+  // already showing Settings) closes the rail. Keeps the icon's
+  // "highlighted = panel is open on Settings" semantic simple, matching
+  // the other reactive icons.
   const settingsBtn = makeIconBtn("settings-btn", "Toggle settings rail (~)", ICON_SETTINGS);
-  settingsBtn.addEventListener("click", () => toggleRailOpen());
+  settingsBtn.addEventListener("click", () => {
+    const open = getSettings().railOpen;
+    const onSettings = rail.activeTab === "settings";
+    if (open && onSettings) {
+      setRailOpen(false);
+    } else {
+      setRailOpen(true);
+      rail.switchTab("settings");
+    }
+  });
 
   // 5. Perf — flips Settings.showProfiler and re-applies via the
   //    perf-panel's single source-of-truth setter.

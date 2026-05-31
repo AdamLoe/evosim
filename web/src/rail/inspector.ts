@@ -12,6 +12,7 @@ import {
 import type { Camera } from "../render";
 import { screenToWorld } from "../render";
 import { setRailOpen } from "../main";
+import { getSettings } from "../settings";
 import { highlights, HIGHLIGHT_PERMANENT } from "./highlight";
 import type { RailState } from "./index";
 
@@ -90,18 +91,15 @@ function set(id: string, text: string): void {
   if (el) el.textContent = text;
 }
 
-// v1.13 Wave 4: the rail orchestrator subscribes to selection-state changes
-// so it can show/hide the Inspector tab button + panel. Fires synchronously
-// from openInspector / clearSelection — never per-RAF.
-type VisibilityListener = (selected: boolean) => void;
-const visibilityListeners = new Set<VisibilityListener>();
-
-export function subscribeInspectorVisibility(cb: VisibilityListener): void {
-  visibilityListeners.add(cb);
-}
-
+// v1.13: the Inspector tab is always visible in the rail strip. The panel
+// body (#inspector-body) and the empty hint (#inspector-empty) swap based
+// on whether a creature is currently selected. `emitVisibility(true)`
+// shows the body; `emitVisibility(false)` shows the "waiting" hint.
 function emitVisibility(selected: boolean): void {
-  for (const cb of visibilityListeners) cb(selected);
+  const empty = document.getElementById("inspector-empty");
+  const body = document.getElementById("inspector-body");
+  if (empty) empty.style.display = selected ? "none" : "";
+  if (body) body.style.display = selected ? "" : "none";
 }
 
 function renderInspectorSoA(soa: SoASnapshot, idx: number, id: number): void {
@@ -263,6 +261,13 @@ export function installCanvasClickHandler(
     const elapsed = performance.now() - downTime;
     const dist = Math.sqrt(dx * dx + dy * dy);
     if (dist >= 10 || elapsed >= 500) return;
+
+    // Creature inspection is opt-in: ignore canvas clicks unless the
+    // Inspector tab is the active, visible tab. Avoids accidental
+    // highlights / sim-side inspect requests when the user just wanted
+    // to look around.
+    if (rail.activeTab !== "inspector") return;
+    if (!getSettings().railOpen) return;
 
     const { w, h } = getView();
     const rect = canvas.getBoundingClientRect();

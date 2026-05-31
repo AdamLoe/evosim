@@ -94,7 +94,10 @@ button {
 #left-col {
   position: relative;
   display: grid;
-  grid-template-rows: var(--topbar-h) 1fr auto;
+  /* v1.13 Wave 1 made #top-bar position:absolute (it overlays the canvas),
+     so it doesn't take a grid row anymore. Only #canvas-wrap and #perf-box
+     participate in the grid flow. */
+  grid-template-rows: 1fr auto;
   min-width: 0;
   min-height: 0;
 }
@@ -177,8 +180,11 @@ button {
   container-type: inline-size;
   container-name: perfbox;
   position: relative;
-  min-height: 0;
-  max-height: var(--profiler-h);
+  /* v1.13 fix: must be `height` (not `max-height`) so the parent grid's
+     `auto` track for this row sizes to the box and leaves the rest for
+     #canvas-wrap. With `max-height` the grid track used the box's
+     max-content (~1000px) and squeezed the canvas to 0. */
+  height: var(--profiler-h);
   overflow: auto;
   background: var(--bg-panel);
   border-top: 1px solid var(--border);
@@ -343,9 +349,15 @@ button {
     align-items: stretch;
     grid-column: 3 / span 1;
   }
+  /* CPU + Profile sections are full width on every breakpoint (graphs row
+     and selector row already eat their natural horizontal space; the tables
+     and trees in these sections want wide columns to stay readable). */
   .perf-cpu-section,
-  .perf-profile-section { display: inline-block; vertical-align: top; width: calc(50% - 6px); }
-  .perf-cpu-section { margin-right: 8px; }
+  .perf-profile-section {
+    display: block;
+    width: 100%;
+    margin-right: 0;
+  }
 }
 
 .jank-reset-btn {
@@ -630,6 +642,23 @@ button {
   margin-left: -8px;
   border-left: 3px solid transparent;
   transition: border-color 0.12s ease;
+}
+/* When the rail is dragged narrow there's no room for the slider track —
+   collapse to label + number input. The slider column (the 1fr middle)
+   gets display:none; the grid drops to 3 cols. The readout column also
+   goes since the typed number is the live readout. */
+#right-rail {
+  container-type: inline-size;
+  container-name: rightrail;
+}
+@container rightrail (max-width: 360px) {
+  .devpanel-row:not(.devpanel-row-wide) {
+    grid-template-columns: 1fr 60px;
+  }
+  .devpanel-row:not(.devpanel-row-wide) > input[type=range],
+  .devpanel-row:not(.devpanel-row-wide) > .devpanel-readout {
+    display: none;
+  }
 }
 .devpanel-row.is-dirty {
   border-left-color: var(--accent-dirty);

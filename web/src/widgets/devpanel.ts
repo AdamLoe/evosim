@@ -469,15 +469,8 @@ export function installDevPanel(getBridge: () => SimBridge): void {
   const box = document.getElementById("devpanel-box") as HTMLDivElement | null;
   if (!box) return;
 
-  // ── Run (live) ──
-  const runSec = section("Run");
-  runSec.appendChild(makeLiveToggle(
-    { label: "Auto run on world end", simName: null, settingKey: "autoRun" },
-    () => { /* read on demand */ },
-  ));
-  box.appendChild(runSec);
-
   // ── Display (live) ──
+  // (autoRun moved to top bar's auto-restart icon button in v1.13 Wave 1.)
   // Profiler visibility lives on the floating monitor-icon button at the
   // bottom-right of the canvas, not in Settings. See widgets/perf-panel.ts.
   const displaySec = section("Display");

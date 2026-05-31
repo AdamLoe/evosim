@@ -40,7 +40,8 @@ export function attachCameraControls(
       e.preventDefault();
       const { w, h } = getView();
       const [wx, wy] = screenToWorld(cam, w, h, e.clientX, e.clientY);
-      const factor = e.deltaY < 0 ? 1.2 : 1 / 1.2;
+      // 1.2^(1/3) ≈ 1.063 — three scroll ticks equal one old tick.
+      const factor = e.deltaY < 0 ? 1.063 : 1 / 1.063;
       cam.zoom *= factor;
       clampCamera(cam, getWorldSize(), w, h);
       // Keep the world point under the cursor stable across the zoom.
