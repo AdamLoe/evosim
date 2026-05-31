@@ -1,0 +1,67 @@
+name: deploy-pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build wasm + web
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: install nightly + rust-src (required for wasm atomics / build-std)
+        run: |
+          rustup toolchain install nightly --component rust-src
+          rustup target add wasm32-unknown-unknown --toolchain nightly
+      - name: wasm-pack build (release, threads)
+        run: rustup run nightly wasm-pack build --target web --out-dir web/wasm --release --features threads
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - name: pnpm install
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+      - name: vite build
+        working-directory: web
+        # VITE_BASE matches the repo name so assets resolve under
+        # https://<user>.github.io/evosim/. Update both this and the README
+        # link if the repo is ever renamed.
+        env:
+          VITE_BASE: /evosim/
+        run: pnpm build
+      - name: add .nojekyll
+        run: touch web/dist/.nojekyll
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/dist
+
+  deploy:
+    name: deploy to github pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

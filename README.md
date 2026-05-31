@@ -5,6 +5,9 @@ brains live in a walled world, graze a regrowing grass field, occasionally eat
 each other, and split when they have enough energy. Every page load starts a
 fresh world — there's no save, no scenario, no goal.
 
+**[Try it live →](https://adamloe.github.io/evosim/)** (runs entirely in your
+browser — Chrome / Edge / Firefox / Safari, desktop)
+
 ![A populated world, ticking](screenshots/demo2.gif)
 
 ## What you're looking at

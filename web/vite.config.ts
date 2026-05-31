@@ -1,5 +1,7 @@
 import { defineConfig } from "vite";
 
+declare const process: { env: Record<string, string | undefined> };
+
 // COOP/COEP headers so SharedArrayBuffer is available (required for
 // wasm-bindgen-rayon if/when threads feature is enabled). Cloudflare Pages
 // gets the same headers via /web/public/_headers.
@@ -8,8 +10,14 @@ const crossOriginIsolationHeaders = {
   "Cross-Origin-Embedder-Policy": "require-corp",
 };
 
+// Base path for built asset URLs. Defaults to "/" for local dev/preview,
+// Cloudflare Pages, Netlify, etc. The GitHub Pages workflow sets
+// VITE_BASE=/evosim/ so assets resolve under https://<user>.github.io/evosim/.
+const base = process.env.VITE_BASE ?? "/";
+
 export default defineConfig({
   root: ".",
+  base,
   server: {
     host: true,
     port: 47821,

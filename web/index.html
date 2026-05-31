@@ -5,6 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="color-scheme" content="dark" />
     <title>evosim</title>
+    <!-- COI service-worker shim: enables SharedArrayBuffer on hosts that
+         can't set COOP/COEP response headers (e.g. GitHub Pages). On hosts
+         that already serve the right headers (Vite dev, Cloudflare Pages
+         via _headers) the shim is a no-op. Must run before any module
+         script that touches SAB. -->
+    <script src="/coi-serviceworker.min.js"></script>
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body>
