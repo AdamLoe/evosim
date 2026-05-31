@@ -2,11 +2,10 @@
 // Called from main.ts each RAF via `pollRail`.
 
 import type { SnapshotHeader, SimBridge } from "../sim-bridge";
-import { maybeSampleStats } from "./stats";
 import { refreshInspector, updateLatestSoA } from "./inspector";
 import { pruneHighlights, highlights } from "./highlight";
 
-export type RailTab = "inspector" | "monitor" | "nn" | "settings";
+export type RailTab = "inspector" | "nn" | "settings";
 
 export interface RailState {
   switchTab(name: RailTab): void;
@@ -46,12 +45,14 @@ export function installRail(): RailState {
 
 export function pollRail(
   rail: RailState,
-  snapshot: SnapshotHeader,
+  _snapshot: SnapshotHeader,
   simBridge: SimBridge,
   creatures: Float32Array,
   pop: number,
 ): void {
-  maybeSampleStats(snapshot);
+  // v1.13 Wave 2: population sampling moved to widgets/perf-panel.ts
+  // (see `setPanelStatus`). The rail just keeps the inspector + highlight
+  // bookkeeping current here.
   updateLatestSoA(creatures, pop);
   refreshInspector(simBridge, rail);
   pruneHighlights(performance.now());

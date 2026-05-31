@@ -14,6 +14,12 @@ import { getSettings } from "./settings";
 import { span } from "./perf";
 import { CREATURE_STRIDE, MAX_POP_FOR_SIM } from "./sim-bridge";
 
+// v1.13 Wave 2: position interpolation between snapshots was removed. The
+// main RAF callback now seq-gates paints (FPS ≤ TPS) so painting the same
+// snapshot twice — a precondition for lerping — is forbidden. The trail
+// pass still draws between the previous and current id-keyed positions,
+// but those are now updated once per painted frame from the SoA directly.
+
 // v1.6 Wave C: the renderer reads typed-array views over the live SAB slot
 // directly (no postMessage payload, no copy). `creatures` is a Float32Array
 // view over the stride-8 SoA in the snapshot slot; `grass` is a Uint8Array
@@ -601,29 +607,16 @@ function initRenderer(gl: WebGL2RenderingContext): GLState {
   };
 }
 
-// ─── Interpolation state (v1.9.2 Wave 3) ─────────────────────────────────
-// Two id-keyed Maps hold the previous and current snapshot positions; a
-// seq counter on the control SAB drives the flip detection in renderWorld.
-// We reuse Map instances across flips (clear, don't recreate) so 30 k-entry
-// rebuilds don't churn the heap.
+// ─── Per-paint trail state (v1.13 Wave 2) ────────────────────────────────
+// Two id-keyed Maps hold the previous and current snapshot positions. The
+// trail pass draws a fading segment from prev to curr; on every painted
+// frame we swap the maps and refill `currById` from the SoA. The renderer
+// no longer interpolates body positions between snapshots — that required
+// painting duplicates, which the main-thread seq-gate now forbids.
 
 interface XY { x: number; y: number; }
 let prevById: Map<number, XY> = new Map();
 let currById: Map<number, XY> = new Map();
-let flipTimeMs = 0;
-let lastSeenSeq = -1;
-
-/**
- * Reset the interpolation state. Called by `main.ts → restart()` so the
- * first post-restart snapshot doesn't draw a long interpolation lerp from
- * positions in the dead worker.
- */
-export function resetInterpolation(): void {
-  prevById.clear();
-  currById.clear();
-  flipTimeMs = performance.now();
-  lastSeenSeq = -1;
-}
 
 // Reusable 8-float buffer for the world-bounds frame line endpoints.
 const FRAME_VERTS = new Float32Array(8);
@@ -704,9 +697,6 @@ export function renderWorld(
   world_size: number,
   grass_dim: number,
   highlightMap: Map<number, number>,
-  nowMs: number,
-  seq: number,
-  targetTPS: number,
 ): void {
   // v1.6 Wave C: stride is fixed at 8 post-SAB cutover; mismatch indicates
   // Rust/TS const drift on `sim-bridge.ts`'s `CREATURE_STRIDE`.
@@ -726,7 +716,7 @@ export function renderWorld(
   try {
     renderWorldImpl(
       gl, cam, viewW, viewH, creatures, grass, pop, world_size, grass_dim,
-      highlightMap, nowMs, seq, targetTPS,
+      highlightMap,
     );
   } finally {
     renderWorldSpan.close();
@@ -744,9 +734,6 @@ function renderWorldImpl(
   world_size: number,
   grass_dim: number,
   highlightMap: Map<number, number>,
-  nowMs: number,
-  seq: number,
-  targetTPS: number,
 ): void {
   const stride = CREATURE_STRIDE;
   if (!state) state = initRenderer(gl);
@@ -784,7 +771,7 @@ function renderWorldImpl(
       gl.uniform1f(s.grassU.zoom, cam.zoom);
       gl.uniform1f(s.grassU.worldSize, world_size);
       gl.uniform1f(s.grassU.opacity, getSettings().grassOpacity);
-      gl.uniform1f(s.grassU.time, nowMs / 1000);
+      gl.uniform1f(s.grassU.time, performance.now() / 1000);
       const tint = readGrassTint();
       gl.uniform3f(s.grassU.tint, tint[0], tint[1], tint[2]);
       gl.bindVertexArray(s.grassVao);
@@ -836,18 +823,17 @@ function renderWorldImpl(
     }
     const scratch = s.instanceScratch;
 
-    // ─── Interpolation flip detection + alpha (Wave 3) ───
-    // The renderer reads the same seq counter the sim worker bumps on
-    // every snapshot publish; on a change we swap the prev/curr id-maps
-    // (no deep copy — pointer swap), then repopulate curr from the
-    // current SoA. lastSeenSeq < 0 is the boot path: seed curr with the
-    // first snapshot positions and skip interpolation until a real flip.
+    // v1.13 Wave 2: the main RAF callback seq-gates paints, so each call
+    // here corresponds to a new snapshot. Rotate the id-keyed position
+    // maps (pointer swap, no allocation) so `prevById` holds the
+    // previous-paint positions for the trail pass; bodies render at the
+    // raw SoA position (no interpolation).
     const idView = new Uint32Array(
       creatures.buffer,
       creatures.byteOffset,
       pop * stride * (creatures.BYTES_PER_ELEMENT / 4),
     );
-    if (seq !== lastSeenSeq) {
+    {
       const tmp = prevById;
       prevById = currById;
       currById = tmp;
@@ -859,14 +845,7 @@ function renderWorldImpl(
         const cid = idHi * 4294967296 + idLo;
         currById.set(cid, { x: creatures[base], y: creatures[base + 1] });
       }
-      // First snapshot ever: there is nothing to lerp from, so clear
-      // prev so the body path renders at curr verbatim.
-      if (lastSeenSeq === -1) prevById.clear();
-      lastSeenSeq = seq;
-      flipTimeMs = nowMs;
     }
-    const expectedIntervalMs = Math.max(16, Math.min(250, 1000 / Math.max(targetTPS, 1)));
-    const alpha = Math.min(1, Math.max(0, (nowMs - flipTimeMs) / expectedIntervalMs));
 
     // Trail scratch: parallel to bodies, one entry per creature that has
     // both prev and curr and is actually moving.
@@ -880,20 +859,14 @@ function renderWorldImpl(
       const cx_raw = creatures[base];
       const cy_raw = creatures[base + 1];
       const radiusWorld = creatures[base + 2];
-      // Look up prev/curr by id; lerp position if prev exists.
+      // Look up prev by id for the trail pass; the body itself draws at
+      // the raw SoA position.
       const idLo = idView[base + 6];
       const idHi = idView[base + 7];
       const cid = idHi * 4294967296 + idLo;
       const prev = prevById.get(cid);
-      let x: number;
-      let y: number;
-      if (prev !== undefined) {
-        x = prev.x + (cx_raw - prev.x) * alpha;
-        y = prev.y + (cy_raw - prev.y) * alpha;
-      } else {
-        x = cx_raw;
-        y = cy_raw;
-      }
+      const x = cx_raw;
+      const y = cy_raw;
       const margin = radiusWorld + 2;
       if (x < minX - margin || x > maxX + margin ||
           y < minY - margin || y > maxY + margin) continue;
@@ -926,12 +899,11 @@ function renderWorldImpl(
       off += FLOATS_PER_INSTANCE;
 
       // Trail: only when we have a prev and the creature actually moved.
-      // Start = prev (one full tick behind), end = interpolated body
-      // position. Length = the full last-tick displacement; the FS fades
-      // alpha from 0 at the back to v_color.a at the front, producing a
-      // comet tail one tick long at any TPS. Thickness scales with body
-      // radius so big creatures get visible tails; min 2 px so small
-      // ones aren't lost at low zoom.
+      // Start = prev (one paint behind), end = current body position.
+      // Length = the inter-paint displacement; the FS fades alpha from 0
+      // at the back to v_color.a at the front, producing a comet tail.
+      // Thickness scales with body radius so big creatures get visible
+      // tails; min 2 px so small ones aren't lost at low zoom.
       if (enableTrails && prev !== undefined) {
         const dx = cx_raw - prev.x;
         const dy = cy_raw - prev.y;
@@ -1013,6 +985,7 @@ function renderWorldImpl(
   // halves of the stable u64 id via `f32::from_bits`. Build a Uint32Array
   // view over the same backing SAB to read them without conversion cost.
   if (highlightMap.size > 0 && pop > 0) {
+    const nowMs = performance.now();
     const idView = new Uint32Array(
       creatures.buffer,
       creatures.byteOffset,

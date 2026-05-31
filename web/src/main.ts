@@ -4,10 +4,14 @@
 // the SimBridge.
 
 import { makeCamera } from "./render";
-import { renderWorld, resetInterpolation } from "./render-gl";
+import { renderWorld } from "./render-gl";
 import { attachCameraControls } from "./camera";
 import { installRail, pollRail, highlights } from "./rail/index";
-import { installProfilerPanel } from "./widgets/perf-panel";
+import {
+  installProfilerPanel,
+  setPanelStatus,
+  resetPanelSamples,
+} from "./widgets/perf-panel";
 import {
   installDevPanel,
   getInitialGrassSeedCount,
@@ -17,8 +21,6 @@ import {
   currentSliderState,
 } from "./widgets/devpanel";
 import { installCanvasClickHandler, resetInspectorSelection } from "./rail/inspector";
-import { resetStats } from "./rail/stats";
-import { installMonitorTab } from "./rail/monitor";
 import { installNnTab } from "./rail/nn-tab";
 import { span } from "./perf";
 import { getSettings, setSetting } from "./settings";
@@ -37,7 +39,9 @@ import {
   type SimReplyBootReady,
 } from "./sim-bridge";
 
-const status = document.getElementById("status") as HTMLSpanElement;
+// v1.13 Wave 2: the `#status` span in the top bar is gone; the status line
+// lives inside the bottom perf panel and is updated via setPanelStatus()
+// (web/src/widgets/perf-panel.ts) each painted frame.
 const canvas = document.getElementById("aquarium") as HTMLCanvasElement;
 const gl = canvas.getContext("webgl2", { antialias: true, alpha: false });
 if (!gl) throw new Error("WebGL2 context unavailable");
@@ -68,12 +72,33 @@ resize();
 let paused = false;
 let targetTPS = getSettings().targetTPS;
 
-let onTpsChange: ((tps: number) => void) | null = null;
+// v1.13 Wave 2: the TPS selector lives in two places — the legacy top-bar
+// dropdown (this file's `installPacingControls`) and the new perf panel's
+// pill selector (`widgets/perf-panel.ts`). Each registers a listener so a
+// change in one syncs the other; devpanel.ts also listens so the upkeep
+// /s readout updates with TPS.
+const tpsChangeListeners: Array<(tps: number) => void> = [];
 export function setTpsChangeListener(fn: (tps: number) => void): void {
-  onTpsChange = fn;
+  tpsChangeListeners.push(fn);
 }
 export function getTargetTPS(): number {
   return targetTPS;
+}
+function fireTpsChange(tps: number): void {
+  for (const fn of tpsChangeListeners) {
+    try { fn(tps); } catch (e) { console.warn("tps listener threw", e); }
+  }
+}
+
+/**
+ * v1.13 Wave 2: the perf panel's TPS selector calls this to update main's
+ * mirrored target-TPS without bouncing through its own listener. Mirrors
+ * the legacy dropdown's onChange handler.
+ */
+export function setExternalTargetTPS(tps: number): void {
+  if (!Number.isFinite(tps) || tps < 1) return;
+  targetTPS = tps;
+  fireTpsChange(tps);
 }
 
 let controlSab: SharedArrayBuffer | null = null;
@@ -123,8 +148,6 @@ async function main(): Promise<void> {
     () => latestSnapshotWorldSize(),
   );
 
-  status.textContent = `seed: ${cachedSeed}  ·  tick 0  ·  pop 0`;
-
   installPacingControls(() => simBridge);
   installRestartButton(() => restart());
 
@@ -133,7 +156,8 @@ async function main(): Promise<void> {
   installCanvasClickHandler(canvas, cam, () => ({ w: viewW, h: viewH }), simBridge, rail);
 
   installProfilerPanel(simBridge);
-  installMonitorTab(simBridge);
+  // v1.13 Wave 2: the right-rail Monitor tab is gone. Its population graph
+  // and per-worker stats now live in the bottom perf panel.
   // v1.12: NN tab. Topology Apply respawns the worker via restart(); bucket
   // edits are live-applied through getBridge() inside the installer.
   installNnTab(() => simBridge, () => restart());
@@ -147,13 +171,12 @@ async function main(): Promise<void> {
     const oldBridge = simBridge;
     simBridge = await spawnSimWorker("");
     oldBridge.terminate();
-    resetStats();
+    resetPanelSamples();
     resetInspectorSelection(rail);
     highlights.clear();
-    // v1.9.2 Wave 3: clear interpolation maps so the first frame after
-    // restart doesn't lerp from positions in the dead worker's last
-    // snapshot.
-    resetInterpolation();
+    // v1.13 Wave 2: position interpolation between snapshots was removed —
+    // the seq-gate now forbids painting the same snapshot twice, and lerping
+    // requires painting duplicates by definition. Nothing to reset here.
   }
 
   window.addEventListener("keydown", (e) => {
@@ -177,17 +200,31 @@ async function main(): Promise<void> {
 
   let autoRestartPending = false;
 
-  let framesThisSecond = 0;
-  let fpsWindowStart = performance.now();
-  let lastFps = -1;
-  function frame(now: number): void {
+  // v1.13 Wave 2: render-loop seq-gate. The renderer must never paint the
+  // same snapshot twice — if `seq === lastPaintedSeq`, the RAF callback
+  // reschedules itself and returns before doing any work. This keeps the
+  // invariant FPS ≤ TPS at all times. The FPS counter (painted-frame
+  // semantics) is owned by the perf panel via setPanelStatus(); we no
+  // longer count one FPS per RAF.
+  let lastPaintedSeq = -1;
+  function frame(_now: number): void {
+    if (!controlI32 || !snapshotBuffer || !snapshotView) {
+      requestAnimationFrame(frame);
+      return;
+    }
+    const seq = Atomics.load(controlI32, CTRL_SEQ);
+    if (seq === lastPaintedSeq) {
+      // No new snapshot since the last paint — skip this RAF entirely so
+      // the painted-frame FPS counter stays bounded by TPS.
+      requestAnimationFrame(frame);
+      return;
+    }
+
     const frameSpan = span("frame");
     try {
-      if (!controlI32 || !snapshotBuffer || !snapshotView) return;
       const readSpan = span("frame.snapshot.read");
       const rawSlot = Atomics.load(controlI32, CTRL_CURRENT_SLOT);
       const slot: 0 | 1 = rawSlot === 1 ? 1 : 0;
-      const seq = Atomics.load(controlI32, CTRL_SEQ);
       const header = readSnapshotHeader(snapshotView, slotOffset(slot));
       const pop = Math.min(header.pop, MAX_POP_FOR_SIM);
       // v1.11 (A+D): snapshot region lives inside wasm.memory.buffer at
@@ -226,25 +263,17 @@ async function main(): Promise<void> {
         latestWorldSize,
         latestGrassDim,
         highlights,
-        now,
-        seq,
-        targetTPS,
       );
 
-      framesThisSecond++;
-      if (now - fpsWindowStart >= 1000) {
-        lastFps = framesThisSecond;
-        framesThisSecond = 0;
-        fpsWindowStart = now;
-      }
-      const endedSuffix = header.world_ended ? "  (world ended)" : "";
-      const tpsStr = isFinite(header.tps) && header.tps > 0
-        ? header.tps.toFixed(0)
-        : "—";
-      const fpsStr = lastFps >= 0 ? lastFps.toString() : "—";
-      status.textContent =
-        `seed: ${cachedSeed}  ·  tick ${header.tick}  ·  pop ${header.pop}` +
-        `  ·  ${tpsStr} TPS  ·  ${fpsStr} FPS${endedSuffix}`;
+      lastPaintedSeq = seq;
+
+      setPanelStatus({
+        seed: cachedSeed,
+        tick: header.tick,
+        pop: header.pop,
+        tps: header.tps,
+        worldEnded: !!header.world_ended,
+      });
     } finally {
       frameSpan.close();
     }
@@ -378,7 +407,15 @@ function installPacingControls(getBridge: () => SimBridge): void {
     targetTPS = v;
     setSetting("targetTPS", targetTPS);
     getBridge().setTargetTps(targetTPS);
-    if (onTpsChange) onTpsChange(targetTPS);
+    fireTpsChange(targetTPS);
+  });
+
+  // Keep the dropdown in sync if some other widget (perf panel) sets the
+  // TPS. Match against the dropdown options; off-list values clear the
+  // selection so the user sees there's no exact preset match.
+  setTpsChangeListener((v) => {
+    const opt = tpsOptions.find((o) => o === v);
+    tpsSelect.value = opt !== undefined ? String(opt) : "";
   });
 
   // Spacer pushes pacing controls to the right.
@@ -446,6 +483,11 @@ function installRestartButton(onClick: () => void): void {
 }
 
 main().catch((err) => {
-  status.textContent = `Boot failed: ${err}`;
   console.error(err);
+  // Surface in the perf panel's status line if it's already wired up;
+  // otherwise users see the error in DevTools.
+  try {
+    const statusLine = document.getElementById("perf-status-line");
+    if (statusLine) statusLine.textContent = `Boot failed: ${err}`;
+  } catch { /* ignore */ }
 });

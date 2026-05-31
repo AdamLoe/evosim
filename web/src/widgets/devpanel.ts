@@ -669,17 +669,9 @@ export function installDevPanel(getBridge: () => SimBridge): void {
     min: 0, max: 10, step: 0.1,
     formatValue: (v) => v.toFixed(1),
   }));
-  // v1.10: user-tunable population cap below the SAB-bound MAX_POP_FOR_SIM.
-  // Defaults to MAX_POP_FOR_SIM (no effective cap). Lower it to stay in the
-  // performance-smooth regime — at high pop the spatial-grid + repulsion
-  // pass scales superlinearly with creature density.
-  lifeSec.appendChild(makeStagedSlider({
-    label: "Max population",
-    simName: "max_population",
-    settingKey: "maxPopulation",
-    min: 1, max: 32_000, step: 100,
-    formatValue: (v) => String(Math.round(v)),
-  }));
+  // v1.13 Wave 2: the "Max population" selector moved out of Settings and
+  // into the bottom perf panel's selectors row. The persisted setting + the
+  // `max_population` slider live there now (live-apply, no staging).
   box.appendChild(lifeSec);
 
   // Dynamic split-threshold cap = energy_max - 1.

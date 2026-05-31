@@ -105,12 +105,6 @@ button {
   font-size: 13px;
 }
 #top-bar > * { flex-shrink: 0; }
-#status {
-  font-variant-numeric: tabular-nums;
-  color: var(--fg-muted);
-  font-family: ui-monospace, monospace;
-  font-size: 12px;
-}
 
 #canvas-wrap {
   position: relative;
@@ -156,9 +150,11 @@ button {
   background: var(--bg-panel);
 }
 
-/* ── Profiler bottom panel ────────────────────────────────────────────────── */
+/* ── Bottom monitor + profiler panel (v1.13 Wave 2) ───────────────────────── */
 
 #perf-box {
+  container-type: inline-size;
+  container-name: perfbox;
   position: relative;
   min-height: 0;
   max-height: var(--profiler-h);
@@ -168,29 +164,169 @@ button {
   padding: 8px 12px;
   font: 11px ui-monospace, monospace;
 }
-.perf-header-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: nowrap;
+
+/* Status line (migrated from top-bar #status). */
+.perf-status-line {
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-muted);
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 8px;
 }
-.perf-stat {
+
+/* Responsive band — wraps the graphs row + selectors row. The CSS
+   container queries below repaint the layout in three breakpoints. */
+.perf-band {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Graphs row: defaults to single-column stack (small breakpoint). */
+.perf-graphs {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.perf-graph-card {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 0;
+}
+.perf-graph-title {
   font: 11px ui-monospace, monospace;
   color: var(--fg-muted);
-  white-space: nowrap;
+  letter-spacing: 0.02em;
 }
-.perf-obs-row {
+.perf-chart {
+  display: block;
+  width: 100%;
+  height: 120px;
+  background: var(--bg-panel-alt);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+}
+.perf-graph-legend {
+  display: flex;
+  gap: 12px;
+  font: 10px ui-monospace, monospace;
+  color: var(--fg-faint);
+}
+.perf-legend-item { display: inline-flex; align-items: center; gap: 4px; }
+.perf-legend-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+.perf-legend-fps { background: var(--chart-line); }
+.perf-legend-tps { background: var(--accent-2); }
+
+/* Selectors row: TPS + Max-pop combos. */
+.perf-selectors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+.perf-selector-row {
   display: flex;
   align-items: center;
-  gap: 12px;
-  flex-wrap: nowrap;
-  margin-top: 3px;
+  gap: 6px;
+  flex-wrap: wrap;
 }
-.perf-obs {
+.perf-selector-label {
+  color: var(--fg-muted);
   font: 11px ui-monospace, monospace;
-  color: var(--fg-faint);
-  white-space: nowrap;
+  min-width: 50px;
 }
+.perf-pill-group {
+  display: inline-flex;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.perf-pill {
+  background: var(--bg-panel-alt);
+  color: var(--fg-muted);
+  border: 0;
+  border-right: 1px solid var(--border);
+  padding: 4px 10px;
+  font: 11px ui-monospace, monospace;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.perf-pill:last-child { border-right: 0; }
+.perf-pill:hover { color: var(--fg); }
+.perf-pill.is-active {
+  background: var(--accent);
+  color: var(--bg-canvas);
+}
+.perf-num-input {
+  width: 64px;
+  background: var(--bg-canvas);
+  color: var(--fg);
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  padding: 3px 5px;
+  font: 11px ui-monospace, monospace;
+}
+.perf-num-input:focus { outline: none; border-color: var(--accent); }
+.perf-num-input::-webkit-outer-spin-button,
+.perf-num-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.perf-num-input { -moz-appearance: textfield; }
+
+/* Sections — CPU Process Monitor + Profile. */
+.perf-section {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  min-width: 0;
+}
+.perf-section-title {
+  font: 11px ui-monospace, monospace;
+  color: var(--fg-muted);
+  letter-spacing: 0.02em;
+  margin-bottom: 4px;
+}
+.perf-profile-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.perf-profile-header > :first-child { margin-right: auto; }
+
+/* CSS container queries: medium (>= 620px) lays graphs side-by-side and
+   keeps selectors below; large (>= 1000px) puts graphs + selectors in a
+   three-column band and the bottom two sections side-by-side. */
+@container perfbox (min-width: 620px) {
+  .perf-graphs { flex-direction: row; }
+}
+@container perfbox (min-width: 1000px) {
+  .perf-band {
+    display: grid;
+    grid-template-columns: 2fr 2fr 1fr;
+    align-items: start;
+  }
+  .perf-graphs { grid-column: 1 / span 2; }
+  .perf-selectors {
+    flex-direction: column;
+    align-items: stretch;
+    grid-column: 3 / span 1;
+  }
+  .perf-cpu-section,
+  .perf-profile-section { display: inline-block; vertical-align: top; width: calc(50% - 6px); }
+  .perf-cpu-section { margin-right: 8px; }
+}
+
 .jank-reset-btn {
   display: inline-flex;
   align-items: center;
@@ -355,39 +491,8 @@ button {
   background-color: rgb(38, 38, 38);
 }
 
-/* Monitor */
-#rail-monitor { padding: 0; }
-.rail-monitor-section {
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--border);
-}
-.rail-monitor-section:last-child { border-bottom: 0; }
-.rail-section-title {
-  font-size: 11px;
-  color: var(--fg-muted);
-  letter-spacing: 0.02em;
-  margin-bottom: 6px;
-}
-#chart-pop { display: block; width: 100%; height: auto; }
-.worker-stats-summary,
-.worker-stats-subphase,
-.worker-stats-pool {
-  font: 11px ui-monospace, monospace;
-  color: var(--fg-muted);
-  margin: 2px 0;
-}
-.worker-stats-subphase { color: var(--fg-faint); }
-.worker-stats-pool { color: var(--fg-faint); font-size: 10px; }
-.worker-stats-profile-toggle {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font: 11px ui-monospace, monospace;
-  color: var(--fg-muted);
-  margin: 4px 0;
-  cursor: pointer;
-  user-select: none;
-}
+/* CPU Process Monitor table (lives inside the bottom perf panel as of
+   v1.13 Wave 2; was the right-rail Monitor tab's worker-stats panel). */
 .worker-stats-table {
   width: 100%;
   border-collapse: collapse;
