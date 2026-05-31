@@ -74,16 +74,16 @@
       <!-- Right rail: Inspector | Monitor | Settings -->
       <aside id="right-rail">
         <nav id="rail-tabs" role="tablist">
-          <button data-tab="inspector" class="rail-tab">Inspector</button>
+          <button data-tab="inspector" class="rail-tab is-active">Inspector</button>
           <button data-tab="monitor" class="rail-tab">Monitor</button>
           <button data-tab="nn" class="rail-tab">NN</button>
-          <button data-tab="settings" class="rail-tab is-active">Settings</button>
+          <button data-tab="settings" class="rail-tab">Settings</button>
         </nav>
 
         <!-- Inspector tab: empty-state by default; populated on creature
              click. The existing #ins-* dl rows live inside this panel so
              the inspector module's getElementById calls keep working. -->
-        <section id="rail-inspector" class="rail-panel">
+        <section id="rail-inspector" class="rail-panel is-active">
           <div id="inspector-empty" class="rail-empty">Click a creature to inspect.</div>
           <div id="inspector-body" style="display:none">
             <dl>
@@ -124,7 +124,7 @@
         </section>
 
         <!-- Settings tab: dev panel content + Apply / Cancel / Reset footer. -->
-        <section id="rail-settings" class="rail-panel is-active">
+        <section id="rail-settings" class="rail-panel">
           <div id="devpanel-box"></div>
           <div id="settings-footer">
             <button id="settings-apply" type="button" disabled>Apply</button>
@@ -138,6 +138,19 @@
     <!-- Toast host for transient notifications (construction-only-changes,
          etc.). Pinned to the bottom-center of the viewport. -->
     <div id="toast-host"></div>
+
+    <!-- World-end overlay: shown when the last creature dies. Grass keeps
+         spreading underneath so the canvas fills in the background. -->
+    <div id="world-end-overlay" hidden>
+      <div class="world-end-card">
+        <h2>World ended</h2>
+        <p>The last creature has died. Grass is still spreading underneath.</p>
+        <div class="world-end-actions">
+          <button id="world-end-restart" type="button">Restart world</button>
+          <button id="world-end-dismiss" type="button">Keep watching</button>
+        </div>
+      </div>
+    </div>
 
     <script type="module" src="/src/main.ts"></script>
   </body>

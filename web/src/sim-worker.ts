@@ -70,7 +70,7 @@ const rayonCurrentNumThreads = (_wasmMod as unknown as Record<string, unknown>)[
 ] as (() => number) | undefined;
 
 /** Target rayon worker count (kept from v1.9; see worker-runtime.md). */
-const TARGET_RAYON_WORKERS = 16;
+const TARGET_RAYON_WORKERS = 12;
 
 /** Tick cadence for emitting the profile-report payload (~1 Hz at 60 TPS). */
 const PROFILE_REPORT_EVERY_N_TICKS = 60;
@@ -409,9 +409,10 @@ function simLoop(): void {
       1,
     );
 
-    const ended = world.world_ended;
-
-    if (paused || ended) {
+    // v2: don't park when `world.world_ended`. Once the population dies out
+    // the sim drops into a thin grass-only path so the canvas keeps filling
+    // while main shows the world-end popup. Only an explicit pause parks.
+    if (paused) {
       const before = Atomics.load(ctrlI32, CTRL_FUTEX);
       Atomics.wait(ctrlI32, CTRL_FUTEX, before, Infinity);
       continue;

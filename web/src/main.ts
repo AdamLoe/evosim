@@ -21,7 +21,7 @@ import { resetStats } from "./rail/stats";
 import { installMonitorTab } from "./rail/monitor";
 import { installNnTab } from "./rail/nn-tab";
 import { span } from "./perf";
-import { getSettings, setSetting } from "./settings";
+import { getSettings, setSetting, hasStoredSetting } from "./settings";
 import { applyTheme } from "./themes";
 import {
   SimBridge,
@@ -95,6 +95,15 @@ async function main(): Promise<void> {
   // :root fallback (charcoal).
   applyTheme(getSettings().theme);
 
+  // First-run adaptive: low-core machines start with a tighter population cap.
+  // Only fires when the user has never persisted their own value.
+  if (!hasStoredSetting("maxPopulation")) {
+    const cores = navigator.hardwareConcurrency ?? 0;
+    if (cores > 0 && cores < 8) {
+      setSetting("maxPopulation", 2000);
+    }
+  }
+
   const sabAvail = typeof SharedArrayBuffer !== "undefined";
   const isolated =
     (globalThis as unknown as { crossOriginIsolated?: boolean }).crossOriginIsolated ?? false;
@@ -154,7 +163,29 @@ async function main(): Promise<void> {
     // restart doesn't lerp from positions in the dead worker's last
     // snapshot.
     resetInterpolation();
+    hideWorldEndOverlay();
   }
+
+  // World-end overlay wiring. Shown by the frame loop the first time a
+  // snapshot reports `world_ended`; cleared by restart() or by the user's
+  // Keep-watching click. The sim itself keeps grass-only ticks running so
+  // the canvas underneath the dim layer still fills in.
+  const overlay = document.getElementById("world-end-overlay") as HTMLDivElement | null;
+  const overlayRestart = document.getElementById("world-end-restart") as HTMLButtonElement | null;
+  const overlayDismiss = document.getElementById("world-end-dismiss") as HTMLButtonElement | null;
+  let overlayDismissed = false;
+  function showWorldEndOverlay(): void {
+    if (overlay && !overlayDismissed) overlay.hidden = false;
+  }
+  function hideWorldEndOverlay(): void {
+    if (overlay) overlay.hidden = true;
+    overlayDismissed = false;
+  }
+  overlayRestart?.addEventListener("click", () => { void restart(); });
+  overlayDismiss?.addEventListener("click", () => {
+    overlayDismissed = true;
+    if (overlay) overlay.hidden = true;
+  });
 
   window.addEventListener("keydown", (e) => {
     if (e.key !== "r" && e.key !== "R") return;
@@ -207,11 +238,15 @@ async function main(): Promise<void> {
       );
       readSpan.close();
 
-      if (header.world_ended && !paused && getSettings().autoRun && !autoRestartPending) {
-        autoRestartPending = true;
-        void restart().then(() => {
-          autoRestartPending = false;
-        });
+      if (header.world_ended) {
+        if (!paused && getSettings().autoRun && !autoRestartPending) {
+          autoRestartPending = true;
+          void restart().then(() => {
+            autoRestartPending = false;
+          });
+        } else {
+          showWorldEndOverlay();
+        }
       }
 
       pollRail(rail, header, simBridge, creatures, pop);

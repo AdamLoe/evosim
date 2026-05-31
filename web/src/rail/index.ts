@@ -14,7 +14,7 @@ export interface RailState {
 }
 
 function installTabs(): RailState {
-  let activeTab: RailTab = "settings";
+  let activeTab: RailTab = "inspector";
 
   function switchTab(name: RailTab): void {
     activeTab = name;

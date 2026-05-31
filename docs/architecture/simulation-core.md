@@ -76,8 +76,10 @@ rayon_current_num_threads() -> u32
 ```
 
 The 22 per-typed `set_*` setters are gone. `set_slider(name, value)` is
-the sole mutation entry point. Bools (only `auto_curriculum` today) ride
-the same path as `0|1` via a dedicated arm in `try_set_slider`.
+the sole mutation entry point. Bools (`full_grass_on_init`) ride the
+same path as `0|1` via a dedicated arm in `try_set_slider`. Slots 17–20
+are kept as `_reserved_curriculum_*` no-ops so SAB index ordering stays
+stable for older clients that still write into them.
 
 ## Tick step order
 
@@ -85,7 +87,10 @@ the same path as `0|1` via a dedicated arm in `try_set_slider`.
 fn step(&mut self) -> bool {
     let _tick = profile_span!(&self.profile, "tick");
 
-    // 0. Curriculum: cost factor = MIN_FACTOR + (1-MIN_FACTOR) * smoothstep(...)
+    // Thin path: once world_ended (or pop==0) we only run grass_step +
+    // bitset rebuild + tick++, then return false. Lets the canvas keep
+    // filling in the background while the UI shows the world-end popup.
+
     // 1. tick.grid.rebuild      — SpatialGrid::rebuild
     // 2. tick.nn                — chunked Brain::forward (LEAF in tick tree)
     // 3. tick.movement          — apply_movement_and_repulsion
@@ -145,12 +150,14 @@ hardwiring. The 32-byte input vector is SIMD-aligned for `wide::f32x8`.
   `for_each_in_radius`.
 - `src/constants.rs` → `WORLD_SIZE = 1200`, `GRASS_GRID_DIM = 960`,
   `GRASS_CELL_COUNT = 921_600`, `MAX_POP_FOR_SIM = 32_000`,
-  `NN_INPUTS = 32`, `NN_HIDDEN_1 = 48`, `NN_HIDDEN_2 = 24`,
-  `NN_OUTPUTS = 5`, `NN_WEIGHT_COUNT = 2808`,
-  `MIN_CHUNKS = 4`, `MAX_CHUNKS = 16`, `STARTING_POP_DEFAULT = 8`,
+  `MAX_POPULATION_DEFAULT = 8_000` (TS lowers to 2000 on first boot when
+  `navigator.hardwareConcurrency < 8`),
+  `NN_INPUTS = 32`, `NN_OUTPUTS = 5`,
+  `MIN_CHUNKS = 4`, `MAX_CHUNKS = 16`, `STARTING_POP_DEFAULT = 32`,
   `CREATURE_SIZE = 1.0`, `START_ENERGY_DEFAULT = 200.0`,
-  `MAX_AGE_DEFAULT = 5000`, `SPLIT_THRESHOLD_DEFAULT = 50.0`,
-  `SPLIT_GIFT_MAX_DEFAULT = 30.0`, `SPLIT_JITTER_DEFAULT = 50.0`,
+  `MAX_AGE_DEFAULT = 5000`, `SPLIT_THRESHOLD_DEFAULT = 99.0`,
+  `SPLIT_GIFT_MAX_DEFAULT = 30.0`, `SPLIT_JITTER_DEFAULT = 1.0`,
+  `REPULSION_MAX = 0.1`, `GRASS_INITIAL_SEED_COUNT_DEFAULT = 1000`,
   `FULL_GRASS_ON_INIT_DEFAULT = false`.
 - `src/wasm_api.rs` → `WorldHandle`, `WorldHandle::set_slider`,
   `WorldHandle::write_snapshot_to`,

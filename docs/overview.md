@@ -44,9 +44,11 @@ tracking, no scripted scenario — every page load starts a fresh world.
 
 ## Tick loop summary
 
-Each tick refreshes curriculum pressure, rebuilds neighbour lookup state,
-runs the NN/action pass, applies movement/graze/eat effects, advances grass,
-settles energy/death/birth bookkeeping, and updates display color state.
+Each tick rebuilds neighbour lookup state, runs the NN/action pass, applies
+movement/graze/eat effects, advances grass, settles energy/death/birth
+bookkeeping, and updates display color state. When the population dies out
+the worker keeps ticking grass-only so the canvas fills in the background
+while the UI shows a "world ended" popup.
 
 The exact step order, phase names, and `tick.*` profiler spans are owned by
 [`architecture/simulation-core.md`](architecture/simulation-core.md). The

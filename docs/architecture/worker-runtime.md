@@ -83,11 +83,16 @@ function simLoop(): void {
                         // reset-jank.
     record("read_input_sab", performance.now() - readStart);
 
-    if (paused || world.world_ended) {
+    if (paused) {
       // Sync park on the futex. Legal because no postMessage hot path
       // exists; main wakes us via Atomics.add(CTRL_FUTEX,1) +
       // Atomics.notify when it writes a slider / unpauses / fires an
       // inspector request.
+      //
+      // v2: `world.world_ended` is intentionally NOT a park trigger.
+      // Once population hits zero the sim drops into a thin grass-only
+      // tick path (see simulation-core.md) so the canvas keeps filling
+      // while main shows the world-end popup.
       Atomics.wait(ctrlI32, CTRL_FUTEX, before, Infinity);
       continue;
     }

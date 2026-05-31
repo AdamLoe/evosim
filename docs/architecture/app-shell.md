@@ -52,10 +52,11 @@ left column uses a row grid for top-bar / canvas / profiler.
   always-on (the worker enables it at boot) and the panel keeps polling
   the bundled report whenever it's visible, regardless of any
   backend "enabled" flag.
-- The rail open/closed toggle: `Settings.railOpen` (default `true`)
-  drives `#app-shell.rail-collapsed`, which collapses the grid track to
-  `0` and hides `#right-rail`. The ⚙ button and the `~` hotkey both
-  route through `setRailOpen` in `main.ts`.
+- The rail open/closed toggle: `Settings.railOpen` (default `false`,
+  so fresh users start with the rail collapsed) drives
+  `#app-shell.rail-collapsed`, which collapses the grid track to `0`
+  and hides `#right-rail`. The ⚙ button and the `~` hotkey both route
+  through `setRailOpen` in `main.ts`.
 - Theming: `web/src/themes.ts` owns the palette map. `applyTheme(id)`
   writes inline custom properties onto `<html>`; the four shipped themes
   (charcoal, slate, light, vivid) each define **every** CSS var listed
@@ -97,8 +98,10 @@ left column uses a row grid for top-bar / canvas / profiler.
 
 ## Tab routing rules
 
-- **Default tab on boot:** Settings (`activeTab = "settings"` inside
-  `installTabs`).
+- **Default tab on boot:** Inspector (`activeTab = "inspector"` inside
+  `installTabs`). The rail also defaults to *closed* (see `railOpen`
+  below), so a fresh user sees the canvas full-bleed and has to open
+  the rail (⚙ / `~`) before any tab is visible.
 - **`⚙` Settings button or `~` hotkey** → toggle the rail
   open/closed (v1.9.1; previously: switch to Settings tab). Routes
   through `setRailOpen` in `main.ts` so the persisted setting + the
@@ -119,12 +122,11 @@ Two interaction tiers live inside the same tab:
 
 - **Live-apply** (Run + Display groups). Edits hit `setSetting(...)`
   and the apply callback immediately. No dirty tracking. Sliders in
-  this tier: `autoRun`, `showProfiler`, `showPopGraph`, `showGrass`,
-  `grassOpacity`, `theme` (Display-group dropdown wired through
-  `applyTheme`).
+  this tier: `autoRun`, `showProfiler`, `showGrass`, `grassOpacity`,
+  `theme` (Display-group dropdown wired through `applyTheme`).
 - **Stage-then-apply** (every other group: Energy, Grass, Eat,
-  Lifecycle, Curriculum). Edits update only the in-memory widget
-  value. The Settings tab's footer reconciles staged changes.
+  Lifecycle). Edits update only the in-memory widget value. The
+  Settings tab's footer reconciles staged changes.
 
 Per staged widget, the dev panel keeps `{simName, settingKey,
 readWidget, writeWidget, snapshot, rowEl}`. A row is **dirty** iff
@@ -164,9 +166,11 @@ edits — re-opening Settings shows them still dirty.
 ## Theming
 
 `web/src/themes.ts` exports a `Theme` interface (`id`, `name`, `tokens:
-Record<string, string>`), the `THEMES` map (currently four entries:
-`charcoal`, `slate`, `light`, `vivid`), `DEFAULT_THEME_ID = "charcoal"`,
-and `applyTheme(id)`. `applyTheme` looks the theme up in the map (falling
+Record<string, string>`), the `THEMES` map (currently five entries:
+`charcoal`, `slate`, `midnight`, `light`, `vivid`),
+`DEFAULT_THEME_ID = "charcoal"` (the `:root` fallback baseline), and
+`applyTheme(id)`. The user-facing default in `settings.ts` is
+`"midnight"`, so fresh installs paint dark-on-black on first frame. `applyTheme` looks the theme up in the map (falling
 back to the default if `id` is unknown) and writes each of the
 `REQUIRED_TOKENS` onto `document.documentElement` via
 `style.setProperty`.
