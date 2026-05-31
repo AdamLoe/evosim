@@ -10,10 +10,7 @@
 import { test, expect } from "@playwright/test";
 import { DEFAULTS } from "../../src/settings";
 
-// Map Rust slider name → settings.ts key for the shared sliders. Keys
-// missing from this table are tolerated (e.g. `auto_curriculum` rides
-// `set_slider` as 0|1; settings stores a real boolean; both encode 0/1 here
-// for comparison).
+// Map Rust slider name → settings.ts key for the shared sliders.
 const RUST_TO_SETTINGS: Record<string, keyof typeof DEFAULTS> = {
   mutation_rate_multiplier: "mutRate",
   // v1.12: legacy nn_mutation_sigma reserved no-op on the Rust side, no
@@ -35,10 +32,6 @@ const RUST_TO_SETTINGS: Record<string, keyof typeof DEFAULTS> = {
   split_jitter: "splitJitter",
   founder_count: "founderCount",
   grass_initial_seed_count: "initialGrassSeedCount",
-  curriculum_min_pop: "curriculumMinPop",
-  curriculum_max_pop: "curriculumMaxPop",
-  curriculum_min_factor: "curriculumMinFactor",
-  auto_curriculum: "autoCurriculum",
   full_grass_on_init: "fullGrassOnInit",
 };
 

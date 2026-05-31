@@ -4,7 +4,7 @@
 //
 // 1. **Live-apply** (run / display groups): widget edits push to the sim
 //    worker and write `localStorage` immediately. No dirty tracking.
-// 2. **Stage-then-apply** (sim / energy / lifecycle / curriculum groups):
+// 2. **Stage-then-apply** (sim / energy / lifecycle groups):
 //    widget edits update only the in-memory widget value. The Settings tab
 //    footer's Apply pushes every dirty staged slider via `set_slider` and
 //    persists to `localStorage`; Cancel restores widgets to the last-applied
@@ -482,10 +482,6 @@ export function installDevPanel(getBridge: () => SimBridge): void {
   // bottom-right of the canvas, not in Settings. See widgets/perf-panel.ts.
   const displaySec = section("Display");
   displaySec.appendChild(makeLiveToggle(
-    { label: "Show population graph", simName: null, settingKey: "showPopGraph" },
-    () => { /* graph lives in Monitor tab — toggle is informational for now */ },
-  ));
-  displaySec.appendChild(makeLiveToggle(
     { label: "Show grass", simName: null, settingKey: "showGrass" },
     () => { /* renderer reads getSettings() each frame */ },
   ));
@@ -701,36 +697,6 @@ export function installDevPanel(getBridge: () => SimBridge): void {
     }
   }
   updateSplitThresholdCap();
-
-  // ── Curriculum ──
-  const currSec = section("Curriculum");
-  currSec.appendChild(makeStagedToggle({
-    label: "Auto curriculum",
-    simName: "auto_curriculum",
-    settingKey: "autoCurriculum",
-  }));
-  currSec.appendChild(makeStagedSlider({
-    label: "Min pop",
-    simName: "curriculum_min_pop",
-    settingKey: "curriculumMinPop",
-    min: 0, max: 5000, step: 50,
-    formatValue: (v) => String(Math.round(v)),
-  }));
-  currSec.appendChild(makeStagedSlider({
-    label: "Max pop",
-    simName: "curriculum_max_pop",
-    settingKey: "curriculumMaxPop",
-    min: 0, max: 5000, step: 50,
-    formatValue: (v) => String(Math.round(v)),
-  }));
-  currSec.appendChild(makeStagedSlider({
-    label: "Min factor",
-    simName: "curriculum_min_factor",
-    settingKey: "curriculumMinFactor",
-    min: 0, max: 1, step: 0.05,
-    formatValue: (v) => v.toFixed(2),
-  }));
-  box.appendChild(currSec);
 
   // ── Footer wiring ──
   footerApply = document.getElementById("settings-apply") as HTMLButtonElement | null;

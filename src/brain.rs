@@ -279,8 +279,9 @@ impl Bucket {
     }
 }
 
-/// 8 fixed mutation buckets. Default = bucket 0 carries the pre-v1.12 single
-/// `(rate, sigma)` knob; buckets 1..=7 are zero-weight.
+/// 8 fixed mutation buckets. Default = three equal-weight buckets covering
+/// no-mutation, small/medium drift, and big perturbation (1/3 each); buckets
+/// 3..=7 are zero-weight reserves for user tuning.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MutationPolicy {
     pub buckets: [Bucket; MUTATION_BUCKET_COUNT],
@@ -289,11 +290,9 @@ pub struct MutationPolicy {
 impl Default for MutationPolicy {
     fn default() -> Self {
         let mut buckets = [Bucket::zero(); MUTATION_BUCKET_COUNT];
-        buckets[0] = Bucket {
-            weight: MUT_BUCKET0_WEIGHT_DEFAULT,
-            rate: MUT_BUCKET_RATE_DEFAULT,
-            sigma: MUT_BUCKET_SIGMA_DEFAULT,
-        };
+        buckets[0] = Bucket { weight: 1.0, rate: 0.0, sigma: 0.0 };
+        buckets[1] = Bucket { weight: 1.0, rate: 0.05, sigma: 0.05 };
+        buckets[2] = Bucket { weight: 1.0, rate: 0.30, sigma: 0.20 };
         Self { buckets }
     }
 }

@@ -56,10 +56,10 @@ pub const SLIDER_NAMES: &[&str] = &[
     "split_gift",                          // 14 f32
     "split_jitter",                        // 15 f32
     "founder_count",                       // 16 u32 (carried as f32)
-    "curriculum_min_pop",                  // 17 u32 (carried as f32)
-    "curriculum_max_pop",                  // 18 u32 (carried as f32)
-    "curriculum_min_factor",               // 19 f32
-    "auto_curriculum",                     // 20 bool (0.0 / non-zero)
+    "_reserved_curriculum_min_pop",        // 17 reserved no-op (was curriculum_min_pop)
+    "_reserved_curriculum_max_pop",        // 18 reserved no-op (was curriculum_max_pop)
+    "_reserved_curriculum_min_factor",     // 19 reserved no-op (was curriculum_min_factor)
+    "_reserved_auto_curriculum",           // 20 reserved no-op (was auto_curriculum)
     "full_grass_on_init",                  // 21 bool (0.0 / non-zero)
     "max_population",                      // 22 u32 (carried as f32) — user-tunable cap
     // v1.12: 8 mutation buckets × 3 floats. Index = 23 + bucket * 3 + field.
@@ -550,19 +550,6 @@ impl WorldHandle {
         // would have no slot in the snapshot creature region).
         self.inner.sliders.max_population = value.clamp(1, MAX_POP_FOR_SIM as u32);
     }
-    fn apply_curriculum_min_pop(&mut self, value: u32) {
-        self.inner.sliders.curriculum_min_pop = value;
-    }
-    fn apply_curriculum_max_pop(&mut self, value: u32) {
-        self.inner.sliders.curriculum_max_pop = value;
-    }
-    fn apply_curriculum_min_factor(&mut self, value: f32) {
-        self.inner.sliders.curriculum_min_factor = value.clamp(0.0, 1.0);
-    }
-    fn apply_auto_curriculum(&mut self, value: bool) {
-        self.inner.sliders.auto_curriculum = value;
-    }
-
     /// Apply a dev-panel slider live by name. JS console workflow
     /// (BUILD-REPORT Known Issue #4). Returns `Err` on unknown name so a
     /// console typo is visible instead of silently ignored.
@@ -622,11 +609,8 @@ impl WorldHandle {
             14 => self.apply_split_gift(value),
             15 => self.apply_split_jitter(value),
             16 => self.apply_founder_count(value.max(0.0) as u32),
-            17 => self.apply_curriculum_min_pop(value.max(0.0) as u32),
-            18 => self.apply_curriculum_max_pop(value.max(0.0) as u32),
-            19 => self.apply_curriculum_min_factor(value),
+            17..=20 => { /* reserved no-op: legacy curriculum slots */ }
             // Bools encoded as 0|1 so protocol surface stays minimal.
-            20 => self.apply_auto_curriculum(value != 0.0),
             21 => self.apply_full_grass_on_init(value != 0.0),
             22 => self.apply_max_population(value.max(1.0) as u32),
             // v1.12: 8 mutation buckets × 3 fields = indices 23..47.
@@ -837,10 +821,6 @@ impl WorldHandle {
             "split_jitter": d.split_jitter,
             "founder_count": d.founder_count as f32,
             "grass_initial_seed_count": d.grass_initial_seed_count as f32,
-            "curriculum_min_pop": d.curriculum_min_pop as f32,
-            "curriculum_max_pop": d.curriculum_max_pop as f32,
-            "curriculum_min_factor": d.curriculum_min_factor,
-            "auto_curriculum": if d.auto_curriculum { 1.0_f32 } else { 0.0 },
             "full_grass_on_init": if d.full_grass_on_init { 1.0_f32 } else { 0.0 },
             "max_population": d.max_population as f32,
         });

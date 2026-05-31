@@ -33,8 +33,11 @@ export const MUTATION_BUCKET_COUNT = 8 as const;
 
 export const DEFAULT_MUTATION_BUCKETS: MutationBucket[] = (() => {
   const out: MutationBucket[] = [];
-  out.push({ weight: 1.0, rate: 0.02, sigma: 0.02 });
-  for (let i = 1; i < MUTATION_BUCKET_COUNT; i++) {
+  // Three equal-weight buckets: 1/3 no change, 1/3 small/medium, 1/3 big.
+  out.push({ weight: 1.0, rate: 0.0, sigma: 0.0 });
+  out.push({ weight: 1.0, rate: 0.05, sigma: 0.05 });
+  out.push({ weight: 1.0, rate: 0.30, sigma: 0.20 });
+  for (let i = 3; i < MUTATION_BUCKET_COUNT; i++) {
     out.push({ weight: 0, rate: 0, sigma: 0 });
   }
   return out;
@@ -55,7 +58,6 @@ export interface Settings {
   autoRun: boolean;
   // Display toggles (live-apply, page-side only)
   showProfiler: boolean;
-  showPopGraph: boolean;
   showGrass: boolean;
   grassOpacity: number;
   // Profiler rolling-window length in ms. Drives both the Rust trees (via
@@ -95,11 +97,6 @@ export interface Settings {
   splitGift: number;
   splitJitter: number;
   founderCount: number;
-  // Curriculum
-  curriculumMinPop: number;
-  curriculumMaxPop: number;
-  curriculumMinFactor: number;
-  autoCurriculum: boolean;
 }
 
 export const DEFAULTS: Settings = {
@@ -107,12 +104,11 @@ export const DEFAULTS: Settings = {
   targetTPS: 60,
   autoRun: false,
   showProfiler: true,
-  showPopGraph: true,
   showGrass: true,
   grassOpacity: 1.0,
   profilerWindowMs: 10_000,
-  railOpen: true,
-  theme: "charcoal",
+  railOpen: false,
+  theme: "midnight",
   upkeepMultiplier: 1.0,
   moveCostMultiplier: 1.0,
   energyMax: 100,
@@ -122,9 +118,9 @@ export const DEFAULTS: Settings = {
   grassEnergyPerBite: 10,
   grassBitesPerBlock: 2,
   digestionCooldown: 50,
-  repulsionMax: 5.0,
-  maxPopulation: 32_000,
-  initialGrassSeedCount: 100,
+  repulsionMax: 0.1,
+  maxPopulation: 8_000,
+  initialGrassSeedCount: 1000,
   fullGrassOnInit: false,
   mutRate: 1.0,
   mutationBuckets: DEFAULT_MUTATION_BUCKETS.map((b) => ({ ...b })),
@@ -133,14 +129,10 @@ export const DEFAULTS: Settings = {
     activations: DEFAULT_NN_TOPOLOGY.activations.slice(),
   },
   maxAge: 5000,
-  splitThreshold: 50,
+  splitThreshold: 99,
   splitGift: 30,
-  splitJitter: 50,
-  founderCount: 8,
-  curriculumMinPop: 1000,
-  curriculumMaxPop: 2000,
-  curriculumMinFactor: 0.0,
-  autoCurriculum: true,
+  splitJitter: 1,
+  founderCount: 32,
 };
 
 const KNOWN_KEYS = new Set<string>(Object.keys(DEFAULTS));
@@ -214,10 +206,19 @@ function readFromStorage(): Partial<Settings> {
   }
 }
 
+const storedAtLoad = readFromStorage();
+
+/** True iff `key` was present in localStorage at module load time. Lets boot
+ * code apply environment-derived defaults (e.g. lowering `maxPopulation` on
+ * low-core devices) without clobbering an explicit user choice. */
+export function hasStoredSetting<K extends keyof Settings>(key: K): boolean {
+  return Object.prototype.hasOwnProperty.call(storedAtLoad, key);
+}
+
 // Live, in-memory copy. Persisted on every write.
 const current: Settings = {
   ...DEFAULTS,
-  ...readFromStorage(),
+  ...storedAtLoad,
   v: SCHEMA_VERSION,
 };
 

@@ -24,7 +24,7 @@ pub const UPKEEP_NN_FIXED: f32 = 0.05;
 // ---- One-time costs ----
 pub const COST_MOVE_PER_DIST: f32 = 0.02;
 pub const SPLIT_GIFT_MAX_DEFAULT: f32 = 30.0;
-pub const SPLIT_THRESHOLD_DEFAULT: f32 = 50.0;
+pub const SPLIT_THRESHOLD_DEFAULT: f32 = 99.0;
 
 // ---- Eat ----
 /// Default per-bite energy transfer fraction. Predator removes
@@ -34,15 +34,6 @@ pub const DIGESTION_COOLDOWN_TICKS: u32 = 50;
 
 // ---- Past-lifespan penalty ----
 pub const PAST_LIFESPAN_MULT: f32 = 4.0; // per 1000 ticks past max_age
-
-// ---- Curriculum ----
-// Cost factor = MIN_FACTOR + (1 - MIN_FACTOR) * smoothstep(min_pop, max_pop, pop).
-// Floor defaults to 0.0 (user-tunable up to 1.0); below min_pop costs vanish so
-// fragile early populations stop bleeding upkeep before selection has anything
-// to grip.
-pub const CURRICULUM_MIN_FACTOR_DEFAULT: f32 = 0.0;
-pub const CURRICULUM_MIN_POP_DEFAULT: u32 = 1000;
-pub const CURRICULUM_MAX_POP_DEFAULT: u32 = 2000;
 
 // ---- Brain ----
 // 32-input semantic layout — see src/world/nn.rs::build_nn_input.
@@ -89,18 +80,13 @@ pub const WALL_PROXIMITY_RANGE: f32 = 50.0;
 // ---- Brain mutation (v1.12 buckets) ----
 /// Fixed cap on mutation buckets. SAB-stable; under-used slots have weight=0.
 pub const MUTATION_BUCKET_COUNT: usize = 8;
-/// Default per-birth mutation: bucket 0 alone, rate=0.02, sigma=0.02 — matches
-/// pre-v1.12 single-knob behaviour exactly.
-pub const MUT_BUCKET0_WEIGHT_DEFAULT: f32 = 1.0;
-pub const MUT_BUCKET_RATE_DEFAULT: f32 = 0.02;
-pub const MUT_BUCKET_SIGMA_DEFAULT: f32 = 0.02;
 
 // ---- Trait-range constants still used as named values ----
 pub const MOVE_SPEED_MAX: f32 = 5.0;
 
 // ---- Physics ----
 pub const REPULSION_K: f32 = 2.0;
-pub const REPULSION_MAX: f32 = 5.0;
+pub const REPULSION_MAX: f32 = 0.1;
 
 // ---- Per-creature defaults (D3: genome removed; all creatures share these) ----
 pub const START_ENERGY_DEFAULT: f32 = 200.0;
@@ -108,9 +94,9 @@ pub const CREATURE_SIZE: f32 = 1.0;
 pub const MAX_AGE_DEFAULT: u32 = 5000;
 /// Default split-position jitter — children spawn at parent ± random[-v, v]
 /// per axis. Live-tunable via DevSliders.split_jitter.
-pub const SPLIT_JITTER_DEFAULT: f32 = 50.0;
+pub const SPLIT_JITTER_DEFAULT: f32 = 1.0;
 /// Default number of creatures seeded at world init (multi-founder).
-pub const STARTING_POP_DEFAULT: u32 = 8;
+pub const STARTING_POP_DEFAULT: u32 = 32;
 
 /// Sim-side population cap. The cap is a *simulation* invariant — when
 /// births would push pop above this number, `World::handle_births` randomly
@@ -125,6 +111,11 @@ pub const STARTING_POP_DEFAULT: u32 = 8;
 /// the same value and the worker handshake-asserts they agree.
 pub const MAX_POP_FOR_SIM: usize = 32_000;
 const _: () = assert!(MAX_POP_FOR_SIM >= STARTING_POP_DEFAULT as usize * 32);
+
+/// Default soft cap for the `max_population` slider. The TS shell may lower
+/// this on first boot for low-core devices (see `main.ts`); the hard sim
+/// invariant remains `MAX_POP_FOR_SIM`.
+pub const MAX_POPULATION_DEFAULT: u32 = 8_000;
 
 // ---- Deterministic chunking ----
 /// Chunk-count clamps. Per-tick count = `clamp(pop/32, MIN, min(MAX, workers))`.
@@ -145,7 +136,7 @@ pub const GRASS_IN_CELL_GROWTH_R_DEFAULT: f32 = 0.05;
 /// Default cross-kernel propagation rate slider.
 pub const GRASS_PROPAGATION_RATE_K_DEFAULT: f32 = 0.001;
 /// Default number of cells seeded at world init.
-pub const GRASS_INITIAL_SEED_COUNT_DEFAULT: u32 = 100;
+pub const GRASS_INITIAL_SEED_COUNT_DEFAULT: u32 = 1000;
 /// Default energy gained per successful graze bite. Live-tunable via
 /// DevSliders.grass_energy_per_bite.
 pub const GRASS_ENERGY_PER_BITE_DEFAULT: f32 = 10.0;
