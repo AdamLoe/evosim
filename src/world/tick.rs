@@ -1,30 +1,31 @@
 //! Per-tick step bodies that mutate `World`. All as `impl World` blocks; private to the `crate::world` parent.
 //!
-//! D3: Genome removed. All body trait reads replaced with constants:
-//!   g_graze_eff → 1.0, g_size → CREATURE_SIZE,
-//!   g_move_speed → MOVE_SPEED_MAX,
-//!   g_eat_eff → 1.0 (always enabled), armor/bite_reach → 0.0.
-//! D9: Scavenge action removed; eat_and_scavenge renamed to eat.
+//! v2.0 Wave 2a: per-creature body genome reintroduced. Body trait reads are
+//! genome-rescaled at each use site (radius, speed cap, move cost, idle upkeep,
+//! graze yield, attack damage). The `Eat` action was renamed to `Attack`. The
+//! biome movement penalty is genome-modulated per creature (water_affinity /
+//! heat_tolerance reduce the water / desert severity).
 
 use super::World;
 use crate::constants::*;
-use crate::creature::Action;
+use crate::creature::{Action, FlashTag};
 #[cfg(feature = "threads")]
 use rayon::prelude::*;
 
-/// Per-predator outcome from the parallel scan phase of `eat()`. Applied
+/// Per-predator outcome from the parallel scan phase of `attack()`. Applied
 /// sequentially after the parallel block since `Hit` writes touch both the
-/// predator and prey scratch lanes — a race risk under rayon.
+/// attacker and victim scratch lanes — a race risk under rayon.
 #[derive(Clone, Copy, Debug, Default)]
-pub(crate) enum EatPick {
-    /// Creature didn't choose `Action::Eat` (or n == 0).
+pub(crate) enum AttackPick {
+    /// Creature didn't choose `Action::Attack` (or n == 0).
     #[default]
     Skip,
-    /// Creature chose Eat but was in digestion cooldown, or had no in-reach
-    /// target. Records the "attempt" for downstream bookkeeping (color EMA)
-    /// without applying any bite.
+    /// Creature chose Attack but was in digestion cooldown, or had no in-reach
+    /// target. Records the "attempt" for downstream bookkeeping without applying
+    /// any bite.
     Miss,
-    /// Eat landed on prey `j`; `transfer` is the pre-eat-eff energy delta.
+    /// Attack landed on victim `j`; `transfer` is the energy delta removed from
+    /// the victim (already scaled by the attacker's diet+body_size).
     Hit { j: u32, transfer: f32 },
 }
 
@@ -45,7 +46,6 @@ impl World {
             return;
         }
 
-        let ri = CREATURE_SIZE * BODY_RADIUS_PER_SIZE; // D3: size = CREATURE_SIZE always
         let bites_per_block = self.sliders.grass_bites_per_block.max(1) as f32;
         let density_chunk = GRASS_MAX / bites_per_block;
         let energy_per_bite = self.sliders.grass_energy_per_bite;
@@ -56,6 +56,13 @@ impl World {
             }
             let xi = self.creatures.x[i];
             let yi = self.creatures.y[i];
+            // v2.0 Wave 2a: body radius is genome-scaled.
+            let ri = CREATURE_SIZE * BODY_RADIUS_PER_SIZE
+                * self.creatures.genome[i].body_size_factor();
+            // v2.0 Wave 2a: graze yield favors grazers — a pure predator
+            // (diet=1) grazes at half yield; a pure grazer (diet=0) at full.
+            let diet = self.creatures.genome[i].diet;
+            let graze_yield = 1.0 - 0.5 * diet;
 
             // Phase 1: collect overlapping cell indices (immutable borrow of grass).
             let mut cells = std::mem::take(&mut self.scratch_neighbors);
@@ -70,7 +77,11 @@ impl World {
             for &cell_idx in &cells {
                 total_gain += self.grass.consume(cell_idx, density_chunk, energy_per_bite);
             }
-            self.creatures.energy[i] += total_gain;
+            self.creatures.energy[i] += total_gain * graze_yield;
+            // v2.0 Wave 2a: ring-flash green if this graze actually consumed.
+            if total_gain > 0.0 {
+                self.creatures.set_flash(i, FlashTag::Grazed);
+            }
 
             // Restore the scratch buffer (high-water-mark allocation preserved).
             self.scratch_neighbors = cells;
@@ -85,20 +96,23 @@ impl World {
             return;
         }
 
-        // D3: speed_cap = MOVE_SPEED_MAX for all creatures (constant).
-        let speed_cap = MOVE_SPEED_MAX;
         let move_mult = self.sliders.move_cost_multiplier;
         let world_size = self.dims.world_size;
         let wrap = self.dims.wrap_world;
         for i in 0..n {
-            // v2.0 Wave 1b: biome base-severity penalty `p` for the cell the
-            // creature currently occupies. Two of its three effects apply here:
-            // a reduced effective speed cap and a higher move-cost multiplier.
-            // (The third — extra upkeep — is in energy_bookkeeping.) Wave 2 will
-            // modulate `p` per genome; here it's genome-independent.
-            let p = self.movement_penalty_at(self.creatures.x[i], self.creatures.y[i]);
+            // v2.0 Wave 2a: speed cap + move cost are genome-scaled by max_speed.
+            let speed_factor = self.creatures.genome[i].max_speed_factor();
+            let speed_cap = MOVE_SPEED_MAX * speed_factor;
+            // v2.0 Wave 2a: GENOME-modulated biome penalty `p` for the cell the
+            // creature occupies (reduced by its water_affinity / heat_tolerance).
+            // Two of its three effects apply here: a reduced effective speed cap
+            // and a higher move-cost multiplier. (The third — extra upkeep — is
+            // in energy_bookkeeping.)
+            let p = self.movement_penalty_for(i);
             let eff_speed_cap = speed_cap * (1.0 - K_BIOME_SPEED * p);
-            let eff_move_mult = move_mult * (1.0 + K_BIOME_COST * p);
+            // Faster creatures pay proportionally more per distance (max_speed
+            // trades raw cap for higher movement cost).
+            let eff_move_mult = move_mult * speed_factor * (1.0 + K_BIOME_COST * p);
             let vx = self.creatures.vx[i];
             let vy = self.creatures.vy[i];
             let mag2 = vx * vx + vy * vy;
@@ -125,9 +139,11 @@ impl World {
 
         self.grid.rebuild(&self.creatures.x, &self.creatures.y);
 
-        // D3: ri is constant for all creatures.
-        let ri = CREATURE_SIZE * BODY_RADIUS_PER_SIZE;
-        let search = ri + ri; // rsum_max = 2 * ri (all same size)
+        // v2.0 Wave 2a: body radius is genome-scaled, so the search radius uses
+        // the maximum possible body radius (body_size trait = 1.0 → factor 1.5)
+        // for BOTH creatures to be sure no overlapping pair is missed.
+        let max_body_r = CREATURE_SIZE * BODY_RADIUS_PER_SIZE * 1.5;
+        let search = max_body_r + max_body_r;
         let rep_max = self.sliders.repulsion_max;
 
         self.scratch_fx.resize(n, 0.0);
@@ -149,11 +165,14 @@ impl World {
                         neighbors.push(j);
                     }
                 });
+                // v2.0 Wave 2a: per-creature genome-scaled body radius.
+                let ri = CREATURE_SIZE * BODY_RADIUS_PER_SIZE
+                    * self.creatures.genome[i].body_size_factor();
                 for &j in &neighbors {
                     let xj = self.creatures.x[j];
                     let yj = self.creatures.y[j];
-                    // D3: rj == ri. Walled: raw Euclidean displacement.
-                    // Toroidal: minimum-image so seam-neighbors repel the short way.
+                    // Walled: raw Euclidean displacement. Toroidal: minimum-image
+                    // so seam-neighbors repel the short way.
                     let mut dx = xj - xi;
                     let mut dy = yj - yi;
                     if wrap {
@@ -169,7 +188,10 @@ impl World {
                         }
                     }
                     let d2 = dx * dx + dy * dy;
-                    let rsum = ri + ri;
+                    // v2.0 Wave 2a: pair sum of genome-scaled radii.
+                    let rj = CREATURE_SIZE * BODY_RADIUS_PER_SIZE
+                        * self.creatures.genome[j].body_size_factor();
+                    let rsum = ri + rj;
                     if d2 < rsum * rsum {
                         if d2 > 1e-8 {
                             let d = d2.sqrt();
@@ -201,15 +223,16 @@ impl World {
 
         // S31: track whether any position changed to skip the final grid rebuild.
         // Walled: wall-clamp to [ri, world_size-ri]. Toroidal: wrap into
-        // [0, world_size). D3: ri is constant CREATURE_SIZE * BODY_RADIUS_PER_SIZE.
+        // [0, world_size). v2.0 Wave 2a: ri is genome-scaled per creature.
         let mut any_moved = false;
-        let ri = CREATURE_SIZE * BODY_RADIUS_PER_SIZE;
-        let lo = ri;
-        let hi = world_size - ri;
         for i in 0..n {
             if self.scratch_fx[i] != 0.0 || self.scratch_fy[i] != 0.0 {
                 any_moved = true;
             }
+            let ri = CREATURE_SIZE * BODY_RADIUS_PER_SIZE
+                * self.creatures.genome[i].body_size_factor();
+            let lo = ri;
+            let hi = world_size - ri;
             let px = self.creatures.x[i] + self.scratch_fx[i];
             let py = self.creatures.y[i] + self.scratch_fy[i];
             let (new_x, new_y) = if wrap {
@@ -230,18 +253,23 @@ impl World {
         }
     }
 
-    /// Eat resolution. Scavenge action removed in D9; function renamed from eat_and_scavenge.
+    /// Attack resolution (v2.0 Wave 2a: `eat` renamed to `attack`).
     ///
-    /// Parallel scan + sequential apply. The per-predator search (find the
-    /// closest in-reach prey) is the hot loop at high pop — in a clump,
-    /// every cell query returns many candidates and the inner distance
-    /// comparison runs over all of them. Splitting the search across rayon
-    /// workers takes that O(N·K) cost down by the worker count.
+    /// Parallel scan + sequential apply. The per-attacker search (find an
+    /// in-reach target) is the hot loop at high pop — in a clump, every cell
+    /// query returns many candidates. Splitting the search across rayon workers
+    /// takes that O(N·K) cost down by the worker count.
     ///
     /// The parallel phase only reads from the SoA + grid; writes that touch
-    /// shared prey lanes (`scratch_damage[j]`) happen serially afterward
-    /// from a per-predator `EatPick` buffer.
-    pub(crate) fn eat(&mut self) {
+    /// shared victim lanes (`scratch_damage[j]`) happen serially afterward from
+    /// a per-attacker `AttackPick` buffer.
+    ///
+    /// v2.0 Wave 2a: attack effectiveness is genome-scaled. The transfer is
+    /// `eat_bite_fraction * victim.energy * effectiveness`, where
+    /// `effectiveness = (0.5 + diet) * body_size_factor` of the ATTACKER —
+    /// predator-diet + larger body hit harder. Single-pool: hits any creature
+    /// (W3 adds species gating).
+    pub(crate) fn attack(&mut self) {
         let n = self.creatures.len();
         if n == 0 {
             return;
@@ -251,27 +279,25 @@ impl World {
         self.scratch_cooldown_set.resize(n, false);
         self.scratch_attempted_eat.resize(n, false);
         self.scratch_got_a_bite.resize(n, false);
-        self.scratch_eat_picks.resize(n, EatPick::Skip);
+        self.scratch_attack_picks.resize(n, AttackPick::Skip);
         self.scratch_damage.fill(0.0);
         self.scratch_gain.fill(0.0);
         self.scratch_cooldown_set.fill(false);
         self.scratch_attempted_eat.fill(false);
         self.scratch_got_a_bite.fill(false);
-        self.scratch_eat_picks.fill(EatPick::Skip);
+        self.scratch_attack_picks.fill(AttackPick::Skip);
 
-        // D3: all creatures have eat_eff = 1.0, armor = 0.0, bite_reach = 0.0,
-        // size = CREATURE_SIZE (all constant).
-        let size = CREATURE_SIZE;
-        let radius_i = size * BODY_RADIUS_PER_SIZE;
-        let max_range = radius_i + radius_i; // bite_reach = 0, rj = radius_i
-        let max_range_sq = max_range * max_range;
-        let armor = 0.0_f32;
+        // v2.0 Wave 2a: max reach uses the largest possible body radius for both
+        // attacker and victim (body_size factor ≤ 1.5) so the grid query never
+        // misses an in-reach pair; the exact per-pair radius is checked inside.
+        let max_body_r = CREATURE_SIZE * BODY_RADIUS_PER_SIZE * 1.5;
+        let max_range = max_body_r + max_body_r;
         let bite_frac = self.sliders.eat_bite_fraction;
         let world_size = self.dims.world_size;
         let wrap = self.dims.wrap_world;
 
         // Parallel scan: every per-i body only reads from xs/ys/actions/
-        // cooldowns/energies/ids/grid (immutable across threads) and writes
+        // cooldowns/energies/genome/grid (immutable across threads) and writes
         // exclusively to its own `picks[i]` slot.
         {
             let xs = &self.creatures.x[..n];
@@ -279,37 +305,34 @@ impl World {
             let actions = &self.creatures.action_this_tick[..n];
             let cooldowns = &self.creatures.digestion_cooldown[..n];
             let energies = &self.creatures.energy[..n];
-            let ids = &self.creatures.id[..n];
+            let genome = &self.creatures.genome[..n];
             let grid = &self.grid;
-            let picks = &mut self.scratch_eat_picks[..n];
+            let picks = &mut self.scratch_attack_picks[..n];
 
-            let scan_one = |i: usize, slot: &mut EatPick| {
-                if actions[i] != Action::Eat {
-                    *slot = EatPick::Skip;
+            let scan_one = |i: usize, slot: &mut AttackPick| {
+                if actions[i] != Action::Attack {
+                    *slot = AttackPick::Skip;
                     return;
                 }
                 if cooldowns[i] > 0 {
-                    *slot = EatPick::Miss;
+                    *slot = AttackPick::Miss;
                     return;
                 }
                 let xi = xs[i];
                 let yi = ys[i];
-                // First-valid-target eat: instead of scanning every candidate
-                // for the *closest* in-reach prey (O(K) per predator → O(N·K)
-                // total in clumps), bail as soon as we find any in-reach prey.
-                // The per-cell iteration starts at `i % K_cell` and wraps, so
-                // different predators in the same stack pick different
-                // cell-mates first — the bite target spreads across the pile
-                // rather than always landing on the lowest-index (oldest)
-                // resident. See decisions/sim.md "Eat picks first-valid…".
-                let _ = ids; // tiebreak field no longer used; kept for parity
+                let ri = CREATURE_SIZE * BODY_RADIUS_PER_SIZE * genome[i].body_size_factor();
+                // First-valid-target attack: bail as soon as we find any
+                // in-reach target. The per-cell iteration starts at `i % K_cell`
+                // and wraps, so different attackers in the same stack pick
+                // different cell-mates first — the bite target spreads across
+                // the pile. See decisions/sim.md.
                 let pick = grid.find_first_in_radius(xi, yi, max_range, i, |j| {
                     if j == i {
                         return false;
                     }
                     let mut dx = xs[j] - xi;
                     let mut dy = ys[j] - yi;
-                    // Toroidal minimum-image so a prey just over the seam is in reach.
+                    // Toroidal minimum-image so a target just over the seam is in reach.
                     if wrap {
                         if dx > world_size * 0.5 {
                             dx -= world_size;
@@ -323,14 +346,22 @@ impl World {
                         }
                     }
                     let d2 = dx * dx + dy * dy;
-                    d2 <= max_range_sq
+                    let rj = CREATURE_SIZE * BODY_RADIUS_PER_SIZE * genome[j].body_size_factor();
+                    let reach = ri + rj;
+                    d2 <= reach * reach
                 });
                 *slot = match pick {
-                    Some(j) => EatPick::Hit {
-                        j: j as u32,
-                        transfer: bite_frac * energies[j] * (1.0 - armor),
-                    },
-                    None => EatPick::Miss,
+                    Some(j) => {
+                        // v2.0 Wave 2a: attack effectiveness scales with the
+                        // attacker's diet (predator) + body size.
+                        let g = &genome[i];
+                        let effectiveness = (0.5 + g.diet) * g.body_size_factor();
+                        AttackPick::Hit {
+                            j: j as u32,
+                            transfer: bite_frac * energies[j] * effectiveness,
+                        }
+                    }
+                    None => AttackPick::Miss,
                 };
             };
 
@@ -351,43 +382,66 @@ impl World {
 
         // Sequential apply: now safe to touch the shared damage/gain lanes.
         for i in 0..n {
-            match self.scratch_eat_picks[i] {
-                EatPick::Skip => {}
-                EatPick::Miss => {
+            match self.scratch_attack_picks[i] {
+                AttackPick::Skip => {}
+                AttackPick::Miss => {
                     self.scratch_attempted_eat[i] = true;
                 }
-                EatPick::Hit { j, transfer } => {
+                AttackPick::Hit { j, transfer } => {
                     let j = j as usize;
                     self.scratch_attempted_eat[i] = true;
                     self.scratch_damage[j] += transfer;
-                    // eat_eff = 1.0 (D3): predator gain == transfer.
+                    // Attacker gains the transferred energy.
                     self.scratch_gain[i] += transfer;
                     self.scratch_cooldown_set[i] = true;
                     self.scratch_got_a_bite[i] = true;
+                    // v2.0 Wave 2a: ring-flash the attacker yellow now; the
+                    // killed-victim red flash is decided after energy resolves.
+                    self.creatures.set_flash(i, FlashTag::Attacked);
                 }
             }
         }
 
+        // Resolve cooldowns + energy. Capture each victim's pre-damage energy so
+        // the kill-credit pass below can detect the lethal transition.
         for i in 0..n {
             if self.scratch_attempted_eat[i] && self.scratch_cooldown_set[i] {
                 self.creatures.digestion_cooldown[i] = self.sliders.digestion_cooldown_ticks;
             }
             self.creatures.energy[i] += self.scratch_gain[i];
+        }
+        // v2.0 Wave 2a: kill-credit ring-flash. An attacker flashes red
+        // ("killed") if the bite it landed drove its victim from alive to dead.
+        // We check before subtracting the victim's damage so "alive → dead" is
+        // unambiguous, then subtract. Done in two passes: first detect lethal
+        // victims, then apply damage.
+        for i in 0..n {
+            if let AttackPick::Hit { j, .. } = self.scratch_attack_picks[i] {
+                let j = j as usize;
+                let victim_after = self.creatures.energy[j] - self.scratch_damage[j];
+                if self.creatures.energy[j] > 0.0 && victim_after <= 0.0 {
+                    self.creatures.set_flash(i, FlashTag::Killed);
+                }
+            }
+        }
+        for i in 0..n {
             self.creatures.energy[i] -= self.scratch_damage[i];
         }
     }
 
     pub(crate) fn energy_bookkeeping(&mut self) {
-        // D3: all variable body-trait upkeep terms removed. Flat formula:
-        //   up = UPKEEP_BASE + UPKEEP_NN_FIXED + UPKEEP_GUT + mouth_tax
-        // (UPKEEP_GUT for gut always present, mouth_tax for eat_eff always > 0)
+        // Idle upkeep base: UPKEEP_BASE + UPKEEP_NN_FIXED + UPKEEP_GUT + mouth_tax.
         let mouth_tax = self.sliders.mouth_tax;
         let up_base = UPKEEP_BASE + UPKEEP_NN_FIXED + UPKEEP_GUT + mouth_tax;
         let mult = self.sliders.upkeep_multiplier;
-        let energy_cap = self.sliders.energy_max;
         let max_age = self.sliders.max_age;
+        // v2.0 Wave 2a: per-creature energy cap scales with body_size (bigger
+        // bodies hold more). Median genome (0.5 → factor 1.0) reproduces the cap.
+        let energy_cap_base = self.sliders.energy_max;
         for i in 0..self.creatures.len() {
-            let mut up = up_base * mult;
+            // v2.0 Wave 2a: idle upkeep is multiplied by the metabolism trait.
+            let metabolism = self.creatures.genome[i].metabolism_factor();
+            let mut up = up_base * mult * metabolism;
             let age = self.creatures.age[i];
             if age > max_age {
                 let excess = (age - max_age) as f32;
@@ -395,16 +449,16 @@ impl World {
                 up *= age_mult.min(1e6);
             }
 
-            // v2.0 Wave 1b: extra per-tick upkeep for standing in a penalized
-            // biome (the third movement-penalty effect). Added AFTER the
-            // age-multiplier so the biome surcharge is a flat additive drain,
-            // not amplified by old age. Genome-independent in Wave 1b.
-            let p = self.movement_penalty_at(self.creatures.x[i], self.creatures.y[i]);
+            // v2.0 Wave 2a: extra per-tick upkeep for standing in a penalized
+            // biome (the third movement-penalty effect), GENOME-modulated by the
+            // creature's affinity traits. Added AFTER the age-multiplier so the
+            // biome surcharge is a flat additive drain, not amplified by old age.
+            let p = self.movement_penalty_for(i);
             up += K_BIOME_UPKEEP * p;
 
-            // D3: max_size_reached removed (was always CREATURE_SIZE anyway).
             self.creatures.energy[i] -= up;
-            // Live-tunable energy cap (clamp gains at end of tick).
+            // v2.0 Wave 2a: body_size-scaled energy cap.
+            let energy_cap = energy_cap_base * self.creatures.genome[i].body_size_factor();
             if self.creatures.energy[i] > energy_cap {
                 self.creatures.energy[i] = energy_cap;
             }
@@ -416,40 +470,20 @@ impl World {
         }
     }
 
-    /// v1.5 S3: per-creature action-EMA color update.
-    /// Green (Graze): +0.01 if argmax-pre==Graze else -0.01.
-    /// Blue (Split):  +0.5 on Split tick else -0.005.
-    /// Red (Eat):     +0.1 per successful bite else -0.001.
-    /// All channels clamped to [0, 1]. Scratch buffers (`scratch_argmax_pre`,
-    /// `scratch_got_a_bite`) must already be index-aligned with `creatures`
-    /// over `0..creatures.len()`. Newborns appended this tick (indices beyond
-    /// the scratch length) keep their initial (0,0,0) EMA.
-    pub(crate) fn color_ema_update(&mut self) {
+    /// v2.0 Wave 2a: ring-flash decay. Decrements every creature's
+    /// `flash_ticks`; when it reaches 0 the tag clears to `None`. Replaces the
+    /// old action-EMA color update (color now derives from the genome at
+    /// snapshot write; per-action highlight is the ring flash). Runs once per
+    /// tick in the `tick.color_ema` span (kept the span name for the profiler).
+    pub(crate) fn flash_decay(&mut self) {
         let n = self.creatures.len();
-        let m = n
-            .min(self.scratch_argmax_pre.len())
-            .min(self.scratch_got_a_bite.len());
-        for i in 0..m {
-            let dg = if self.scratch_argmax_pre[i] == Action::Graze as u8 {
-                0.5
-            } else {
-                -0.05
-            };
-            self.creatures.color_g[i] = (self.creatures.color_g[i] + dg).clamp(0.0, 1.0);
-
-            let db = if self.creatures.action_this_tick[i] == Action::Split {
-                1.0
-            } else {
-                -0.01
-            };
-            self.creatures.color_b[i] = (self.creatures.color_b[i] + db).clamp(0.0, 1.0);
-
-            let dr = if self.scratch_got_a_bite[i] {
-                1.0
-            } else {
-                -0.01
-            };
-            self.creatures.color_r[i] = (self.creatures.color_r[i] + dr).clamp(0.0, 1.0);
+        for i in 0..n {
+            if self.creatures.flash_ticks[i] > 0 {
+                self.creatures.flash_ticks[i] -= 1;
+                if self.creatures.flash_ticks[i] == 0 {
+                    self.creatures.flash_tag[i] = FlashTag::None;
+                }
+            }
         }
     }
 
@@ -598,6 +632,9 @@ mod tests {
     #[test]
     fn position_clamps_at_wall_edge() {
         let mut w = World::new("d7-wall-clamp");
+        // v2.0 Wave 2a: pin median genome so body radius = 1.0 (factor 1.0),
+        // matching this test's `ri = CREATURE_SIZE * BODY_RADIUS_PER_SIZE` bound.
+        w.creatures.genome[0] = crate::creature::Genome::median();
         w.creatures.x[0] = WORLD_SIZE - 1.0;
         w.creatures.y[0] = WORLD_SIZE * 0.5;
         w.creatures.vx[0] = 5.0; // would cross the right wall
@@ -663,7 +700,7 @@ mod tests {
         let b2 = Brain::founder(&mut rng, NnTopology::legacy());
         let n_before = w.creatures.len();
         w.creatures
-            .push(1, 598.0, WORLD_SIZE * 0.5, START_ENERGY_DEFAULT, 0, b2);
+            .push(1, 598.0, WORLD_SIZE * 0.5, START_ENERGY_DEFAULT, 0, b2, crate::creature::Genome::median());
         w.creatures.vx[n_before] = 0.0;
         w.creatures.vy[n_before] = 0.0;
 
@@ -713,7 +750,11 @@ mod tests {
         };
 
         let mut w = World::new("graze-patch");
-        // D3: size = CREATURE_SIZE always. Position creature at cell (30,30) center.
+        // v2.0 Wave 2a: median genome (radius 1.0) + pure-grazer diet (full yield).
+        let mut g0 = crate::creature::Genome::median();
+        g0.diet = 0.0;
+        w.creatures.genome[0] = g0;
+        // Position creature at cell (30,30) center.
         let cell_ix: usize = 30;
         let cell_iy: usize = 30;
         let cx = (cell_ix as f32 + 0.5) * GRASS_CELL_SIZE;
@@ -803,6 +844,9 @@ mod tests {
         };
 
         let mut w = World::new("graze-cap");
+        let mut g0 = crate::creature::Genome::median();
+        g0.diet = 0.0; // pure grazer → full graze yield (matches pre-genome)
+        w.creatures.genome[0] = g0;
         let ix = 2usize;
         let iy = 2usize;
         let cx = (ix as f32 + 0.5) * GRASS_CELL_SIZE;
@@ -836,6 +880,9 @@ mod tests {
         use crate::constants::{GRASS_CELL_SIZE, GRASS_ENERGY_PER_BITE_DEFAULT, GRASS_MAX};
 
         let mut w = World::new("graze-const-eff");
+        let mut g0 = crate::creature::Genome::median();
+        g0.diet = 0.0; // pure grazer → full graze yield (matches pre-genome)
+        w.creatures.genome[0] = g0;
         let ix = 5usize;
         let iy = 5usize;
         let cx = (ix as f32 + 0.5) * GRASS_CELL_SIZE;
@@ -865,6 +912,9 @@ mod tests {
         };
 
         let mut w = World::new("graze-conserve");
+        let mut g0 = crate::creature::Genome::median();
+        g0.diet = 0.0; // pure grazer → full graze yield (matches pre-genome)
+        w.creatures.genome[0] = g0;
         w.grass.density.fill(GRASS_MAX);
 
         let cx = WORLD_SIZE * 0.5;
@@ -917,15 +967,19 @@ mod tests {
     }
 
     /// P3a test: basic bite transfer — adjacent predator/prey, armor=0, eff=1.0, bite_frac=0.5.
-    /// D3: all creatures have eat_eff=1.0, armor=0.0 as constants.
+    /// v2.0 Wave 2a: median-genome attacker (diet=0.5, body_size=0.5 → factor
+    /// 1.0) gives effectiveness `(0.5 + 0.5) * 1.0 = 1.0`, reproducing the
+    /// pre-genome transfer (0.5 × 100 × 1.0 = 50).
     #[test]
-    fn p3a_eat_bite_basic_transfer() {
+    fn p3a_attack_bite_basic_transfer() {
         use crate::brain::{Brain, NnTopology};
 
         let mut w = World::new("p3a-basic");
         w.creatures.energy[0] = 100.0;
         w.creatures.digestion_cooldown[0] = 0;
-        w.creatures.action_this_tick[0] = Action::Eat;
+        w.creatures.action_this_tick[0] = Action::Attack;
+        // Pin the attacker's genome to median so effectiveness == 1.0.
+        w.creatures.genome[0] = crate::creature::Genome::median();
         w.sliders.eat_bite_fraction = 0.5;
 
         // Add prey (creature 1) adjacent.
@@ -935,21 +989,19 @@ mod tests {
         let pred_y = w.creatures.y[0];
         // Place prey within bite reach (0.0 since bite_reach = 0).
         w.creatures
-            .push(1, pred_x + 1.5, pred_y, 100.0, 0, prey_brain);
+            .push(1, pred_x + 1.5, pred_y, 100.0, 0, prey_brain, crate::creature::Genome::median());
 
         w.grid.rebuild(&w.creatures.x, &w.creatures.y);
 
         let pred_energy_before = w.creatures.energy[0];
         let prey_energy_before = w.creatures.energy[1];
 
-        w.eat();
+        w.attack();
 
         let pred_energy_after = w.creatures.energy[0];
         let prey_energy_after = w.creatures.energy[1];
 
-        // transfer = 0.5 * 100.0 * (1.0 - 0.0) = 50.0
-        // predator gain = transfer * eat_eff
-        // prey loss = transfer
+        // transfer = 0.5 * 100.0 * effectiveness(=1.0 at median genome) = 50.0
         let expected_gain = 50.0_f32;
         let prey_loss = prey_energy_before - prey_energy_after;
         let pred_gain = pred_energy_after - pred_energy_before;
@@ -966,14 +1018,14 @@ mod tests {
 
     /// P3a test: digestion cooldown still gates bites — only attempt cost charged, no bite.
     #[test]
-    fn p3a_eat_cooldown_still_gates() {
+    fn p3a_attack_cooldown_still_gates() {
         use crate::brain::{Brain, NnTopology};
 
         let mut w = World::new("p3a-cooldown");
         w.creatures.energy[0] = 100.0;
         // Set active cooldown so bite is gated.
         w.creatures.digestion_cooldown[0] = 10;
-        w.creatures.action_this_tick[0] = Action::Eat;
+        w.creatures.action_this_tick[0] = Action::Attack;
         w.sliders.eat_bite_fraction = 0.5;
 
         let mut rng = SimRng::from_u64(7);
@@ -981,14 +1033,14 @@ mod tests {
         let pred_x = w.creatures.x[0];
         let pred_y = w.creatures.y[0];
         w.creatures
-            .push(1, pred_x + 1.5, pred_y, 100.0, 0, prey_brain);
+            .push(1, pred_x + 1.5, pred_y, 100.0, 0, prey_brain, crate::creature::Genome::median());
 
         w.grid.rebuild(&w.creatures.x, &w.creatures.y);
 
         let prey_energy_before = w.creatures.energy[1];
         let pred_energy_before = w.creatures.energy[0];
 
-        w.eat();
+        w.attack();
 
         let prey_change = (w.creatures.energy[1] - prey_energy_before).abs();
         let pred_change = pred_energy_before - w.creatures.energy[0];
@@ -1005,55 +1057,50 @@ mod tests {
         );
     }
 
-    // ---- v1.5 S3 color-EMA tests ----
+    // ---- v2.0 Wave 2a ring-flash decay tests ----
 
-    /// v1.5 S3: one EMA tick where argmax-pre==Graze, action==Graze, no bite.
-    /// Green +0.01, blue −0.005 (clamped to 0), red −0.001 (clamped to 0).
-    /// Then a Split tick from non-zero blue bumps blue by +0.5 (clamped to 1).
+    /// A lit ring-flash counts down each tick and clears to `None` at 0.
     #[test]
-    fn color_ema_increments_on_action() {
-        let mut w = World::new("s3-color-ema");
-        let n = w.creatures.len();
+    fn flash_decay_counts_down_and_clears() {
+        use crate::creature::{FlashTag, FLASH_TICKS};
+        let mut w = World::new("wave2a-flash-decay");
+        // Founder starts with a Born flash from spawn.
+        assert_eq!(w.creatures.flash_tag[0], FlashTag::Born);
+        assert_eq!(w.creatures.flash_ticks[0], FLASH_TICKS);
+        // Decay FLASH_TICKS times → cleared.
+        for t in 1..=FLASH_TICKS {
+            w.flash_decay();
+            let remaining = FLASH_TICKS - t;
+            assert_eq!(w.creatures.flash_ticks[0], remaining, "after {t} decays");
+            if remaining == 0 {
+                assert_eq!(w.creatures.flash_tag[0], FlashTag::None, "tag clears at 0");
+            } else {
+                assert_eq!(w.creatures.flash_tag[0], FlashTag::Born, "tag persists while lit");
+            }
+        }
+        // Idempotent at 0.
+        w.flash_decay();
+        assert_eq!(w.creatures.flash_ticks[0], 0);
+        assert_eq!(w.creatures.flash_tag[0], FlashTag::None);
+    }
 
-        // --- Tick 1: Graze pre-argmax, Graze action, no bite ---
+    /// A successful graze lights the green ("grazed") flash.
+    #[test]
+    fn graze_sets_green_flash() {
+        use crate::constants::{GRASS_CELL_SIZE, GRASS_MAX};
+        use crate::creature::FlashTag;
+        let mut w = World::new("wave2a-graze-flash");
+        let cx = (10.5) * GRASS_CELL_SIZE;
+        let cy = (10.5) * GRASS_CELL_SIZE;
+        w.creatures.x[0] = cx;
+        w.creatures.y[0] = cy;
         w.creatures.action_this_tick[0] = Action::Graze;
-        w.scratch_argmax_pre.resize(n, Action::Graze as u8);
-        w.scratch_got_a_bite.resize(n, false);
-
-        w.color_ema_update();
-
-        assert!(
-            (w.creatures.color_g[0] - 0.5).abs() < 1e-6,
-            "green expected 0.5 got {}",
-            w.creatures.color_g[0]
-        );
-        assert_eq!(w.creatures.color_b[0], 0.0, "blue clamped at 0");
-        assert_eq!(w.creatures.color_r[0], 0.0, "red clamped at 0");
-
-        // --- Tick 2: Split action with Split pre-argmax + a bite ---
-        w.creatures.action_this_tick[0] = Action::Split;
-        w.scratch_argmax_pre[0] = Action::Split as u8;
-        w.scratch_got_a_bite[0] = true;
-
-        w.color_ema_update();
-
-        // green: was 0.5, argmax-pre != Graze → -0.05 → 0.45.
-        assert!(
-            (w.creatures.color_g[0] - 0.45).abs() < 1e-6,
-            "green expected 0.45 got {}",
-            w.creatures.color_g[0]
-        );
-        // blue: was 0.0, +1.0 (Split tick) → clamps to 1.0.
-        assert!(
-            (w.creatures.color_b[0] - 1.0).abs() < 1e-6,
-            "blue expected 1.0 got {}",
-            w.creatures.color_b[0]
-        );
-        // red: was 0.0, +1.0 (bite) → clamps to 1.0.
-        assert!(
-            (w.creatures.color_r[0] - 1.0).abs() < 1e-6,
-            "red expected 1.0 got {}",
-            w.creatures.color_r[0]
+        w.grass.density.fill(GRASS_MAX);
+        w.graze();
+        assert_eq!(
+            w.creatures.flash_tag[0],
+            FlashTag::Grazed,
+            "a consuming graze must light the green flash"
         );
     }
 }

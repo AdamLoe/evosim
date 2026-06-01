@@ -24,7 +24,7 @@ tick                 ← per-tick sim wall-clock (Rust-side)
   tick.nn                       (LEAF — wall-clock wait for rayon)
   tick.movement
   tick.graze
-  tick.eat_scavenge
+  tick.attack                   (v2.0 Wave 2a: was tick.eat_scavenge)
   tick.grass_step               (LEAF — wall-clock wait for rayon)
   tick.energy_bookkeeping
   tick.collect_deaths

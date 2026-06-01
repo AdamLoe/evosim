@@ -215,6 +215,11 @@ fn biome_nn_inputs_present_in_both_wrap_modes() {
                 ..Default::default()
             },
         );
+        // v2.0 Wave 2a: the biome NN inputs are genome-modulated. Pin the
+        // founder's affinity traits to 0 so it reads the BASE severities this
+        // test asserts (a higher-affinity creature would read a lower penalty).
+        w.creatures.genome[0].water_affinity = 0.0;
+        w.creatures.genome[0].heat_tolerance = 0.0;
         // Both biome groups must be active regardless of wrap.
         let dir_off = w
             .nn_input_layout

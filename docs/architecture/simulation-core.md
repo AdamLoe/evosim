@@ -173,12 +173,12 @@ fn step(&mut self) -> bool {
     // 2. tick.nn                — chunked Brain::forward (LEAF in tick tree)
     // 3. tick.movement          — apply_movement_and_repulsion
     // 4. tick.graze             — multi-cell density consume (sequential)
-    // 5. tick.eat_scavenge      — per-bite energy transfer
+    // 5. tick.attack            — per-bite energy transfer (v2.0 Wave 2a: Eat→Attack)
     // 6. tick.grass_step        — grass propagation + bitset rebuild (LEAF)
     // 7. tick.energy_bookkeeping
     // 8. tick.collect_deaths
     // 9. tick.handle_births     — split + RANDOM CULL back to MAX_POP_FOR_SIM
-    //10. tick.color_ema         — per-creature RGB drift toward action argmax
+    //10. tick.color_ema         — ring-flash decay (v2.0 Wave 2a; span name kept)
     //11. tick.bookkeeping_tail  — last_action promote, tick++, world-end check
 }
 ```
@@ -212,7 +212,7 @@ Default (wrap **on**) — real width 31 → padded 32:
 
 | Slot | Group / inputs |
 |---|---|
-| `[0..8)` | `SelfMemory`: hunger, age_frac, prev_vx, prev_vy, is_last_graze, is_last_eat, ticks_since_split_norm, cooldown_ready |
+| `[0..8)` | `SelfMemory`: hunger, age_frac, prev_vx, prev_vy, is_last_graze, is_last_attack, ticks_since_split_norm, cooldown_ready |
 | `[8..16)` | `CreatureSectors` × 8 world-aligned sectors (range `PROXIMITY_RANGE = 20u`) |
 | `[16..24)` | `GrassSectors` × 8 sectors (range `GRASS_PROXIMITY_RANGE = 20u`) |
 | `[24..28)` | `BiomeDir`: movement penalty one cell N/S/E/W (base severity, wrap-aware) |
@@ -229,8 +229,13 @@ shifting `CreatureSectors`→`[12..20)`, `GrassSectors`→`[20..28)`,
 
 Width table (wrap × {on, off}): **wrap on = 26+5 = 31 → pad 32; wrap off =
 30+5 = 35 → pad 40** (the `+5` is the always-on `BiomeDir`+`CurrCellPenalty`).
-The biome inputs are all base-severity penalties in `[0, 1]`, sampled wrap-aware
-alongside the existing input build (`BiomeSampler` in `src/world/nn.rs`).
+The biome inputs are penalties in `[0, 1]`, sampled wrap-aware alongside the
+existing input build (`BiomeSampler` in `src/world/nn.rs`). **v2.0 Wave 2a:
+these biome inputs are GENOME-MODULATED per creature** — the `BiomeDir` +
+`CurrCellPenalty` slots read `base_severity * (1 - water_affinity)` on water
+cells and `* (1 - heat_tolerance)` on desert cells, so a high-affinity creature
+reads the same lower penalty it pays in the tick effects (this closes the Wave
+1b seam).
 
 `GRASS_PROXIMITY_RANGE` was raised **8u → 20u** so each of the 8 grass sectors
 spans `ceil(20/5) = 4` grass cells (≥3) at the 5u cell; the sector LUT radius
@@ -243,17 +248,66 @@ constants in the build path. The SIMD-vs-scalar drift guard now exercises BOTH
 input widths (32 and 40). Old brains are discarded (no save/load).
 
 Outputs: `out[0] = vx`, `out[1] = vy`, `out[2..5]` = action logits for
-`{Graze=0, Eat=1, Split=2}`. Hidden layers use Leaky ReLU (slope 0.01).
+`{Graze=0, Attack=1, Split=2}` (v2.0 Wave 2a: `Eat` renamed to `Attack`; the
+repr indices and logit order are unchanged, so NN numerics are stable). Hidden
+layers use Leaky ReLU (slope 0.01).
 Per-layer founder init follows He-uniform `r = sqrt(6 / fan_in)`, computed at
 runtime per matmul (the first matmul's `fan_in` is the runtime input width).
 Founder weights are pure uniform-random — no hardwiring.
+
+## Body genome (v2.0 Wave 2a, single-pool)
+
+Each creature carries a `Genome` (`src/creature.rs`) — **six `f32 ∈ [0,1]`**
+traits, stored as a SoA column (`creatures.genome`) alongside the brain. The
+genome is **sim-side only**; it never rides the snapshot (the render color is
+*derived* from it at write time). Each trait is rescaled at its use site, with
+ranges centered so a **median genome (all 0.5) ≈ today's constants**:
+
+| trait | rescale → factor | plugs into |
+|---|---|---|
+| `body_size` | `0.5 + t` ∈ [0.5, 1.5] | sprite + repulsion radius, energy-cap factor, attack damage |
+| `max_speed` | `0.5 + t` ∈ [0.5, 1.5] | speed cap × factor; move-cost × factor |
+| `metabolism` | `0.5 + t` ∈ [0.5, 1.5] | per-tick idle-upkeep multiplier |
+| `diet` | `t` (0 grazer … 1 predator) | graze yield × `(1 - 0.5·diet)`; attack effectiveness × `(0.5 + diet)` |
+| `water_affinity` | `t` | water move-penalty × `(1 - t)` |
+| `heat_tolerance` | `t` | desert move-penalty × `(1 - t)` |
+
+Attack effectiveness combines diet + body: `effectiveness = (0.5 + diet) *
+body_size_factor` (so a median genome's effectiveness is `1.0 * 1.0 = 1.0`,
+reproducing the pre-genome transfer). The genome-modulated movement penalty
+(`World::movement_penalty_for`) reduces the Wave 1b base severity by the affinity
+trait of the cell's biome, and the **same modulation is applied to the biome NN
+inputs** — closing the Wave 1b seam.
+
+**Founders** draw a genome uniformly in `[0,1]` per trait (single-pool: visible
+diversity from tick 0; drawn from the world RNG right after the founder brain).
+**Mutation on split:** the genome mutates off the **same per-birth mutation
+bucket** as the brain (`Brain::child_from_with_sigma` returns the chosen bucket's
+sigma); each trait takes one Gaussian nudge `+= normal() * (bucket.sigma *
+trait_mutation_sigma_multiplier)` then is clamped to `[0,1]`. Same bucket, scaled
+sigma — the genome draws happen *after* the brain weights on the same RNG so the
+stream stays deterministic. `trait_mutation_sigma_multiplier` is a live slider
+(default **0.3**).
+
+## Action ring-flash (v2.0 Wave 2a, sim-side state)
+
+Each creature carries a transient `flash_tag` (`FlashTag`) + `flash_ticks`
+countdown (5 ticks). A creature records a flash when it acts; when several fire
+in one tick the **highest priority wins**: **Killed (red) > CreatedChild (blue) >
+Attacked (yellow) > Grazed (green)**; **Born (teal)** is set at spawn. The
+countdown decrements each tick in `flash_decay` (the `tick.color_ema` span, kept
+for profiler stability — it replaced the old action-EMA color update). The flash
+is packed into the snapshot for the renderer (2b draws the ring); see
+[`shared-memory-and-protocol.md`](shared-memory-and-protocol.md).
 
 ## Code anchors
 
 - `src/world/mod.rs` → `World`, `DevSliders`, `World::step`,
   `World::handle_births`, `World::new_with_sliders`.
-- `src/world/tick.rs` → `apply_movement_and_repulsion`, `graze`, `eat`,
-  `energy_bookkeeping`, `collect_deaths`, `color_ema_update`.
+- `src/world/tick.rs` → `apply_movement_and_repulsion`, `graze`, `attack`,
+  `energy_bookkeeping`, `collect_deaths`, `flash_decay`.
+- `src/creature.rs` → `Genome` (6-trait body genome + rescale-factor helpers),
+  `FlashTag` (ring-flash priority), `CreatureSoA` (`genome` / `flash_*` columns).
 - `src/world/nn.rs` → `nn_forward_all_chunks`, `build_nn_input`,
   `NnInputLayout` / `NnInputGroup` (composable input-layout descriptor, incl.
   the `BiomeDir` + `CurrCellPenalty` groups), `BiomeSampler` (biome NN-input

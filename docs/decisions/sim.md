@@ -244,26 +244,58 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 - **Applies to**: `architecture/simulation-core.md`.
 - **Code anchors**: `src/creature.rs → Action`, `Action::ALL`.
 
-### Creature color is per-creature action EMA, not NN-weight hash
+### Creature color is genome-derived; per-action highlight is a ring-flash (v2.0 Wave 2a)
 
-- **Decision**: Three EMA channels track Graze argmax / successful
-  bites / Split intent → green / red / blue. Display floor 0.15 per
-  channel.
-- **Why**: A glance shows behaviour, not identity. NN-weight hash
-  colors were stable per lineage but gave no signal about what a
-  creature was *doing*.
+- **Decision**: The action-EMA `color_r/g/b` channels are **removed**.
+  Display color is now **derived from the genome** at snapshot write
+  (`color_u32`: HSV hue←diet, sat←body_size, value←max_speed). Per-action
+  highlight moved to a transient **ring-flash** — a `flash_tag` +
+  5-tick countdown packed into the snapshot's `packed_u32`. Priority when
+  several fire in one tick: Killed (red) > CreatedChild (blue) > Attacked
+  (yellow) > Grazed (green); Born (teal) is set at spawn.
+- **Why**: With an evolving body genome, identity-color (lineage/morphology)
+  and behaviour-highlight (a brief ring) are *separable* — the steady color
+  reads "what is this creature" and the flash reads "what did it just do".
+  The old EMA conflated the two and rode 3 f32 lanes.
 - **Applies to**: `architecture/simulation-core.md`,
+  `architecture/shared-memory-and-protocol.md`,
   `architecture/render-pipeline.md`.
-- **Code anchors**: `src/world/mod.rs → color_ema_update`,
-  `CreatureSoA::color_r / color_g / color_b`.
+- **Code anchors**: `src/creature.rs → Genome, FlashTag`,
+  `src/world/tick.rs → flash_decay`,
+  `src/wasm_api.rs → genome_color_u32, pack_render_u32`.
 
-### Eat picks first-valid in a per-predator-rotated cell walk
+### Body genome reintroduced — 6 traits, single-pool, bucket-coupled mutation (v2.0 Wave 2a)
 
-- **Decision**: `World::eat` no longer scans every in-radius candidate to
-  pick the *closest* in-reach prey. Instead it takes the first prey
-  whose squared distance falls inside `max_range_sq`, with the per-cell
-  iteration starting at `predator_idx % K_cell` and wrapping. Drops the
-  closest + lowest-id tiebreak that the previous implementation used.
+- **Decision**: Each creature carries a 6-trait body `Genome` (`body_size,
+  max_speed, metabolism, diet, water_affinity, heat_tolerance`, each `f32 ∈
+  [0,1]`), rescaled at each use site with ranges **centered so a median (0.5)
+  genome ≈ today's constants**. It is a SoA column, **never on the snapshot**
+  (the render color is derived from it). Founders seed **uniform-random per
+  trait** (single-pool diversity from tick 0). On split the genome mutates off
+  the **same per-birth mutation bucket** as the brain, with the trait Gaussian
+  step using `bucket.sigma * trait_mutation_sigma_multiplier` (default **0.3**),
+  drawn *after* the brain weights on the same RNG (deterministic). Traits clamp
+  to `[0,1]`. The biome movement penalty (and the matching biome NN inputs) are
+  genome-modulated by the affinity traits — closing the Wave 1b seam.
+- **Why**: Reintroduces morphology as a real selection axis (the D3 deletion
+  flattened every creature to constants). Coupling the genome step to the brain's
+  bucket keeps one mutation knob set, and the ×0.3 multiplier keeps trait drift
+  gentler than weight drift so behaviour and body don't co-mutate at the same
+  scale. Single-pool (no species/crossover) keeps Wave 2a scoped — W3 adds those.
+- **Applies to**: `architecture/simulation-core.md`,
+  `architecture/shared-memory-and-protocol.md`.
+- **Code anchors**: `src/creature.rs → Genome`,
+  `src/brain.rs → child_from_with_sigma`,
+  `src/world/mod.rs → handle_births / movement_penalty_for`,
+  `src/world/tick.rs → graze / attack / energy_bookkeeping`.
+
+### Attack picks first-valid in a per-attacker-rotated cell walk
+
+- **Decision**: `World::attack` (v2.0 Wave 2a: renamed from `eat`) does not scan
+  every in-radius candidate to pick the *closest* in-reach target. Instead it
+  takes the first target whose squared distance falls inside the genome-scaled
+  reach, with the per-cell iteration starting at `attacker_idx % K_cell` and
+  wrapping. Drops the closest + lowest-id tiebreak the previous impl used.
 - **Why**: At high pop with `repulsion_max=0` (or any large clump),
   every predator's bbox returned dozens of candidates and the inner
   scan dominated the tick. The cells in a clump are small enough that
@@ -273,7 +305,7 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   (SoA-index order ≈ age order).
 - **Applies to**: `architecture/simulation-core.md`,
   `src/grid.rs → SpatialGrid::find_first_in_radius`,
-  `src/world/tick.rs → World::eat`.
+  `src/world/tick.rs → World::attack`.
 - **Tradeoffs**: Bite-target is no longer the strict argmin-distance
   prey; in a tight stack the picked prey is whichever sits at
   `(predator_idx + k) mod K_cell` first. Determinism is preserved
@@ -284,7 +316,7 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   cheapest mitigation is a starburst cell walk so "first" approximates
   "closest" without sorting.
 - **Code anchors**: `src/grid.rs → SpatialGrid::find_first_in_radius`,
-  `src/world/tick.rs → eat`, `EatPick`.
+  `src/world/tick.rs → attack`, `AttackPick`.
 
 ### Creature proximity scan walks cells in starburst order with sector-saturation early-bail
 

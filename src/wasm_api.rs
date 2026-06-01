@@ -12,6 +12,12 @@ use wasm_bindgen::prelude::*;
 #[path = "wasm_dims_tests.rs"]
 mod wasm_dims_tests;
 
+// v2.0 Wave 2a: snapshot-repack lane-offset tests (color_u32 / packed_u32 /
+// region size) live in their own file/module (same merge-hazard rule).
+#[cfg(test)]
+#[path = "wasm_snapshot_tests.rs"]
+mod wasm_snapshot_tests;
+
 /// v1.12: parse the boot payload's `nn_topology_json`. Empty string → legacy
 /// 32→48→24→5 default. Otherwise expects
 /// `{"hidden_sizes":[…],"activations":[…]}`.
@@ -71,21 +77,23 @@ pub const SLIDER_NAMES: &[&str] = &[
     // v2.0 Wave 1b: live-tunable biome movement-penalty base severities [0,1].
     "water_movement_penalty",              // 21 f32 — Water biome base severity
     "desert_movement_penalty",             // 22 f32 — Desert biome base severity
+    // v2.0 Wave 2a: live multiplier on the per-birth body-genome mutation step.
+    "trait_mutation_sigma_multiplier",     // 23 f32 — genome trait-sigma multiplier
     // v1.12: 8 mutation buckets × 3 floats. Index = SLIDER_BUCKET_BASE + bucket*3 + field.
     // field 0 = weight, 1 = rate, 2 = sigma. See MUTATION_BUCKET_COUNT.
-    "bucket_0_weight", "bucket_0_rate", "bucket_0_sigma", // 23..26
-    "bucket_1_weight", "bucket_1_rate", "bucket_1_sigma", // 26..29
-    "bucket_2_weight", "bucket_2_rate", "bucket_2_sigma", // 29..32
-    "bucket_3_weight", "bucket_3_rate", "bucket_3_sigma", // 32..35
-    "bucket_4_weight", "bucket_4_rate", "bucket_4_sigma", // 35..38
-    "bucket_5_weight", "bucket_5_rate", "bucket_5_sigma", // 38..41
-    "bucket_6_weight", "bucket_6_rate", "bucket_6_sigma", // 41..44
-    "bucket_7_weight", "bucket_7_rate", "bucket_7_sigma", // 44..47
+    "bucket_0_weight", "bucket_0_rate", "bucket_0_sigma", // 24..27
+    "bucket_1_weight", "bucket_1_rate", "bucket_1_sigma", // 27..30
+    "bucket_2_weight", "bucket_2_rate", "bucket_2_sigma", // 30..33
+    "bucket_3_weight", "bucket_3_rate", "bucket_3_sigma", // 33..36
+    "bucket_4_weight", "bucket_4_rate", "bucket_4_sigma", // 36..39
+    "bucket_5_weight", "bucket_5_rate", "bucket_5_sigma", // 39..42
+    "bucket_6_weight", "bucket_6_rate", "bucket_6_sigma", // 42..45
+    "bucket_7_weight", "bucket_7_rate", "bucket_7_sigma", // 45..48
 ];
 
-/// First mutation-bucket slider slot. v2.0 Wave 1b (shifted from 21 to 23 after
-/// adding the 2 biome movement-penalty slots).
-pub const SLIDER_BUCKET_BASE: usize = 23;
+/// First mutation-bucket slider slot. v2.0 Wave 2a (shifted from 23 to 24 after
+/// adding the `trait_mutation_sigma_multiplier` slot).
+pub const SLIDER_BUCKET_BASE: usize = 24;
 
 /// Number of slots in `CTRL_SLIDERS`. Equal to `SLIDER_NAMES.len()`.
 pub const SLIDER_COUNT: usize = SLIDER_NAMES.len();
@@ -496,8 +504,11 @@ impl WorldHandle {
     /// Layout per slot (little-endian throughout):
     ///   `[0..20)`   tick, pop, world_ended, tps_bits, jank_count   (u32 each)
     ///   `[20..32)`  padding (32-byte align for creature SoA)
-    ///   `[32..32 + MAX_POP_FOR_SIM × 32)` creature SoA, 32 B stride
-    ///   `[trailing GRASS_CELL_COUNT × 4 bytes)` f32 grass density
+    ///   `[32..32 + MAX_POP_FOR_SIM × 32)` creature SoA, 32 B stride. v2.0 Wave
+    ///     2a lane order (8 lanes): x, y, radius, color_u32, id_lo, id_hi,
+    ///     packed_u32, (pad). See `fill_creature_bytes` / `genome_color_u32` /
+    ///     `pack_render_u32` for the packed-field bit layouts.
+    ///   `[trailing grass_cell_count bytes)` u8 quantized grass density
     #[wasm_bindgen]
     pub fn write_snapshot(&mut self, slot: u32) {
         let profile_on = self.inner.profile.enabled();
@@ -680,6 +691,11 @@ impl WorldHandle {
     fn apply_desert_movement_penalty(&mut self, value: f32) {
         self.inner.sliders.desert_movement_penalty = value.clamp(0.0, 1.0);
     }
+    /// v2.0 Wave 2a live: per-birth body-genome mutation-step multiplier. Clamped
+    /// non-negative (a negative sigma is meaningless).
+    fn apply_trait_mutation_sigma_multiplier(&mut self, value: f32) {
+        self.inner.sliders.trait_mutation_sigma_multiplier = value.max(0.0);
+    }
     fn apply_max_population(&mut self, value: u32) {
         // Clamp into [1, MAX_POP_FOR_SIM]. The SAB-bound cap is structural —
         // we never let the soft cap exceed it (extra births above MAX_POP_FOR_SIM
@@ -753,6 +769,8 @@ impl WorldHandle {
             // v2.0 Wave 1b live biome movement-penalty severities [0, 1].
             21 => self.apply_water_movement_penalty(value),
             22 => self.apply_desert_movement_penalty(value),
+            // v2.0 Wave 2a live genome trait-sigma multiplier.
+            23 => self.apply_trait_mutation_sigma_multiplier(value),
             // v1.12: 8 mutation buckets × 3 fields.
             n if n >= SLIDER_BUCKET_BASE
                 && n < SLIDER_BUCKET_BASE + MUTATION_BUCKET_COUNT * 3 =>
@@ -830,9 +848,9 @@ impl WorldHandle {
 
     /// JSON blob for the Inspector panel. Returns None if idx is out of range.
     /// O(1) — all fields are direct SoA reads.
-    /// v1.5 S3 schema: drops color_rgb/weight_hash/photo_eff/eat_eff/armor/
-    /// bite_reach/vision_range/eye_count. Adds color_ema (raw, unfloored),
-    /// cooldown_remaining, and wall_proximity (N/S/E/W, range 50u).
+    /// v2.0 Wave 2a schema: drops `color_ema` (color now derives from the
+    /// genome); adds the 6 genome traits + the creature's current
+    /// genome-modulated movement penalty.
     #[wasm_bindgen]
     pub fn creature_inspect_json(&self, idx: u32) -> Option<String> {
         let i = idx as usize;
@@ -841,6 +859,7 @@ impl WorldHandle {
         }
         let action_name = format!("{:?}", self.inner.creatures.action_this_tick[i]);
         let brain = &self.inner.creatures.brains[i];
+        let g = &self.inner.creatures.genome[i];
         // v1.5 S3: wall_proximity (N/S/E/W) computed inline; S5b promotes to
         // a shared proximity.rs helper. Range 50u, linear normalize: 1.0 at
         // wall contact → 0.0 at >=50u away.
@@ -852,6 +871,8 @@ impl WorldHandle {
         let wp_s = (1.0 - ((world_size - cy) / wall_range)).clamp(0.0, 1.0);
         let wp_w = (1.0 - (cx / wall_range)).clamp(0.0, 1.0);
         let wp_e = (1.0 - ((world_size - cx) / wall_range)).clamp(0.0, 1.0);
+        // v2.0 Wave 2a: genome-modulated movement penalty at the current cell.
+        let movement_penalty = self.inner.movement_penalty_for(i);
         let json = serde_json::json!({
             "index": idx,
             "id": self.inner.creatures.id[i],
@@ -861,16 +882,21 @@ impl WorldHandle {
             "max_age": self.inner.sliders.max_age,
             "energy": self.inner.creatures.energy[i],
             "energy_frac": (self.inner.creatures.energy[i] / 100.0).clamp(0.0, 1.0),
-            "size": CREATURE_SIZE,
+            "size": CREATURE_SIZE * g.body_size_factor(),
             "current_action": action_name,
-            "move_speed": MOVE_SPEED_MAX,
+            "move_speed": MOVE_SPEED_MAX * g.max_speed_factor(),
             "cooldown_remaining": self.inner.creatures.digestion_cooldown[i],
-            // v1.5 S3: action-EMA color, raw (unfloored) for the inspector readout.
-            "color_ema": [
-                self.inner.creatures.color_r[i],
-                self.inner.creatures.color_g[i],
-                self.inner.creatures.color_b[i],
-            ],
+            // v2.0 Wave 2a: the 6 evolving body-genome traits (raw [0,1]).
+            "genome": {
+                "body_size": g.body_size,
+                "max_speed": g.max_speed,
+                "metabolism": g.metabolism,
+                "diet": g.diet,
+                "water_affinity": g.water_affinity,
+                "heat_tolerance": g.heat_tolerance,
+            },
+            // v2.0 Wave 2a: current genome-modulated biome movement penalty [0,1].
+            "movement_penalty": movement_penalty,
             "wall_proximity": [wp_n, wp_s, wp_e, wp_w],
             "nn_weight_count": brain.weights.len(),
         });
@@ -970,6 +996,8 @@ impl WorldHandle {
             // v2.0 Wave 1b live biome movement-penalty severities.
             "water_movement_penalty": d.water_movement_penalty,
             "desert_movement_penalty": d.desert_movement_penalty,
+            // v2.0 Wave 2a genome trait-sigma multiplier.
+            "trait_mutation_sigma_multiplier": d.trait_mutation_sigma_multiplier,
         });
         // v1.12: 8 mutation buckets × 3 fields. Names match SLIDER_NAMES.
         let obj = json.as_object_mut().expect("json! produced an object");
@@ -1032,30 +1060,90 @@ fn fill_creature_bytes(world: &World, dst: &mut [u8]) -> usize {
         "pop={pop} exceeds MAX_POP_FOR_SIM={MAX_POP_FOR_SIM} — sim cull broke",
     );
     debug_assert!(dst.len() >= pop * 32, "dst too small for creature SoA",);
-    let body_r = CREATURE_SIZE * BODY_RADIUS_PER_SIZE;
+    let base_r = CREATURE_SIZE * BODY_RADIUS_PER_SIZE;
     for i in 0..pop {
         let x = world.creatures.x[i];
         let y = world.creatures.y[i];
-        // v1.5 S3: action-EMA color with 0.15 display floor.
-        let r = world.creatures.color_r[i].max(0.15);
-        let g = world.creatures.color_g[i].max(0.15);
-        let b = world.creatures.color_b[i].max(0.15);
+        let g = &world.creatures.genome[i];
+        // v2.0 Wave 2a: sprite radius is body_size-derived.
+        let body_r = base_r * g.body_size_factor();
+        // v2.0 Wave 2a: genome-derived display color (RGBA8 packed u32).
+        let color = genome_color_u32(g);
+        // v2.0 Wave 2a: ring-flash + reserved species_id, bit-packed.
+        let packed = pack_render_u32(
+            world.creatures.flash_tag[i] as u8,
+            world.creatures.flash_ticks[i],
+            0, /* species_id reserved (single-pool) */
+        );
         let id = world.creatures.id[i];
         let id_lo = id as u32;
         let id_hi = (id >> 32) as u32;
         let off = i * 32;
+        // Lane order (8 f32-lanes / 32 B): x, y, radius, color_u32, id_lo,
+        // id_hi, packed_u32, (pad). color_u32 + packed_u32 + id halves are raw
+        // u32 bits (the reader builds a Uint32Array view over the same bytes).
         dst[off..off + 4].copy_from_slice(&x.to_le_bytes());
         dst[off + 4..off + 8].copy_from_slice(&y.to_le_bytes());
         dst[off + 8..off + 12].copy_from_slice(&body_r.to_le_bytes());
-        dst[off + 12..off + 16].copy_from_slice(&r.to_le_bytes());
-        dst[off + 16..off + 20].copy_from_slice(&g.to_le_bytes());
-        dst[off + 20..off + 24].copy_from_slice(&b.to_le_bytes());
-        // id_lo/id_hi as raw u32 bits — reader builds a Uint32Array view
-        // over the same 8 bytes; no float→int conversion either side.
-        dst[off + 24..off + 28].copy_from_slice(&id_lo.to_le_bytes());
-        dst[off + 28..off + 32].copy_from_slice(&id_hi.to_le_bytes());
+        dst[off + 12..off + 16].copy_from_slice(&color.to_le_bytes());
+        dst[off + 16..off + 20].copy_from_slice(&id_lo.to_le_bytes());
+        dst[off + 20..off + 24].copy_from_slice(&id_hi.to_le_bytes());
+        dst[off + 24..off + 28].copy_from_slice(&packed.to_le_bytes());
+        // off+28..off+32: pad lane (reserved, zeroed).
+        dst[off + 28..off + 32].copy_from_slice(&0u32.to_le_bytes());
     }
     pop
+}
+
+/// v2.0 Wave 2a: single-pool genome → RGBA8 display color packed into one u32.
+///
+/// HSV mapping (visual identity, FEEL KNOB). hue ← `diet` (`hue_deg = 120 * (1 -
+/// diet)`, grazer green 120° → predator red 0°); saturation ← `body_size`
+/// (mapped to [0.4, 1.0]; floor keeps small grazers visible); value ←
+/// `max_speed` (mapped to [0.5, 1.0]; faster = brighter).
+///
+/// Returned as RGBA8 little-endian: R = bits 0..8, G = 8..16, B = 16..24, A =
+/// 24..32 (A always 255). The TS reader (2b) does `R = u & 0xFF`, etc.
+#[inline]
+fn genome_color_u32(g: &crate::creature::Genome) -> u32 {
+    let hue = 120.0 * (1.0 - g.diet); // degrees, 120(green)→0(red)
+    let sat = 0.4 + 0.6 * g.body_size; // [0.4, 1.0]
+    let val = 0.5 + 0.5 * g.max_speed; // [0.5, 1.0]
+    let (r, gg, b) = hsv_to_rgb8(hue, sat, val);
+    (r as u32) | ((gg as u32) << 8) | ((b as u32) << 16) | (0xFFu32 << 24)
+}
+
+/// HSV (hue degrees, sat/val in [0,1]) → 8-bit RGB.
+#[inline]
+fn hsv_to_rgb8(h_deg: f32, s: f32, v: f32) -> (u8, u8, u8) {
+    let h = (h_deg.rem_euclid(360.0)) / 60.0;
+    let c = v * s;
+    let x = c * (1.0 - (h % 2.0 - 1.0).abs());
+    let m = v - c;
+    let (r, g, b) = match h as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let to8 = |f: f32| ((f + m).clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+    (to8(r), to8(g), to8(b))
+}
+
+/// v2.0 Wave 2a: bit-pack the render-only `packed_u32` lane.
+///
+/// Bit layout (LSB first; 2b decode contract):
+///   bits  0..3  (3 bits) : flash_tag       (FlashTag 0..5)
+///   bits  3..7  (4 bits) : flash_ticks     (0..FLASH_TICKS, ≤ 15)
+///   bits  7..23 (16 bits): species_id      (reserved; 0 in single-pool, W3 fills)
+///   bits 23..32 (9 bits) : reserved        (0)
+#[inline]
+fn pack_render_u32(flash_tag: u8, flash_ticks: u8, species_id: u16) -> u32 {
+    ((flash_tag as u32) & 0x7)
+        | (((flash_ticks as u32) & 0xF) << 3)
+        | (((species_id as u32) & 0xFFFF) << 7)
 }
 
 /// Wrapper for `fill_creature_bytes` matching the v1.11 method-call site so
@@ -1201,6 +1289,8 @@ mod tests {
         assert_eq!(read_u32(16), handle.jank_count);
 
         // Creature SoA: 32-byte stride, one record per founder (3 here).
+        // v2.0 Wave 2a lane order: x, y, radius, color_u32, id_lo, id_hi,
+        // packed_u32, (pad).
         assert_eq!(pop_written, 3);
         assert_eq!(creatures.len(), 3 * 32);
         for i in 0..3 {
@@ -1210,12 +1300,28 @@ mod tests {
             let body = f32::from_le_bytes(creatures[base + 8..base + 12].try_into().unwrap());
             assert_eq!(x, handle.inner.creatures.x[i]);
             assert_eq!(y, handle.inner.creatures.y[i]);
-            assert_eq!(body, CREATURE_SIZE * BODY_RADIUS_PER_SIZE);
-            // Id round-trips via u32-halves.
-            let id_lo = u32::from_le_bytes(creatures[base + 24..base + 28].try_into().unwrap());
-            let id_hi = u32::from_le_bytes(creatures[base + 28..base + 32].try_into().unwrap());
+            // Radius is body_size-derived (genome factor 0.5..1.5).
+            let expected_r = CREATURE_SIZE
+                * BODY_RADIUS_PER_SIZE
+                * handle.inner.creatures.genome[i].body_size_factor();
+            assert!((body - expected_r).abs() < 1e-5, "radius lane mismatch");
+            // color_u32 lane (3): alpha byte must be 255.
+            let color = u32::from_le_bytes(creatures[base + 12..base + 16].try_into().unwrap());
+            assert_eq!((color >> 24) & 0xFF, 0xFF, "color_u32 alpha must be 255");
+            // Id round-trips via u32-halves at lanes 4,5 (off 16..24).
+            let id_lo = u32::from_le_bytes(creatures[base + 16..base + 20].try_into().unwrap());
+            let id_hi = u32::from_le_bytes(creatures[base + 20..base + 24].try_into().unwrap());
             let id = ((id_hi as u64) << 32) | (id_lo as u64);
             assert_eq!(id, handle.inner.creatures.id[i]);
+            // packed_u32 lane (6): low 3 bits = flash_tag, next 4 = flash_ticks.
+            let packed = u32::from_le_bytes(creatures[base + 24..base + 28].try_into().unwrap());
+            assert_eq!(packed & 0x7, handle.inner.creatures.flash_tag[i] as u32);
+            assert_eq!((packed >> 3) & 0xF, handle.inner.creatures.flash_ticks[i] as u32);
+            // species_id bits reserved 0 in single-pool.
+            assert_eq!((packed >> 7) & 0xFFFF, 0, "species_id reserved must be 0");
+            // pad lane (7) is zero.
+            let pad = u32::from_le_bytes(creatures[base + 28..base + 32].try_into().unwrap());
+            assert_eq!(pad, 0, "pad lane must be zero");
         }
 
         // Grass: v2.0 Wave 1a ships u8 quantized density (one byte per cell).

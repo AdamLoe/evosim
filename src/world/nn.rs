@@ -1,6 +1,7 @@
 //! NN forward pass and action-decode helpers. Both sequential and threaded paths live here.
-//! v1.3 D9: Action enum collapsed to {Graze=0, Eat=1, Split=2}. NN_OUTPUTS=5.
-//! decode_action/is_valid_action take no Genome param (genome removed in D3).
+//! v2.0 Wave 2a: Action enum is {Graze=0, Attack=1, Split=2} (Eat→Attack rename).
+//! NN_OUTPUTS=5. The biome NN inputs are genome-modulated per creature (a high
+//! water_affinity / heat_tolerance creature reads a lower penalty).
 //! v1.5 S5b: build_nn_input rewritten to 32-input semantic layout; vision deleted.
 
 use super::biome::biome_from_u8;
@@ -45,10 +46,14 @@ impl<'a> BiomeSampler<'a> {
         }
     }
 
-    /// Base movement-penalty severity `p ∈ [0, 1]` for the cell under a world
-    /// position. Wrap-aware. Genome-independent (Wave 2 modulates per genome).
+    /// v2.0 Wave 2a: genome-MODULATED movement-penalty severity `p ∈ [0, 1]`
+    /// for the cell under a world position, reduced by the per-creature affinity
+    /// traits. Wrap-aware. Water cells are reduced by `water_affinity`, desert
+    /// cells by `heat_tolerance` (`p *= (1 - trait)`), so a high-affinity
+    /// creature READS the same lower penalty it PAYS in the tick effects. The
+    /// penalty is clamped to [0, 1].
     #[inline]
-    pub(crate) fn penalty_at(&self, x: f32, y: f32) -> f32 {
+    pub(crate) fn penalty_at(&self, x: f32, y: f32, water_affinity: f32, heat_tolerance: f32) -> f32 {
         let dim = self.grass_dim;
         let ws = self.world_size;
         let (px, py) = if self.wrap {
@@ -58,11 +63,12 @@ impl<'a> BiomeSampler<'a> {
         };
         let ix = ((px / GRASS_CELL_SIZE) as usize).min(dim - 1);
         let iy = ((py / GRASS_CELL_SIZE) as usize).min(dim - 1);
-        match biome_from_u8(self.grid[iy * dim + ix]) {
-            Biome::Plains => 0.0,
-            Biome::Water => self.water_penalty,
-            Biome::Desert => self.desert_penalty,
-        }
+        let p = match biome_from_u8(self.grid[iy * dim + ix]) {
+            Biome::Plains => return 0.0,
+            Biome::Water => self.water_penalty * (1.0 - water_affinity),
+            Biome::Desert => self.desert_penalty * (1.0 - heat_tolerance),
+        };
+        p.clamp(0.0, 1.0)
     }
 }
 
@@ -705,7 +711,8 @@ pub(crate) fn build_nn_input(
         buf[o + 3] = prev_vy / MOVE_SPEED_MAX;
         let la = creatures.last_action[i];
         buf[o + 4] = if matches!(la, Action::Graze) { 1.0 } else { 0.0 };
-        buf[o + 5] = if matches!(la, Action::Eat) { 1.0 } else { 0.0 };
+        // slot 5: is_last_attack (was is_last_eat before the Wave 2a rename).
+        buf[o + 5] = if matches!(la, Action::Attack) { 1.0 } else { 0.0 };
         buf[o + 6] = (creatures.ticks_since_split[i] as f32 / max_age_f).clamp(0.0, 1.0);
         buf[o + 7] = if cooldown == 0 { 1.0 } else { 0.0 };
     }
@@ -754,17 +761,21 @@ pub(crate) fn build_nn_input(
     // The movement penalty the creature would pay one grass cell in each
     // cardinal direction. Sector convention matches walls: 0=N (-y), 1=S (+y),
     // 2=E (+x), 3=W (-x). Wrap-aware sampling lives in `BiomeSampler`.
+    // v2.0 Wave 2a: GENOME-modulated — reduced by this creature's affinity
+    // traits, so it reads the same lower penalty it pays.
+    let wa = creatures.genome[i].water_affinity;
+    let ht = creatures.genome[i].heat_tolerance;
     if let Some(o) = layout.offset_of(NnInputGroup::BiomeDir) {
         let step = GRASS_CELL_SIZE;
-        buf[o] = biome.penalty_at(x, y - step); // N
-        buf[o + 1] = biome.penalty_at(x, y + step); // S
-        buf[o + 2] = biome.penalty_at(x + step, y); // E
-        buf[o + 3] = biome.penalty_at(x - step, y); // W
+        buf[o] = biome.penalty_at(x, y - step, wa, ht); // N
+        buf[o + 1] = biome.penalty_at(x, y + step, wa, ht); // S
+        buf[o + 2] = biome.penalty_at(x + step, y, wa, ht); // E
+        buf[o + 3] = biome.penalty_at(x - step, y, wa, ht); // W
     }
 
     // --- current-cell penalty (under the body; v2.0 Wave 1b) ---
     if let Some(o) = layout.offset_of(NnInputGroup::CurrCellPenalty) {
-        buf[o] = biome.penalty_at(x, y);
+        buf[o] = biome.penalty_at(x, y, wa, ht);
     }
 
     // --- reserved-predator padding (explicit 0.0) ---
@@ -805,7 +816,7 @@ pub(crate) fn build_nn_input(
 }
 
 /// Check whether an action is currently valid for creature `i` (v6 §1 + §G).
-/// D9: 3-variant enum. Graze always valid; Eat gated on cooldown; Split on energy.
+/// D9: 3-variant enum. Graze always valid; Attack gated on cooldown; Split on energy.
 pub(crate) fn is_valid_action(
     act: Action,
     energy: f32,
@@ -814,7 +825,7 @@ pub(crate) fn is_valid_action(
 ) -> bool {
     match act {
         Action::Graze => true,
-        Action::Eat => cooldown == 0,
+        Action::Attack => cooldown == 0,
         Action::Split => energy >= split_threshold,
     }
 }
@@ -1108,7 +1119,7 @@ mod tests {
         let logits = [0.0f32, 0.0, 10.0];
         let act = decode_action(&logits, 10.0, 0, SPLIT_THRESHOLD_DEFAULT);
         assert_ne!(act, Action::Split, "Split must be invalid when energy < 50");
-        assert!(matches!(act, Action::Graze | Action::Eat), "got {:?}", act);
+        assert!(matches!(act, Action::Graze | Action::Attack), "got {:?}", act);
     }
 
     #[test]
@@ -1120,10 +1131,10 @@ mod tests {
     }
 
     #[test]
-    fn decode_action_eat_invalid_in_cooldown() {
+    fn decode_action_attack_invalid_in_cooldown() {
         let logits = [0.0f32, 10.0, 0.0];
         let act = decode_action(&logits, 100.0, 5, SPLIT_THRESHOLD_DEFAULT);
-        assert_ne!(act, Action::Eat, "Eat must be invalid when cooldown > 0");
+        assert_ne!(act, Action::Attack, "Attack must be invalid when cooldown > 0");
         assert_eq!(act, Action::Graze, "should fall through to Graze");
     }
 

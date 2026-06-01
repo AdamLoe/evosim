@@ -92,17 +92,17 @@ length-prefixed payloads).
 | 6 | `CTRL_PROFILE_CLEAR_EPOCH` | Bumped to request `WorldHandle::profile_clear()`. |
 | 7 | `CTRL_RESET_JANK_EPOCH` | Bumped to request `WorldHandle::reset_jank()`. |
 | 16..(16+SLIDER_COUNT) | `CTRL_SLIDERS_BASE+i` | f32 value per slider, indexed by `SLIDER_NAMES`. |
-| 48 | `CTRL_INSPECT_REQ_EPOCH` | Bumped by main when an inspector request is issued. |
-| 49 | `CTRL_INSPECT_REQ_KIND` | 0 = by world coord, 1 = by stable id. |
-| 50–52 | `CTRL_INSPECT_REQ_WX_BITS`, `_WY_BITS`, `_TOL_BITS` | f32-bits, used when KIND=0. |
-| 53–54 | `CTRL_INSPECT_REQ_ID_LO`, `_HI` | u32 halves of the 64-bit id, used when KIND=1. |
-| 56 | `CTRL_INSPECT_RESP_EPOCH` | Bumped by worker after writing response bytes. |
-| 57 | `CTRL_INSPECT_RESP_LEN` | Length of response JSON in bytes (0 = not found). |
-| 58 | `CTRL_INSPECT_RESP_REQ_EPOCH` | Echo of the request epoch the response is answering. |
-| 64 | `CTRL_PROFILE_REPORT_EPOCH` | Bumped by worker after writing profile report. |
-| 65 | `CTRL_PROFILE_REPORT_LEN` | Length of profile JSON in bytes. |
-| 72 | `CTRL_NN_STATS_EPOCH` | Bumped by worker after writing NN stats. |
-| 73 | `CTRL_NN_STATS_LEN` | Length of NN stats JSON in bytes. |
+| 80 | `CTRL_INSPECT_REQ_EPOCH` | Bumped by main when an inspector request is issued. (v2.0 Wave 2a: shifted 64→80 to clear the now-48-wide slider region.) |
+| 81 | `CTRL_INSPECT_REQ_KIND` | 0 = by world coord, 1 = by stable id. |
+| 82–84 | `CTRL_INSPECT_REQ_WX_BITS`, `_WY_BITS`, `_TOL_BITS` | f32-bits, used when KIND=0. |
+| 85–86 | `CTRL_INSPECT_REQ_ID_LO`, `_HI` | u32 halves of the 64-bit id, used when KIND=1. |
+| 88 | `CTRL_INSPECT_RESP_EPOCH` | Bumped by worker after writing response bytes. |
+| 89 | `CTRL_INSPECT_RESP_LEN` | Length of response JSON in bytes (0 = not found). |
+| 90 | `CTRL_INSPECT_RESP_REQ_EPOCH` | Echo of the request epoch the response is answering. |
+| 96 | `CTRL_PROFILE_REPORT_EPOCH` | Bumped by worker after writing profile report. |
+| 97 | `CTRL_PROFILE_REPORT_LEN` | Length of profile JSON in bytes. |
+| 104 | `CTRL_NN_STATS_EPOCH` | Bumped by worker after writing NN stats. |
+| 105 | `CTRL_NN_STATS_LEN` | Length of NN stats JSON in bytes. |
 
 Slots not listed are reserved; do not read or write them.
 
@@ -175,20 +175,48 @@ Rust-side `debug_assert` in `SnapshotLayout::from_grass_cell_count` checks
 `grass_bytes == biome_bytes`. The TS side must size both views off the boot-time
 `grass_dim` it receives, never a hardcoded constant.
 
-## Creature SoA (per-creature, 32 bytes)
+## Creature SoA (per-creature, 32 bytes) — v2.0 Wave 2a render-only repack
 
-| Bytes | f32 lane | Field |
+The creature region byte size + `CREATURE_STRIDE = 8` lanes / 32 B are
+**unchanged**; only the *meanings* of the lanes shifted. The 3 action-EMA
+`color_r/g/b` f32 lanes were replaced by a single packed `color_u32` (genome-
+derived display color) + a `packed_u32` (ring-flash + reserved species_id).
+**7 used lanes + 1 trailing pad.**
+
+| Bytes | lane | Field |
 |---|---|---|
-| `0..4` | `[i*8 + 0]` | `x` (world units) |
-| `4..8` | `[i*8 + 1]` | `y` (world units) |
-| `8..12` | `[i*8 + 2]` | `body_radius` |
-| `12..16` | `[i*8 + 3]` | `color_r` |
-| `16..20` | `[i*8 + 4]` | `color_g` |
-| `20..24` | `[i*8 + 5]` | `color_b` |
-| `24..28` | u32 `idView[i*8 + 6]` | `id_lo` |
-| `28..32` | u32 `idView[i*8 + 7]` | `id_hi` |
+| `0..4` | f32 `[i*8 + 0]` | `x` (world units) |
+| `4..8` | f32 `[i*8 + 1]` | `y` (world units) |
+| `8..12` | f32 `[i*8 + 2]` | `radius` (body_size-derived sprite radius) |
+| `12..16` | u32 `[i*8 + 3]` | `color_u32` (genome display color, RGBA8) |
+| `16..20` | u32 `[i*8 + 4]` | `id_lo` |
+| `20..24` | u32 `[i*8 + 5]` | `id_hi` |
+| `24..28` | u32 `[i*8 + 6]` | `packed_u32` (ring-flash + species_id) |
+| `28..32` | u32 `[i*8 + 7]` | pad (reserved, 0) |
 
-`id` reassembly: `const id = idView[i*8 + 7] * 4294967296 + idView[i*8 + 6]`.
+`id` reassembly: `const id = idView[i*8 + 5] * 4294967296 + idView[i*8 + 4]`.
+
+### `color_u32` (lane 3) — RGBA8, little-endian
+
+`R = u & 0xFF`, `G = (u >> 8) & 0xFF`, `B = (u >> 16) & 0xFF`, `A = (u >> 24) &
+0xFF` (A always 255). Built from the genome via HSV (`genome_color_u32` in
+`src/wasm_api.rs`): hue ← `diet` (`120 * (1 - diet)`°, grazer-green 120° →
+predator-red 0°), saturation ← `body_size` → `[0.4, 1.0]`, value ← `max_speed` →
+`[0.5, 1.0]`.
+
+### `packed_u32` (lane 6) — bit layout (2b decode contract)
+
+LSB-first. `pack_render_u32` in `src/wasm_api.rs`:
+
+| bits | width | field |
+|---|---|---|
+| `0..3` | 3 | `flash_tag` — `FlashTag` 0..5 (0 None, 1 Born/teal, 2 Grazed/green, 3 Attacked/yellow, 4 CreatedChild/blue, 5 Killed/red) |
+| `3..7` | 4 | `flash_ticks` — 0..5 (countdown; 0 = no active flash) |
+| `7..23` | 16 | `species_id` — reserved (0 in single-pool; W3 fills, no layout change) |
+| `23..32` | 9 | reserved (0) |
+
+Decode: `flash_tag = p & 0x7`, `flash_ticks = (p >> 3) & 0xF`, `species_id = (p
+>> 7) & 0xFFFF`.
 
 ## Main → worker messages (`SimMessage`)
 
@@ -252,7 +280,10 @@ if it advanced, the bytes are guaranteed to be coherent.
   `bindings_in_sync` fails CI on drift; fix by running
   `cargo run --bin gen-bindings`. v2.0 Wave 1a changed the slider table
   (dropped 4 `_reserved_curriculum_*` + `full_grass_on_init`; added `world_size`
-  / `world_seed` / `wrap_world`; `SLIDER_COUNT = 45`, `SLIDER_BUCKET_BASE = 21`).
+  / `world_seed` / `wrap_world`). Wave 1b added `water_movement_penalty` /
+  `desert_movement_penalty`; Wave 2a added `trait_mutation_sigma_multiplier`. Now
+  `SLIDER_COUNT = 48`, `SLIDER_BUCKET_BASE = 24` (and the inspector/response
+  control-SAB blocks shifted up to 80+ to keep clear of the wider slider region).
 - `CREATURE_STRIDE = 8` — renderer-side guard `if (stride !== 8) throw`.
 - **Grass + biome region sizes** — no longer a constant-equality assert. The
   snapshot grass region (u8) and the biomeSab are both `grass_cell_count` bytes,

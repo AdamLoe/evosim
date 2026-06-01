@@ -565,16 +565,39 @@ impl Brain {
     ///
     /// `multiplier` is the global `mutation_rate_multiplier` slider; it scales
     /// the chosen bucket's rate.
+    /// v2.0 Wave 2a: thin wrapper over `child_from_with_sigma` that discards the
+    /// returned bucket sigma. Retained for the brain-mutation unit tests; the
+    /// live birth path calls `child_from_with_sigma` directly (it needs the
+    /// sigma to drive the genome step off the same per-birth draw).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn child_from(
         parent: &Brain,
         rng: &mut SimRng,
         policy: &MutationPolicy,
         multiplier: f32,
     ) -> Self {
+        Self::child_from_with_sigma(parent, rng, policy, multiplier).0
+    }
+
+    /// v2.0 Wave 2a: like `child_from`, but also returns the **chosen bucket's
+    /// sigma** so the caller can mutate the per-creature body genome off the
+    /// SAME per-birth bucket draw (the genome step scales this sigma by the
+    /// trait-mutation multiplier). Returns `0.0` for the frozen-evolution case
+    /// (all-zero bucket weights) — i.e. the genome is then copied verbatim too.
+    ///
+    /// RNG draw order (deterministic, must not change): bucket pick, then the
+    /// brain-weight geometric-skip Gaussian walk. The genome draws (if any)
+    /// happen AFTER this returns, off the same `rng`.
+    pub fn child_from_with_sigma(
+        parent: &Brain,
+        rng: &mut SimRng,
+        policy: &MutationPolicy,
+        multiplier: f32,
+    ) -> (Self, f32) {
         let mut child = parent.clone();
         let total: f32 = policy.buckets.iter().map(|b| b.weight.max(0.0)).sum();
         if !(total > 0.0) {
-            return child;
+            return (child, 0.0);
         }
         // Pick a bucket by weighted draw.
         let mut u = rng.unit() * total;
@@ -598,7 +621,7 @@ impl Brain {
                 i = i.saturating_add(step).saturating_add(1);
             }
         }
-        child
+        (child, sigma)
     }
 }
 

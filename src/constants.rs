@@ -42,10 +42,14 @@ pub const COST_MOVE_PER_DIST: f32 = 0.02;
 pub const SPLIT_GIFT_MAX_DEFAULT: f32 = 30.0;
 pub const SPLIT_THRESHOLD_DEFAULT: f32 = 99.0;
 
-// ---- Eat ----
-/// Default per-bite energy transfer fraction. Predator removes
-/// `eat_bite_fraction * prey.energy * (1 - prey.armor)` per bite.
-pub const EAT_BITE_FRACTION_DEFAULT: f32 = 1.0;
+// ---- Attack (Eat→Attack rename, v2.0 Wave 2a) ----
+/// Default per-bite energy transfer fraction. An attacker removes
+/// `eat_bite_fraction * victim.energy * effectiveness` per bite (effectiveness
+/// is genome-scaled in Wave 2a). v2.0 Wave 2a: reconciled to **0.5** — the const
+/// previously read 1.0 but `DevSliders::default`, the slider default, and the
+/// `p3a_*_eat_bite_fraction_default` test all expect 0.5; this is the shipped
+/// effective default, so the const now agrees.
+pub const EAT_BITE_FRACTION_DEFAULT: f32 = 0.5;
 pub const DIGESTION_COOLDOWN_TICKS: u32 = 0;
 
 // ---- Past-lifespan penalty ----
@@ -126,6 +130,14 @@ pub const WALL_PROXIMITY_RANGE: f32 = 50.0;
 // ---- Brain mutation (v1.12 buckets) ----
 /// Fixed cap on mutation buckets. SAB-stable; under-used slots have weight=0.
 pub const MUTATION_BUCKET_COUNT: usize = 8;
+
+// ---- Genome mutation (v2.0 Wave 2a) ----
+/// Default for the live `trait_mutation_sigma_multiplier` slider. The
+/// per-creature body genome mutates off the SAME per-birth mutation bucket as
+/// the brain, but the trait Gaussian step uses `bucket.sigma * this`. 0.3 keeps
+/// trait drift gentler than weight drift (so behaviour and morphology don't
+/// co-mutate at the same scale). Live-tunable.
+pub const TRAIT_MUTATION_SIGMA_MULTIPLIER_DEFAULT: f32 = 0.3;
 
 // ---- Trait-range constants still used as named values ----
 pub const MOVE_SPEED_MAX: f32 = 5.0;
