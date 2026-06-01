@@ -40,6 +40,7 @@ impl World {
                 let grass_ref = &self.grass;
                 let grid_ref = &self.grid;
                 let sector_lut_ref = &self.sector_lut[..];
+                let layout_ref = &self.nn_input_layout;
                 let energy_max = self.sliders.energy_max;
                 let split_threshold = self.sliders.split_threshold;
                 let max_age = self.sliders.max_age;
@@ -61,7 +62,9 @@ impl World {
                             debug_assert_eq!(vx_sub.len(), arg_sub.len());
                             debug_assert_eq!(vx_sub.len(), sec_sub.len());
 
-                            let mut input_buf = [0.0f32; NN_INPUTS];
+                            // v2.0: input buffer sized to the MAX_NN_INPUTS
+                            // ceiling; only `layout.width()` lanes are active.
+                            let mut input_buf = [0.0f32; MAX_NN_INPUTS];
                             // v1.12: stack scratch sized to the hard upper
                             // bound (NN_MAX_HIDDEN_WIDTH * 4B = 1 KB each).
                             // The forward pass uses `..max_width()` slices.
@@ -83,6 +86,7 @@ impl World {
                                 let pick_t = if timed { Some(&mut chunk_pick) } else { None };
                                 let (vx, vy, action, argmax_pre) = pick_action_d(
                                     i,
+                                    layout_ref,
                                     &mut input_buf,
                                     &mut scratch_a,
                                     &mut scratch_b,
@@ -143,8 +147,9 @@ impl World {
             let energy_max = self.sliders.energy_max;
             let split_threshold = self.sliders.split_threshold;
             let max_age = self.sliders.max_age;
+            let layout = self.nn_input_layout.clone();
             for &(lo, hi) in ranges {
-                let mut input_buf = [0.0f32; NN_INPUTS];
+                let mut input_buf = [0.0f32; MAX_NN_INPUTS];
                 let mut scratch_a = [0.0f32; NN_MAX_HIDDEN_WIDTH];
                 let mut scratch_b = [0.0f32; NN_MAX_HIDDEN_WIDTH];
                 let mut output_buf = [0.0f32; NN_OUTPUTS];
@@ -157,6 +162,7 @@ impl World {
                     let pick_t = if timed { Some(&mut chunk_pick) } else { None };
                     let (vx, vy, action, argmax_pre) = pick_action_d(
                         i,
+                        &layout,
                         &mut input_buf,
                         &mut scratch_a,
                         &mut scratch_b,
@@ -354,28 +360,186 @@ pub(crate) struct BuildTimings {
     pub proximity_total_us: u64,
 }
 
-/// Build the 32-input NN input vector for creature `i` (v1.5 S5b).
+/// Composable NN input-layout descriptor (v2.0).
 ///
-/// Layout (NN_INPUTS=32):
-/// - `[0..8)`   self/memory
-///   - `[0]` hunger = 1 - energy/energy_max
-///   - `[1]` age_frac = age / max_age
-///   - `[2]` prev_vx / MOVE_SPEED_MAX
-///   - `[3]` prev_vy / MOVE_SPEED_MAX
-///   - `[4]` is_last_graze (1.0 if last_action == Graze)
-///   - `[5]` is_last_eat   (1.0 if last_action == Eat)
-///   - `[6]` ticks_since_split / max_age (clamped [0,1])
-///   - `[7]` cooldown_ready (1.0 when digestion_cooldown == 0)
-/// - `[8..12)`  wall_proximity N/S/E/W (range WALL_PROXIMITY_RANGE)
-/// - `[12..20)` creature_proximity 8 sectors (range PROXIMITY_RANGE)
-/// - `[20..28)` grass_density 8 sectors (range PROXIMITY_RANGE)
-/// - `[28]`     padding (0.0)            — reserved for predator-color (v1.6+)
-/// - `[29]`     curr_grass_density (bilinear sample at body center)
-/// - `[30]`     1.0 (bias-learning constant)
-/// - `[31]`     padding (0.0)            — SIMD alignment to 32 = 4 × 8
+/// The NN input vector is built from an ordered set of *groups*. Each group
+/// occupies a contiguous slot range; `NnInputLayout` walks the active groups
+/// in canonical order, assigns each a slot offset, and rounds the running
+/// total up to the next multiple of 8 (the SIMD-chunk requirement) with a
+/// trailing alignment pad. `build_nn_input` then writes each active group at
+/// its computed offset into a `MAX_NN_INPUTS`-sized buffer.
+///
+/// For Wave 0 the only active configuration is the legacy layout
+/// (`NnInputLayout::legacy()`), which reproduces the historical width-32 slot
+/// order bit-for-bit. Future waves toggle groups (wrap walls 4→8, biome,
+/// creature sectors 8↔16) and the offsets + total width recompute here — no
+/// hand-maintained slot constants.
+///
+/// Canonical group order (legacy, all active):
+/// | group              | width | legacy slots |
+/// |--------------------|-------|--------------|
+/// | `SelfMemory`       | 8     | `[0..8)`     |
+/// | `WallProximity`    | 4     | `[8..12)`    |
+/// | `CreatureSectors`  | 8     | `[12..20)`   |
+/// | `GrassSectors`     | 8     | `[20..28)`   |
+/// | `ReservedPredator` | 1     | `[28]`       |
+/// | `CurrGrass`        | 1     | `[29]`       |
+/// | `Bias`             | 1     | `[30]`       |
+/// | (trailing pad)     | 1     | `[31]`       |
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NnInputGroup {
+    SelfMemory,
+    WallProximity,
+    CreatureSectors,
+    GrassSectors,
+    ReservedPredator,
+    CurrGrass,
+    Bias,
+}
+
+impl NnInputGroup {
+    /// Canonical group order. The legacy layout activates every group; future
+    /// waves choose a subset / wider variants from this same ordering.
+    const ORDER: [NnInputGroup; 7] = [
+        NnInputGroup::SelfMemory,
+        NnInputGroup::WallProximity,
+        NnInputGroup::CreatureSectors,
+        NnInputGroup::GrassSectors,
+        NnInputGroup::ReservedPredator,
+        NnInputGroup::CurrGrass,
+        NnInputGroup::Bias,
+    ];
+
+    /// Position of this group in the canonical order.
+    fn rank(self) -> usize {
+        Self::ORDER
+            .iter()
+            .position(|&g| g == self)
+            .expect("every group is in ORDER")
+    }
+}
+
+/// True iff `active`'s groups are strictly increasing in canonical rank (i.e.
+/// a subsequence of `NnInputGroup::ORDER`, no repeats, in order).
+fn is_canonical_subsequence(active: &[(NnInputGroup, usize)]) -> bool {
+    active
+        .windows(2)
+        .all(|w| w[0].0.rank() < w[1].0.rank())
+}
+
+/// Resolved layout: per-active-group `(group, offset)` in canonical order plus
+/// the SIMD-aligned total width. Construct once (cheap) and reuse; for Wave 0
+/// the descriptor is the legacy layout.
+#[derive(Clone, Debug)]
+pub(crate) struct NnInputLayout {
+    /// `(group, offset, width)` for each active group, in canonical order.
+    groups: Vec<(NnInputGroup, usize, usize)>,
+    /// Total active width, padded up to a multiple of 8 (≤ MAX_NN_INPUTS).
+    width: usize,
+}
+
+impl NnInputLayout {
+    /// Build a layout from `(group, width)` pairs given in canonical order.
+    /// Offsets are assigned by packing groups contiguously; the total is then
+    /// rounded up to the next multiple of 8 with a trailing alignment pad.
+    ///
+    /// The active list must be a subsequence of `NnInputGroup::ORDER` (each
+    /// group appears at most once, in canonical order) — this keeps offsets
+    /// deterministic as future waves toggle groups on/off.
+    fn from_groups(active: &[(NnInputGroup, usize)]) -> Self {
+        debug_assert!(
+            is_canonical_subsequence(active),
+            "NN input groups must be a canonical-order subsequence of NnInputGroup::ORDER"
+        );
+        let mut groups = Vec::with_capacity(active.len());
+        let mut off = 0usize;
+        for &(g, w) in active {
+            groups.push((g, off, w));
+            off += w;
+        }
+        // SIMD-chunk alignment: round the unpadded width up to a multiple of 8.
+        let width = off.div_ceil(8) * 8;
+        debug_assert!(
+            width <= MAX_NN_INPUTS,
+            "NN input layout width {width} exceeds MAX_NN_INPUTS {MAX_NN_INPUTS}"
+        );
+        Self { groups, width }
+    }
+
+    /// Legacy width-32 layout: every group active at its historical width.
+    /// Reproduces the pre-v2.0 slot order exactly (8/4/8/8/1/1/1 + 1 pad = 32).
+    /// The computed offsets are pinned to the documented legacy slot
+    /// constants (`NN_WALL_OFFSET`, …) so any drift is caught at construction.
+    pub(crate) fn legacy() -> Self {
+        let layout = Self::from_groups(&[
+            (NnInputGroup::SelfMemory, 8),
+            (NnInputGroup::WallProximity, 4),
+            (NnInputGroup::CreatureSectors, NN_SECTORS),
+            (NnInputGroup::GrassSectors, NN_SECTORS),
+            (NnInputGroup::ReservedPredator, 1),
+            (NnInputGroup::CurrGrass, 1),
+            (NnInputGroup::Bias, 1),
+        ]);
+        debug_assert_eq!(layout.width(), NN_INPUTS, "legacy layout width must be 32");
+        debug_assert_eq!(
+            layout.offset_of(NnInputGroup::SelfMemory),
+            Some(0)
+        );
+        debug_assert_eq!(
+            layout.offset_of(NnInputGroup::WallProximity),
+            Some(NN_WALL_OFFSET)
+        );
+        debug_assert_eq!(
+            layout.offset_of(NnInputGroup::CreatureSectors),
+            Some(NN_CREATURE_SECTOR_OFFSET)
+        );
+        debug_assert_eq!(
+            layout.offset_of(NnInputGroup::GrassSectors),
+            Some(NN_GRASS_SECTOR_OFFSET)
+        );
+        debug_assert_eq!(layout.offset_of(NnInputGroup::ReservedPredator), Some(28));
+        debug_assert_eq!(
+            layout.offset_of(NnInputGroup::CurrGrass),
+            Some(NN_CURR_GRASS_SLOT)
+        );
+        debug_assert_eq!(layout.offset_of(NnInputGroup::Bias), Some(NN_BIAS_SLOT));
+        layout
+    }
+
+    /// Test-only constructor: build a layout from an explicit canonical-order
+    /// `(group, width)` list. Lets the width tests synthesize variant layouts
+    /// (wider sectors, toggled-off groups) without a live group toggle.
+    #[cfg(test)]
+    pub(crate) fn from_groups_for_test(active: &[(NnInputGroup, usize)]) -> Self {
+        Self::from_groups(active)
+    }
+
+    /// SIMD-aligned total input width (a multiple of 8 in [8, MAX_NN_INPUTS]).
+    /// This is the value that must match the topology's `input_width`.
+    pub(crate) fn width(&self) -> usize {
+        self.width
+    }
+
+    /// Offset of `group` if active, else `None`.
+    pub(crate) fn offset_of(&self, group: NnInputGroup) -> Option<usize> {
+        self.groups
+            .iter()
+            .find(|(g, _, _)| *g == group)
+            .map(|(_, off, _)| *off)
+    }
+}
+
+/// Build the NN input vector for creature `i` into a `MAX_NN_INPUTS`-sized
+/// buffer (v2.0 composable layout). Only the first `layout.width()` lanes are
+/// active; the remainder are alignment padding left at 0.0.
+///
+/// For the legacy layout this reproduces the historical width-32 slot order
+/// bit-for-bit (see `NnInputLayout`). The forward pass consumes exactly
+/// `topology.input_width()` lanes, which must equal `layout.width()`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_nn_input(
     i: usize,
+    layout: &NnInputLayout,
     creatures: &CreatureSoA,
     grass: &GrassGrid,
     grid: &SpatialGrid,
@@ -386,9 +550,9 @@ pub(crate) fn build_nn_input(
     energy_max: f32,
     max_age: u32,
     timings: Option<&mut BuildTimings>,
-) -> [f32; NN_INPUTS] {
+) -> [f32; MAX_NN_INPUTS] {
     use crate::profiler::clock_now_us_threadsafe;
-    let mut buf = [0.0f32; NN_INPUTS];
+    let mut buf = [0.0f32; MAX_NN_INPUTS];
     let energy = creatures.energy[i];
     let age = creatures.age[i];
     let cooldown = creatures.digestion_cooldown[i];
@@ -402,29 +566,29 @@ pub(crate) fn build_nn_input(
         0
     };
 
-    // --- [0..8) self/memory ---
-    let energy_frac = (energy / energy_max.max(1.0)).clamp(0.0, 1.0);
-    buf[0] = (1.0 - energy_frac).clamp(0.0, 1.0); // hunger
-    let max_age_f = (max_age.max(1)) as f32;
-    buf[1] = (age as f32 / max_age_f).clamp(0.0, 1.0); // age_frac
-    buf[2] = prev_vx / MOVE_SPEED_MAX;
-    buf[3] = prev_vy / MOVE_SPEED_MAX;
-    let la = creatures.last_action[i];
-    buf[4] = if matches!(la, Action::Graze) {
-        1.0
-    } else {
-        0.0
-    };
-    buf[5] = if matches!(la, Action::Eat) { 1.0 } else { 0.0 };
-    buf[6] = (creatures.ticks_since_split[i] as f32 / max_age_f).clamp(0.0, 1.0);
-    buf[7] = if cooldown == 0 { 1.0 } else { 0.0 };
+    // --- self/memory ---
+    if let Some(o) = layout.offset_of(NnInputGroup::SelfMemory) {
+        let energy_frac = (energy / energy_max.max(1.0)).clamp(0.0, 1.0);
+        buf[o] = (1.0 - energy_frac).clamp(0.0, 1.0); // hunger
+        let max_age_f = (max_age.max(1)) as f32;
+        buf[o + 1] = (age as f32 / max_age_f).clamp(0.0, 1.0); // age_frac
+        buf[o + 2] = prev_vx / MOVE_SPEED_MAX;
+        buf[o + 3] = prev_vy / MOVE_SPEED_MAX;
+        let la = creatures.last_action[i];
+        buf[o + 4] = if matches!(la, Action::Graze) { 1.0 } else { 0.0 };
+        buf[o + 5] = if matches!(la, Action::Eat) { 1.0 } else { 0.0 };
+        buf[o + 6] = (creatures.ticks_since_split[i] as f32 / max_age_f).clamp(0.0, 1.0);
+        buf[o + 7] = if cooldown == 0 { 1.0 } else { 0.0 };
+    }
 
-    // --- [8..12) wall_proximity ---
-    let walls = proximity::compute_wall_proximity(x, y);
-    buf[NN_WALL_OFFSET] = walls[0];
-    buf[NN_WALL_OFFSET + 1] = walls[1];
-    buf[NN_WALL_OFFSET + 2] = walls[2];
-    buf[NN_WALL_OFFSET + 3] = walls[3];
+    // --- wall_proximity N/S/E/W ---
+    if let Some(o) = layout.offset_of(NnInputGroup::WallProximity) {
+        let walls = proximity::compute_wall_proximity(x, y);
+        buf[o] = walls[0];
+        buf[o + 1] = walls[1];
+        buf[o + 2] = walls[2];
+        buf[o + 3] = walls[3];
+    }
 
     // t1: handoff to creature-sector scan.
     let t1 = if timings.is_some() {
@@ -433,10 +597,11 @@ pub(crate) fn build_nn_input(
         0
     };
 
-    // --- [12..20) creature_proximity sectors ---
-    proximity::compute_creature_proximity_sectors(x, y, i, grid, creatures, sector_scratch);
-    buf[NN_CREATURE_SECTOR_OFFSET..NN_CREATURE_SECTOR_OFFSET + NN_SECTORS]
-        .copy_from_slice(&sector_scratch[..NN_SECTORS]);
+    // --- creature_proximity sectors ---
+    if let Some(o) = layout.offset_of(NnInputGroup::CreatureSectors) {
+        proximity::compute_creature_proximity_sectors(x, y, i, grid, creatures, sector_scratch);
+        buf[o..o + NN_SECTORS].copy_from_slice(&sector_scratch[..NN_SECTORS]);
+    }
 
     let t2 = if timings.is_some() {
         clock_now_us_threadsafe()
@@ -444,10 +609,11 @@ pub(crate) fn build_nn_input(
         0
     };
 
-    // --- [20..28) grass_density sectors ---
-    proximity::compute_grass_density_sectors(x, y, grass, sector_lut, sector_scratch);
-    buf[NN_GRASS_SECTOR_OFFSET..NN_GRASS_SECTOR_OFFSET + NN_SECTORS]
-        .copy_from_slice(&sector_scratch[..NN_SECTORS]);
+    // --- grass_density sectors ---
+    if let Some(o) = layout.offset_of(NnInputGroup::GrassSectors) {
+        proximity::compute_grass_density_sectors(x, y, grass, sector_lut, sector_scratch);
+        buf[o..o + NN_SECTORS].copy_from_slice(&sector_scratch[..NN_SECTORS]);
+    }
 
     let t3 = if timings.is_some() {
         clock_now_us_threadsafe()
@@ -455,17 +621,20 @@ pub(crate) fn build_nn_input(
         0
     };
 
-    // --- [28] padding ---
-    buf[28] = 0.0;
+    // --- reserved-predator padding (explicit 0.0) ---
+    if let Some(o) = layout.offset_of(NnInputGroup::ReservedPredator) {
+        buf[o] = 0.0;
+    }
 
-    // --- [29] curr_grass_density ---
-    buf[NN_CURR_GRASS_SLOT] = grass.bilinear_sample(x, y);
+    // --- curr_grass_density ---
+    if let Some(o) = layout.offset_of(NnInputGroup::CurrGrass) {
+        buf[o] = grass.bilinear_sample(x, y);
+    }
 
-    // --- [30] bias ---
-    buf[NN_BIAS_SLOT] = 1.0;
-
-    // --- [31] padding ---
-    buf[31] = 0.0;
+    // --- bias constant ---
+    if let Some(o) = layout.offset_of(NnInputGroup::Bias) {
+        buf[o] = 1.0;
+    }
 
     let t4 = if timings.is_some() {
         clock_now_us_threadsafe()
@@ -565,7 +734,8 @@ pub(crate) struct PickTimings {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn pick_action_d(
     i: usize,
-    input_buf: &mut [f32; NN_INPUTS],
+    layout: &NnInputLayout,
+    input_buf: &mut [f32; MAX_NN_INPUTS],
     scratch_a: &mut [f32; NN_MAX_HIDDEN_WIDTH],
     scratch_b: &mut [f32; NN_MAX_HIDDEN_WIDTH],
     output_buf: &mut [f32; NN_OUTPUTS],
@@ -587,6 +757,7 @@ pub(crate) fn pick_action_d(
     let t_build_start = if timed { clock_now_us_threadsafe() } else { 0 };
     *input_buf = build_nn_input(
         i,
+        layout,
         creatures,
         grass,
         grid,
@@ -669,14 +840,16 @@ mod tests {
     }
 
     /// Helper: build inputs for the founder of a fresh world.
-    fn build_for_founder(w: &mut World) -> [f32; NN_INPUTS] {
+    fn build_for_founder(w: &mut World) -> [f32; MAX_NN_INPUTS] {
         let mut scratch = [0.0f32; 8];
         let prev_vx = w.creatures.vx[0];
         let prev_vy = w.creatures.vy[0];
         let energy_max = w.sliders.energy_max;
         let max_age = w.sliders.max_age;
+        let layout = w.nn_input_layout.clone();
         build_nn_input(
             0,
+            &layout,
             &w.creatures,
             &w.grass,
             &w.grid,

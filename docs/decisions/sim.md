@@ -194,6 +194,14 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   be multiples of 8 (the topology choice is partly a consequence). No
   biases keeps the weight count parametric and the founder init
   uniform-random.
+- **v2.0 update**: the **input width** (like the hidden-layer list) is now a
+  *runtime* field of `NnTopology`, a multiple of 8 in `[8, MAX_NN_INPUTS = 48]`,
+  fed to the first matmul as `fan_in`. The compile-time `NN_INPUTS == 32` assert
+  is replaced by runtime checks in `NnTopology::with_input_width`. `build_nn_input`
+  is now a composable, offset-computing `NnInputLayout` descriptor; the legacy
+  layout reproduces width 32 (weight_count `2808`) bit-for-bit. (The
+  `NN_HIDDEN_*`/`NN_WEIGHT_COUNT`/`NN_INIT_RANGE_L*` anchors below are stale from
+  v1.12 — left for the broader doc-migration pass.)
 - **Applies to**: `architecture/simulation-core.md`.
 - **Code anchors**: `src/brain.rs → Brain`, `Brain::founder`,
   `Brain::forward`; `src/constants.rs → NN_INPUTS`, `NN_HIDDEN_1`,

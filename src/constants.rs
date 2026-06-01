@@ -46,7 +46,20 @@ pub const PAST_LIFESPAN_MULT: f32 = 4.0; // per 1000 ticks past max_age
 //   [29]     curr_grass_density (cells under the body)
 //   [30]     1.0 (bias-learning constant)
 //   [31]     padding (0.0) — SIMD alignment to 32 = 4 × 8
+/// Legacy/default NN input width. The 32-input semantic layout above is the
+/// width produced when only the legacy input groups are active. v2.0: input
+/// width is now a *runtime* field of `NnTopology` (`brain.rs`), seeded from
+/// the active `build_nn_input` group set; this const is the default/legacy
+/// value and the calibration anchor for the drift-guard test.
 pub const NN_INPUTS: usize = 32;
+/// Hard upper bound on the runtime NN input width. The per-chunk stack input
+/// buffer is sized to this ceiling; the active width (a multiple of 8 in
+/// `[8, MAX_NN_INPUTS]`) feeds the first matmul as `fan_in`. Future input
+/// groups (wrap walls, biome, 16 creature sectors) widen the active layout up
+/// to this cap without changing the buffer size or the SIMD invariants.
+pub const MAX_NN_INPUTS: usize = 48;
+const _: () = assert!(MAX_NN_INPUTS >= NN_INPUTS);
+const _: () = assert!(MAX_NN_INPUTS.is_multiple_of(8));
 pub const NN_OUTPUTS: usize = 5; // out[0]=vx, out[1]=vy, out[2..5]=action logits (Graze/Eat/Split)
 // v1.12: NN_HIDDEN_1/2 + NN_WEIGHT_COUNT were compile-time constants in
 // the legacy 32→48→24→5 topology. They're now derived from the

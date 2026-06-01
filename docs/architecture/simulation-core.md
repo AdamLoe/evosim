@@ -17,10 +17,17 @@ runs one tick by sequentially executing the numbered phases below.
 
 - The `World` struct, `CreatureSoA`, `GrassGrid`, `SpatialGrid`, `SimRng`,
   `Brain`, `DevSliders`, `Action`.
-- The 32-input NN layout (semantic — self/memory, wall, sector creature,
-  sector grass, current-cell density, bias slot, padding).
-- The 32 → 48 → 24 → 5 brain topology with per-layer Leaky ReLU and SIMD
-  forward (`wide::f32x8`).
+- The NN input layout — a composable, settings-derived descriptor
+  (`NnInputLayout` in `src/world/nn.rs`) that, given which input groups are
+  active, computes each group's slot offset and the total **runtime input
+  width**. Width is a multiple of 8 in `[8, MAX_NN_INPUTS = 48]`; the legacy
+  layout (all groups active) reproduces the historical width-32 semantic order
+  (self/memory, wall, sector creature, sector grass, reserved, current-cell
+  density, bias, trailing pad).
+- The brain topology (legacy `32 → 48 → 24 → 5`) with per-layer Leaky ReLU and
+  SIMD forward (`wide::f32x8`). **Input width is a runtime field of
+  `NnTopology`** (alongside the runtime hidden-layer list); it feeds the first
+  matmul as `fan_in`.
 - The tick step order (see below). Every named phase has a `tick.<name>`
   profile span; `tick.nn` and `tick.grass_step` are leaves.
 - The grass mechanic: logistic in-cell growth + cross-kernel propagation,
@@ -110,24 +117,42 @@ wait for the rayon dispatch only. The breakdown lives in the sibling
 top-level `nn` and `grass_step` trees — see
 [`profiler.md`](profiler.md).
 
-## NN topology (32 → 48 → 24 → 5)
+## NN topology (runtime input width → hidden layers → 5)
 
-| Slot | Inputs |
+**Input width is a runtime field of `NnTopology`** (`src/brain.rs`), mirroring
+how the hidden-layer list is runtime-sized. The active width is computed by the
+composable `NnInputLayout` descriptor (`src/world/nn.rs`) from the set of active
+input groups, then fed to the first matmul as `fan_in`. The width must be a
+multiple of 8 (SIMD chunks) and `≤ MAX_NN_INPUTS = 48`; these are **runtime**
+checks in `NnTopology::with_input_width`, which replaced the old compile-time
+`NN_INPUTS == 32` hard assert. `build_nn_input` writes into a
+`MAX_NN_INPUTS`-sized buffer; only the active `width()` lanes are populated.
+
+The **legacy layout** (`NnInputLayout::legacy()`, the only active configuration
+today) activates every group at its historical width and reproduces the
+width-32 semantic slot order bit-for-bit:
+
+| Slot | Group / inputs |
 |---|---|
-| `[0..8)` | self / memory: hunger, age_frac, prev_vx, prev_vy, is_last_graze, is_last_eat, ticks_since_split_norm, cooldown_ready |
-| `[8..12)` | wall_proximity N/S/E/W (range `WALL_PROXIMITY_RANGE = 50u`) |
-| `[12..20)` | creature_proximity × 8 world-aligned sectors (range `PROXIMITY_RANGE = 20u`) |
-| `[20..28)` | grass_density × 8 sectors (range `GRASS_PROXIMITY_RANGE = 8u`) |
-| `[28]` | padding (0.0) |
-| `[29]` | curr_grass_density (under the body) |
-| `[30]` | `1.0` (bias-learning constant) |
-| `[31]` | padding (0.0) — SIMD alignment to 32 = 4 × 8 |
+| `[0..8)` | `SelfMemory`: hunger, age_frac, prev_vx, prev_vy, is_last_graze, is_last_eat, ticks_since_split_norm, cooldown_ready |
+| `[8..12)` | `WallProximity` N/S/E/W (range `WALL_PROXIMITY_RANGE = 50u`) |
+| `[12..20)` | `CreatureSectors` × 8 world-aligned sectors (range `PROXIMITY_RANGE = 20u`) |
+| `[20..28)` | `GrassSectors` × 8 sectors (range `GRASS_PROXIMITY_RANGE = 8u`) |
+| `[28]` | `ReservedPredator` (0.0) |
+| `[29]` | `CurrGrass`: curr_grass_density (under the body) |
+| `[30]` | `Bias` — `1.0` (bias-learning constant) |
+| `[31]` | trailing pad (0.0) — SIMD alignment, total rounded up to a multiple of 8 |
+
+Group offsets and the total width are **recomputed by the descriptor** whenever
+the active group set changes (future waves: wrap walls 4→8, biome, 8↔16
+creature sectors) — there are no hand-maintained slot constants in the build
+path. The legacy `weight_count` is unchanged: `32*48 + 48*24 + 24*5 = 2808`.
 
 Outputs: `out[0] = vx`, `out[1] = vy`, `out[2..5]` = action logits for
 `{Graze=0, Eat=1, Split=2}`. Hidden layers use Leaky ReLU (slope 0.01).
-Per-layer init range follows He: `r_l1 = 0.433`, `r_l2 = 0.354`,
-`r_l3 = 0.500`. Founder weights are pure uniform-random — no
-hardwiring. The 32-byte input vector is SIMD-aligned for `wide::f32x8`.
+Per-layer founder init follows He-uniform `r = sqrt(6 / fan_in)`, computed at
+runtime per matmul (the first matmul's `fan_in` is the runtime input width).
+Founder weights are pure uniform-random — no hardwiring.
 
 ## Code anchors
 
@@ -136,13 +161,16 @@ hardwiring. The 32-byte input vector is SIMD-aligned for `wide::f32x8`.
 - `src/world/tick.rs` → `apply_movement_and_repulsion`, `graze`, `eat`,
   `energy_bookkeeping`, `collect_deaths`, `color_ema_update`.
 - `src/world/nn.rs` → `nn_forward_all_chunks`, `build_nn_input`,
+  `NnInputLayout` / `NnInputGroup` (composable input-layout descriptor),
   `decode_action`, `chunk_ranges`, `dynamic_chunks`, `PickTimings`.
 - `src/world/nn_stats.rs` → `NnStats`.
 - `src/world/proximity.rs` → `LUT_DIM`, sector LUT build, wall +
   creature + grass proximity helpers.
 - `src/brain.rs` → `Brain`, `Brain::founder`, `Brain::forward`,
-  `Brain::child_from`, the `lrelu` helper, `NN_WEIGHT_COUNT == 2808`
-  compile-asserts.
+  `Brain::child_from`, `NnTopology` (runtime `input_width` field +
+  `with_input_width`), the `lrelu` helper, the `NN_OUTPUTS == 5` compile-assert
+  (the old `NN_INPUTS == 32` assert is gone — input width is now a runtime
+  check). Width tests: `src/brain_width_tests.rs`.
 - `src/creature.rs` → `CreatureSoA`, `Action` (3 variants), `Action::ALL`.
 - `src/grass.rs` → `GrassGrid`, `compute_propagation`, `bilinear_sample`,
   `consume`, `for_each_cell_overlapping_circle`, `rebuild_row_bitset`.
@@ -152,7 +180,8 @@ hardwiring. The 32-byte input vector is SIMD-aligned for `wide::f32x8`.
   `GRASS_CELL_COUNT = 921_600`, `MAX_POP_FOR_SIM = 32_000`,
   `MAX_POPULATION_DEFAULT = 8_000` (TS lowers to 2000 on first boot when
   `navigator.hardwareConcurrency < 8`),
-  `NN_INPUTS = 32`, `NN_OUTPUTS = 5`,
+  `NN_INPUTS = 32` (legacy/default input width), `MAX_NN_INPUTS = 48`
+  (runtime input-width ceiling), `NN_OUTPUTS = 5`,
   `MIN_CHUNKS = 4`, `MAX_CHUNKS = 16`, `STARTING_POP_DEFAULT = 32`,
   `CREATURE_SIZE = 1.0`, `START_ENERGY_DEFAULT = 200.0`,
   `MAX_AGE_DEFAULT = 5000`, `SPLIT_THRESHOLD_DEFAULT = 99.0`,

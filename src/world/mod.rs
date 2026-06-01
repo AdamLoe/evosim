@@ -197,6 +197,10 @@ pub struct World {
     /// (from the boot payload), used by `Brain::founder` and by the per-layer
     /// profiler-drain loop in `nn_forward_all_chunks`.
     pub(crate) nn_topology: NnTopology,
+    /// v2.0: composable NN input-layout descriptor. Defines the active input
+    /// groups + their slot offsets; `width()` must equal
+    /// `nn_topology.input_width()`. Wave 0 = legacy width-32 layout.
+    pub(crate) nn_input_layout: self::nn::NnInputLayout,
     /// Per-worker + per-sub-phase counters for the parallel NN forward pass.
     /// Wrapped in Arc so the parallel block can hold a thread-safe handle while
     /// `&mut self.creatures` is being mutated next to it. See `nn_stats.rs`.
@@ -256,6 +260,14 @@ impl World {
         let mut grid = SpatialGrid::new();
         grid.rebuild(&creatures.x, &creatures.y);
         let sector_lut = proximity::build_sector_lut();
+        // Wave 0: the active input layout is the legacy width-32 layout. Its
+        // width must agree with the topology the founders were drawn for.
+        let nn_input_layout = self::nn::NnInputLayout::legacy();
+        debug_assert_eq!(
+            nn_input_layout.width(),
+            nn_topology.input_width(),
+            "NN input layout width must equal topology input_width"
+        );
         Self {
             tick: 0,
             seed: seed_string,
@@ -287,6 +299,7 @@ impl World {
             sector_lut,
             scratch_sector_accum: Vec::new(),
             nn_topology,
+            nn_input_layout,
             nn_stats: std::sync::Arc::new(nn_stats::NnStats::new(
                 crate::profiler::clock_now_us_threadsafe(),
             )),
@@ -763,6 +776,7 @@ impl World {
             sector_lut,
             scratch_sector_accum: Vec::new(),
             nn_topology: self.nn_topology.clone(),
+            nn_input_layout: self.nn_input_layout.clone(),
             nn_stats: std::sync::Arc::new(nn_stats::NnStats::new(0)),
         }
     }

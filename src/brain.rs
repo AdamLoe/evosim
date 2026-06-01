@@ -1,6 +1,10 @@
-//! Brain — runtime-shaped NN (v1.12).
+//! Brain — runtime-shaped NN (v1.12 / v2.0).
 //!
-//! Fixed 32-input semantic layout + 5-output (vx, vy, action logits 0..2).
+//! Runtime input width (a multiple of 8 in `[8, MAX_NN_INPUTS]`, default
+//! `NN_INPUTS = 32`) + 5-output (vx, vy, action logits 0..2). The input width
+//! is a field of `NnTopology`, mirroring how hidden layers are runtime-sized:
+//! the first matmul takes it as `fan_in`. The semantic layout that produces a
+//! given width lives in `world/nn.rs::build_nn_input`.
 //! Hidden layers are configurable: 1..=NN_MAX_HIDDEN_LAYERS layers, each
 //! width a multiple of 8 in [8, NN_MAX_HIDDEN_WIDTH], with a per-layer
 //! activation drawn from `Activation`.
@@ -23,12 +27,24 @@ use crate::world::nn::PickTimings;
 use serde::{Deserialize, Serialize};
 use wide::f32x8;
 
-// Compile-time invariants that can't change at runtime.
-const _: () = assert!(NN_INPUTS == 32);
+// v2.0 Wave 0 runtime input-width tests live in their own file/module to avoid
+// the shared `mod tests` merge hazard.
+#[cfg(test)]
+#[path = "brain_width_tests.rs"]
+mod brain_width_tests;
+
+// Compile-time invariants that can't change at runtime. The active *input
+// width* is validated at runtime in `NnTopology::new` (`input_width <=
+// MAX_NN_INPUTS` and `input_width % 8 == 0`), since it is now a runtime field;
+// only the legacy/default value and the output count are pinned here.
 const _: () = assert!(NN_OUTPUTS == 5);
 const _: () = assert!(
     NN_INPUTS.is_multiple_of(8),
-    "NN_INPUTS must be multiple of 8 for SIMD chunks"
+    "NN_INPUTS (legacy default width) must be multiple of 8 for SIMD chunks"
+);
+const _: () = assert!(
+    MAX_NN_INPUTS.is_multiple_of(8),
+    "MAX_NN_INPUTS must be multiple of 8 for SIMD chunks"
 );
 
 /// Per-layer activation. `Linear` is identity; the others are pointwise.
@@ -97,25 +113,54 @@ fn apply_activation(act: Activation, out: &mut [f32]) {
     }
 }
 
-/// Validated hidden-layer-only topology.
+/// Validated topology: runtime input width + hidden-layer list.
 ///
-/// Inputs (`NN_INPUTS`) and outputs (`NN_OUTPUTS`) are implicit. Every entry
-/// in `hidden_sizes` must be a multiple of 8 in [8, NN_MAX_HIDDEN_WIDTH], and
+/// `input_width` is the active NN input count — a multiple of 8 in
+/// `[8, MAX_NN_INPUTS]`, default `NN_INPUTS = 32`. It feeds the first matmul
+/// as `fan_in`. Outputs (`NN_OUTPUTS`) are implicit. Every entry in
+/// `hidden_sizes` must be a multiple of 8 in [8, NN_MAX_HIDDEN_WIDTH], and
 /// `hidden_sizes.len()` must be in [1, NN_MAX_HIDDEN_LAYERS].
 /// `activations.len() == hidden_sizes.len()` — exactly one activation per
 /// hidden layer. The output matmul is always `Linear`, followed by the fixed
 /// output projection (tanh on slots 0..2); neither is user-configurable.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NnTopology {
+    /// Runtime input width. Defaults to `NN_INPUTS` when deserialized from a
+    /// payload that predates the field (serde `default`), preserving legacy
+    /// 32-input topology JSON.
+    #[serde(default = "default_input_width")]
+    input_width: usize,
     hidden_sizes: Vec<usize>,
     activations: Vec<Activation>,
 }
 
+fn default_input_width() -> usize {
+    NN_INPUTS
+}
+
 impl NnTopology {
-    /// Construct after validating. Returns `Err` describing the first
-    /// rule violation; otherwise the topology is safe for `Brain::founder`
-    /// and the SIMD matmul invariants.
+    /// Construct with the legacy/default input width (`NN_INPUTS = 32`) after
+    /// validating. See `with_input_width` for a non-default width.
     pub fn new(hidden_sizes: Vec<usize>, activations: Vec<Activation>) -> Result<Self, String> {
+        Self::with_input_width(NN_INPUTS, hidden_sizes, activations)
+    }
+
+    /// Construct after validating, with an explicit runtime input width.
+    /// Returns `Err` describing the first rule violation; otherwise the
+    /// topology is safe for `Brain::founder` and the SIMD matmul invariants.
+    pub fn with_input_width(
+        input_width: usize,
+        hidden_sizes: Vec<usize>,
+        activations: Vec<Activation>,
+    ) -> Result<Self, String> {
+        if !(8..=MAX_NN_INPUTS).contains(&input_width) {
+            return Err(format!("input_width={input_width} out of [8, {MAX_NN_INPUTS}]"));
+        }
+        if !input_width.is_multiple_of(8) {
+            return Err(format!(
+                "input_width={input_width} not multiple of 8 (SIMD chunks)"
+            ));
+        }
         if hidden_sizes.is_empty() {
             return Err("need at least one hidden layer".into());
         }
@@ -144,6 +189,7 @@ impl NnTopology {
             }
         }
         Ok(Self {
+            input_width,
             hidden_sizes,
             activations,
         })
@@ -159,6 +205,11 @@ impl NnTopology {
         .expect("LEGACY_HIDDEN_SIZES + 2 lrelu must be a valid topology")
     }
 
+    /// Active runtime input width (first-matmul `fan_in`).
+    pub fn input_width(&self) -> usize {
+        self.input_width
+    }
+
     pub fn hidden_sizes(&self) -> &[usize] {
         &self.hidden_sizes
     }
@@ -172,10 +223,11 @@ impl NnTopology {
     pub fn matmul_count(&self) -> usize {
         self.hidden_sizes.len() + 1
     }
-    /// Total weight count = Σ (fan_in × fan_out) for each matmul.
+    /// Total weight count = Σ (fan_in × fan_out) for each matmul. The first
+    /// matmul's `fan_in` is the runtime `input_width`.
     pub fn weight_count(&self) -> usize {
         let mut sum = 0;
-        let mut fan_in = NN_INPUTS;
+        let mut fan_in = self.input_width;
         for &w in &self.hidden_sizes {
             sum += fan_in * w;
             fan_in = w;
@@ -318,7 +370,7 @@ impl Brain {
         let total = topology.weight_count();
         let mut weights = vec![0.0f32; total];
         let mut off = 0;
-        let mut fan_in = NN_INPUTS;
+        let mut fan_in = topology.input_width();
         for &fan_out in topology
             .hidden_sizes()
             .iter()
@@ -359,7 +411,7 @@ impl Brain {
     /// when present.
     pub fn forward(
         &self,
-        input: &[f32; NN_INPUTS],
+        input: &[f32; MAX_NN_INPUTS],
         output: &mut [f32; NN_OUTPUTS],
         scratch_a: &mut [f32],
         scratch_b: &mut [f32],
@@ -376,11 +428,13 @@ impl Brain {
         // at the end.
         let mut layer_us = [0u64; NN_MAX_MATMULS];
 
-        // Ping-pong buffers. The first matmul reads from `input`, every
-        // subsequent matmul reads from the previous output buffer. We start
-        // with output going to `scratch_a`, then alternate.
+        // Ping-pong buffers. The first matmul reads from `input` (only the
+        // active `input_width` lanes), every subsequent matmul reads from the
+        // previous output buffer. We start with output going to `scratch_a`,
+        // then alternate.
         let mut weight_off = 0usize;
-        let mut fan_in = NN_INPUTS;
+        let mut fan_in = self.topology.input_width();
+        debug_assert!(input.len() >= fan_in);
 
         // ─── Hidden matmuls: input → h1, h1 → h2, ... ──────────────────
         let hidden_count = hidden_sizes.len();
@@ -392,7 +446,13 @@ impl Brain {
             // First matmul reads input; subsequent reads from whichever
             // scratch we last wrote.
             if k == 0 {
-                matmul_tiled(weights, input, &mut scratch_a[..fan_out], fan_in, fan_out);
+                matmul_tiled(
+                    weights,
+                    &input[..fan_in],
+                    &mut scratch_a[..fan_out],
+                    fan_in,
+                    fan_out,
+                );
                 apply_activation(activations[k], &mut scratch_a[..fan_out]);
             } else if k % 2 == 1 {
                 // Read from scratch_a, write to scratch_b.
@@ -444,7 +504,7 @@ impl Brain {
     #[cfg(test)]
     pub fn forward_scalar(
         &self,
-        input: &[f32; NN_INPUTS],
+        input: &[f32; MAX_NN_INPUTS],
         output: &mut [f32; NN_OUTPUTS],
         scratch_a: &mut [f32],
         scratch_b: &mut [f32],
@@ -452,12 +512,12 @@ impl Brain {
         let hidden_sizes = self.topology.hidden_sizes();
         let activations = self.topology.activations();
         let mut weight_off = 0usize;
-        let mut fan_in = NN_INPUTS;
+        let mut fan_in = self.topology.input_width();
 
         for (k, &fan_out) in hidden_sizes.iter().enumerate() {
             let weights = &self.weights[weight_off..weight_off + fan_in * fan_out];
             let (src, dst): (&[f32], &mut [f32]) = if k == 0 {
-                (input, scratch_a)
+                (&input[..], scratch_a)
             } else if k % 2 == 1 {
                 (&*scratch_a, scratch_b)
             } else {
@@ -692,7 +752,7 @@ mod tests {
         ] {
             let (mut sa, mut sb) = make_scratch(&topology);
             let brain = Brain::zero_with(topology);
-            let input = [0.0f32; NN_INPUTS];
+            let input = [0.0f32; MAX_NN_INPUTS];
             let mut output = [0.0f32; NN_OUTPUTS];
             brain.forward(&input, &mut output, &mut sa, &mut sb, None);
             assert!(output.iter().all(|&v| v == 0.0), "zero weights → zero output");
@@ -702,7 +762,7 @@ mod tests {
         let topology = NnTopology::legacy();
         let (mut sa, mut sb) = make_scratch(&topology);
         let brain = Brain::founder(&mut rng, topology);
-        let input = [1.0f32; NN_INPUTS];
+        let input = [1.0f32; MAX_NN_INPUTS];
         let mut output = [0.0f32; NN_OUTPUTS];
         brain.forward(&input, &mut output, &mut sa, &mut sb, None);
         assert!(output.iter().all(|&v| v.is_finite()));
@@ -725,7 +785,7 @@ mod tests {
         for topology in topologies {
             let mut rng = SimRng::from_u64(12345);
             let brain = Brain::founder(&mut rng, topology.clone());
-            let mut input = [0.0f32; NN_INPUTS];
+            let mut input = [0.0f32; MAX_NN_INPUTS];
             for v in &mut input {
                 *v = rng.symm();
             }
@@ -760,13 +820,15 @@ mod tests {
         let topology = NnTopology::legacy();
         let (mut sa, mut sb) = make_scratch(&topology);
         let h1_width = topology.hidden_sizes()[0];
+        let input_width = topology.input_width();
         let mut brain = Brain::zero_with(topology);
-        // Row 0 of layer-1 weights: all -1.0. Input all +1.0 → pre-activation = -NN_INPUTS.
-        for i in 0..NN_INPUTS {
+        // Row 0 of layer-1 weights (input_width entries) all -1.0. Input all
+        // +1.0 → pre-activation = -input_width = -NN_INPUTS for legacy.
+        for i in 0..input_width {
             brain.weights[i] = -1.0;
         }
 
-        let input = [1.0f32; NN_INPUTS];
+        let input = [1.0f32; MAX_NN_INPUTS];
         let mut output = [0.0f32; NN_OUTPUTS];
         brain.forward(&input, &mut output, &mut sa, &mut sb, None);
 
@@ -793,7 +855,7 @@ mod tests {
             *w = 0.3;
         }
         for sign in [1.0f32, -1.0f32] {
-            let input = [sign; NN_INPUTS];
+            let input = [sign; MAX_NN_INPUTS];
             let mut output = [0.0f32; NN_OUTPUTS];
             brain.forward(&input, &mut output, &mut sa, &mut sb, None);
             assert!(
@@ -811,7 +873,7 @@ mod tests {
         let brain = Brain::founder(&mut rng, topology.clone());
         let (mut sa1, mut sb1) = make_scratch(&topology);
         let (mut sa2, mut sb2) = make_scratch(&topology);
-        let mut input = [0.0f32; NN_INPUTS];
+        let mut input = [0.0f32; MAX_NN_INPUTS];
         for v in &mut input {
             *v = rng.symm();
         }
