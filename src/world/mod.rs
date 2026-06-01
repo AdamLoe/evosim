@@ -8,6 +8,7 @@ pub(crate) mod biome;
 pub(crate) mod nn;
 pub(crate) mod nn_stats;
 pub(crate) mod proximity;
+pub(crate) mod species;
 pub(crate) mod tick;
 
 // v2.0 Wave 1a: wrap-correctness (torus vs walled) tests live in their own
@@ -33,6 +34,14 @@ mod grass_biome_tests;
 #[cfg(test)]
 #[path = "genome_tests.rs"]
 mod genome_tests;
+
+// v2.0 Wave 3a: species + sexual-mating tests (mate fires same-species within
+// contact radius, Attack same-species gate, crossover distributions,
+// initiator-only cost/cooldown, species-mode determinism), in their own
+// file/module (same merge-hazard rule).
+#[cfg(test)]
+#[path = "mating_tests.rs"]
+mod mating_tests;
 
 use self::nn::{chunk_ranges, dynamic_chunks};
 use self::tick::AttackPick;
@@ -128,6 +137,29 @@ pub struct DevSliders {
     /// The genome mutates off the SAME bucket as the brain (per child), but each
     /// trait's Gaussian nudge uses `chosen_bucket.sigma * this`. Default 0.3.
     pub trait_mutation_sigma_multiplier: f32,
+    /// v2.0 Wave 3a construction-only: species + sexual-mating mode. OFF ⇒
+    /// today's single-pool asexual `Split` sim (unchanged). ON ⇒ 10 seeded
+    /// species + `Mate` + Attack-refuses-same-species + 16-sector creature
+    /// proximity + per-species color. Restart-required (changes the NN layout +
+    /// the action semantics). Shapes the *next* world only.
+    pub species_mode: bool,
+    /// v2.0 Wave 3a construction-only: crossover policy for sexual reproduction
+    /// (species_mode). `Average` = per-slot midpoint; `FiftyFifty` = per-slot
+    /// 50/50 pick. Applied to both brain weights and the 6 genome traits, then
+    /// mutation. Default `FiftyFifty`.
+    pub crossover_mode: CrossoverMode,
+    /// v2.0 Wave 3a construction-only: number of seeded species (species_mode).
+    pub starting_species_count: u32,
+    /// v2.0 Wave 3a construction-only: founders per species (species_mode).
+    pub starting_species_member_count: u32,
+    /// v2.0 Wave 3a construction-only: per-founder spread multiplier. ACCEPTED
+    /// but INERT in Wave 3 (the placeholder seeding draws uniform-random founder
+    /// genomes); Wave 4 applies it to the per-founder bucket draw. The slider is
+    /// wired + plumbed now so the slider set is final.
+    pub starting_species_member_variance: f32,
+    /// v2.0 Wave 3a live: initiator-only post-mating cooldown (ticks). The
+    /// initiator pays this after a successful `Mate`; the partner is unaffected.
+    pub mating_cooldown_ticks: u32,
 }
 
 impl Default for DevSliders {
@@ -162,6 +194,12 @@ impl Default for DevSliders {
             water_movement_penalty: WATER_MOVEMENT_PENALTY_DEFAULT,
             desert_movement_penalty: DESERT_MOVEMENT_PENALTY_DEFAULT,
             trait_mutation_sigma_multiplier: TRAIT_MUTATION_SIGMA_MULTIPLIER_DEFAULT,
+            species_mode: SPECIES_MODE_DEFAULT,
+            crossover_mode: CROSSOVER_MODE_DEFAULT,
+            starting_species_count: STARTING_SPECIES_COUNT_DEFAULT,
+            starting_species_member_count: STARTING_SPECIES_MEMBER_COUNT_DEFAULT,
+            starting_species_member_variance: STARTING_SPECIES_MEMBER_VARIANCE_DEFAULT,
+            mating_cooldown_ticks: MATING_COOLDOWN_TICKS_DEFAULT,
         }
     }
 }
@@ -196,6 +234,11 @@ pub struct World {
     /// copied byte-for-byte into the boot `biome_buf` SAB. Read O(1) per tick
     /// via `biome_at`.
     pub(crate) biome_grid: Vec<u8>,
+    /// v2.0 Wave 3a: species registry (id → color). Empty when `species_mode`
+    /// is off; seeded with `starting_species_count` species otherwise. Dynamic
+    /// (add/remove-capable) so the v2.1 split work needs no protocol change. The
+    /// per-creature `species_id` keys into this for the snapshot color lane.
+    pub(crate) species: species::SpeciesRegistry,
     /// Grass density field (v1.2 grass mechanic).
     pub grass: GrassGrid,
     pub grid: SpatialGrid,
@@ -235,6 +278,10 @@ pub struct World {
     /// Per-tick splitter indices (creatures whose Action::Split fired with
     /// enough energy). Drives the parallel child-brain phase in `handle_births`.
     pub(crate) scratch_splitters: Vec<usize>,
+    /// v2.0 Wave 3a: per-initiator partner index for the mating path. Index `k`
+    /// aligns with `scratch_splitters[k]` (the initiator); the value is the
+    /// partner SoA index found within contact radius. Only valid in species_mode.
+    pub(crate) scratch_mate_partners: Vec<usize>,
     /// Bitmask over splitters: `true` means the prospective newborn is sampled
     /// for the cap-cull and should NOT be cloned. Saves a brain clone+free per
     /// would-be-culled newborn.
@@ -264,9 +311,11 @@ pub struct World {
     /// 33×33 LUT (`proximity::LUT_DIM²`) eliminates `atan2` in the per-creature
     /// grass-density scan. Built once at `new_with_sliders`.
     pub(crate) sector_lut: Vec<(u8, u8, f32)>,
-    /// v1.5 S5b: per-creature 8-accumulator scratch reused across the NN input
-    /// build. Resized in `step()` before the chunked input phase.
-    pub(crate) scratch_sector_accum: Vec<[f32; 8]>,
+    /// v1.5 S5b / v2.0 Wave 3a: per-creature 16-accumulator scratch reused across
+    /// the NN input build. Sized 16 so it holds the species-mode 16-sector
+    /// creature-proximity block (8 same + 8 other); single-pool uses only the
+    /// first 8. Resized in `step()` before the chunked input phase.
+    pub(crate) scratch_sector_accum: Vec<[f32; 16]>,
     /// v1.12: NN structure for this world's lifetime. Set at construction
     /// (from the boot payload), used by `Brain::founder` and by the per-layer
     /// profiler-drain loop in `nn_forward_all_chunks`.
@@ -338,15 +387,16 @@ impl World {
             }
             grass.rebuild_row_bitset();
         }
-        // v2.0 Wave 1b: the active input layout is driven by `wrap_world`
-        // (drops ReservedPredator; WallProximity only when walled; biome groups
-        // always-on). The active width is 32 (wrap on) or 40 (wrap off). The
+        // v2.0 Wave 1b/3a: the active input layout is driven by `wrap_world` +
+        // `species_mode` (drops ReservedPredator; WallProximity only when walled;
+        // biome groups always-on; CreatureSectors 8 single-pool / 16 species).
+        // The active width is 32/40/40/48 (see the 4-way table in nn.rs). The
         // topology's `input_width` must agree with the layout the founders are
         // drawn for, so reconcile the topology to the layout width BEFORE
-        // founder draws. The incoming `nn_topology` carries its hidden layers
-        // (from the boot payload or legacy default) at the default 32-input
-        // width; we widen its first matmul fan-in to match the layout.
-        let nn_input_layout = self::nn::NnInputLayout::for_settings(dims.wrap_world);
+        // founder draws.
+        let species_mode = sliders.species_mode;
+        let nn_input_layout =
+            self::nn::NnInputLayout::for_settings(dims.wrap_world, species_mode);
         let nn_topology = if nn_topology.input_width() == nn_input_layout.width() {
             nn_topology
         } else {
@@ -364,7 +414,6 @@ impl World {
         );
 
         let mut creatures = CreatureSoA::with_capacity(2048);
-        let founder_count = sliders.founder_count.clamp(1, 32);
         let founder_energy = START_ENERGY_DEFAULT.min(sliders.energy_max);
         let body_r = CREATURE_SIZE * BODY_RADIUS_PER_SIZE;
         // Walled: keep founders a body-radius off the wall. Toroidal: any point
@@ -374,20 +423,68 @@ impl World {
         } else {
             (body_r, dims.world_size - body_r)
         };
-        for k in 0..founder_count {
-            let brain = Brain::founder(&mut rng, nn_topology.clone());
-            // v2.0 Wave 2a: single-pool founders draw a genome uniformly in
-            // [0,1] per trait (visible diversity from tick 0). Drawn AFTER the
-            // brain so the RNG stream stays deterministic.
-            let genome = Genome::founder(&mut rng);
-            // Halton (2, 3) gives a low-discrepancy 2D sequence; shift by 1 so
-            // the first sample isn't (0, 0).
-            let hx = halton(k + 1, 2);
-            let hy = halton(k + 1, 3);
-            let x = lo + hx * (hi - lo);
-            let y = lo + hy * (hi - lo);
-            creatures.push(k as u64, x, y, founder_energy, 0, brain, genome);
+
+        // v2.0 Wave 3a: species registry + per-creature `species_id` seeding.
+        let mut species = species::SpeciesRegistry::new();
+        let mut next_id: u64 = 0;
+        if species_mode {
+            // PLACEHOLDER seeding (Wave 4 does biome-appropriate founders +
+            // `_member_variance` spread). Seed `starting_species_count` species,
+            // each clustering `starting_species_member_count` founders near a
+            // random spread-out anchor. Founder genomes are BASIC uniform-random
+            // (single-pool style) — just enough to exercise mating + gating.
+            let species_count = sliders.starting_species_count.max(1);
+            let member_count = sliders.starting_species_member_count.max(1);
+            species = species::SpeciesRegistry::seed(species_count);
+            // Cluster spread: founders scatter within this radius of the anchor.
+            // Sized so a cluster is contact-mating-reachable at tick 0 but the
+            // species still occupies a distinct patch of the (large) world.
+            let cluster_radius = (dims.world_size * 0.01).max(MOVE_SPEED_MAX * 2.0);
+            for s in 0..species_count {
+                let sp_id = s as u16;
+                // Anchor placement via Halton(2,3) so anchors spread out
+                // deterministically across the world (single RNG stream stays
+                // clean; anchors don't consume sim RNG draws).
+                let ax = lo + halton(s + 1, 2) * (hi - lo);
+                let ay = lo + halton(s + 1, 3) * (hi - lo);
+                for _ in 0..member_count {
+                    let brain = Brain::founder(&mut rng, nn_topology.clone());
+                    let genome = Genome::founder(&mut rng);
+                    // Cluster the founder near the anchor (sim RNG; deterministic).
+                    let jx = rng.symm() * cluster_radius;
+                    let jy = rng.symm() * cluster_radius;
+                    let (x, y) = if dims.wrap_world {
+                        (
+                            (ax + jx).rem_euclid(dims.world_size),
+                            (ay + jy).rem_euclid(dims.world_size),
+                        )
+                    } else {
+                        ((ax + jx).clamp(lo, hi), (ay + jy).clamp(lo, hi))
+                    };
+                    creatures.push(next_id, x, y, founder_energy, 0, brain, genome, sp_id);
+                    next_id += 1;
+                }
+            }
+        } else {
+            // Single-pool: today's multi-founder Halton spawn, unchanged.
+            let founder_count = sliders.founder_count.clamp(1, 32);
+            for k in 0..founder_count {
+                let brain = Brain::founder(&mut rng, nn_topology.clone());
+                // v2.0 Wave 2a: single-pool founders draw a genome uniformly in
+                // [0,1] per trait (visible diversity from tick 0). Drawn AFTER the
+                // brain so the RNG stream stays deterministic.
+                let genome = Genome::founder(&mut rng);
+                // Halton (2, 3) gives a low-discrepancy 2D sequence; shift by 1 so
+                // the first sample isn't (0, 0).
+                let hx = halton(k + 1, 2);
+                let hy = halton(k + 1, 3);
+                let x = lo + hx * (hi - lo);
+                let y = lo + hy * (hi - lo);
+                creatures.push(k as u64, x, y, founder_energy, 0, brain, genome, 0);
+                next_id += 1;
+            }
         }
+        let next_creature_id = next_id;
         let mut grid = SpatialGrid::new(dims);
         grid.rebuild(&creatures.x, &creatures.y);
         let sector_lut = proximity::build_sector_lut();
@@ -397,12 +494,13 @@ impl World {
             dims,
             world_seed,
             biome_grid,
+            species,
             rng,
             grass,
             grid,
             creatures,
             sliders,
-            next_creature_id: founder_count as u64,
+            next_creature_id,
             world_ended: false,
             profile: crate::profiler::Profiler::new(),
             scratch_fx: Vec::new(),
@@ -417,6 +515,7 @@ impl World {
             scratch_dead: Vec::new(),
             scratch_cull_pool: Vec::new(),
             scratch_splitters: Vec::new(),
+            scratch_mate_partners: Vec::new(),
             scratch_newborn_dead: Vec::new(),
             scratch_existing_dead: Vec::new(),
             scratch_birth_seeds: Vec::new(),
@@ -562,7 +661,7 @@ impl World {
             // v1.5 S3: argmax-pre buffer mirrors per-creature output; sized to
             // match population before the chunked NN pass writes into it.
             self.scratch_argmax_pre.resize(n, 0);
-            self.scratch_sector_accum.resize(n, [0.0f32; 8]);
+            self.scratch_sector_accum.resize(n, [0.0f32; 16]);
             self.nn_forward_all_chunks(&ranges, n);
         }
 
@@ -705,10 +804,15 @@ impl World {
             }
         }
 
-        // 10. Births.
+        // 10. Births. Single-pool: asexual Split. species_mode: sexual Mate
+        //     (same-species, contact-radius, initiator-gated; v2.0 Wave 3a).
         {
             crate::profile_span!(&self.profile, "tick.handle_births");
-            self.handle_births();
+            if self.sliders.species_mode {
+                self.handle_mating();
+            } else {
+                self.handle_births();
+            }
         }
 
         // 12. Step-12 tail: last_action promotion, tick bump, world-end check.
@@ -913,8 +1017,18 @@ impl World {
                 };
                 let new_id = self.next_creature_id;
                 self.next_creature_id += 1;
-                self.creatures
-                    .push(new_id, cx, cy, gift, self.tick, child_brain, child_genome);
+                // Single-pool: child inherits the parent's species_id (0/unused).
+                let child_species = self.creatures.species_id[parent_i];
+                self.creatures.push(
+                    new_id,
+                    cx,
+                    cy,
+                    gift,
+                    self.tick,
+                    child_brain,
+                    child_genome,
+                    child_species,
+                );
                 // v2.0 Wave 2a: the splitting parent flashes blue ("created a
                 // child"). The newborn itself flashes teal ("born") via `push`.
                 self.creatures.set_flash(parent_i, FlashTag::CreatedChild);
@@ -951,6 +1065,268 @@ impl World {
         self.scratch_child_genomes = child_genomes;
     }
 
+    /// v2.0 Wave 3a: sexual mating (species_mode). The action[2] slot decodes to
+    /// `Action::Split` here too (the NN logit order is stable) but means **Mate**.
+    ///
+    /// Gated ENTIRELY by the initiator: a creature mates only if it chose
+    /// action[2], is off mating cooldown, has energy ≥ the mating cost (= the
+    /// split energy gift), AND finds a same-species creature within the contact
+    /// radius `(r_i + r_j) * MATING_CONTACT_RADIUS_FACTOR` — essentially
+    /// touching, NOT the 20u perception range. First-found same-species creature
+    /// wins (no nearest-scan, consistent with Attack). All cost + cooldown fall
+    /// on the initiator only; the partner pays nothing, needs no energy, and is
+    /// not required to be off cooldown. The child spawns at the **midpoint** of
+    /// the two parents via crossover-then-mutate (per `crossover_mode`), with the
+    /// parents' shared `species_id`.
+    pub(crate) fn handle_mating(&mut self) {
+        let n = self.creatures.len();
+        if n == 0 {
+            return;
+        }
+        let mating_cost = self.sliders.split_gift;
+        let crossover = self.sliders.crossover_mode;
+        let cooldown_ticks = self.sliders.mating_cooldown_ticks;
+        let world_size = self.dims.world_size;
+        let wrap = self.dims.wrap_world;
+        let half_world = world_size * 0.5;
+        let base_r = CREATURE_SIZE * BODY_RADIUS_PER_SIZE;
+        // Grid query reach: largest possible summed body radii × factor.
+        let max_body_r = base_r * 1.5;
+        let max_range = (max_body_r + max_body_r) * MATING_CONTACT_RADIUS_FACTOR;
+
+        // 1. Find an in-contact same-species partner for every eligible
+        //    initiator. Read-only over the SoA + grid; collect (initiator,
+        //    partner) pairs sequentially (cheap O(initiators) — most creatures
+        //    aren't mating any given tick).
+        let mut initiators = std::mem::take(&mut self.scratch_splitters);
+        let mut partners = std::mem::take(&mut self.scratch_mate_partners);
+        initiators.clear();
+        partners.clear();
+        for i in 0..n {
+            if self.creatures.action_this_tick[i] != Action::Split {
+                continue;
+            }
+            // Initiator-only gate (mirror the NN validity check; re-checked here
+            // for safety since the action was decided before bookkeeping).
+            if self.creatures.mating_cooldown[i] > 0 || self.creatures.energy[i] < mating_cost {
+                continue;
+            }
+            let xi = self.creatures.x[i];
+            let yi = self.creatures.y[i];
+            let ri = base_r * self.creatures.genome[i].body_size_factor();
+            let self_species = self.creatures.species_id[i];
+            let grid = &self.grid;
+            let creatures = &self.creatures;
+            // First same-species creature within contact wins.
+            let found = grid.find_first_in_radius(xi, yi, max_range, i, |j| {
+                if j == i {
+                    return false;
+                }
+                if creatures.species_id[j] != self_species {
+                    return false;
+                }
+                let mut dx = creatures.x[j] - xi;
+                let mut dy = creatures.y[j] - yi;
+                if wrap {
+                    if dx > half_world {
+                        dx -= world_size;
+                    } else if dx < -half_world {
+                        dx += world_size;
+                    }
+                    if dy > half_world {
+                        dy -= world_size;
+                    } else if dy < -half_world {
+                        dy += world_size;
+                    }
+                }
+                let d2 = dx * dx + dy * dy;
+                let rj = base_r * creatures.genome[j].body_size_factor();
+                let contact = (ri + rj) * MATING_CONTACT_RADIUS_FACTOR;
+                d2 <= contact * contact
+            });
+            if let Some(j) = found {
+                initiators.push(i);
+                partners.push(j);
+            }
+        }
+
+        let n_pairs = initiators.len();
+        if n_pairs == 0 {
+            self.scratch_splitters = initiators;
+            self.scratch_mate_partners = partners;
+            return;
+        }
+
+        // 2. Cap-cull decision over the virtual post-birth pop, identical to
+        //    handle_births. Virtual newborn indices map [n..n+n_pairs).
+        let active_cap = (self.sliders.max_population as usize).clamp(1, MAX_POP_FOR_SIM);
+        let virtual_pop = n + n_pairs;
+        let excess = virtual_pop.saturating_sub(active_cap);
+
+        let mut newborn_dead = std::mem::take(&mut self.scratch_newborn_dead);
+        newborn_dead.clear();
+        newborn_dead.resize(n_pairs, false);
+        let mut existing_dead = std::mem::take(&mut self.scratch_existing_dead);
+        existing_dead.clear();
+        if excess > 0 {
+            self.scratch_cull_pool.clear();
+            self.scratch_cull_pool.extend(0..virtual_pop);
+            for _ in 0..excess {
+                let pick = self.rng.index(self.scratch_cull_pool.len());
+                let k = self.scratch_cull_pool.swap_remove(pick);
+                if k < n {
+                    existing_dead.push(k);
+                } else {
+                    newborn_dead[k - n] = true;
+                }
+            }
+        }
+
+        // 3. Pre-roll one RNG seed per pair (deterministic order).
+        let mut seeds = std::mem::take(&mut self.scratch_birth_seeds);
+        seeds.clear();
+        seeds.reserve(n_pairs);
+        for _ in 0..n_pairs {
+            seeds.push(self.rng.next_u64());
+        }
+
+        // 4. Parallel: crossover-then-mutate the child brain + genome for every
+        //    surviving pair. RNG draw order per child (deterministic): brain
+        //    crossover (+ bucket mutation), then genome crossover, then genome
+        //    mutation — all off the pair's pre-rolled seed.
+        let mut child_brains = std::mem::take(&mut self.scratch_child_brains);
+        child_brains.clear();
+        child_brains.resize_with(n_pairs, || None);
+        let mut child_genomes = std::mem::take(&mut self.scratch_child_genomes);
+        child_genomes.clear();
+        child_genomes.resize_with(n_pairs, || None);
+
+        let policy = &self.sliders.mutation_policy;
+        let mut_mult = self.sliders.mutation_rate_multiplier;
+        let trait_sigma_mult = self.sliders.trait_mutation_sigma_multiplier;
+        {
+            let brains = &self.creatures.brains[..n];
+            let genomes = &self.creatures.genome[..n];
+            let inits = &initiators[..];
+            let parts = &partners[..];
+            let seeds_view = &seeds[..];
+            let dead_mask = &newborn_dead[..];
+            let out = &mut child_brains[..];
+            let out_g = &mut child_genomes[..];
+
+            let build_one = |k: usize, slot: &mut Option<Brain>, gslot: &mut Option<Genome>| {
+                if dead_mask[k] {
+                    return;
+                }
+                let pa = &brains[inits[k]];
+                let pb = &brains[parts[k]];
+                let mut rng = SimRng::from_u64(seeds_view[k]);
+                let (child_brain, bucket_sigma) = Brain::child_from_crossover_with_sigma(
+                    pa, pb, &mut rng, policy, mut_mult, crossover,
+                );
+                let ga = &genomes[inits[k]];
+                let gb = &genomes[parts[k]];
+                let crossed = ga.crossed(gb, &mut rng, crossover);
+                let child_genome = crossed.mutated(&mut rng, bucket_sigma * trait_sigma_mult);
+                *slot = Some(child_brain);
+                *gslot = Some(child_genome);
+            };
+
+            #[cfg(feature = "threads")]
+            {
+                use rayon::prelude::*;
+                out.par_iter_mut()
+                    .zip(out_g.par_iter_mut())
+                    .enumerate()
+                    .for_each(|(k, (slot, gslot))| build_one(k, slot, gslot));
+            }
+            #[cfg(not(feature = "threads"))]
+            {
+                for (k, (slot, gslot)) in out.iter_mut().zip(out_g.iter_mut()).enumerate() {
+                    build_one(k, slot, gslot);
+                }
+            }
+        }
+
+        // 5. Sequential apply: initiator pays the energy cost + enters cooldown;
+        //    child spawns at the parent midpoint (no habitable-cell check). The
+        //    partner is untouched. Cost/cooldown apply even if the newborn was
+        //    cull-sampled (the initiator still "mated").
+        for (k, &init_i) in initiators.iter().enumerate() {
+            let part_j = partners[k];
+            // Initiator-only cost + cooldown.
+            self.creatures.energy[init_i] -= mating_cost;
+            self.creatures.mating_cooldown[init_i] = cooldown_ticks;
+
+            if let Some(child_brain) = child_brains[k].take() {
+                let child_genome = child_genomes[k].take().unwrap_or_else(Genome::median);
+                let species_id = self.creatures.species_id[init_i];
+                // Midpoint of the two parents (wrap-aware minimum-image so a
+                // seam-straddling pair spawns between them, not across the world).
+                let xi = self.creatures.x[init_i];
+                let yi = self.creatures.y[init_i];
+                let xj = self.creatures.x[part_j];
+                let yj = self.creatures.y[part_j];
+                let (cx, cy) = if wrap {
+                    let mut dx = xj - xi;
+                    let mut dy = yj - yi;
+                    if dx > half_world {
+                        dx -= world_size;
+                    } else if dx < -half_world {
+                        dx += world_size;
+                    }
+                    if dy > half_world {
+                        dy -= world_size;
+                    } else if dy < -half_world {
+                        dy += world_size;
+                    }
+                    (
+                        (xi + dx * 0.5).rem_euclid(world_size),
+                        (yi + dy * 0.5).rem_euclid(world_size),
+                    )
+                } else {
+                    (0.5 * (xi + xj), 0.5 * (yi + yj))
+                };
+                // The newborn's energy is the mating cost paid by the initiator
+                // (the "gift"), mirroring split semantics.
+                let gift = mating_cost.max(0.0);
+                let new_id = self.next_creature_id;
+                self.next_creature_id += 1;
+                self.creatures
+                    .push(new_id, cx, cy, gift, self.tick, child_brain, child_genome, species_id);
+                // Initiator flashes blue ("created a child"); newborn teal via push.
+                self.creatures.set_flash(init_i, FlashTag::CreatedChild);
+            }
+        }
+
+        // 6. Apply pre-existing-creature culls (newborns sampled for the cull
+        //    were never pushed). Mirror the scratch-column swap_remove dance.
+        if !existing_dead.is_empty() {
+            existing_dead.sort_unstable();
+            for &k in existing_dead.iter().rev() {
+                if k < self.scratch_argmax_pre.len() {
+                    self.scratch_argmax_pre.swap_remove(k);
+                }
+                if k < self.scratch_got_a_bite.len() {
+                    self.scratch_got_a_bite.swap_remove(k);
+                }
+                if k < self.scratch_sector_accum.len() {
+                    self.scratch_sector_accum.swap_remove(k);
+                }
+            }
+            self.creatures.remove_indices(&existing_dead);
+        }
+
+        // Return scratch buffers to the World (high-water allocations kept).
+        self.scratch_splitters = initiators;
+        self.scratch_mate_partners = partners;
+        self.scratch_newborn_dead = newborn_dead;
+        self.scratch_existing_dead = existing_dead;
+        self.scratch_birth_seeds = seeds;
+        self.scratch_child_brains = child_brains;
+        self.scratch_child_genomes = child_genomes;
+    }
+
     pub fn tick_once(&mut self) -> bool {
         self.step()
     }
@@ -971,6 +1347,7 @@ impl World {
                 self.creatures.birth_tick[i],
                 self.creatures.brains[i].clone(),
                 self.creatures.genome[i],
+                self.creatures.species_id[i],
             );
             // Restore non-push fields.
             creatures.vx[i] = self.creatures.vx[i];
@@ -984,6 +1361,7 @@ impl World {
             creatures.ticks_since_split[i] = self.creatures.ticks_since_split[i];
             creatures.flash_tag[i] = self.creatures.flash_tag[i];
             creatures.flash_ticks[i] = self.creatures.flash_ticks[i];
+            creatures.mating_cooldown[i] = self.creatures.mating_cooldown[i];
         }
         let mut grid = SpatialGrid::new(self.dims);
         grid.rebuild(&creatures.x, &creatures.y);
@@ -994,6 +1372,7 @@ impl World {
             dims: self.dims,
             world_seed: self.world_seed,
             biome_grid: self.biome_grid.clone(),
+            species: self.species.clone(),
             rng: self.rng.clone(),
             grass: self.grass.clone(),
             grid,
@@ -1014,6 +1393,7 @@ impl World {
             scratch_dead: Vec::new(),
             scratch_cull_pool: Vec::new(),
             scratch_splitters: Vec::new(),
+            scratch_mate_partners: Vec::new(),
             scratch_newborn_dead: Vec::new(),
             scratch_existing_dead: Vec::new(),
             scratch_birth_seeds: Vec::new(),
@@ -1142,7 +1522,7 @@ mod tests {
             let g = Genome::founder(&mut seeder);
             let x = seeder.uniform(10.0, ws - 10.0);
             let y = seeder.uniform(10.0, ws - 10.0);
-            w.creatures.push(k + 1, x, y, START_ENERGY_DEFAULT, 0, b, g);
+            w.creatures.push(k + 1, x, y, START_ENERGY_DEFAULT, 0, b, g, 0);
         }
 
         let energy_start: f32 = w.creatures.energy.iter().sum();

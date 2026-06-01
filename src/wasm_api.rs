@@ -79,21 +79,28 @@ pub const SLIDER_NAMES: &[&str] = &[
     "desert_movement_penalty",             // 22 f32 — Desert biome base severity
     // v2.0 Wave 2a: live multiplier on the per-birth body-genome mutation step.
     "trait_mutation_sigma_multiplier",     // 23 f32 — genome trait-sigma multiplier
+    // v2.0 Wave 3a: species + sexual-mating construction/live settings.
+    "species_mode",                        // 24 bool (0/non-zero) construction — species + mating
+    "crossover_mode",                      // 25 enum (0=average, non-zero=fifty_fifty) construction
+    "starting_species_count",              // 26 u32 (carried as f32) construction
+    "starting_species_member_count",       // 27 u32 (carried as f32) construction
+    "starting_species_member_variance",    // 28 f32 construction (INERT in W3; W4 applies it)
+    "mating_cooldown_ticks",               // 29 u32 (carried as f32) live — initiator-only cooldown
     // v1.12: 8 mutation buckets × 3 floats. Index = SLIDER_BUCKET_BASE + bucket*3 + field.
     // field 0 = weight, 1 = rate, 2 = sigma. See MUTATION_BUCKET_COUNT.
-    "bucket_0_weight", "bucket_0_rate", "bucket_0_sigma", // 24..27
-    "bucket_1_weight", "bucket_1_rate", "bucket_1_sigma", // 27..30
-    "bucket_2_weight", "bucket_2_rate", "bucket_2_sigma", // 30..33
-    "bucket_3_weight", "bucket_3_rate", "bucket_3_sigma", // 33..36
-    "bucket_4_weight", "bucket_4_rate", "bucket_4_sigma", // 36..39
-    "bucket_5_weight", "bucket_5_rate", "bucket_5_sigma", // 39..42
-    "bucket_6_weight", "bucket_6_rate", "bucket_6_sigma", // 42..45
-    "bucket_7_weight", "bucket_7_rate", "bucket_7_sigma", // 45..48
+    "bucket_0_weight", "bucket_0_rate", "bucket_0_sigma", // 30..33
+    "bucket_1_weight", "bucket_1_rate", "bucket_1_sigma", // 33..36
+    "bucket_2_weight", "bucket_2_rate", "bucket_2_sigma", // 36..39
+    "bucket_3_weight", "bucket_3_rate", "bucket_3_sigma", // 39..42
+    "bucket_4_weight", "bucket_4_rate", "bucket_4_sigma", // 42..45
+    "bucket_5_weight", "bucket_5_rate", "bucket_5_sigma", // 45..48
+    "bucket_6_weight", "bucket_6_rate", "bucket_6_sigma", // 48..51
+    "bucket_7_weight", "bucket_7_rate", "bucket_7_sigma", // 51..54
 ];
 
-/// First mutation-bucket slider slot. v2.0 Wave 2a (shifted from 23 to 24 after
-/// adding the `trait_mutation_sigma_multiplier` slot).
-pub const SLIDER_BUCKET_BASE: usize = 24;
+/// First mutation-bucket slider slot. v2.0 Wave 3a (shifted from 24 to 30 after
+/// adding the 6 species/mating slots).
+pub const SLIDER_BUCKET_BASE: usize = 30;
 
 /// Number of slots in `CTRL_SLIDERS`. Equal to `SLIDER_NAMES.len()`.
 pub const SLIDER_COUNT: usize = SLIDER_NAMES.len();
@@ -264,6 +271,15 @@ impl WorldHandle {
         world_size: f32,
         wrap_world: bool,
         world_seed: u32,
+        // v2.0 Wave 3a: species + sexual-mating construction settings. These
+        // shape the world topology + seeding at construction, so they ride the
+        // explicit construction path (not the live slider SAB). `crossover_mode`
+        // is carried as an f32 (0 = average, non-zero = fifty_fifty).
+        species_mode: bool,
+        crossover_mode: f32,
+        starting_species_count: u32,
+        starting_species_member_count: u32,
+        starting_species_member_variance: f32,
     ) -> Result<WorldHandle, JsValue> {
         let actual_seed = if seed.is_empty() {
             let mut bytes = [0u8; 8];
@@ -291,6 +307,12 @@ impl WorldHandle {
             world_size,
             wrap_world,
             world_seed: actual_world_seed,
+            // v2.0 Wave 3a species + sexual-mating construction settings.
+            species_mode,
+            crossover_mode: crate::constants::CrossoverMode::from_slider(crossover_mode),
+            starting_species_count: starting_species_count.max(1),
+            starting_species_member_count: starting_species_member_count.max(1),
+            starting_species_member_variance: starting_species_member_variance.max(0.0),
             ..Default::default()
         };
         let topology = parse_nn_topology(nn_topology_json)
@@ -696,6 +718,34 @@ impl WorldHandle {
     fn apply_trait_mutation_sigma_multiplier(&mut self, value: f32) {
         self.inner.sliders.trait_mutation_sigma_multiplier = value.max(0.0);
     }
+    /// v2.0 Wave 3a construction-only: species + sexual-mating mode for the
+    /// *next* world. Live world keeps its current mode.
+    fn apply_species_mode(&mut self, value: bool) {
+        self.inner.sliders.species_mode = value;
+    }
+    /// v2.0 Wave 3a construction-only: crossover policy (0 = average, non-zero =
+    /// fifty_fifty). Live world keeps its current policy.
+    fn apply_crossover_mode(&mut self, value: f32) {
+        self.inner.sliders.crossover_mode = crate::constants::CrossoverMode::from_slider(value);
+    }
+    /// v2.0 Wave 3a construction-only: number of seeded species. Clamped ≥ 1.
+    fn apply_starting_species_count(&mut self, value: u32) {
+        self.inner.sliders.starting_species_count = value.max(1);
+    }
+    /// v2.0 Wave 3a construction-only: founders per species. Clamped ≥ 1.
+    fn apply_starting_species_member_count(&mut self, value: u32) {
+        self.inner.sliders.starting_species_member_count = value.max(1);
+    }
+    /// v2.0 Wave 3a construction-only: per-founder spread multiplier. ACCEPTED
+    /// but INERT in Wave 3 (the placeholder seeding ignores it); Wave 4 applies
+    /// it to the per-founder bucket draw. Clamped non-negative.
+    fn apply_starting_species_member_variance(&mut self, value: f32) {
+        self.inner.sliders.starting_species_member_variance = value.max(0.0);
+    }
+    /// v2.0 Wave 3a live: initiator-only post-mating cooldown in ticks.
+    fn apply_mating_cooldown_ticks(&mut self, value: u32) {
+        self.inner.sliders.mating_cooldown_ticks = value;
+    }
     fn apply_max_population(&mut self, value: u32) {
         // Clamp into [1, MAX_POP_FOR_SIM]. The SAB-bound cap is structural —
         // we never let the soft cap exceed it (extra births above MAX_POP_FOR_SIM
@@ -771,6 +821,13 @@ impl WorldHandle {
             22 => self.apply_desert_movement_penalty(value),
             // v2.0 Wave 2a live genome trait-sigma multiplier.
             23 => self.apply_trait_mutation_sigma_multiplier(value),
+            // v2.0 Wave 3a species + sexual-mating settings.
+            24 => self.apply_species_mode(value != 0.0),
+            25 => self.apply_crossover_mode(value),
+            26 => self.apply_starting_species_count(value.max(0.0) as u32),
+            27 => self.apply_starting_species_member_count(value.max(0.0) as u32),
+            28 => self.apply_starting_species_member_variance(value),
+            29 => self.apply_mating_cooldown_ticks(value.max(0.0) as u32),
             // v1.12: 8 mutation buckets × 3 fields.
             n if n >= SLIDER_BUCKET_BASE
                 && n < SLIDER_BUCKET_BASE + MUTATION_BUCKET_COUNT * 3 =>
@@ -873,7 +930,12 @@ impl WorldHandle {
         let wp_e = (1.0 - ((world_size - cx) / wall_range)).clamp(0.0, 1.0);
         // v2.0 Wave 2a: genome-modulated movement penalty at the current cell.
         let movement_penalty = self.inner.movement_penalty_for(i);
-        let json = serde_json::json!({
+        // v2.0 Wave 3a: species fields (species_mode only). The species-history
+        // breadcrumb is Wave 5 — left empty here.
+        let species_mode = self.inner.sliders.species_mode;
+        let species_id = self.inner.creatures.species_id[i];
+        let species_color = self.inner.species.color_of(species_id);
+        let mut json = serde_json::json!({
             "index": idx,
             "id": self.inner.creatures.id[i],
             "x": cx,
@@ -900,6 +962,16 @@ impl WorldHandle {
             "wall_proximity": [wp_n, wp_s, wp_e, wp_w],
             "nn_weight_count": brain.weights.len(),
         });
+        // v2.0 Wave 3a: species fields only in species mode. The species color is
+        // exposed as the RGBA8 packed u32 (same lane the renderer paints) plus an
+        // empty species-history breadcrumb (Wave 5 fills it).
+        if species_mode {
+            if let Some(obj) = json.as_object_mut() {
+                obj.insert("species_id".into(), serde_json::json!(species_id));
+                obj.insert("species_color".into(), serde_json::json!(species_color));
+                obj.insert("species_history".into(), serde_json::json!([] as [u16; 0]));
+            }
+        }
         Some(serde_json::to_string(&json).unwrap_or_else(|_| "{}".into()))
     }
 
@@ -998,6 +1070,13 @@ impl WorldHandle {
             "desert_movement_penalty": d.desert_movement_penalty,
             // v2.0 Wave 2a genome trait-sigma multiplier.
             "trait_mutation_sigma_multiplier": d.trait_mutation_sigma_multiplier,
+            // v2.0 Wave 3a species + sexual-mating settings (bools/enums as 0/1).
+            "species_mode": if d.species_mode { 1.0_f32 } else { 0.0 },
+            "crossover_mode": d.crossover_mode.to_slider(),
+            "starting_species_count": d.starting_species_count as f32,
+            "starting_species_member_count": d.starting_species_member_count as f32,
+            "starting_species_member_variance": d.starting_species_member_variance,
+            "mating_cooldown_ticks": d.mating_cooldown_ticks as f32,
         });
         // v1.12: 8 mutation buckets × 3 fields. Names match SLIDER_NAMES.
         let obj = json.as_object_mut().expect("json! produced an object");
@@ -1061,19 +1140,30 @@ fn fill_creature_bytes(world: &World, dst: &mut [u8]) -> usize {
     );
     debug_assert!(dst.len() >= pop * 32, "dst too small for creature SoA",);
     let base_r = CREATURE_SIZE * BODY_RADIUS_PER_SIZE;
+    // v2.0 Wave 3a: in species mode the body color is the SPECIES color (looked
+    // up sim-side from the registry) so the renderer needs no change this wave;
+    // single-pool keeps the genome-derived color. The per-creature `species_id`
+    // also rides the snapshot `packed_u32` (bits 7..23).
+    let species_mode = world.sliders.species_mode;
     for i in 0..pop {
         let x = world.creatures.x[i];
         let y = world.creatures.y[i];
         let g = &world.creatures.genome[i];
         // v2.0 Wave 2a: sprite radius is body_size-derived.
         let body_r = base_r * g.body_size_factor();
-        // v2.0 Wave 2a: genome-derived display color (RGBA8 packed u32).
-        let color = genome_color_u32(g);
-        // v2.0 Wave 2a: ring-flash + reserved species_id, bit-packed.
+        let species_id = world.creatures.species_id[i];
+        // Display color: species color (species_mode) or genome color (single-pool).
+        let color = if species_mode {
+            world.species.color_of(species_id)
+        } else {
+            genome_color_u32(g)
+        };
+        // v2.0 Wave 2a/3a: ring-flash + species_id, bit-packed. species_id is 0
+        // (reserved) in single-pool, the creature's species in species_mode.
         let packed = pack_render_u32(
             world.creatures.flash_tag[i] as u8,
             world.creatures.flash_ticks[i],
-            0, /* species_id reserved (single-pool) */
+            if species_mode { species_id } else { 0 },
         );
         let id = world.creatures.id[i];
         let id_lo = id as u32;
@@ -1269,9 +1359,10 @@ mod tests {
     /// drives so the SAB layout is testable off-wasm.
     #[test]
     fn write_snapshot_to_layout_matches_stride() {
-        let mut handle =
-            WorldHandle::new_with_founder_count("a1-snapshot", 0, 100.0, 3, false, "", 1200.0, false, 1)
-                .unwrap();
+        let mut handle = WorldHandle::new_with_founder_count(
+            "a1-snapshot", 0, 100.0, 3, false, "", 1200.0, false, 1, false, 1.0, 10, 10, 3.0,
+        )
+        .unwrap();
         let mut creatures = Vec::new();
         let mut grass = Vec::new();
         let mut stats = Vec::new();
@@ -1360,7 +1451,7 @@ mod tests {
     #[test]
     fn creature_at_returns_stable_id() {
         let handle = WorldHandle::new_with_founder_count(
-            "e21-creature-at", 0, 100.0, 1, false, "", 1200.0, false, 1,
+            "e21-creature-at", 0, 100.0, 1, false, "", 1200.0, false, 1, false, 1.0, 10, 10, 3.0,
         )
         .unwrap();
         let founder_id = handle.inner.creatures.id[0] as f64;

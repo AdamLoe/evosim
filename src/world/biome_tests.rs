@@ -167,12 +167,13 @@ fn world_movement_penalty_reads_biome_and_sliders() {
 fn build_inputs_at(w: &mut World, x: f32, y: f32) -> [f32; MAX_NN_INPUTS] {
     w.creatures.x[0] = x;
     w.creatures.y[0] = y;
-    let mut scratch = [0.0f32; 8];
+    let mut scratch = [0.0f32; 16];
     let prev_vx = w.creatures.vx[0];
     let prev_vy = w.creatures.vy[0];
     let energy_max = w.sliders.energy_max;
     let max_age = w.sliders.max_age;
     let world_size = w.dims.world_size;
+    let species_mode = w.sliders.species_mode;
     let layout = w.nn_input_layout.clone();
     let biome = BiomeSampler::new(
         &w.biome_grid[..],
@@ -185,6 +186,7 @@ fn build_inputs_at(w: &mut World, x: f32, y: f32) -> [f32; MAX_NN_INPUTS] {
     build_nn_input(
         0,
         &layout,
+        species_mode,
         &w.creatures,
         &w.grass,
         &w.grid,

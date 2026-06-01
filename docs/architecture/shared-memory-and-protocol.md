@@ -188,7 +188,7 @@ derived display color) + a `packed_u32` (ring-flash + reserved species_id).
 | `0..4` | f32 `[i*8 + 0]` | `x` (world units) |
 | `4..8` | f32 `[i*8 + 1]` | `y` (world units) |
 | `8..12` | f32 `[i*8 + 2]` | `radius` (body_size-derived sprite radius) |
-| `12..16` | u32 `[i*8 + 3]` | `color_u32` (genome display color, RGBA8) |
+| `12..16` | u32 `[i*8 + 3]` | `color_u32` (display color, RGBA8 — genome in single-pool, **species color** in species mode) |
 | `16..20` | u32 `[i*8 + 4]` | `id_lo` |
 | `20..24` | u32 `[i*8 + 5]` | `id_hi` |
 | `24..28` | u32 `[i*8 + 6]` | `packed_u32` (ring-flash + species_id) |
@@ -199,10 +199,15 @@ derived display color) + a `packed_u32` (ring-flash + reserved species_id).
 ### `color_u32` (lane 3) — RGBA8, little-endian
 
 `R = u & 0xFF`, `G = (u >> 8) & 0xFF`, `B = (u >> 16) & 0xFF`, `A = (u >> 24) &
-0xFF` (A always 255). Built from the genome via HSV (`genome_color_u32` in
-`src/wasm_api.rs`): hue ← `diet` (`120 * (1 - diet)`°, grazer-green 120° →
-predator-red 0°), saturation ← `body_size` → `[0.4, 1.0]`, value ← `max_speed` →
-`[0.5, 1.0]`.
+0xFF` (A always 255). **Single-pool:** built from the genome via HSV
+(`genome_color_u32` in `src/wasm_api.rs`): hue ← `diet` (`120 * (1 - diet)`°,
+grazer-green 120° → predator-red 0°), saturation ← `body_size` → `[0.4, 1.0]`,
+value ← `max_speed` → `[0.5, 1.0]`. **Species mode (v2.0 Wave 3a):** the sim
+writes the **species color** into this same lane (looked up from
+`World.species`), so the renderer needs **no change** to show species colors this
+wave. The Wave-3 species color is a placeholder evenly-spread saturated hue
+(`placeholder_species_color`, `hue = id/total × 360°`); Wave 4 replaces it with
+the polled species→color table (note that seam — the lane stays the same).
 
 ### `packed_u32` (lane 6) — bit layout (2b decode contract)
 
@@ -212,7 +217,7 @@ LSB-first. `pack_render_u32` in `src/wasm_api.rs`:
 |---|---|---|
 | `0..3` | 3 | `flash_tag` — `FlashTag` 0..5 (0 None, 1 Born/teal, 2 Grazed/green, 3 Attacked/yellow, 4 CreatedChild/blue, 5 Killed/red) |
 | `3..7` | 4 | `flash_ticks` — 0..5 (countdown; 0 = no active flash) |
-| `7..23` | 16 | `species_id` — reserved (0 in single-pool; W3 fills, no layout change) |
+| `7..23` | 16 | `species_id` — **0 in single-pool; the creature's species in species_mode** (v2.0 Wave 3a; no layout change vs the W2 reservation) |
 | `23..32` | 9 | reserved (0) |
 
 Decode: `flash_tag = p & 0x7`, `flash_ticks = (p >> 3) & 0xF`, `species_id = (p
@@ -231,7 +236,13 @@ see canonical state. v2.0 Wave 1a: the boot construction call
 (`WorldHandle.newWithFounderCount`) gains `world_size: f32`,
 `wrap_world: bool`, `world_seed: u32` (a `world_seed` of 0 → the Rust side picks
 a random one). `world_seed` is **separate** from the string `seed` (the RNG seed)
-— they are not coupled.
+— they are not coupled. v2.0 Wave 3a: the same construction call gains five
+species/mating construction args — `species_mode: bool`, `crossover_mode: f32`
+(0=average, non-zero=fifty_fifty), `starting_species_count: u32`,
+`starting_species_member_count: u32`, `starting_species_member_variance: f32` —
+since they shape the world topology + seeding at construction. (The TS boot
+plumbing that passes these is the Wave-3b stream's job.) `mating_cooldown_ticks`
+is live, so it rides the slider SAB, not this call.
 
 ## Worker → main replies (`SimReply`)
 
@@ -281,9 +292,15 @@ if it advanced, the bytes are guaranteed to be coherent.
   `cargo run --bin gen-bindings`. v2.0 Wave 1a changed the slider table
   (dropped 4 `_reserved_curriculum_*` + `full_grass_on_init`; added `world_size`
   / `world_seed` / `wrap_world`). Wave 1b added `water_movement_penalty` /
-  `desert_movement_penalty`; Wave 2a added `trait_mutation_sigma_multiplier`. Now
-  `SLIDER_COUNT = 48`, `SLIDER_BUCKET_BASE = 24` (and the inspector/response
-  control-SAB blocks shifted up to 80+ to keep clear of the wider slider region).
+  `desert_movement_penalty`; Wave 2a added `trait_mutation_sigma_multiplier`
+  (and the inspector/response control-SAB blocks shifted up to 80+). v2.0 Wave 3a
+  added six species/mating sliders at indices **24–29** (`species_mode`,
+  `crossover_mode`, `starting_species_count`, `starting_species_member_count`,
+  `starting_species_member_variance`, `mating_cooldown_ticks`). Now
+  `SLIDER_COUNT = 54`, `SLIDER_BUCKET_BASE = 30`. The slider region `[16, 70)`
+  still ends below the inspect block (slot 80), so **the control-SAB byte offsets
+  did NOT shift** this wave — only `slider-ids.ts` changed (`control-sab.ts`
+  unchanged).
 - `CREATURE_STRIDE = 8` — renderer-side guard `if (stride !== 8) throw`.
 - **Grass + biome region sizes** — no longer a constant-equality assert. The
   snapshot grass region (u8) and the biomeSab are both `grass_cell_count` bytes,

@@ -103,6 +103,10 @@ impl World {
                 let layout_ref = &self.nn_input_layout;
                 let energy_max = self.sliders.energy_max;
                 let split_threshold = self.sliders.split_threshold;
+                // v2.0 Wave 3a: species mode + the initiator-only mating cost
+                // (= the split energy gift). Both shared read-only across chunks.
+                let species_mode = self.sliders.species_mode;
+                let mating_cost = self.sliders.split_gift;
                 let max_age = self.sliders.max_age;
                 let world_size = self.dims.world_size;
                 // v2.0 Wave 1b: cheap Copy view over the static biome grid +
@@ -158,6 +162,7 @@ impl World {
                                 let (vx, vy, action, argmax_pre) = pick_action_d(
                                     i,
                                     layout_ref,
+                                    species_mode,
                                     &mut input_buf,
                                     &mut scratch_a,
                                     &mut scratch_b,
@@ -172,6 +177,7 @@ impl World {
                                     prev_vy,
                                     energy_max,
                                     split_threshold,
+                                    mating_cost,
                                     max_age,
                                     world_size,
                                     pick_t,
@@ -219,6 +225,9 @@ impl World {
             let _ = n; // unused in the sequential path
             let energy_max = self.sliders.energy_max;
             let split_threshold = self.sliders.split_threshold;
+            // v2.0 Wave 3a: species mode + the initiator-only mating cost.
+            let species_mode = self.sliders.species_mode;
+            let mating_cost = self.sliders.split_gift;
             let max_age = self.sliders.max_age;
             let world_size = self.dims.world_size;
             let layout = self.nn_input_layout.clone();
@@ -247,6 +256,7 @@ impl World {
                     let (vx, vy, action, argmax_pre) = pick_action_d(
                         i,
                         &layout,
+                        species_mode,
                         &mut input_buf,
                         &mut scratch_a,
                         &mut scratch_b,
@@ -261,6 +271,7 @@ impl World {
                         prev_vy,
                         energy_max,
                         split_threshold,
+                        mating_cost,
                         max_age,
                         world_size,
                         pick_t,
@@ -560,38 +571,57 @@ impl NnInputLayout {
         Self { groups, width }
     }
 
-    /// v2.0 Wave 1b active layout, driven by construction settings.
+    /// v2.0 active layout, driven by construction settings (wrap + species).
     ///
     /// Drops the `ReservedPredator` group entirely and includes `WallProximity`
     /// (4 slots) ONLY when the world is walled (`wrap_world == false`). The two
     /// biome groups (`BiomeDir` = 4, `CurrCellPenalty` = 1) are always-on in
-    /// BOTH wrap modes.
+    /// BOTH wrap modes. The `CreatureSectors` group is **8** in single-pool and
+    /// **16** in `species_mode` (8 same-species + 8 other-species; v2.0 Wave 3a).
     ///
-    /// Wrap on: `SelfMemory(8) + CreatureSectors(8) + GrassSectors(8) +
-    /// BiomeDir(4) + CurrCellPenalty(1) + CurrGrass(1) + Bias(1) = 31 → padded
-    /// to 32`. Wrap off adds `WallProximity(4)` → `35 → padded to 40`. So the
-    /// wrap-off NN width is 40 (was 32 pre-1b); old brains are discarded (no
-    /// save/load). The topology's `input_width` must match `width()` — the
-    /// construction path widens it to suit (see `World::new_with_sliders_topology`).
-    pub(crate) fn for_settings(wrap_world: bool) -> Self {
+    /// Resulting widths (always-on block = SelfMemory 8 + GrassSectors 8 +
+    /// BiomeDir 4 + CurrCellPenalty 1 + CurrGrass 1 + Bias 1 = 23; + WallProximity
+    /// 4 when walled; + CreatureSectors 8 or 16):
+    ///
+    /// | wrap | species | real | pad |
+    /// |------|---------|------|-----|
+    /// | on   | off     | 31   | 32  |
+    /// | off  | off     | 35   | 40  |
+    /// | on   | on      | 39   | 40  |
+    /// | off  | on      | 43   | 48  |
+    ///
+    /// Old brains are discarded (no save/load). The topology's `input_width`
+    /// must match `width()` — the construction path widens it to suit (see
+    /// `World::new_with_sliders_topology`).
+    pub(crate) fn for_settings(wrap_world: bool, species_mode: bool) -> Self {
+        let creature_sectors = if species_mode {
+            NN_CREATURE_SECTORS_SPECIES
+        } else {
+            NN_SECTORS
+        };
         let mut groups: Vec<(NnInputGroup, usize)> = Vec::with_capacity(8);
         groups.push((NnInputGroup::SelfMemory, 8));
         if !wrap_world {
             groups.push((NnInputGroup::WallProximity, 4));
         }
-        groups.push((NnInputGroup::CreatureSectors, NN_SECTORS));
+        groups.push((NnInputGroup::CreatureSectors, creature_sectors));
         groups.push((NnInputGroup::GrassSectors, NN_SECTORS));
         groups.push((NnInputGroup::BiomeDir, NN_BIOME_DIRS));
         groups.push((NnInputGroup::CurrCellPenalty, 1));
         groups.push((NnInputGroup::CurrGrass, 1));
         groups.push((NnInputGroup::Bias, 1));
         let layout = Self::from_groups(&groups);
-        // Wrap on → 31 real → 32; wrap off → 35 real → 40.
-        let expected = if wrap_world { 32 } else { 40 };
+        // 4-way width table (see doc above).
+        let expected = match (wrap_world, species_mode) {
+            (true, false) => 32,
+            (false, false) => 40,
+            (true, true) => 40,
+            (false, true) => 48,
+        };
         debug_assert_eq!(
             layout.width(),
             expected,
-            "Wave 1b layout (wrap_world={wrap_world}) must pad to {expected}"
+            "Wave 3a layout (wrap={wrap_world}, species={species_mode}) must pad to {expected}"
         );
         layout
     }
@@ -673,11 +703,12 @@ impl NnInputLayout {
 pub(crate) fn build_nn_input(
     i: usize,
     layout: &NnInputLayout,
+    species_mode: bool,
     creatures: &CreatureSoA,
     grass: &GrassGrid,
     grid: &SpatialGrid,
     sector_lut: &[(u8, u8, f32)],
-    sector_scratch: &mut [f32; 8],
+    sector_scratch: &mut [f32; 16],
     biome: BiomeSampler,
     prev_vx: f32,
     prev_vy: f32,
@@ -734,9 +765,28 @@ pub(crate) fn build_nn_input(
     };
 
     // --- creature_proximity sectors ---
+    // Single-pool: 8 unified sectors. species_mode: 16 sectors (8 same-species +
+    // 8 other-species; v2.0 Wave 3a). The wider 16-slot `sector_scratch` holds
+    // both blocks; in single-pool only the first 8 are used.
     if let Some(o) = layout.offset_of(NnInputGroup::CreatureSectors) {
-        proximity::compute_creature_proximity_sectors(x, y, i, grid, creatures, sector_scratch);
-        buf[o..o + NN_SECTORS].copy_from_slice(&sector_scratch[..NN_SECTORS]);
+        if species_mode {
+            let self_species = creatures.species_id[i];
+            proximity::compute_creature_proximity_sectors_species(
+                x,
+                y,
+                i,
+                self_species,
+                grid,
+                creatures,
+                sector_scratch,
+            );
+            buf[o..o + NN_CREATURE_SECTORS_SPECIES]
+                .copy_from_slice(&sector_scratch[..NN_CREATURE_SECTORS_SPECIES]);
+        } else {
+            let mut sec8 = [0.0f32; 8];
+            proximity::compute_creature_proximity_sectors(x, y, i, grid, creatures, &mut sec8);
+            buf[o..o + NN_SECTORS].copy_from_slice(&sec8[..NN_SECTORS]);
+        }
     }
 
     let t2 = if timings.is_some() {
@@ -747,8 +797,9 @@ pub(crate) fn build_nn_input(
 
     // --- grass_density sectors ---
     if let Some(o) = layout.offset_of(NnInputGroup::GrassSectors) {
-        proximity::compute_grass_density_sectors(x, y, grass, sector_lut, sector_scratch);
-        buf[o..o + NN_SECTORS].copy_from_slice(&sector_scratch[..NN_SECTORS]);
+        let mut grass_sec = [0.0f32; 8];
+        proximity::compute_grass_density_sectors(x, y, grass, sector_lut, &mut grass_sec);
+        buf[o..o + NN_SECTORS].copy_from_slice(&grass_sec[..NN_SECTORS]);
     }
 
     let t3 = if timings.is_some() {
@@ -815,29 +866,60 @@ pub(crate) fn build_nn_input(
     buf
 }
 
-/// Check whether an action is currently valid for creature `i` (v6 §1 + §G).
-/// D9: 3-variant enum. Graze always valid; Attack gated on cooldown; Split on energy.
-pub(crate) fn is_valid_action(
-    act: Action,
-    energy: f32,
-    cooldown: u32,
-    split_threshold: f32,
-) -> bool {
+/// Mode-dependent validity parameters for the third action slot (v2.0 Wave 3a).
+///
+/// `Action::Split` is the enum variant for action[2] in BOTH modes (the NN logit
+/// order is stable), but its *meaning* and validity differ:
+///   * single-pool (`species_mode == false`): it's **Split** — valid iff
+///     `energy >= split_threshold`. The mating fields are ignored.
+///   * species_mode (`true`): it's **Mate** — valid iff the initiator is off
+///     mating cooldown (`mating_cooldown == 0`) AND `energy >= mating_cost`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ActionGate {
+    pub species_mode: bool,
+    pub split_threshold: f32,
+    /// Initiator-only mating cost (= the split energy gift). Species mode only.
+    pub mating_cost: f32,
+    /// Initiator's current mating cooldown (ticks). Species mode only.
+    pub mating_cooldown: u32,
+}
+
+impl ActionGate {
+    /// Single-pool gate: only `split_threshold` matters.
+    #[cfg(test)]
+    pub(crate) fn single_pool(split_threshold: f32) -> Self {
+        Self {
+            species_mode: false,
+            split_threshold,
+            mating_cost: 0.0,
+            mating_cooldown: 0,
+        }
+    }
+}
+
+/// Check whether an action is currently valid for a creature (v6 §1 + §G).
+/// D9: 3-variant enum. Graze always valid; Attack gated on digestion cooldown;
+/// action[2] is Split (single-pool: energy gate) or Mate (species: off
+/// mating-cooldown + energy ≥ mating cost) per `gate`.
+pub(crate) fn is_valid_action(act: Action, energy: f32, cooldown: u32, gate: &ActionGate) -> bool {
     match act {
         Action::Graze => true,
         Action::Attack => cooldown == 0,
-        Action::Split => energy >= split_threshold,
+        // action[2]: Split (single-pool) or Mate (species_mode).
+        Action::Split => {
+            if gate.species_mode {
+                gate.mating_cooldown == 0 && energy >= gate.mating_cost
+            } else {
+                energy >= gate.split_threshold
+            }
+        }
     }
 }
 
 /// Decode action logits to an Action via argmax with first-index tiebreak
-/// and valid-fallthrough (v6 §1 + §E).
-pub(crate) fn decode_action(
-    logits: &[f32; 3],
-    energy: f32,
-    cooldown: u32,
-    split_threshold: f32,
-) -> Action {
+/// and valid-fallthrough (v6 §1 + §E). An invalid action[2] (Split/Mate) falls
+/// through to Graze exactly as today.
+pub(crate) fn decode_action(logits: &[f32; 3], energy: f32, cooldown: u32, gate: &ActionGate) -> Action {
     if logits.iter().any(|v| !v.is_finite()) {
         return Action::Graze;
     }
@@ -851,7 +933,7 @@ pub(crate) fn decode_action(
     });
     for &k in &order {
         let act = Action::ALL[k as usize];
-        if is_valid_action(act, energy, cooldown, split_threshold) {
+        if is_valid_action(act, energy, cooldown, gate) {
             return act;
         }
     }
@@ -892,6 +974,7 @@ pub(crate) struct PickTimings {
 pub(crate) fn pick_action_d(
     i: usize,
     layout: &NnInputLayout,
+    species_mode: bool,
     input_buf: &mut [f32; MAX_NN_INPUTS],
     scratch_a: &mut [f32; NN_MAX_HIDDEN_WIDTH],
     scratch_b: &mut [f32; NN_MAX_HIDDEN_WIDTH],
@@ -900,12 +983,13 @@ pub(crate) fn pick_action_d(
     grass: &GrassGrid,
     grid: &SpatialGrid,
     sector_lut: &[(u8, u8, f32)],
-    sector_scratch: &mut [f32; 8],
+    sector_scratch: &mut [f32; 16],
     biome: BiomeSampler,
     prev_vx: f32,
     prev_vy: f32,
     energy_max: f32,
     split_threshold: f32,
+    mating_cost: f32,
     max_age: u32,
     world_size: f32,
     mut timings: Option<&mut PickTimings>,
@@ -917,6 +1001,7 @@ pub(crate) fn pick_action_d(
     *input_buf = build_nn_input(
         i,
         layout,
+        species_mode,
         creatures,
         grass,
         grid,
@@ -975,7 +1060,15 @@ pub(crate) fn pick_action_d(
 
     let energy = creatures.energy[i];
     let cooldown = creatures.digestion_cooldown[i];
-    let action = decode_action(logits, energy, cooldown, split_threshold);
+    // action[2] gate: Split (single-pool) or Mate (species_mode). The mating
+    // gate is initiator-only (off mating cooldown + energy ≥ mating cost).
+    let gate = ActionGate {
+        species_mode,
+        split_threshold,
+        mating_cost,
+        mating_cooldown: creatures.mating_cooldown[i],
+    };
+    let action = decode_action(logits, energy, cooldown, &gate);
 
     let had_nan = logits.iter().any(|v| !v.is_finite());
     if had_nan {
@@ -1002,12 +1095,13 @@ mod tests {
 
     /// Helper: build inputs for the founder of a fresh world.
     fn build_for_founder(w: &mut World) -> [f32; MAX_NN_INPUTS] {
-        let mut scratch = [0.0f32; 8];
+        let mut scratch = [0.0f32; 16];
         let prev_vx = w.creatures.vx[0];
         let prev_vy = w.creatures.vy[0];
         let energy_max = w.sliders.energy_max;
         let max_age = w.sliders.max_age;
         let world_size = w.dims.world_size;
+        let species_mode = w.sliders.species_mode;
         let layout = w.nn_input_layout.clone();
         let biome = BiomeSampler::new(
             &w.biome_grid[..],
@@ -1020,6 +1114,7 @@ mod tests {
         build_nn_input(
             0,
             &layout,
+            species_mode,
             &w.creatures,
             &w.grass,
             &w.grid,
@@ -1117,7 +1212,7 @@ mod tests {
     #[test]
     fn decode_action_valid_fallthrough_split_invalid() {
         let logits = [0.0f32, 0.0, 10.0];
-        let act = decode_action(&logits, 10.0, 0, SPLIT_THRESHOLD_DEFAULT);
+        let act = decode_action(&logits, 10.0, 0, &ActionGate::single_pool(SPLIT_THRESHOLD_DEFAULT));
         assert_ne!(act, Action::Split, "Split must be invalid when energy < 50");
         assert!(matches!(act, Action::Graze | Action::Attack), "got {:?}", act);
     }
@@ -1125,7 +1220,7 @@ mod tests {
     #[test]
     fn decode_action_first_index_tiebreak() {
         let logits = [5.0f32; 3];
-        let act = decode_action(&logits, 100.0, 0, SPLIT_THRESHOLD_DEFAULT);
+        let act = decode_action(&logits, 100.0, 0, &ActionGate::single_pool(SPLIT_THRESHOLD_DEFAULT));
         assert_eq!(act, Action::ALL[0], "lower index must win on ties");
         assert_eq!(act, Action::Graze, "Graze is index 0 after D9");
     }
@@ -1133,7 +1228,7 @@ mod tests {
     #[test]
     fn decode_action_attack_invalid_in_cooldown() {
         let logits = [0.0f32, 10.0, 0.0];
-        let act = decode_action(&logits, 100.0, 5, SPLIT_THRESHOLD_DEFAULT);
+        let act = decode_action(&logits, 100.0, 5, &ActionGate::single_pool(SPLIT_THRESHOLD_DEFAULT));
         assert_ne!(act, Action::Attack, "Attack must be invalid when cooldown > 0");
         assert_eq!(act, Action::Graze, "should fall through to Graze");
     }
@@ -1141,7 +1236,7 @@ mod tests {
     #[test]
     fn decode_action_split_invalid_when_low_energy() {
         let logits = [0.0f32, 0.0, 10.0];
-        let act = decode_action(&logits, 0.0, 0, SPLIT_THRESHOLD_DEFAULT);
+        let act = decode_action(&logits, 0.0, 0, &ActionGate::single_pool(SPLIT_THRESHOLD_DEFAULT));
         assert_ne!(
             act,
             Action::Split,
@@ -1152,7 +1247,7 @@ mod tests {
     #[test]
     fn decode_action_graze_always_valid_as_fallback() {
         let logits = [-5.0f32, 2.0, 10.0];
-        let act = decode_action(&logits, 0.0, 1, SPLIT_THRESHOLD_DEFAULT);
+        let act = decode_action(&logits, 0.0, 1, &ActionGate::single_pool(SPLIT_THRESHOLD_DEFAULT));
         assert!(
             matches!(act, Action::Graze),
             "Expected Graze fallback, got {:?}",
@@ -1163,11 +1258,11 @@ mod tests {
     #[test]
     fn nan_logits_return_graze_via_decode() {
         let nan_logits = [f32::NAN, 0.0, 0.0];
-        let act = decode_action(&nan_logits, 100.0, 0, SPLIT_THRESHOLD_DEFAULT);
+        let act = decode_action(&nan_logits, 100.0, 0, &ActionGate::single_pool(SPLIT_THRESHOLD_DEFAULT));
         assert_eq!(act, Action::Graze, "NaN logit must produce Graze");
 
         let inf_logits = [f32::INFINITY, 0.0, 0.0];
-        let act2 = decode_action(&inf_logits, 100.0, 0, SPLIT_THRESHOLD_DEFAULT);
+        let act2 = decode_action(&inf_logits, 100.0, 0, &ActionGate::single_pool(SPLIT_THRESHOLD_DEFAULT));
         assert_eq!(act2, Action::Graze, "+Inf logit must produce Graze");
     }
 

@@ -31,7 +31,7 @@ fn dims_1200() {
 fn snapshot_and_biome_sizes_derive_from_grass_cell_count() {
     // Small 1200u walled world → 240² = 57_600 grass cells.
     let h = WorldHandle::new_with_founder_count(
-        "dims-seam", 0, 100.0, 1, false, "", 1200.0, false, 1,
+        "dims-seam", 0, 100.0, 1, false, "", 1200.0, false, 1, false, 1.0, 10, 10, 3.0,
     )
     .unwrap();
     let cells = 240usize * 240;

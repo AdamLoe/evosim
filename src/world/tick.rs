@@ -295,10 +295,13 @@ impl World {
         let bite_frac = self.sliders.eat_bite_fraction;
         let world_size = self.dims.world_size;
         let wrap = self.dims.wrap_world;
+        // v2.0 Wave 3a: species mode refuses same-species targets (no
+        // cannibalism). Single-pool hits any creature (v1 predation, unchanged).
+        let species_mode = self.sliders.species_mode;
 
         // Parallel scan: every per-i body only reads from xs/ys/actions/
-        // cooldowns/energies/genome/grid (immutable across threads) and writes
-        // exclusively to its own `picks[i]` slot.
+        // cooldowns/energies/genome/species/grid (immutable across threads) and
+        // writes exclusively to its own `picks[i]` slot.
         {
             let xs = &self.creatures.x[..n];
             let ys = &self.creatures.y[..n];
@@ -306,6 +309,7 @@ impl World {
             let cooldowns = &self.creatures.digestion_cooldown[..n];
             let energies = &self.creatures.energy[..n];
             let genome = &self.creatures.genome[..n];
+            let species_ids = &self.creatures.species_id[..n];
             let grid = &self.grid;
             let picks = &mut self.scratch_attack_picks[..n];
 
@@ -321,6 +325,7 @@ impl World {
                 let xi = xs[i];
                 let yi = ys[i];
                 let ri = CREATURE_SIZE * BODY_RADIUS_PER_SIZE * genome[i].body_size_factor();
+                let self_species = species_ids[i];
                 // First-valid-target attack: bail as soon as we find any
                 // in-reach target. The per-cell iteration starts at `i % K_cell`
                 // and wraps, so different attackers in the same stack pick
@@ -328,6 +333,10 @@ impl World {
                 // the pile. See decisions/sim.md.
                 let pick = grid.find_first_in_radius(xi, yi, max_range, i, |j| {
                     if j == i {
+                        return false;
+                    }
+                    // v2.0 Wave 3a: in species mode, never attack same-species.
+                    if species_mode && species_ids[j] == self_species {
                         return false;
                     }
                     let mut dx = xs[j] - xi;
@@ -465,6 +474,11 @@ impl World {
             self.creatures.cumulative_upkeep[i] += up;
             if self.creatures.digestion_cooldown[i] > 0 {
                 self.creatures.digestion_cooldown[i] -= 1;
+            }
+            // v2.0 Wave 3a: decrement the initiator-only mating cooldown
+            // (unused / always 0 in single-pool mode).
+            if self.creatures.mating_cooldown[i] > 0 {
+                self.creatures.mating_cooldown[i] -= 1;
             }
             self.creatures.age[i] += 1;
         }
@@ -700,7 +714,7 @@ mod tests {
         let b2 = Brain::founder(&mut rng, NnTopology::legacy());
         let n_before = w.creatures.len();
         w.creatures
-            .push(1, 598.0, WORLD_SIZE * 0.5, START_ENERGY_DEFAULT, 0, b2, crate::creature::Genome::median());
+            .push(1, 598.0, WORLD_SIZE * 0.5, START_ENERGY_DEFAULT, 0, b2, crate::creature::Genome::median(), 0);
         w.creatures.vx[n_before] = 0.0;
         w.creatures.vy[n_before] = 0.0;
 
@@ -989,7 +1003,7 @@ mod tests {
         let pred_y = w.creatures.y[0];
         // Place prey within bite reach (0.0 since bite_reach = 0).
         w.creatures
-            .push(1, pred_x + 1.5, pred_y, 100.0, 0, prey_brain, crate::creature::Genome::median());
+            .push(1, pred_x + 1.5, pred_y, 100.0, 0, prey_brain, crate::creature::Genome::median(), 0);
 
         w.grid.rebuild(&w.creatures.x, &w.creatures.y);
 
@@ -1033,7 +1047,7 @@ mod tests {
         let pred_x = w.creatures.x[0];
         let pred_y = w.creatures.y[0];
         w.creatures
-            .push(1, pred_x + 1.5, pred_y, 100.0, 0, prey_brain, crate::creature::Genome::median());
+            .push(1, pred_x + 1.5, pred_y, 100.0, 0, prey_brain, crate::creature::Genome::median(), 0);
 
         w.grid.rebuild(&w.creatures.x, &w.creatures.y);
 

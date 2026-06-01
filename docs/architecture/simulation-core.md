@@ -76,6 +76,70 @@ full-energy (100) creature drains ≈0.75 energy/tick on water (≈130 ticks) an
 ≈0.5/tick on desert (≈195 ticks), so a dash across is easily survivable but
 sustained residence is not.
 
+### Species + sexual mating mode (v2.0 Wave 3a)
+
+`species_mode` (construction-only `DevSliders` flag, **default OFF**) is a hard
+restart-required switch between two regimes that never coexist in one run:
+
+| | `species_mode = off` (single-pool) | `species_mode = on` (species) |
+|---|---|---|
+| Population | Single pool, asexual. | N seeded species, founders clustered at random anchors. |
+| Reproduction | Asexual `Split` (unchanged). | Sexual `Mate` (same-species, contact-radius, initiator-gated). |
+| Action[2] | `Split` — valid iff `energy ≥ split_threshold`. | `Mate` — valid iff off mating cooldown AND `energy ≥ mating cost`. |
+| Attack target | Any creature (v1 predation). | Other-species only (no cannibalism). |
+| Body color | Genome-derived hue. | Per-species saturated color. |
+| Creature NN sectors | 8 unified. | 16 (8 same-species + 8 other-species). |
+
+The NN output shape is unchanged: `action[2]` decodes to the `Action::Split`
+enum variant in BOTH modes (the logit order is stable), but its *meaning* and
+validity gate differ by mode — see `ActionGate` in `src/world/nn.rs`
+(`decode_action` / `is_valid_action` branch on `species_mode`). Continuous
+`(vx, vy)` velocity is unchanged.
+
+**Species registry.** `World.species` is a `SpeciesRegistry`
+(`src/world/species.rs`) — a `Vec<Species>` keyed by id (`Species { id: u16,
+color_u32 }`), built **dynamic** (add/remove-capable) so the v2.1 split/merge
+work needs no protocol change even though v3 seeds a fixed set. Each creature
+carries a `species_id: u16` SoA column (0/unused in single-pool). Seeding
+(Wave-3 **placeholder**; Wave 4 does biome-appropriate founders): seed
+`starting_species_count` (default 10) species each with an evenly-spread
+saturated **placeholder hue** (`hue = id/total × 360°`); for each, cluster
+`starting_species_member_count` (default 10) founders near a random Halton
+anchor with **basic uniform-random** founder genomes. `starting_species_member_variance`
+(default 3.0) is **accepted but inert** in Wave 3 — wired + plumbed, applied in
+Wave 4.
+
+**Mate mechanic** (`World::handle_mating`, runs in the `tick.handle_births` span
+in species mode). Gated ENTIRELY by the **initiator**: it chose `action[2]`, is
+off mating cooldown, and has `energy ≥ mating cost` (= the `split_gift`). On fire
+it scans for the **first** same-species creature (by `species_id` only — no
+genome-distance gate) within a small **contact radius** `(r_i + r_j) ×
+MATING_CONTACT_RADIUS_FACTOR` (≈ summed body radii, **NOT** the 20u perception
+range) — first-found wins, no nearest-scan (consistent with Attack). **All cost +
+cooldown fall on the initiator only:** it pays the mating cost and enters a fixed
+`mating_cooldown_ticks` (default 200, live slider) cooldown via the dedicated
+`mating_cooldown` SoA column (decremented in `energy_bookkeeping`, distinct from
+`digestion_cooldown`). The partner pays nothing, needs no energy, and is **not**
+required to be off cooldown — it's purely a target. The child spawns at the
+parent **midpoint** (wrap-aware; no habitable-cell check) via
+**crossover-then-mutate**, with the parents' shared `species_id`. An invalid
+`Mate` pick falls through to Graze exactly like Split.
+
+**Crossover** (`crossover_mode` construction enum `{average, fifty_fifty}`,
+default `fifty_fifty`) is applied **identically to brain weights AND the 6 genome
+traits**, then mutation (the same per-birth bucket machinery as a normal child):
+`fifty_fifty` = per-slot 50/50 random pick from the two parents; `average` =
+per-slot elementwise midpoint. Single-pool `Split` is unchanged (asexual, no
+crossover). RNG draw order is fixed: brain crossover (one `unit()`/weight for
+fifty_fifty; none for average) → brain bucket mutation → genome crossover → genome
+mutation, all off the pair's pre-rolled seed (`Brain::child_from_crossover_with_sigma`
++ `Genome::crossed`).
+
+**Attack same-species gate.** In species mode `Attack` refuses same-species
+targets (a sim-side gate in `World::attack` — no cannibalism). Single-pool
+`Attack` hits any creature (v1 predation, unchanged). Effectiveness still scales
+with `diet` + `body_size` (Wave 2).
+
 ## What it owns
 
 - The `World` struct, `CreatureSoA`, `GrassGrid`, `SpatialGrid`, `SimRng`,
@@ -155,9 +219,20 @@ carried through the boot construction call (`newWithFounderCount`), just not a
 live slider.
 **v2.0 Wave 1b slider changes:** two live biome movement-penalty sliders are
 added — `water_movement_penalty` (**21**, default 0.8) and
-`desert_movement_penalty` (**22**, default 0.4) — so `SLIDER_BUCKET_BASE` shifts
-21→**23** and `SLIDER_COUNT = 47`. Regenerate `web/src/generated/slider-ids.ts`
-via `cargo run --bin gen-bindings` (the `bindings_in_sync` test guards it).
+`desert_movement_penalty` (**22**, default 0.4).
+**v2.0 Wave 2a slider change:** `trait_mutation_sigma_multiplier` (**23**, default 0.3).
+**v2.0 Wave 3a slider changes:** six species/mating sliders added at indices
+**24–29** — `species_mode` (24, bool, construction), `crossover_mode` (25, enum
+0=average/1=fifty_fifty, construction), `starting_species_count` (26),
+`starting_species_member_count` (27), `starting_species_member_variance` (28,
+inert in W3), `mating_cooldown_ticks` (29, live, default 200) — so
+`SLIDER_BUCKET_BASE` shifts 24→**30** and `SLIDER_COUNT = 54`. The slider region
+`[16, 70)` stays below the inspect block (slot 80), so **no control-SAB byte-slot
+shift** this wave. Regenerate `web/src/generated/slider-ids.ts` via `cargo run
+--bin gen-bindings` (the `bindings_in_sync` test guards it). `species_mode` +
+`crossover_mode` + the three `starting_species_*` settings also ride the explicit
+construction call (`newWithFounderCount`) since they shape the world topology +
+seeding at construction; `mating_cooldown_ticks` is live.
 
 ## Tick step order
 
@@ -177,7 +252,8 @@ fn step(&mut self) -> bool {
     // 6. tick.grass_step        — grass propagation + bitset rebuild (LEAF)
     // 7. tick.energy_bookkeeping
     // 8. tick.collect_deaths
-    // 9. tick.handle_births     — split + RANDOM CULL back to MAX_POP_FOR_SIM
+    // 9. tick.handle_births     — single-pool: split; species_mode: handle_mating
+    //                             (sexual Mate) + RANDOM CULL back to MAX_POP_FOR_SIM
     //10. tick.color_ema         — ring-flash decay (v2.0 Wave 2a; span name kept)
     //11. tick.bookkeeping_tail  — last_action promote, tick++, world-end check
 }
@@ -200,20 +276,34 @@ checks in `NnTopology::with_input_width`, which replaced the old compile-time
 `MAX_NN_INPUTS`-sized buffer; only the active `width()` lanes are populated.
 
 The **active layout** is driven by construction settings
-(`NnInputLayout::for_settings(wrap_world)`, v2.0 Wave 1b): the
+(`NnInputLayout::for_settings(wrap_world, species_mode)`, v2.0 Wave 3a): the
 `ReservedPredator` group is **dropped**, `WallProximity` (4 slots) is present
-**only when `wrap_world == false`**, and the two biome groups — `BiomeDir` (4:
-N/S/E/W) + `CurrCellPenalty` (1) — are **always-on in BOTH wrap modes**. So the
-active width is **32 (wrap on)** or **40 (wrap off)**; the topology's
-`input_width` is reconciled to the layout width at construction (the wrap-off
-width grew 32→40 vs Wave 1a — old brains are discarded, no save/load).
+**only when `wrap_world == false`**, the two biome groups — `BiomeDir` (4:
+N/S/E/W) + `CurrCellPenalty` (1) — are **always-on in BOTH wrap modes**, and the
+`CreatureSectors` group is **8 in single-pool / 16 in species_mode** (8
+same-species + 8 other-species). The topology's `input_width` is reconciled to
+the layout width at construction (old brains are discarded, no save/load).
 
-Default (wrap **on**) — real width 31 → padded 32:
+**4-way width table** (always-on block = SelfMemory 8 + GrassSectors 8 + BiomeDir
+4 + CurrCellPenalty 1 + CurrGrass 1 + Bias 1 = 23; + WallProximity 4 when walled;
++ CreatureSectors 8 or 16):
+
+| `wrap_world` | `species_mode` | real | pad to |
+|---|---|---|---|
+| on | off | 31 | **32** |
+| off | off | 35 | **40** |
+| on | on | 39 | **40** |
+| off | on | 43 | **48** (the `MAX_NN_INPUTS` ceiling) |
+
+The SIMD-vs-scalar drift guard exercises **all four** compositions (widths
+32/40/48 — width-40 covers both wrap-off/species-off and wrap-on/species-on).
+
+Default (wrap **on**, species **off**) — real width 31 → padded 32:
 
 | Slot | Group / inputs |
 |---|---|
 | `[0..8)` | `SelfMemory`: hunger, age_frac, prev_vx, prev_vy, is_last_graze, is_last_attack, ticks_since_split_norm, cooldown_ready |
-| `[8..16)` | `CreatureSectors` × 8 world-aligned sectors (range `PROXIMITY_RANGE = 20u`) |
+| `[8..16)` | `CreatureSectors` × 8 world-aligned sectors (range `PROXIMITY_RANGE = 20u`); in `species_mode` this group is **16** (8 same-species + 8 other-species), shifting the groups after it |
 | `[16..24)` | `GrassSectors` × 8 sectors (range `GRASS_PROXIMITY_RANGE = 20u`) |
 | `[24..28)` | `BiomeDir`: movement penalty one cell N/S/E/W (base severity, wrap-aware) |
 | `[28]` | `CurrCellPenalty`: movement penalty under the body |
@@ -249,8 +339,10 @@ input widths (32 and 40). Old brains are discarded (no save/load).
 
 Outputs: `out[0] = vx`, `out[1] = vy`, `out[2..5]` = action logits for
 `{Graze=0, Attack=1, Split=2}` (v2.0 Wave 2a: `Eat` renamed to `Attack`; the
-repr indices and logit order are unchanged, so NN numerics are stable). Hidden
-layers use Leaky ReLU (slope 0.01).
+repr indices and logit order are unchanged, so NN numerics are stable). v2.0
+Wave 3a: `action[2]` (the `Split` variant) decodes to **Mate** in `species_mode`
+— same logit slot, mode-dependent validity gate (`ActionGate`). Hidden layers use
+Leaky ReLU (slope 0.01).
 Per-layer founder init follows He-uniform `r = sqrt(6 / fan_in)`, computed at
 runtime per matmul (the first matmul's `fan_in` is the runtime input width).
 Founder weights are pure uniform-random — no hardwiring.
@@ -303,27 +395,35 @@ is packed into the snapshot for the renderer (2b draws the ring); see
 ## Code anchors
 
 - `src/world/mod.rs` → `World`, `DevSliders`, `World::step`,
-  `World::handle_births`, `World::new_with_sliders`.
-- `src/world/tick.rs` → `apply_movement_and_repulsion`, `graze`, `attack`,
-  `energy_bookkeeping`, `collect_deaths`, `flash_decay`.
-- `src/creature.rs` → `Genome` (6-trait body genome + rescale-factor helpers),
-  `FlashTag` (ring-flash priority), `CreatureSoA` (`genome` / `flash_*` columns).
+  `World::handle_births` (single-pool split), `World::handle_mating` (species
+  sexual mate), `World::new_with_sliders` (single-pool + species seeding).
+- `src/world/tick.rs` → `apply_movement_and_repulsion`, `graze`, `attack`
+  (same-species gate in species mode), `energy_bookkeeping` (mating-cooldown
+  decrement), `collect_deaths`, `flash_decay`.
+- `src/creature.rs` → `Genome` (6-trait body genome + rescale-factor helpers +
+  `crossed` per-trait crossover), `FlashTag` (ring-flash priority), `CreatureSoA`
+  (`genome` / `flash_*` / `species_id` / `mating_cooldown` columns).
+- `src/world/species.rs` → `Species`, `SpeciesRegistry` (dynamic id→color
+  registry), `placeholder_species_color` (Wave-3 evenly-spread hue).
 - `src/world/nn.rs` → `nn_forward_all_chunks`, `build_nn_input`,
   `NnInputLayout` / `NnInputGroup` (composable input-layout descriptor, incl.
-  the `BiomeDir` + `CurrCellPenalty` groups), `BiomeSampler` (biome NN-input
-  view), `decode_action`, `chunk_ranges`, `dynamic_chunks`, `PickTimings`.
+  the `BiomeDir` + `CurrCellPenalty` groups; `for_settings(wrap, species)`),
+  `BiomeSampler` (biome NN-input view), `decode_action` / `is_valid_action` /
+  `ActionGate` (mode-dependent action[2] gate), `chunk_ranges`, `dynamic_chunks`,
+  `PickTimings`.
 - `src/world/biome.rs` → `generate_biome_grid` (SplitMix64 blob generator from
   `world_seed`), `biome_from_u8`. `World::biome_at` / `movement_penalty_at` /
   `biome_grid_bytes` live in `src/world/mod.rs`.
 - `src/world/nn_stats.rs` → `NnStats`.
 - `src/world/proximity.rs` → `LUT_RADIUS = 4` / `LUT_DIM`, sector LUT build,
   wall + creature + grass proximity helpers (all wrap-aware via the grid/grass
-  `dims`).
+  `dims`), `compute_creature_proximity_sectors_species` (16-sector same/other
+  block fill for species mode).
 - `src/brain.rs` → `Brain`, `Brain::founder`, `Brain::forward`,
-  `Brain::child_from`, `NnTopology` (runtime `input_width` field +
-  `with_input_width`), the `lrelu` helper, the `NN_OUTPUTS == 5` compile-assert
-  (the old `NN_INPUTS == 32` assert is gone — input width is now a runtime
-  check). Width tests: `src/brain_width_tests.rs`.
+  `Brain::child_from` (asexual), `Brain::child_from_crossover_with_sigma`
+  (sexual per-weight crossover then bucket mutation), `NnTopology` (runtime
+  `input_width` field + `with_input_width`), the `lrelu` helper, the
+  `NN_OUTPUTS == 5` compile-assert. Width tests: `src/brain_width_tests.rs`.
 - `src/creature.rs` → `CreatureSoA`, `Action` (3 variants), `Action::ALL`.
 - `src/grass.rs` → `GrassGrid`, `compute_propagation`, `bilinear_sample`,
   `consume`, `for_each_cell_overlapping_circle`, `rebuild_row_bitset`.
@@ -351,7 +451,12 @@ is packed into the snapshot for the renderer (2b draws the ring); see
   `MAX_AGE_DEFAULT = 5000`, `SPLIT_THRESHOLD_DEFAULT = 99.0`,
   `SPLIT_GIFT_MAX_DEFAULT = 30.0`, `SPLIT_JITTER_DEFAULT = 1.0`,
   `REPULSION_MAX = 0.1`, `GRASS_INITIAL_SEED_COUNT_DEFAULT = 8000`,
-  `FULL_GRASS_ON_INIT_DEFAULT = false`.
+  `FULL_GRASS_ON_INIT_DEFAULT = false`,
+  `SPECIES_MODE_DEFAULT = false`, `CrossoverMode` enum + `CROSSOVER_MODE_DEFAULT =
+  FiftyFifty`, `NN_CREATURE_SECTORS_SPECIES = 16`,
+  `STARTING_SPECIES_COUNT_DEFAULT = 10`, `STARTING_SPECIES_MEMBER_COUNT_DEFAULT = 10`,
+  `STARTING_SPECIES_MEMBER_VARIANCE_DEFAULT = 3.0` (inert in W3),
+  `MATING_COOLDOWN_TICKS_DEFAULT = 200`, `MATING_CONTACT_RADIUS_FACTOR = 1.5`.
   (`LUT_RADIUS = 4` lives in `src/world/proximity.rs`.)
 - `src/wasm_api.rs` → `WorldHandle`, `WorldHandle::set_slider`,
   `WorldHandle::write_snapshot_to`,

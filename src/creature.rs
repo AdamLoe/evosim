@@ -103,6 +103,50 @@ impl Genome {
         }
     }
 
+    /// v2.0 Wave 3a: per-trait crossover of two parent genomes (the genome twin
+    /// of `Brain::child_from_crossover_with_sigma`). Applied BEFORE the mutation
+    /// step. RNG draw order (deterministic): `FiftyFifty` consumes exactly one
+    /// `rng.unit()` per trait, in fixed trait order (body_size, max_speed,
+    /// metabolism, diet, water_affinity, heat_tolerance); `Average` consumes NO
+    /// RNG (pure midpoint).
+    pub fn crossed(
+        &self,
+        other: &Genome,
+        rng: &mut crate::rng::SimRng,
+        crossover: crate::constants::CrossoverMode,
+    ) -> Self {
+        use crate::constants::CrossoverMode;
+        match crossover {
+            CrossoverMode::Average => Genome {
+                body_size: 0.5 * (self.body_size + other.body_size),
+                max_speed: 0.5 * (self.max_speed + other.max_speed),
+                metabolism: 0.5 * (self.metabolism + other.metabolism),
+                diet: 0.5 * (self.diet + other.diet),
+                water_affinity: 0.5 * (self.water_affinity + other.water_affinity),
+                heat_tolerance: 0.5 * (self.heat_tolerance + other.heat_tolerance),
+            },
+            CrossoverMode::FiftyFifty => {
+                // One draw per trait, fixed order. `pick(a, b)` first so the
+                // draw happens in declaration order regardless of which wins.
+                let pick = |a: f32, b: f32, r: &mut crate::rng::SimRng| {
+                    if r.unit() < 0.5 {
+                        a
+                    } else {
+                        b
+                    }
+                };
+                Genome {
+                    body_size: pick(self.body_size, other.body_size, rng),
+                    max_speed: pick(self.max_speed, other.max_speed, rng),
+                    metabolism: pick(self.metabolism, other.metabolism, rng),
+                    diet: pick(self.diet, other.diet, rng),
+                    water_affinity: pick(self.water_affinity, other.water_affinity, rng),
+                    heat_tolerance: pick(self.heat_tolerance, other.heat_tolerance, rng),
+                }
+            }
+        }
+    }
+
     /// Sprite/body radius factor (× `CREATURE_SIZE`). 0.5 trait → 1.0 (today).
     #[inline]
     pub fn body_size_factor(&self) -> f32 {
@@ -193,6 +237,15 @@ pub struct CreatureSoA {
     /// into the snapshot for the renderer (2b draws the ring).
     pub flash_tag: Vec<FlashTag>,
     pub flash_ticks: Vec<u8>,
+    /// v2.0 Wave 3a: per-creature species id. Unused (always 0) in single-pool
+    /// mode; in `species_mode` it keys the species color + the Attack /
+    /// same-species gates and rides the snapshot `packed_u32` (bits 7..23).
+    pub species_id: Vec<u16>,
+    /// v2.0 Wave 3a: initiator-only post-mating cooldown (ticks). Decrements once
+    /// per tick in `energy_bookkeeping`. Gates whether `Mate` is a legal NN pick
+    /// (species_mode only). Distinct from `digestion_cooldown` (which gates
+    /// Attack). Always 0 / unused in single-pool mode.
+    pub mating_cooldown: Vec<u32>,
 }
 
 impl CreatureSoA {
@@ -216,6 +269,8 @@ impl CreatureSoA {
             genome: Vec::with_capacity(cap),
             flash_tag: Vec::with_capacity(cap),
             flash_ticks: Vec::with_capacity(cap),
+            species_id: Vec::with_capacity(cap),
+            mating_cooldown: Vec::with_capacity(cap),
         }
     }
 
@@ -229,8 +284,9 @@ impl CreatureSoA {
     }
 
     /// Append one creature. Returns new index. v2.0 Wave 2a: takes the
-    /// per-creature `genome`. New creatures are born with a `Born` ring-flash
-    /// (teal) lit for `FLASH_TICKS`.
+    /// per-creature `genome`. v2.0 Wave 3a: takes `species_id` (0 = single-pool
+    /// / unused). New creatures are born with a `Born` ring-flash (teal) lit for
+    /// `FLASH_TICKS`.
     #[allow(clippy::too_many_arguments)]
     pub fn push(
         &mut self,
@@ -241,6 +297,7 @@ impl CreatureSoA {
         birth_tick: u32,
         brain: Brain,
         genome: Genome,
+        species_id: u16,
     ) -> usize {
         self.id.push(id);
         self.x.push(x);
@@ -260,6 +317,8 @@ impl CreatureSoA {
         // v2.0 Wave 2a: newborns flash teal ("born").
         self.flash_tag.push(FlashTag::Born);
         self.flash_ticks.push(FLASH_TICKS);
+        self.species_id.push(species_id);
+        self.mating_cooldown.push(0);
         self.brains.push(brain);
         self.x.len() - 1
     }
@@ -300,6 +359,8 @@ impl CreatureSoA {
             self.genome.swap_remove(k);
             self.flash_tag.swap_remove(k);
             self.flash_ticks.swap_remove(k);
+            self.species_id.swap_remove(k);
+            self.mating_cooldown.swap_remove(k);
             self.brains.swap_remove(k);
         }
     }
@@ -318,7 +379,7 @@ mod tests {
         let mut rng = SimRng::from_u64(1);
         for i in 0..4u64 {
             let b = Brain::founder(&mut rng, NnTopology::legacy());
-            soa.push(i, i as f32 * 10.0, 0.0, 100.0, 0, b, Genome::median());
+            soa.push(i, i as f32 * 10.0, 0.0, 100.0, 0, b, Genome::median(), 0);
         }
         assert_eq!(soa.len(), 4);
         soa.remove_indices(&[1]);
@@ -337,7 +398,7 @@ mod tests {
         for k in 0u64..5 {
             let b = Brain::founder(&mut rng, NnTopology::legacy());
             let g = Genome::founder(&mut rng);
-            soa.push(k, k as f32, 0.0, 100.0, 0, b, g);
+            soa.push(k, k as f32, 0.0, 100.0, 0, b, g, 0);
         }
         assert_eq!(soa.len(), 5);
         soa.remove_indices(&[0, 2]);
@@ -351,7 +412,7 @@ mod tests {
         let mut rng = SimRng::from_u64(7);
         for k in 0u64..3 {
             let b = Brain::founder(&mut rng, NnTopology::legacy());
-            soa.push(k, k as f32, 0.0, 100.0, 0, b, Genome::median());
+            soa.push(k, k as f32, 0.0, 100.0, 0, b, Genome::median(), 0);
         }
         for i in 0..soa.len() {
             assert_eq!(soa.flash_tag[i], FlashTag::Born, "flash_tag[{i}] must be Born");
@@ -365,7 +426,7 @@ mod tests {
         let mut soa = CreatureSoA::with_capacity(1);
         let mut rng = SimRng::from_u64(3);
         let b = Brain::founder(&mut rng, NnTopology::legacy());
-        soa.push(0, 0.0, 0.0, 100.0, 0, b, Genome::median());
+        soa.push(0, 0.0, 0.0, 100.0, 0, b, Genome::median(), 0);
         // Lower-priority Grazed over the Born-at-spawn (Born p=1 < Grazed p=2).
         soa.set_flash(0, FlashTag::Grazed);
         assert_eq!(soa.flash_tag[0], FlashTag::Grazed);

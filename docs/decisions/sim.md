@@ -233,16 +233,21 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   field.
 - **Applies to**: `architecture/simulation-core.md`.
 
-### Action enum is collapsed to `{Graze, Eat, Split}`
+### Action enum is collapsed to `{Graze, Attack, Split}`
 
 - **Decision**: Three discrete actions. NN outputs 5 values: `vx`, `vy`,
   and three action logits. No Rest, Scavenge, Signal, Armor, Pigment
-  variants.
+  variants. v2.0 Wave 2a renamed `Eat → Attack` (same repr/logit order).
+  v2.0 Wave 3a: `action[2]` (the `Split` variant) decodes to **Mate** in
+  `species_mode` — same logit slot, mode-dependent validity gate
+  (`ActionGate`), so the NN output shape is stable across modes.
 - **Why**: Smaller search space, simpler invariants. Other action
   variants cost code without delivering observable behavioural payoff
-  at the population sizes the sim reaches.
+  at the population sizes the sim reaches. Reusing `action[2]`'s logit for
+  Mate keeps the SAB + brain output shape unchanged between modes.
 - **Applies to**: `architecture/simulation-core.md`.
-- **Code anchors**: `src/creature.rs → Action`, `Action::ALL`.
+- **Code anchors**: `src/creature.rs → Action`, `Action::ALL`;
+  `src/world/nn.rs → ActionGate / decode_action / is_valid_action`.
 
 ### Creature color is genome-derived; per-action highlight is a ring-flash (v2.0 Wave 2a)
 
@@ -344,13 +349,18 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   that the precomputed list needs a different cap, or a future sense
   uses sum-aggregation (where the early-bail invariant doesn't hold).
 
-### No save/load, no species tracking, no events, no Hall of Fame
+### No save/load, no events, no Hall of Fame
 
 - **Decision**: Every page load is a fresh world. No persistence, no
-  species registry, no event log, no eulogy.
-- **Why**: All four cost surface area without delivering observable
+  event log, no eulogy.
+- **Why**: All three cost surface area without delivering observable
   benefits. Removing them lets the rest of the system get smaller.
 - **Applies to**: `architecture/simulation-core.md`.
+- **Note (v2.0 Wave 3a)**: a **species** registry now exists in
+  `species_mode` (`World.species`) — but it's still in-memory, fresh per
+  world; there's no cross-session persistence. The "no species tracking"
+  clause referred to per-session durable lineage, which still doesn't exist
+  (species-history breadcrumb is plumbed-but-empty until V2.1 splits).
 - **Revisit when**: a use case appears that genuinely needs durable
   per-creature identity or cross-session continuity.
 
@@ -420,6 +430,105 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   a multiple of 8). No genome inputs yet (Wave 2).
 - **Revisit when**: more biome senses are added, or the input width
   approaches `MAX_NN_INPUTS = 48`.
+
+### Species + sexual mating is an opt-in mode, not a replacement (v2.0 Wave 3a)
+
+- **Decision**: `species_mode` is a construction-only `DevSliders` flag
+  (default OFF, restart-required). OFF = today's single-pool asexual
+  `Split` sim, fully unchanged. ON = N seeded species + sexual `Mate` +
+  Attack-refuses-same-species + 16-sector creature proximity + per-species
+  color. The two never coexist in a run.
+- **Why**: Emergent single-pool drift is the v1 thing worth preserving;
+  faction storytelling is the v2 thing worth adding. A single hard switch
+  keeps both readable and lets the user A/B them.
+- **Applies to**: `architecture/simulation-core.md`,
+  `src/world/{mod,nn,tick,species}.rs`, `src/wasm_api.rs`.
+- **Code anchors**: `DevSliders.species_mode`, `World.species`
+  (`SpeciesRegistry`), the `species_id` SoA column.
+
+### Mate: contact-radius, NN-initiated, first-found, initiator-only cost + cooldown (v2.0 Wave 3a)
+
+- **Decision**: In species mode, `action[2]` (the `Action::Split` logit)
+  decodes to **Mate**. It's gated ENTIRELY by the initiator — a legal pick
+  only when off mating cooldown AND `energy ≥ mating cost` (= `split_gift`);
+  an invalid pick falls through to Graze, like Split. On fire, the sim finds
+  the **first** same-species creature (by `species_id` only) within a small
+  contact radius `(r_i + r_j) × MATING_CONTACT_RADIUS_FACTOR` (≈ summed body
+  radii, NOT the 20u perception range), first-found wins (no nearest-scan,
+  matching Attack). **All cost + cooldown fall on the initiator only:** it
+  pays the cost and enters a fixed `mating_cooldown_ticks` (default 200, live)
+  cooldown via a dedicated `mating_cooldown` SoA column; the partner pays
+  nothing, needs no energy, and is not required to be off cooldown. The child
+  spawns at the parent midpoint (wrap-aware, no habitable-cell check) with the
+  parents' shared `species_id`.
+- **Why**: Contact (not perception range) makes mating a deliberate physical
+  act that ties reproduction to staying clustered ("stay together or die out"
+  is the intended selection pressure). Initiator-only cost/cooldown is a
+  deliberate cold-start concession — requiring both parents ready-and-fed
+  roughly squares the gating probability, which a clustered founder group with
+  random brains rarely clears.
+- **Applies to**: `World::handle_mating`, `ActionGate` /
+  `decode_action` / `is_valid_action` in `src/world/nn.rs`,
+  `energy_bookkeeping` (cooldown decrement).
+- **Watch item**: with no partner cooldown, many initiators can mate one
+  popular partner in a single tick — add a guard if births spike.
+
+### Crossover is a construction enum applied to brain weights AND genome traits (v2.0 Wave 3a)
+
+- **Decision**: `crossover_mode` (construction enum `{average, fifty_fifty}`,
+  default `fifty_fifty`) is applied **identically** to brain weights and the 6
+  genome traits, then mutation (the same per-birth bucket machinery as a normal
+  child). `fifty_fifty` = per-slot 50/50 random pick from the two parents;
+  `average` = per-slot elementwise midpoint. Single-pool `Split` is unchanged
+  (asexual, no crossover). RNG draw order is fixed and deterministic: brain
+  crossover (one `unit()`/weight for fifty_fifty, none for average) → brain
+  bucket mutation → genome crossover → genome mutation, off the pair's pre-rolled
+  seed.
+- **Why**: Both are interesting evolutionary mechanics; one construction switch
+  is cheap and lets the user observe both regimes. `fifty_fifty` preserves
+  variance (standard GA); `average` is available for homogenization research.
+  Per-weight crossover of trained nets is a known neuroevolution hazard, kept
+  safe by the **aligned regime** (same-species-only mating + small per-birth
+  brain mutation + frequent within-species mating) so crossover is allele-shuffling,
+  not basin-mixing — crossover's job here is narrative, not raw optimization.
+- **Applies to**: `Brain::child_from_crossover_with_sigma` (`src/brain.rs`),
+  `Genome::crossed` (`src/creature.rs`), `World::handle_mating`.
+- **Revisit when**: playtest shows one mode strictly dominant, or brains
+  demonstrably fail to evolve under mating.
+
+### Cannibalism stays off in species mode — `Attack` refuses same-species (v2.0 Wave 3a)
+
+- **Decision**: In species mode, `World::attack` refuses same-`species_id`
+  targets (a sim-side gate, not learned). Single-pool has no species, so
+  `Attack` hits any creature — the v1 predation mechanic, unchanged. "No
+  cannibalism" is a species-mode rule, not a global one.
+- **Why**: Short networks drift into "eat anything moving" within a few
+  generations; without a hard gate every species converges to cannibalism. Our
+  brains aren't deep enough to encode evolved anti-cannibalism, so we guardrail it.
+- **Applies to**: `World::attack` (`src/world/tick.rs`).
+- **Revisit when**: brains grow deep enough that anti-cannibalism could plausibly
+  evolve and be retained against drift.
+
+### Species seeding + identity: dynamic registry, placeholder color, fixed-set seed (v2.0 Wave 3a scaffolding)
+
+- **Decision**: `World.species` is a **dynamic** `SpeciesRegistry`
+  (`Vec<Species { id, color_u32 }>`, add/remove-capable) even though v3 seeds a
+  fixed `starting_species_count` (default 10). Each species gets an evenly-spread
+  saturated **placeholder hue** written sim-side into the snapshot `color_u32`
+  lane (so the renderer needs no change). Per-creature `species_id` keys the
+  color + gates. Wave-3 seeding is a **placeholder**: cluster
+  `starting_species_member_count` founders near a random Halton anchor with basic
+  uniform-random genomes; `starting_species_member_variance` is wired + plumbed
+  but **inert** until Wave 4 (which does biome-appropriate founders + the spread).
+- **Why**: Building the registry dynamic now means the V2.1 split/merge work
+  needs no protocol change. Writing the species color into the existing lane
+  keeps the renderer unchanged this wave; Wave 4 swaps the source for a polled
+  species→color table (noted seam). The placeholder seeding is just enough to
+  exercise mating + the gates without front-loading Wave-4 balance work.
+- **Applies to**: `src/world/species.rs`, `World::new_with_sliders` (species
+  seeding branch), `fill_creature_bytes` (species color lane).
+- **Revisit when**: Wave 4 lands real biome-adapted founders + the polled
+  color table; v2.1 adds splits/merges.
 
 ## See also
 

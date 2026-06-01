@@ -302,6 +302,80 @@ pub const DESERT_MOVEMENT_PENALTY_DEFAULT: f32 = 0.4;
 /// Number of directional biome NN inputs (N/S/E/W) in the `BiomeDir` group.
 pub const NN_BIOME_DIRS: usize = 4;
 
+// ---- Species + sexual mating (v2.0 Wave 3a) ----
+//
+// `species_mode` is a construction-time toggle (default OFF). OFF = today's
+// single-pool asexual `Split` sim, fully unchanged. ON = 10 seeded species +
+// sexual `Mate` (same-species, contact-radius, initiator-gated cooldown) +
+// Attack-refuses-same-species + 16-sector creature proximity + per-species
+// color. Everything below is inert when `species_mode` is off.
+
+/// Default for the `species_mode` construction toggle. OFF ⇒ single-pool asexual.
+pub const SPECIES_MODE_DEFAULT: bool = false;
+
+/// Per-sector creature-proximity count when `species_mode` is ON: 8 same-species
+/// sectors + 8 other-species sectors = 16. (Single-pool stays at `NN_SECTORS`=8
+/// unified.) Plugged into the `CreatureSectors` NN input group width.
+pub const NN_CREATURE_SECTORS_SPECIES: usize = 2 * NN_SECTORS;
+
+/// Default number of seeded species in `species_mode` (Wave 3 placeholder
+/// seeding; Wave 4 does biome-appropriate founders). Live in the construction
+/// slider set now so Wave 4 only refines the algorithm.
+pub const STARTING_SPECIES_COUNT_DEFAULT: u32 = 10;
+/// Default founders per species (`starting_species_member_count`).
+pub const STARTING_SPECIES_MEMBER_COUNT_DEFAULT: u32 = 10;
+/// Default per-founder spread multiplier (`starting_species_member_variance`).
+/// ACCEPTED but INERT in Wave 3 — the Wave-3 placeholder seeding draws basic
+/// uniform-random founder genomes; Wave 4 applies this to the per-founder bucket
+/// draw. The slider is wired + plumbed now so the slider set is final.
+pub const STARTING_SPECIES_MEMBER_VARIANCE_DEFAULT: f32 = 3.0;
+
+/// Default initiator-only post-mating cooldown in ticks. Live-tunable.
+pub const MATING_COOLDOWN_TICKS_DEFAULT: u32 = 200;
+
+/// Contact-radius padding for mating. `Mate` finds a same-species partner within
+/// `(r_initiator + r_partner) * MATING_CONTACT_RADIUS_FACTOR` — essentially
+/// touching (summed body radii), NOT the 20u perception range. A factor of 1.0
+/// is "bodies overlap"; 1.5 gives a little slack so a clustered founder group can
+/// actually reach a partner. Balance knob.
+pub const MATING_CONTACT_RADIUS_FACTOR: f32 = 1.5;
+
+/// Crossover policy for sexual reproduction (`species_mode` ON). Applied
+/// identically to brain weights AND the 6 genome traits, then mutation. v2.0
+/// Wave 3a. Default `FiftyFifty` (preserves variance; standard GA).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[repr(u8)]
+pub enum CrossoverMode {
+    /// Per-slot elementwise midpoint of the two parents.
+    Average = 0,
+    /// Per-slot 50/50 random pick from the two parents.
+    FiftyFifty = 1,
+}
+
+impl CrossoverMode {
+    /// Construction-slider encoding (carried as f32 over the SAB): 0 = average,
+    /// non-zero = fifty_fifty. Default is FiftyFifty.
+    #[inline]
+    pub fn from_slider(value: f32) -> Self {
+        if value == 0.0 {
+            CrossoverMode::Average
+        } else {
+            CrossoverMode::FiftyFifty
+        }
+    }
+    /// Slider value (f32) for this mode.
+    #[inline]
+    pub fn to_slider(self) -> f32 {
+        match self {
+            CrossoverMode::Average => 0.0,
+            CrossoverMode::FiftyFifty => 1.0,
+        }
+    }
+}
+
+/// Default crossover mode (construction setting).
+pub const CROSSOVER_MODE_DEFAULT: CrossoverMode = CrossoverMode::FiftyFifty;
+
 /// Runtime world dimensions, computed once at construction from `world_size`.
 ///
 /// v2.0 Wave 1a: replaces the old compile-time `WORLD_SIZE` / `HASH_DIM` /

@@ -450,6 +450,140 @@ pub(crate) fn compute_grass_density_sectors(
     }
 }
 
+/// v2.0 Wave 3a: species-aware creature proximity. Fills `out[0..8]` with the
+/// per-sector intensity of the nearest **same-species** neighbor and `out[8..16]`
+/// with the nearest **other-species** neighbor, using the creature's own
+/// `species_id`. Otherwise identical to `compute_creature_proximity_sectors`
+/// (same starburst walk, same bilinear sector split, same wrap-aware
+/// minimum-image distance, same per-sector `max` aggregation).
+///
+/// The starburst early-bail fires only once BOTH 8-sector blocks are fully lit
+/// (16 sectors). This is accepted per the v2.0 decisions: at the coarse
+/// `HASH_CELL` and the ~64×-sparser density a full-range walk is cheap, and a
+/// mono-species clump simply never lights the other-species block — the bail
+/// then waits until `max_intensity` falls below the lit same-species sectors,
+/// which it does at range, so the walk still terminates.
+pub(crate) fn compute_creature_proximity_sectors_species(
+    x: f32,
+    y: f32,
+    self_id: usize,
+    self_species: u16,
+    grid: &SpatialGrid,
+    creatures: &CreatureSoA,
+    out: &mut [f32; 16],
+) {
+    *out = [0.0f32; 16];
+    let range = PROXIMITY_RANGE;
+    let inv_range = 1.0 / range;
+    let range2 = range * range;
+    let cell = HASH_CELL;
+    let inv_cell = 1.0 / cell;
+    let dim = grid.dims.hash_dim as i32;
+    let wrap = grid.dims.wrap_world;
+    let world_size = grid.dims.world_size;
+    let half_world = world_size * 0.5;
+
+    let ix0 = (x * inv_cell).floor() as i32;
+    let iy0 = (y * inv_cell).floor() as i32;
+
+    // Per-sector best intensity, per block (same / other). 16 channels total.
+    let mut best = [0.0f32; 16];
+    let mut sectors_hit: u32 = 0;
+    let mut min_best: f32 = 0.0;
+
+    for &(dxo, dyo, min_dist_sq) in proximity_starburst() {
+        let min_dist = min_dist_sq.sqrt();
+        let max_intensity = 1.0 - min_dist * inv_range;
+        if max_intensity <= 0.0 {
+            break;
+        }
+        // Bail only once ALL 16 sectors are lit AND no further cell can beat the
+        // worst lit sector.
+        if sectors_hit == 16 && max_intensity <= min_best {
+            break;
+        }
+
+        let ix_raw = ix0 + dxo;
+        let iy_raw = iy0 + dyo;
+        let (ix, iy) = if wrap {
+            (ix_raw.rem_euclid(dim), iy_raw.rem_euclid(dim))
+        } else {
+            if ix_raw < 0 || ix_raw >= dim || iy_raw < 0 || iy_raw >= dim {
+                continue;
+            }
+            (ix_raw, iy_raw)
+        };
+        let c = iy as usize * grid.dims.hash_dim + ix as usize;
+        let s = grid.starts[c] as usize;
+        let e = grid.starts[c + 1] as usize;
+        for &idx_u32 in &grid.indices[s..e] {
+            let j = idx_u32 as usize;
+            if j == self_id {
+                continue;
+            }
+            let mut dx = creatures.x[j] - x;
+            let mut dy = creatures.y[j] - y;
+            if wrap {
+                if dx > half_world {
+                    dx -= world_size;
+                } else if dx < -half_world {
+                    dx += world_size;
+                }
+                if dy > half_world {
+                    dy -= world_size;
+                } else if dy < -half_world {
+                    dy += world_size;
+                }
+            }
+            let d2 = dx * dx + dy * dy;
+            if d2 > range2 {
+                continue;
+            }
+            let d = d2.sqrt();
+            let intensity = 1.0 - d * inv_range;
+            if intensity <= 0.0 {
+                continue;
+            }
+            // Same-species → block 0 ([0..8)); other-species → block 1 ([8..16)).
+            let block = if creatures.species_id[j] == self_species {
+                0
+            } else {
+                8
+            };
+            let (primary, w) = sector_of(dx, dy);
+            let adj = adjacent_sector(dx, dy, primary);
+            let p_val = intensity * w;
+            let a_val = intensity * (1.0 - w);
+            let p_idx = block + primary as usize;
+            let a_idx = block + adj as usize;
+            if p_val > best[p_idx] {
+                if best[p_idx] == 0.0 {
+                    sectors_hit += 1;
+                }
+                best[p_idx] = p_val;
+            }
+            if a_val > best[a_idx] {
+                if best[a_idx] == 0.0 {
+                    sectors_hit += 1;
+                }
+                best[a_idx] = a_val;
+            }
+        }
+
+        if sectors_hit == 16 {
+            let mut mb = best[0];
+            for &v in &best[1..] {
+                if v < mb {
+                    mb = v;
+                }
+            }
+            min_best = mb;
+        }
+    }
+
+    *out = best;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

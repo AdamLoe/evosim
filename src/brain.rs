@@ -623,6 +623,85 @@ impl Brain {
         }
         (child, sigma)
     }
+
+    /// v2.0 Wave 3a: sexual child from TWO parents — per-weight crossover then
+    /// the same per-birth bucket mutation as `child_from_with_sigma`. Returns the
+    /// child brain + the chosen bucket's sigma so the caller can drive the genome
+    /// step off the SAME per-birth draw (genome crossover + mutation happen AFTER
+    /// this returns, on the same `rng`).
+    ///
+    /// Both parents must share a topology (same-species mating guarantees it; we
+    /// `debug_assert` the weight lengths agree and fall back to parent A's shape).
+    ///
+    /// RNG draw order (deterministic, must not change): first the per-weight
+    /// crossover — **fifty_fifty** draws one `rng.unit()` per weight slot to pick
+    /// A vs B, while **average** consumes NO RNG (pure midpoint); then the bucket
+    /// pick (one `rng.unit()`) and the geom-skip Gaussian mutation walk. The
+    /// genome crossover/mutation draws (if any) happen after this returns.
+    pub fn child_from_crossover_with_sigma(
+        parent_a: &Brain,
+        parent_b: &Brain,
+        rng: &mut SimRng,
+        policy: &MutationPolicy,
+        multiplier: f32,
+        crossover: crate::constants::CrossoverMode,
+    ) -> (Self, f32) {
+        use crate::constants::CrossoverMode;
+        let mut child = parent_a.clone();
+        debug_assert_eq!(
+            parent_a.weights.len(),
+            parent_b.weights.len(),
+            "crossover parents must share a topology (same-species mating)"
+        );
+        let n = child.weights.len().min(parent_b.weights.len());
+        match crossover {
+            CrossoverMode::Average => {
+                for i in 0..n {
+                    child.weights[i] = 0.5 * (parent_a.weights[i] + parent_b.weights[i]);
+                }
+            }
+            CrossoverMode::FiftyFifty => {
+                for i in 0..n {
+                    // One RNG draw per slot — A on heads, B on tails.
+                    if rng.unit() < 0.5 {
+                        child.weights[i] = parent_a.weights[i];
+                    } else {
+                        child.weights[i] = parent_b.weights[i];
+                    }
+                }
+            }
+        }
+
+        // Then mutate exactly like an asexual child (same bucket machinery).
+        // `total` is a sum of non-negative finite weights, so `<= 0.0` is the
+        // exact equivalent of the asexual path's `!(total > 0.0)` (no NaN risk).
+        let total: f32 = policy.buckets.iter().map(|b| b.weight.max(0.0)).sum();
+        if total <= 0.0 {
+            return (child, 0.0);
+        }
+        let mut u = rng.unit() * total;
+        let mut chosen = &policy.buckets[0];
+        for b in policy.buckets.iter() {
+            let w = b.weight.max(0.0);
+            if u < w {
+                chosen = b;
+                break;
+            }
+            u -= w;
+        }
+        let p = (chosen.rate * multiplier).clamp(0.0, 1.0);
+        let sigma = chosen.sigma;
+        if p > 0.0 && sigma > 0.0 {
+            let m = child.weights.len();
+            let mut i = rng.geom_skip(p);
+            while i < m {
+                child.weights[i] += rng.normal() * sigma;
+                let step = rng.geom_skip(p);
+                i = i.saturating_add(step).saturating_add(1);
+            }
+        }
+        (child, sigma)
+    }
 }
 
 #[cfg(test)]
@@ -794,13 +873,15 @@ mod tests {
     /// CRITICAL: SIMD and scalar agree within 1e-5 relative error across
     /// several topologies (parameterised drift-guard from v1.12 plan).
     ///
-    /// v2.0 Wave 1b: the active NN width is now 32 (wrap on) OR 40 (wrap off).
-    /// The drift guard must cover BOTH input widths, so the topology list
-    /// includes width-32 and width-40 variants (via `with_input_width`).
+    /// v2.0 Wave 3a: the active NN width is one of the 4-way table 32/40/40/48
+    /// (wrap × species). The drift guard must cover ALL FOUR input widths, so the
+    /// topology list includes width-32, width-40, AND width-48 variants (via
+    /// `with_input_width`). 40 covers both wrap-off/species-off AND
+    /// wrap-on/species-on; the 48 ceiling is wrap-off/species-on.
     #[test]
     fn forward_pass_matches_scalar_reference_multiple_topologies() {
         let topologies = [
-            // width-32 (wrap-on) compositions
+            // width-32 (wrap-on, species-off) compositions
             NnTopology::legacy(),
             NnTopology::new(
                 vec![64, 32, 16],
@@ -808,7 +889,7 @@ mod tests {
             )
             .unwrap(),
             NnTopology::new(vec![8], vec![Activation::LReLU]).unwrap(),
-            // width-40 (wrap-off) compositions — exercise the wider first matmul.
+            // width-40 (wrap-off/species-off OR wrap-on/species-on) — wider first matmul.
             NnTopology::with_input_width(40, vec![48, 24], vec![Activation::LReLU, Activation::LReLU])
                 .unwrap(),
             NnTopology::with_input_width(
@@ -818,6 +899,16 @@ mod tests {
             )
             .unwrap(),
             NnTopology::with_input_width(40, vec![8], vec![Activation::LReLU]).unwrap(),
+            // width-48 (wrap-off, species-on) — the MAX_NN_INPUTS ceiling.
+            NnTopology::with_input_width(48, vec![48, 24], vec![Activation::LReLU, Activation::LReLU])
+                .unwrap(),
+            NnTopology::with_input_width(
+                48,
+                vec![64, 32, 16],
+                vec![Activation::LReLU, Activation::LReLU, Activation::LReLU],
+            )
+            .unwrap(),
+            NnTopology::with_input_width(48, vec![8], vec![Activation::LReLU]).unwrap(),
         ];
 
         for topology in topologies {

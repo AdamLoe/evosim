@@ -24,8 +24,10 @@ fn creature_region_size_unchanged() {
 #[test]
 fn snapshot_lane_offsets_match_repack() {
     let mut handle =
-        WorldHandle::new_with_founder_count("wave2a-lanes", 0, 100.0, 4, false, "", 1200.0, false, 1)
-            .unwrap();
+        WorldHandle::new_with_founder_count(
+            "wave2a-lanes", 0, 100.0, 4, false, "", 1200.0, false, 1, false, 1.0, 10, 10, 3.0,
+        )
+        .unwrap();
     let mut creatures = Vec::new();
     let mut grass = Vec::new();
     let mut stats = Vec::new();
