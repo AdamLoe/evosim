@@ -22,6 +22,7 @@ touches a subsystem, load the relevant architecture doc from
 | Running or adding tests, triaging test failures | [`testing-how-to.md`](testing-how-to.md) |
 | Making a commit, staging files, touching lockfiles/generated outputs/settings | [`repo-rules.md`](repo-rules.md) |
 | Editing docs, shipping a plan, deciding which doc owns a fact | [`maintaining-docs.md`](maintaining-docs.md) |
+| Orchestrating a large multi-stream effort via sub-agents | [`orchestrating.md`](orchestrating.md) |
 | Creating a mission plan | [`../plans/index.md`](../plans/index.md) + [`../plans/template.md`](../plans/template.md) |
 | Updating or shipping a mission plan | [`../plans/index.md`](../plans/index.md) + [`maintaining-docs.md`](maintaining-docs.md) |
 
@@ -41,6 +42,10 @@ touches a subsystem, load the relevant architecture doc from
   `../plans/template.md` only when creating a new plan.
 - For file discovery, use `../repository-layout.md`; this agent-context
   layer is about workflow, not source-tree inventory.
+- For a multi-stream effort driven via sub-agents (audit → plan →
+  implement → verify → doc-migrate), read `orchestrating.md`; bootstrap
+  such a chat with `../prompts/fresh-orchestrator.md`. A single focused
+  change does not need it.
 
 ## See also
 

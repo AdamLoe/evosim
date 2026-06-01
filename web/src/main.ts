@@ -447,11 +447,6 @@ const SVG_ATTRS =
   'viewBox="0 0 24 24" width="18" height="18" fill="none" ' +
   'stroke="currentColor" stroke-width="1.8" stroke-linecap="round" ' +
   'stroke-linejoin="round" aria-hidden="true"';
-const ICON_PLAY = `<svg ${SVG_ATTRS}><path d="M7 5l12 7-12 7V5z" fill="currentColor" stroke="none"/></svg>`;
-const ICON_PAUSE = `<svg ${SVG_ATTRS}><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>`;
-const ICON_RESTART = `<svg ${SVG_ATTRS}><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg>`;
-const ICON_AUTO_RESTART = `<svg ${SVG_ATTRS}><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/></svg>`;
-const ICON_SETTINGS = `<svg ${SVG_ATTRS}><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`;
 const ICON_PERF = `<svg ${SVG_ATTRS}><rect x="2.5" y="3.5" width="19" height="13" rx="1.5"/><path d="M8 20.5h8M12 16.5v4"/><path d="M5.5 13.5l3-3 2.5 2.5 3.5-5 3.5 3.5"/></svg>`;
 
 function makeIconBtn(id: string, title: string, html: string): HTMLButtonElement {
@@ -465,29 +460,39 @@ function makeIconBtn(id: string, title: string, html: string): HTMLButtonElement
   return btn;
 }
 
-// v1.13 Wave 1: install all five top-bar icon buttons in one pass and
-// register the keyboard shortcuts (space → pause/play). Highlight state
-// for the three "toggleable" buttons (auto-restart, settings, perf) is
-// refreshed by a low-rate interval — cheaper than wiring a subscription
-// into perf-panel / devpanel and good enough for visual sync.
+function makeTextBtn(id: string, label: string, title: string): HTMLButtonElement {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.id = id;
+  btn.className = "topbar-btn";
+  btn.title = title;
+  btn.textContent = label;
+  return btn;
+}
+
+// Top bar lives in the top-right corner: text labels for the three
+// primary actions (Play/Pause, Restart, Auto-restart) + a perf icon
+// for the bottom-panel toggle. Settings lives in the rail tabs now —
+// no top-bar ⚙ shortcut. Highlight state for the toggleable buttons
+// (auto-restart, perf) is refreshed by a low-rate interval.
 function installTopBarButtons(
   getBridge: () => SimBridge,
   onRestart: () => void,
-  rail: RailState,
+  _rail: RailState,
 ): void {
   const bar = document.getElementById("top-bar");
   if (!bar) return;
 
-  // 1. Play / pause — single button, glyph swaps with state.
-  const playBtn = makeIconBtn("playpause-btn", "Play / pause (space)", paused ? ICON_PLAY : ICON_PAUSE);
-  const refreshPlayGlyph = (): void => {
-    playBtn.innerHTML = paused ? ICON_PLAY : ICON_PAUSE;
+  // 1. Play / pause — text swaps based on state.
+  const playBtn = makeTextBtn("playpause-btn", paused ? "Play" : "Pause", "Play / pause (space)");
+  const refreshPlayLabel = (): void => {
+    playBtn.textContent = paused ? "Play" : "Pause";
     playBtn.classList.toggle("is-active", paused);
   };
   playBtn.addEventListener("click", () => {
     paused = !paused;
     getBridge().setPaused(paused);
-    refreshPlayGlyph();
+    refreshPlayLabel();
   });
   window.addEventListener("keydown", (e) => {
     if (e.key !== " " && e.code !== "Space") return;
@@ -496,43 +501,23 @@ function installTopBarButtons(
     e.preventDefault();
     paused = !paused;
     getBridge().setPaused(paused);
-    refreshPlayGlyph();
+    refreshPlayLabel();
   });
 
-  // 2. Restart — fires the same restart() the `r` hotkey wires to.
-  const restartBtn = makeIconBtn("restart-btn", "Restart simulation (r)", ICON_RESTART);
+  // 2. Restart.
+  const restartBtn = makeTextBtn("restart-btn", "Restart", "Restart simulation (r)");
   restartBtn.addEventListener("click", onRestart);
 
-  // 3. Auto-restart — toggles Settings.autoRun. Highlight follows the
-  //    persisted value (which the devpanel can also flip).
-  const autoBtn = makeIconBtn("auto-restart-btn", "Auto-restart on world end", ICON_AUTO_RESTART);
+  // 3. Auto-restart toggle.
+  const autoBtn = makeTextBtn("auto-restart-btn", "Auto-restart", "Auto-restart on world end");
   autoBtn.addEventListener("click", () => {
     const next = !getSettings().autoRun;
     setSetting("autoRun", next);
     autoBtn.classList.toggle("is-active", next);
   });
 
-  // 4. Settings — toggles the rail open/closed (same as `~` hotkey).
-  //    Highlighted only when the rail is open AND showing the settings
-  //    tab — otherwise the rail is acting as Inspector or NN.
-  // Clicking ⚙ opens the rail to the Settings tab; clicking again (when
-  // already showing Settings) closes the rail. Keeps the icon's
-  // "highlighted = panel is open on Settings" semantic simple, matching
-  // the other reactive icons.
-  const settingsBtn = makeIconBtn("settings-btn", "Toggle settings rail (~)", ICON_SETTINGS);
-  settingsBtn.addEventListener("click", () => {
-    const open = getSettings().railOpen;
-    const onSettings = rail.activeTab === "settings";
-    if (open && onSettings) {
-      setRailOpen(false);
-    } else {
-      setRailOpen(true);
-      rail.switchTab("settings");
-    }
-  });
-
-  // 5. Perf — flips Settings.showProfiler and re-applies via the
-  //    perf-panel's single source-of-truth setter.
+  // 4. Perf — bottom panel toggle. Stays as an icon since it's a global
+  //    UI affordance, not an action.
   const perfBtn = makeIconBtn("perf-btn", "Toggle profiler panel", ICON_PERF);
   perfBtn.addEventListener("click", () => {
     const next = !getSettings().showProfiler;
@@ -541,22 +526,13 @@ function installTopBarButtons(
     perfBtn.classList.toggle("is-active", next);
   });
 
-  bar.append(playBtn, restartBtn, autoBtn, settingsBtn, perfBtn);
+  bar.append(playBtn, restartBtn, autoBtn, perfBtn);
 
-  // Initial highlight pass + low-rate sync. Polling at 4 Hz keeps the
-  // three reactive buttons in step with state changes coming from
-  // elsewhere (devpanel autoRun row, rail tab click, etc.) without
-  // forcing us to plumb subscriptions through the perf-panel / devpanel
-  // / rail modules.
   const refreshHighlights = (): void => {
     autoBtn.classList.toggle("is-active", getSettings().autoRun);
-    settingsBtn.classList.toggle(
-      "is-active",
-      getSettings().railOpen && rail.activeTab === "settings",
-    );
     perfBtn.classList.toggle("is-active", getSettings().showProfiler);
   };
-  refreshPlayGlyph();
+  refreshPlayLabel();
   refreshHighlights();
   window.setInterval(refreshHighlights, 250);
 }

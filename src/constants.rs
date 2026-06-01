@@ -29,8 +29,8 @@ pub const SPLIT_THRESHOLD_DEFAULT: f32 = 99.0;
 // ---- Eat ----
 /// Default per-bite energy transfer fraction. Predator removes
 /// `eat_bite_fraction * prey.energy * (1 - prey.armor)` per bite.
-pub const EAT_BITE_FRACTION_DEFAULT: f32 = 0.5;
-pub const DIGESTION_COOLDOWN_TICKS: u32 = 50;
+pub const EAT_BITE_FRACTION_DEFAULT: f32 = 1.0;
+pub const DIGESTION_COOLDOWN_TICKS: u32 = 0;
 
 // ---- Past-lifespan penalty ----
 pub const PAST_LIFESPAN_MULT: f32 = 4.0; // per 1000 ticks past max_age
@@ -132,11 +132,11 @@ pub const GRASS_CELL_COUNT: usize = GRASS_GRID_DIM * GRASS_GRID_DIM; // 921_600
 /// Maximum density per cell (clamped post-step).
 pub const GRASS_MAX: f32 = 1.0;
 /// Default in-cell logistic growth rate slider.
-pub const GRASS_IN_CELL_GROWTH_R_DEFAULT: f32 = 0.05;
+pub const GRASS_IN_CELL_GROWTH_R_DEFAULT: f32 = 0.01;
 /// Default cross-kernel propagation rate slider.
-pub const GRASS_PROPAGATION_RATE_K_DEFAULT: f32 = 0.001;
+pub const GRASS_PROPAGATION_RATE_K_DEFAULT: f32 = 0.003;
 /// Default number of cells seeded at world init.
-pub const GRASS_INITIAL_SEED_COUNT_DEFAULT: u32 = 1000;
+pub const GRASS_INITIAL_SEED_COUNT_DEFAULT: u32 = 8000;
 /// Default energy gained per successful graze bite. Live-tunable via
 /// DevSliders.grass_energy_per_bite.
 pub const GRASS_ENERGY_PER_BITE_DEFAULT: f32 = 10.0;

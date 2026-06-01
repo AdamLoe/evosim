@@ -664,6 +664,38 @@ function readGrassTint(): [number, number, number] {
   return grassTintCacheVal;
 }
 
+// Browsers normalise any CSS color (hex / named / rgba) to "rgb(r, g, b)"
+// or "rgba(r, g, b, a)" via getComputedStyle. We exploit that to read
+// theme-defined hex tokens without writing a hex parser.
+const colorProbe: HTMLDivElement = (() => {
+  const d = document.createElement("div");
+  d.style.cssText = "position:absolute;width:0;height:0;visibility:hidden;pointer-events:none;";
+  document.documentElement.appendChild(d);
+  return d;
+})();
+function readCssColorRgb(varName: string): [number, number, number] {
+  colorProbe.style.color = `var(${varName})`;
+  const computed = getComputedStyle(colorProbe).color;
+  const m = computed.match(/rgba?\(([^)]+)\)/);
+  if (!m) return [0, 0, 0];
+  const parts = m[1].split(",").map((p) => parseFloat(p.trim()));
+  return [
+    (parts[0] ?? 0) / 255,
+    (parts[1] ?? 0) / 255,
+    (parts[2] ?? 0) / 255,
+  ];
+}
+
+let bgCanvasCacheKey = "";
+let bgCanvasCacheVal: [number, number, number] = [0.02, 0.03, 0.04];
+function readBgCanvas(): [number, number, number] {
+  const raw = readCssVar("--bg-canvas");
+  if (raw === bgCanvasCacheKey) return bgCanvasCacheVal;
+  bgCanvasCacheKey = raw;
+  bgCanvasCacheVal = raw ? readCssColorRgb("--bg-canvas") : [0.02, 0.03, 0.04];
+  return bgCanvasCacheVal;
+}
+
 let ringColorCacheKey = "";
 let ringColorCacheVal: [number, number, number, number] = [0, 0, 0, 0.6];
 function readRingColor(): [number, number, number, number] {
@@ -741,7 +773,8 @@ function renderWorldImpl(
 
   // Match physical-pixel viewport to the canvas drawing buffer (DPR-aware).
   gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
-  gl.clearColor(0x04 / 255, 0x07 / 255, 0x0b / 255, 1.0);
+  const [br, bg, bb] = readBgCanvas();
+  gl.clearColor(br, bg, bb, 1.0);
   gl.clear(gl.COLOR_BUFFER_BIT);
 
   // ─── Grass ───

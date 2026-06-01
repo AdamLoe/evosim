@@ -57,6 +57,22 @@ Use [`template.md`](template.md) when creating a new plan. An agent
 reviewing or updating an existing plan usually only needs this index plus
 the plan itself.
 
+## Active plans
+
+- [`v2.0.0-mission.md`](v2.0.0-mission.md) — World, body, species:
+  editable runtime `world_size` (default 8× linear / 64× area),
+  optional toroidal wrap, 3 biomes, evolving body genome, opt-in
+  species + sexual mating mode.
+- [`v2.0.0-decisions.md`](v2.0.0-decisions.md) — Companion rationale
+  for v2.0.0: every choice settled in plan drafting, with the
+  alternatives that were rejected.
+- [`v2-possible-next-steps.md`](v2-possible-next-steps.md) —
+  **long-lived** backlog for the v2 family: deferred ideas, expected
+  problems, and design directions discussed but not committed (brain
+  inheritance under sexual reproduction, mating cold-start levers,
+  the 1920² optimization pass, survey-scale visibility, dynamic
+  species). Never deleted.
+
 ## See also
 
 - [`template.md`](template.md) — copy-paste skeleton for new plans.

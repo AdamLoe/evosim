@@ -17,7 +17,8 @@ route:
 - Rationale / "why is it this way?" →
   `docs/decisions/index.md`, then the relevant domain doc.
 - Editing code in `src/` or `web/`, running commands, testing, committing,
-  iterating live, creating plans, or updating docs →
+  iterating live, creating plans, updating docs, or orchestrating a
+  multi-stream effort via sub-agents →
   `docs/agent-context/index.md`, then the procedural doc it routes to.
 - Creating or updating a plan → `docs/plans/index.md`; open
   `docs/plans/template.md` only when creating a new plan.

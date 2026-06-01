@@ -36,7 +36,7 @@ const CONSTRUCTION_ONLY_SLIDERS = new Set<string>([
 ]);
 
 const TOAST_CONSTRUCTION =
-  "Some changes only take effect on new simulations.";
+  "Saved. Click Restart to see these changes in a new world.";
 
 // ─── Boot-payload accessors ───────────────────────────────────────────────
 

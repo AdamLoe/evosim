@@ -13,6 +13,7 @@ system knowledge, move that content into `architecture/` or
 | Need | Read |
 |---|---|
 | Fresh-chat entry point | [`fresh-chat.md`](fresh-chat.md) |
+| Bootstrap a chat to orchestrate a multi-stream effort via sub-agents | [`fresh-orchestrator.md`](fresh-orchestrator.md) |
 | Dev-server/startup prompt | [`dev-server.md`](dev-server.md) |
 | Periodic docs-vs-code drift audit | [`check-docs.md`](check-docs.md) |
 | End-of-chat wrap-up (plans, docs, commit, worktrees, agents) | [`wrap-up.md`](wrap-up.md) |
