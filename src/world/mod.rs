@@ -8,6 +8,12 @@ pub(crate) mod nn_stats;
 pub(crate) mod proximity;
 pub(crate) mod tick;
 
+// v2.0 Wave 1a: wrap-correctness (torus vs walled) tests live in their own
+// file/module to avoid the shared-`mod tests` merge hazard.
+#[cfg(test)]
+#[path = "wrap_tests.rs"]
+mod wrap_tests;
+
 use self::nn::{chunk_ranges, dynamic_chunks};
 use self::tick::EatPick;
 use crate::brain::{Brain, MutationPolicy, NnTopology};
@@ -79,6 +85,18 @@ pub struct DevSliders {
     /// user hold pop below that in the performance-smooth regime without
     /// changing the build.
     pub max_population: u32,
+    /// Construction-only: world extent in world-units (square world). v2.0
+    /// Wave 1a runtime-sizing setting. Drives the grass/hash dims via
+    /// `WorldDims::from_world_size`; only shapes the *next* world.
+    pub world_size: f32,
+    /// Construction-only: whether the next world is toroidal (wrap) or walled.
+    /// On ⇒ positions wrap, wrap-aware neighbor/proximity math, no wall NN
+    /// inputs. Off ⇒ positions clamp, 4 wall-proximity NN inputs present.
+    pub wrap_world: bool,
+    /// Construction-only: numeric world seed (v2.0 Wave 1a). Carried through
+    /// construction/boot; Wave 1b uses it for biome generation. SEPARATE from
+    /// the string/XxHash64 sim RNG seed — they are not coupled.
+    pub world_seed: u32,
 }
 
 impl Default for DevSliders {
@@ -105,6 +123,11 @@ impl Default for DevSliders {
             digestion_cooldown_ticks: DIGESTION_COOLDOWN_TICKS,
             repulsion_max: REPULSION_MAX,
             max_population: MAX_POPULATION_DEFAULT,
+            world_size: WORLD_SIZE_DEFAULT,
+            wrap_world: WRAP_WORLD_DEFAULT,
+            // Default: random per construction (caller may override). Kept
+            // separate from the string RNG seed — see `world_seed` doc.
+            world_seed: 0,
         }
     }
 }
@@ -126,6 +149,13 @@ pub struct World {
     pub tick: u32,
     pub seed: String,
     pub rng: SimRng,
+    /// Runtime world dimensions (world_size / wrap / grass+hash dims), computed
+    /// once at construction from the `world_size` + `wrap_world` settings.
+    /// v2.0 Wave 1a: replaces the compile-time `WORLD_SIZE` / dim constants.
+    pub dims: WorldDims,
+    /// Numeric world seed (v2.0 Wave 1a). Carried for biome gen (Wave 1b);
+    /// separate from the string RNG seed.
+    pub world_seed: u32,
     /// Grass density field (v1.2 grass mechanic).
     pub grass: GrassGrid,
     pub grid: SpatialGrid,
@@ -212,12 +242,19 @@ impl World {
     /// entrypoint when no slider overrides are needed. Wasm callers should
     /// route through `WorldHandle::new_with_founder_count` for the multi-
     /// founder default.
+    ///
+    /// v2.0 Wave 1a: this legacy test ctor pins a *walled 1200u* world so the
+    /// historical walled-behavior tests keep their meaning. The production path
+    /// (`WorldHandle::new*`) uses the new 9600u/wrap-on defaults from
+    /// `DevSliders::default()`.
     #[allow(dead_code)]
     pub fn new(seed: impl Into<String>) -> Self {
         Self::new_with_sliders(
             seed,
             DevSliders {
                 founder_count: 1,
+                world_size: 1200.0,
+                wrap_world: false,
                 ..Default::default()
             },
         )
@@ -234,7 +271,10 @@ impl World {
     ) -> Self {
         let seed_string = seed.into();
         let mut rng = SimRng::from_string(&seed_string);
-        let mut grass = GrassGrid::new(&mut rng, sliders.grass_initial_seed_count);
+        // v2.0 Wave 1a: runtime dims computed once from the construction settings.
+        let dims = WorldDims::from_world_size(sliders.world_size, sliders.wrap_world);
+        let world_seed = sliders.world_seed;
+        let mut grass = GrassGrid::new(&mut rng, sliders.grass_initial_seed_count, dims);
         if sliders.full_grass_on_init {
             for d in grass.density.iter_mut() {
                 *d = GRASS_MAX;
@@ -245,8 +285,13 @@ impl World {
         let founder_count = sliders.founder_count.clamp(1, 32);
         let founder_energy = START_ENERGY_DEFAULT.min(sliders.energy_max);
         let body_r = CREATURE_SIZE * BODY_RADIUS_PER_SIZE;
-        let lo = body_r;
-        let hi = WORLD_SIZE - body_r;
+        // Walled: keep founders a body-radius off the wall. Toroidal: any point
+        // in [0, world_size) is valid (no wall to bump).
+        let (lo, hi) = if dims.wrap_world {
+            (0.0, dims.world_size)
+        } else {
+            (body_r, dims.world_size - body_r)
+        };
         for k in 0..founder_count {
             let brain = Brain::founder(&mut rng, nn_topology.clone());
             // Halton (2, 3) gives a low-discrepancy 2D sequence; shift by 1 so
@@ -257,12 +302,13 @@ impl World {
             let y = lo + hy * (hi - lo);
             creatures.push(k as u64, x, y, founder_energy, 0, brain);
         }
-        let mut grid = SpatialGrid::new();
+        let mut grid = SpatialGrid::new(dims);
         grid.rebuild(&creatures.x, &creatures.y);
         let sector_lut = proximity::build_sector_lut();
-        // Wave 0: the active input layout is the legacy width-32 layout. Its
-        // width must agree with the topology the founders were drawn for.
-        let nn_input_layout = self::nn::NnInputLayout::legacy();
+        // v2.0 Wave 1a: the active input layout is driven by `wrap_world`
+        // (drops ReservedPredator; WallProximity only when walled). Its width
+        // must agree with the topology the founders were drawn for.
+        let nn_input_layout = self::nn::NnInputLayout::for_settings(dims.wrap_world);
         debug_assert_eq!(
             nn_input_layout.width(),
             nn_topology.input_width(),
@@ -271,6 +317,8 @@ impl World {
         Self {
             tick: 0,
             seed: seed_string,
+            dims,
+            world_seed,
             rng,
             grass,
             grid,
@@ -309,6 +357,13 @@ impl World {
     #[inline]
     pub fn population(&self) -> u32 {
         self.creatures.len() as u32
+    }
+
+    /// Runtime world extent in world-units. v2.0 Wave 1a: replaces the old
+    /// compile-time `WORLD_SIZE` constant at every read site.
+    #[inline]
+    pub fn world_size(&self) -> f32 {
+        self.dims.world_size
     }
 
     /// Run one sim tick. Returns true while there is meaningful work happening.
@@ -662,8 +717,12 @@ impl World {
         //    (Split fired), and for each surviving newborn we draw jitter
         //    from `self.rng`, allocate an id, and push to the SoA.
         let radius = CREATURE_SIZE * BODY_RADIUS_PER_SIZE;
+        let world_size = self.dims.world_size;
+        let wrap = self.dims.wrap_world;
+        // Walled: clamp the child a body-radius off the wall. Toroidal: wrap the
+        // jittered position into [0, world_size).
         let clamp_lo = radius;
-        let clamp_hi = WORLD_SIZE - radius;
+        let clamp_hi = world_size - radius;
         let jitter_scale = self.sliders.split_jitter;
         for (k, &parent_i) in splitters.iter().enumerate() {
             let parent_energy_after_cost = self.creatures.energy[parent_i] - split_threshold;
@@ -673,8 +732,17 @@ impl World {
             if let Some(child_brain) = child_brains[k].take() {
                 let jitter_x = self.rng.symm() * jitter_scale;
                 let jitter_y = self.rng.symm() * jitter_scale;
-                let cx = (self.creatures.x[parent_i] + jitter_x).clamp(clamp_lo, clamp_hi);
-                let cy = (self.creatures.y[parent_i] + jitter_y).clamp(clamp_lo, clamp_hi);
+                let (cx, cy) = if wrap {
+                    (
+                        (self.creatures.x[parent_i] + jitter_x).rem_euclid(world_size),
+                        (self.creatures.y[parent_i] + jitter_y).rem_euclid(world_size),
+                    )
+                } else {
+                    (
+                        (self.creatures.x[parent_i] + jitter_x).clamp(clamp_lo, clamp_hi),
+                        (self.creatures.y[parent_i] + jitter_y).clamp(clamp_lo, clamp_hi),
+                    )
+                };
                 let new_id = self.next_creature_id;
                 self.next_creature_id += 1;
                 self.creatures
@@ -742,12 +810,14 @@ impl World {
             creatures.distance_travelled[i] = self.creatures.distance_travelled[i];
             creatures.ticks_since_split[i] = self.creatures.ticks_since_split[i];
         }
-        let mut grid = SpatialGrid::new();
+        let mut grid = SpatialGrid::new(self.dims);
         grid.rebuild(&creatures.x, &creatures.y);
         let sector_lut = self.sector_lut.clone();
         World {
             tick: self.tick,
             seed: self.seed.clone(),
+            dims: self.dims,
+            world_seed: self.world_seed,
             rng: self.rng.clone(),
             grass: self.grass.clone(),
             grid,
@@ -889,10 +959,11 @@ mod tests {
 
         // Seed in 999 extra creatures (founder is already there).
         // D3: no genome diversity — just varied brain initializations.
+        let ws = w.world_size();
         for k in 0..999u64 {
             let b = Brain::founder(&mut seeder, NnTopology::legacy());
-            let x = seeder.uniform(10.0, WORLD_SIZE - 10.0);
-            let y = seeder.uniform(10.0, WORLD_SIZE - 10.0);
+            let x = seeder.uniform(10.0, ws - 10.0);
+            let y = seeder.uniform(10.0, ws - 10.0);
             w.creatures.push(k + 1, x, y, START_ENERGY_DEFAULT, 0, b);
         }
 

@@ -6,6 +6,12 @@ use crate::constants::*;
 use crate::world::World;
 use wasm_bindgen::prelude::*;
 
+// v2.0 Wave 1a: computed-dims (snapshot grass u8 + biomeSab) tests live in their
+// own file/module to avoid the shared-`mod tests` merge hazard.
+#[cfg(test)]
+#[path = "wasm_dims_tests.rs"]
+mod wasm_dims_tests;
+
 /// v1.12: parse the boot payload's `nn_topology_json`. Empty string → legacy
 /// 32→48→24→5 default. Otherwise expects
 /// `{"hidden_sizes":[…],"activations":[…]}`.
@@ -56,26 +62,28 @@ pub const SLIDER_NAMES: &[&str] = &[
     "split_gift",                          // 14 f32
     "split_jitter",                        // 15 f32
     "founder_count",                       // 16 u32 (carried as f32)
-    "_reserved_curriculum_min_pop",        // 17 reserved no-op (was curriculum_min_pop)
-    "_reserved_curriculum_max_pop",        // 18 reserved no-op (was curriculum_max_pop)
-    "_reserved_curriculum_min_factor",     // 19 reserved no-op (was curriculum_min_factor)
-    "_reserved_auto_curriculum",           // 20 reserved no-op (was auto_curriculum)
-    "full_grass_on_init",                  // 21 bool (0.0 / non-zero)
-    "max_population",                      // 22 u32 (carried as f32) — user-tunable cap
-    // v1.12: 8 mutation buckets × 3 floats. Index = 23 + bucket * 3 + field.
+    "max_population",                      // 17 u32 (carried as f32) — user-tunable cap
+    // v2.0 Wave 1a construction settings (shape the next world only). DROPPED
+    // here vs v1.x: the four `_reserved_curriculum_*` slots and `full_grass_on_init`.
+    "world_size",                          // 18 f32 (construction) — world extent
+    "world_seed",                          // 19 u32 (carried as f32) — biome seed (Wave 1b)
+    "wrap_world",                          // 20 bool (0.0 / non-zero) — torus vs walled
+    // v1.12: 8 mutation buckets × 3 floats. Index = SLIDER_BUCKET_BASE + bucket*3 + field.
     // field 0 = weight, 1 = rate, 2 = sigma. See MUTATION_BUCKET_COUNT.
-    "bucket_0_weight", "bucket_0_rate", "bucket_0_sigma", // 23..26
-    "bucket_1_weight", "bucket_1_rate", "bucket_1_sigma", // 26..29
-    "bucket_2_weight", "bucket_2_rate", "bucket_2_sigma", // 29..32
-    "bucket_3_weight", "bucket_3_rate", "bucket_3_sigma", // 32..35
-    "bucket_4_weight", "bucket_4_rate", "bucket_4_sigma", // 35..38
-    "bucket_5_weight", "bucket_5_rate", "bucket_5_sigma", // 38..41
-    "bucket_6_weight", "bucket_6_rate", "bucket_6_sigma", // 41..44
-    "bucket_7_weight", "bucket_7_rate", "bucket_7_sigma", // 44..47
+    "bucket_0_weight", "bucket_0_rate", "bucket_0_sigma", // 21..24
+    "bucket_1_weight", "bucket_1_rate", "bucket_1_sigma", // 24..27
+    "bucket_2_weight", "bucket_2_rate", "bucket_2_sigma", // 27..30
+    "bucket_3_weight", "bucket_3_rate", "bucket_3_sigma", // 30..33
+    "bucket_4_weight", "bucket_4_rate", "bucket_4_sigma", // 33..36
+    "bucket_5_weight", "bucket_5_rate", "bucket_5_sigma", // 36..39
+    "bucket_6_weight", "bucket_6_rate", "bucket_6_sigma", // 39..42
+    "bucket_7_weight", "bucket_7_rate", "bucket_7_sigma", // 42..45
 ];
 
-/// First mutation-bucket slider slot. v1.12.
-pub const SLIDER_BUCKET_BASE: usize = 23;
+/// First mutation-bucket slider slot. v2.0 Wave 1a (shifted from 23 to 21 after
+/// dropping the 4 reserved-curriculum + full_grass_on_init slots and adding the
+/// 3 world_size/world_seed/wrap_world construction slots).
+pub const SLIDER_BUCKET_BASE: usize = 21;
 
 /// Number of slots in `CTRL_SLIDERS`. Equal to `SLIDER_NAMES.len()`.
 pub const SLIDER_COUNT: usize = SLIDER_NAMES.len();
@@ -90,11 +98,15 @@ pub const SLIDER_COUNT: usize = SLIDER_NAMES.len();
 // `js_sys::Uint8Array::copy_from` boundary crossings that dominated snapshot
 // cost (~4 ms / tick at pop 80).
 //
-// Grass density is stored as raw f32 (no `(d * 255) as u8` quantize). The
-// renderer uploads it as an `R32F` texture (WebGL2 supports this natively).
-// Trade: 4× more grass bytes per slot (3.7 MB vs 921 KB) for zero quantize
-// work in the sim worker — net win, since the wasm-internal memcpy is much
-// faster than the boundary copy plus quantize.
+// v2.0 Wave 1a: the grass region is now RUNTIME-SIZED (from `world_size`) and
+// quantized to u8 — one byte per grass cell (density 0..GRASS_MAX → 0..255 on
+// snapshot write). The creature region is UNCHANGED (stride 32 B / 8 lanes).
+// The header + creature region are compile-time constants; only the grass region
+// (and thus slot/buf totals) are computed at boot from the world's `grass_dim`
+// and stored on the `WorldHandle`. The "computed-dims-equality" safety model
+// replaces the old constant-equality asserts: the boot-computed grass region
+// size must equal `grass_cell_count` bytes, and the dedicated `biomeSab` is the
+// same size.
 
 /// Bytes per snapshot stats header (matches `SNAPSHOT_HEADER_BYTES` TS-side).
 /// 20 bytes payload + 12 bytes padding so the creature SoA that follows is
@@ -102,15 +114,46 @@ pub const SLIDER_COUNT: usize = SLIDER_NAMES.len();
 pub const SNAPSHOT_HEADER_BYTES: usize = 32;
 /// Bytes per creature record in the snapshot SoA (matches CREATURE_STRIDE × 4).
 pub const SNAPSHOT_CREATURE_STRIDE: usize = 32;
-/// Total creature SoA region size per slot.
+/// Total creature SoA region size per slot. UNCHANGED in v2.0 (world-size
+/// independent — sized by `MAX_POP_FOR_SIM`).
 pub const SNAPSHOT_CREATURE_BYTES: usize = MAX_POP_FOR_SIM * SNAPSHOT_CREATURE_STRIDE;
-/// Total grass region size per slot — v1.11: f32 per cell (no quantize).
-pub const SNAPSHOT_GRASS_BYTES: usize = GRASS_CELL_COUNT * 4;
-/// Bytes per snapshot slot.
-pub const SNAPSHOT_SLOT_BYTES: usize =
-    SNAPSHOT_HEADER_BYTES + SNAPSHOT_CREATURE_BYTES + SNAPSHOT_GRASS_BYTES;
-/// Total snapshot region size — two double-buffered slots.
-pub const SNAPSHOT_BUF_BYTES: usize = 2 * SNAPSHOT_SLOT_BYTES;
+
+/// Computed snapshot region sizes for a given grass cell count. v2.0 Wave 1a:
+/// the grass region is `grass_cell_count` BYTES (u8 per cell, quantized on
+/// write), so the per-slot/buf totals are runtime values, not constants.
+#[derive(Clone, Copy, Debug)]
+struct SnapshotLayout {
+    /// u8 grass region size per slot = grass_cell_count bytes.
+    grass_bytes: usize,
+    /// header + creatures + grass.
+    slot_bytes: usize,
+    /// two double-buffered slots.
+    buf_bytes: usize,
+    /// biomeSab size = grass_cell_count bytes (u8 per cell).
+    biome_bytes: usize,
+}
+
+impl SnapshotLayout {
+    fn from_grass_cell_count(grass_cell_count: usize) -> Self {
+        // u8 grass: one byte per cell. The biomeSab mirrors the same cell count.
+        let grass_bytes = grass_cell_count;
+        let slot_bytes = SNAPSHOT_HEADER_BYTES + SNAPSHOT_CREATURE_BYTES + grass_bytes;
+        let buf_bytes = 2 * slot_bytes;
+        // Computed-dims-equality safety model: the grass region and the biomeSab
+        // are both derived from the same `grass_cell_count`, so they must agree.
+        let biome_bytes = grass_cell_count;
+        debug_assert_eq!(
+            grass_bytes, biome_bytes,
+            "snapshot grass region (u8) and biomeSab must both equal grass_cell_count bytes"
+        );
+        Self {
+            grass_bytes,
+            slot_bytes,
+            buf_bytes,
+            biome_bytes,
+        }
+    }
+}
 
 #[wasm_bindgen]
 pub struct WorldHandle {
@@ -122,6 +165,14 @@ pub struct WorldHandle {
     /// header layout, the creature SoA stride, and the grass f32 format
     /// are all locked at boot and never change for the worker's lifetime.
     snapshot_buf: Vec<u8>,
+    /// v2.0 Wave 1a: runtime snapshot region sizes, computed at boot from the
+    /// world's `grass_dim` (grass region is u8, `grass_cell_count` bytes/slot).
+    snapshot_layout: SnapshotLayout,
+    /// v2.0 Wave 1a: dedicated biome SAB — one u8 per grass cell (`Biome` enum,
+    /// `repr(u8)`). Wave 1a fills it with `Plains` (0) placeholder; Wave 1b
+    /// populates it from `world_seed`. Lives in wasm linear memory like the
+    /// snapshot buffer; the main thread reads via a view at `biome_buf_byte_offset`.
+    biome_buf: Vec<u8>,
     /// Rolling window of wall-clock intervals (ms) between successive tick
     /// completions — i.e. tick-end-to-tick-end, *including* whatever pacing
     /// wait the worker imposed between iterations. This is what the
@@ -151,9 +202,23 @@ impl WorldHandle {
             seed.to_string()
         };
         let inner = World::new_with_sliders(actual_seed, crate::world::DevSliders::default());
+        Self::from_world(inner)
+    }
+
+    /// Allocate the runtime-sized snapshot + biome buffers from a constructed
+    /// world's grass dims and assemble the handle. v2.0 Wave 1a: the snapshot
+    /// grass region and the biomeSab are both `grass_cell_count` u8 bytes/slot.
+    fn from_world(inner: World) -> Self {
+        let grass_cell_count = inner.dims.grass_cell_count;
+        let layout = SnapshotLayout::from_grass_cell_count(grass_cell_count);
+        // biomeSab placeholder: all Plains (0) for Wave 1a. `vec![0u8; …]`
+        // already encodes `Biome::Plains as u8 == 0`.
+        let biome_buf = vec![crate::constants::Biome::Plains as u8; layout.biome_bytes];
         Self {
             inner,
-            snapshot_buf: vec![0u8; SNAPSHOT_BUF_BYTES],
+            snapshot_buf: vec![0u8; layout.buf_bytes],
+            snapshot_layout: layout,
+            biome_buf,
             tick_intervals_ms: std::collections::VecDeque::new(),
             last_tick_end_ms: None,
             jank_count: 0,
@@ -172,6 +237,7 @@ impl WorldHandle {
     /// if the JSON is malformed or fails `NnTopology::new` validation —
     /// surfaces a typo immediately instead of silently falling back.
     #[wasm_bindgen(js_name = newWithFounderCount)]
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_founder_count(
         seed: &str,
         initial_grass_seed_count: u32,
@@ -179,6 +245,9 @@ impl WorldHandle {
         founder_count: u32,
         full_grass_on_init: bool,
         nn_topology_json: &str,
+        world_size: f32,
+        wrap_world: bool,
+        world_seed: u32,
     ) -> Result<WorldHandle, JsValue> {
         let actual_seed = if seed.is_empty() {
             let mut bytes = [0u8; 8];
@@ -188,23 +257,30 @@ impl WorldHandle {
         } else {
             seed.to_string()
         };
+        // v2.0 Wave 1a: a `world_seed` of 0 from the boot payload means "pick a
+        // random one" so every fresh world differs unless the caller pins it.
+        // This is SEPARATE from the string RNG seed above — they don't couple.
+        let actual_world_seed = if world_seed == 0 {
+            let mut bytes = [0u8; 4];
+            getrandom::getrandom(&mut bytes).ok();
+            u32::from_le_bytes(bytes)
+        } else {
+            world_seed
+        };
         let sliders = crate::world::DevSliders {
             grass_initial_seed_count: initial_grass_seed_count,
             energy_max: energy_max.max(1.0),
             founder_count: founder_count.clamp(1, 32),
             full_grass_on_init,
+            world_size,
+            wrap_world,
+            world_seed: actual_world_seed,
             ..Default::default()
         };
         let topology = parse_nn_topology(nn_topology_json)
             .map_err(|e| JsValue::from_str(&format!("nn_topology error: {e}")))?;
         let inner = World::new_with_sliders_topology(actual_seed, sliders, topology);
-        Ok(Self {
-            inner,
-            snapshot_buf: vec![0u8; SNAPSHOT_BUF_BYTES],
-            tick_intervals_ms: std::collections::VecDeque::new(),
-            last_tick_end_ms: None,
-            jank_count: 0,
-        })
+        Ok(Self::from_world(inner))
     }
 
     /// One tick. Returns true while alive.
@@ -303,21 +379,38 @@ impl WorldHandle {
         self.inner.world_ended
     }
 
+    /// Runtime world extent in world-units. v2.0 Wave 1a: derived from the
+    /// construction `world_size` setting (no longer a compile-time constant).
     #[wasm_bindgen(getter)]
     pub fn world_size(&self) -> f32 {
-        WORLD_SIZE
+        self.inner.world_size()
+    }
+
+    /// Whether the world is toroidal (wrap) or walled. v2.0 Wave 1a. The
+    /// renderer mirrors this for trail/cull seam handling (TS stream).
+    #[wasm_bindgen(getter)]
+    pub fn wrap_world(&self) -> bool {
+        self.inner.dims.wrap_world
+    }
+
+    /// Numeric world seed (v2.0 Wave 1a). Carried for biome gen (Wave 1b);
+    /// separate from the string RNG seed.
+    #[wasm_bindgen(getter)]
+    pub fn world_seed(&self) -> u32 {
+        self.inner.world_seed
     }
 
     // ─── Grass render API (P1g) ──────────────────────────────────────────────
 
-    /// Grass grid dimension (480). Constant accessor; called per frame by the
-    /// renderer to avoid hard-coding the value in TS.
+    /// Runtime grass grid dimension (cells per axis). v2.0 Wave 1a: computed at
+    /// boot from `world_size` (1920 at the 9600u default). The boot handshake
+    /// carries this so the main thread sizes its grass + biome views.
     #[wasm_bindgen(getter)]
     pub fn grass_dim(&self) -> u32 {
-        GRASS_GRID_DIM as u32
+        self.inner.dims.grass_dim as u32
     }
 
-    /// Grass cell size in world-units (1.25). Constant accessor; used by the
+    /// Grass cell size in world-units (5.0). Constant accessor; used by the
     /// render layer for world→screen coordinate conversion.
     #[wasm_bindgen(getter)]
     pub fn grass_cell_size(&self) -> f32 {
@@ -336,16 +429,17 @@ impl WorldHandle {
     }
 
     /// Total length of the snapshot region in bytes. Stable across the
-    /// worker's lifetime — no growth, no reallocation.
+    /// worker's lifetime — no growth, no reallocation. v2.0: runtime value
+    /// (grass region is u8, sized from `grass_cell_count`).
     #[wasm_bindgen(getter)]
     pub fn snapshot_buf_byte_len(&self) -> u32 {
-        SNAPSHOT_BUF_BYTES as u32
+        self.snapshot_layout.buf_bytes as u32
     }
 
     /// Byte offset within the snapshot region for slot `slot` (0 or 1).
     #[wasm_bindgen(getter)]
     pub fn snapshot_slot_bytes(&self) -> u32 {
-        SNAPSHOT_SLOT_BYTES as u32
+        self.snapshot_layout.slot_bytes as u32
     }
 
     /// Bytes per snapshot stats header (header + alignment padding).
@@ -354,16 +448,34 @@ impl WorldHandle {
         SNAPSHOT_HEADER_BYTES as u32
     }
 
-    /// Bytes per creature region per slot.
+    /// Bytes per creature region per slot. UNCHANGED in v2.0 (32 B stride ×
+    /// `MAX_POP_FOR_SIM`).
     #[wasm_bindgen(getter)]
     pub fn snapshot_creature_bytes(&self) -> u32 {
         SNAPSHOT_CREATURE_BYTES as u32
     }
 
-    /// Bytes per grass region per slot (v1.11: f32 grass, 4× per cell).
+    /// Bytes per grass region per slot. v2.0 Wave 1a: u8 grass, one byte per
+    /// cell → `grass_cell_count` bytes (runtime).
     #[wasm_bindgen(getter)]
     pub fn snapshot_grass_bytes(&self) -> u32 {
-        SNAPSHOT_GRASS_BYTES as u32
+        self.snapshot_layout.grass_bytes as u32
+    }
+
+    // ─── v2.0 Wave 1a: dedicated biome SAB ───────────────────────────────────
+
+    /// Byte offset of the biome buffer (one u8 `Biome` per grass cell) inside
+    /// wasm linear memory. Main thread builds a view at this offset of length
+    /// `biome_buf_byte_len()`. Wave 1a: all Plains (0) placeholder.
+    #[wasm_bindgen(getter)]
+    pub fn biome_buf_byte_offset(&self) -> u32 {
+        self.biome_buf.as_ptr() as u32
+    }
+
+    /// Length of the biome buffer in bytes = `grass_cell_count` (u8 per cell).
+    #[wasm_bindgen(getter)]
+    pub fn biome_buf_byte_len(&self) -> u32 {
+        self.snapshot_layout.biome_bytes as u32
     }
 
     /// Write a full snapshot (stats header + creature SoA + f32 grass) into
@@ -386,8 +498,10 @@ impl WorldHandle {
             None
         };
 
+        let slot_bytes = self.snapshot_layout.slot_bytes;
+        let grass_bytes = self.snapshot_layout.grass_bytes;
         let slot_idx = (slot as usize) & 1;
-        let slot_base = slot_idx * SNAPSHOT_SLOT_BYTES;
+        let slot_base = slot_idx * slot_bytes;
 
         // Creatures: write the per-creature 32 B records directly into the
         // creature region. No JS boundary — `write_creatures_each` builds an
@@ -422,10 +536,8 @@ impl WorldHandle {
         header[12..16].copy_from_slice(&tps_bits.to_le_bytes());
         header[16..20].copy_from_slice(&jank.to_le_bytes());
 
-        // Grass: raw f32 density bytes. No quantize, no boundary crossing.
-        // Single contiguous memcpy from the sim's internal density `Vec<f32>`
-        // into the snapshot region. ~3.7 MB at typical RAM bandwidth ≈ 0.4 ms
-        // versus the prior 2.8 ms parallel quantize + 0.65 ms boundary copy.
+        // Grass: v2.0 Wave 1a quantizes f32 density (0..GRASS_MAX) → u8 (0..255),
+        // one byte per cell, directly into the snapshot region. No JS boundary.
         let grass_start = if profile_on {
             Some(crate::profiler::clock_now_us_threadsafe())
         } else {
@@ -433,9 +545,8 @@ impl WorldHandle {
         };
         let grass_off = slot_base + SNAPSHOT_HEADER_BYTES + SNAPSHOT_CREATURE_BYTES;
         let density: &[f32] = &self.inner.grass.density;
-        let density_bytes: &[u8] = bytemuck_slice_cast(density);
-        self.snapshot_buf[grass_off..grass_off + SNAPSHOT_GRASS_BYTES]
-            .copy_from_slice(density_bytes);
+        let grass_region = &mut self.snapshot_buf[grass_off..grass_off + grass_bytes];
+        quantize_grass_into(density, grass_region);
         let grass_end = if profile_on {
             Some(crate::profiler::clock_now_us_threadsafe())
         } else {
@@ -539,10 +650,18 @@ impl WorldHandle {
         // Stored for next world construction (active world keeps its current population).
         self.inner.sliders.founder_count = value.clamp(1, 32);
     }
-    fn apply_full_grass_on_init(&mut self, value: bool) {
-        // Construction-only: only affects the next world. Stored on DevSliders
-        // so the boot payload can round-trip it via set_slider.
-        self.inner.sliders.full_grass_on_init = value;
+    /// v2.0 Wave 1a construction-only: world extent for the *next* world. Stored
+    /// on DevSliders so the boot payload round-trips it; live world keeps its dims.
+    fn apply_world_size(&mut self, value: f32) {
+        self.inner.sliders.world_size = value.max(crate::constants::GRASS_CELL_SIZE);
+    }
+    /// v2.0 Wave 1a construction-only: numeric world seed (biome gen, Wave 1b).
+    fn apply_world_seed(&mut self, value: u32) {
+        self.inner.sliders.world_seed = value;
+    }
+    /// v2.0 Wave 1a construction-only: torus vs walled for the next world.
+    fn apply_wrap_world(&mut self, value: bool) {
+        self.inner.sliders.wrap_world = value;
     }
     fn apply_max_population(&mut self, value: u32) {
         // Clamp into [1, MAX_POP_FOR_SIM]. The SAB-bound cap is structural —
@@ -609,11 +728,12 @@ impl WorldHandle {
             14 => self.apply_split_gift(value),
             15 => self.apply_split_jitter(value),
             16 => self.apply_founder_count(value.max(0.0) as u32),
-            17..=20 => { /* reserved no-op: legacy curriculum slots */ }
-            // Bools encoded as 0|1 so protocol surface stays minimal.
-            21 => self.apply_full_grass_on_init(value != 0.0),
-            22 => self.apply_max_population(value.max(1.0) as u32),
-            // v1.12: 8 mutation buckets × 3 fields = indices 23..47.
+            17 => self.apply_max_population(value.max(1.0) as u32),
+            // v2.0 Wave 1a construction-only settings (shape the next world).
+            18 => self.apply_world_size(value),
+            19 => self.apply_world_seed(value.max(0.0) as u32),
+            20 => self.apply_wrap_world(value != 0.0),
+            // v1.12: 8 mutation buckets × 3 fields.
             n if n >= SLIDER_BUCKET_BASE
                 && n < SLIDER_BUCKET_BASE + MUTATION_BUCKET_COUNT * 3 =>
             {
@@ -706,11 +826,12 @@ impl WorldHandle {
         // wall contact → 0.0 at >=50u away.
         let cx = self.inner.creatures.x[i];
         let cy = self.inner.creatures.y[i];
+        let world_size = self.inner.dims.world_size;
         let wall_range = 50.0_f32;
         let wp_n = (1.0 - (cy / wall_range)).clamp(0.0, 1.0);
-        let wp_s = (1.0 - ((WORLD_SIZE - cy) / wall_range)).clamp(0.0, 1.0);
+        let wp_s = (1.0 - ((world_size - cy) / wall_range)).clamp(0.0, 1.0);
         let wp_w = (1.0 - (cx / wall_range)).clamp(0.0, 1.0);
-        let wp_e = (1.0 - ((WORLD_SIZE - cx) / wall_range)).clamp(0.0, 1.0);
+        let wp_e = (1.0 - ((world_size - cx) / wall_range)).clamp(0.0, 1.0);
         let json = serde_json::json!({
             "index": idx,
             "id": self.inner.creatures.id[i],
@@ -821,8 +942,11 @@ impl WorldHandle {
             "split_jitter": d.split_jitter,
             "founder_count": d.founder_count as f32,
             "grass_initial_seed_count": d.grass_initial_seed_count as f32,
-            "full_grass_on_init": if d.full_grass_on_init { 1.0_f32 } else { 0.0 },
             "max_population": d.max_population as f32,
+            // v2.0 Wave 1a construction settings.
+            "world_size": d.world_size,
+            "world_seed": d.world_seed as f32,
+            "wrap_world": if d.wrap_world { 1.0_f32 } else { 0.0 },
         });
         // v1.12: 8 mutation buckets × 3 fields. Names match SLIDER_NAMES.
         let obj = json.as_object_mut().expect("json! produced an object");
@@ -919,14 +1043,22 @@ fn write_creatures_each_into(world: &World, dst: &mut [u8]) -> usize {
     fill_creature_bytes(world, dst)
 }
 
-/// Reinterpret `&[f32]` as `&[u8]` for byte-level copy. Sound on wasm32
-/// (little-endian, no alignment trap on byte reads of f32-aligned data).
+/// v2.0 Wave 1a: quantize f32 grass density (0..`GRASS_MAX`) → u8 (0..255), one
+/// byte per cell, into `dst` (which must be exactly `density.len()` bytes). The
+/// renderer (TS stream) uploads this as an R8 texture and rescales by 1/255.
 #[inline]
-fn bytemuck_slice_cast(s: &[f32]) -> &[u8] {
-    // SAFETY: f32 is 4 bytes; wasm32 is little-endian. The bytes are read
-    // through a `*const u8`, which is always validly aligned. No mutation,
-    // no aliasing risk.
-    unsafe { std::slice::from_raw_parts(s.as_ptr() as *const u8, std::mem::size_of_val(s)) }
+fn quantize_grass_into(density: &[f32], dst: &mut [u8]) {
+    debug_assert_eq!(
+        density.len(),
+        dst.len(),
+        "u8 grass region must be one byte per cell"
+    );
+    let inv_max = 1.0 / GRASS_MAX;
+    for (d, out) in density.iter().zip(dst.iter_mut()) {
+        // clamp to [0, GRASS_MAX] then scale to [0, 255], rounding to nearest.
+        let q = (d * inv_max).clamp(0.0, 1.0) * 255.0;
+        *out = (q + 0.5) as u8;
+    }
 }
 
 impl WorldHandle {
@@ -945,9 +1077,9 @@ impl WorldHandle {
         grass_dst: &mut Vec<u8>,
         stats_dst: &mut Vec<u8>,
     ) -> usize {
-        // v1.11: native test path mirrors the wasm-side layout (f32 grass,
-        // no quantize). Each Vec is sized to match exactly what main would
-        // read out of the wasm-memory snapshot region.
+        // v2.0 Wave 1a: native test path mirrors the wasm-side layout — u8 grass
+        // (one byte per cell, quantized). Each Vec is sized to match exactly what
+        // main would read out of the wasm-memory snapshot region.
         creatures_dst.clear();
         creatures_dst.resize(self.inner.creatures.len() * 32, 0);
         let pop_written = fill_creature_bytes(&self.inner, creatures_dst);
@@ -962,7 +1094,8 @@ impl WorldHandle {
         stats_dst.extend_from_slice(&self.jank_count.to_le_bytes());
 
         grass_dst.clear();
-        grass_dst.extend_from_slice(bytemuck_slice_cast(&self.inner.grass.density));
+        grass_dst.resize(self.inner.grass.density.len(), 0);
+        quantize_grass_into(&self.inner.grass.density, grass_dst);
 
         pop_written
     }
@@ -1025,7 +1158,9 @@ mod tests {
     /// drives so the SAB layout is testable off-wasm.
     #[test]
     fn write_snapshot_to_layout_matches_stride() {
-        let mut handle = WorldHandle::new_with_founder_count("a1-snapshot", 0, 100.0, 3, false, "").unwrap();
+        let mut handle =
+            WorldHandle::new_with_founder_count("a1-snapshot", 0, 100.0, 3, false, "", 1200.0, false, 1)
+                .unwrap();
         let mut creatures = Vec::new();
         let mut grass = Vec::new();
         let mut stats = Vec::new();
@@ -1060,21 +1195,19 @@ mod tests {
             assert_eq!(id, handle.inner.creatures.id[i]);
         }
 
-        // Grass: v1.11 ships f32 density (no quantize). One little-endian
-        // f32 per cell, contiguous.
+        // Grass: v2.0 Wave 1a ships u8 quantized density (one byte per cell).
+        let cell_count = handle.inner.dims.grass_cell_count;
         assert_eq!(
             grass.len(),
-            crate::constants::GRASS_CELL_COUNT * 4,
-            "grass region size = cells × 4 bytes per f32"
+            cell_count,
+            "grass region size = grass_cell_count bytes (u8 per cell)"
         );
-        for i in 0..crate::constants::GRASS_CELL_COUNT {
-            let bytes: [u8; 4] = grass[i * 4..i * 4 + 4].try_into().unwrap();
-            let d_read = f32::from_le_bytes(bytes);
-            assert_eq!(
-                d_read.to_bits(),
-                handle.inner.grass.density[i].to_bits(),
-                "cell {i} f32 mismatch"
-            );
+        for i in 0..cell_count {
+            let expected = {
+                let q = (handle.inner.grass.density[i] / GRASS_MAX).clamp(0.0, 1.0) * 255.0;
+                (q + 0.5) as u8
+            };
+            assert_eq!(grass[i], expected, "cell {i} u8 quantize mismatch");
         }
     }
 
@@ -1097,7 +1230,10 @@ mod tests {
     /// halton position. Uses a 1-founder world so we control placement exactly.
     #[test]
     fn creature_at_returns_stable_id() {
-        let handle = WorldHandle::new_with_founder_count("e21-creature-at", 0, 100.0, 1, false, "").unwrap();
+        let handle = WorldHandle::new_with_founder_count(
+            "e21-creature-at", 0, 100.0, 1, false, "", 1200.0, false, 1,
+        )
+        .unwrap();
         let founder_id = handle.inner.creatures.id[0] as f64;
         let cx = handle.inner.creatures.x[0];
         let cy = handle.inner.creatures.y[0];
@@ -1142,16 +1278,16 @@ mod tests {
 
     // ─── P3d: observability counter tests ────────────────────────────────────
 
-    /// live_grass_cell_count never exceeds GRASS_CELL_COUNT and doesn't
-    /// double-count empty cells (cells with density == 0 are excluded).
+    /// live_grass_cell_count never exceeds the runtime grass_cell_count and
+    /// doesn't double-count empty cells (cells with density == 0 are excluded).
     #[test]
     fn live_grass_cell_count_does_not_exceed_cell_count() {
-        use crate::constants::GRASS_CELL_COUNT;
         let handle = WorldHandle::new("p3d-grass-cells");
+        let cell_count = handle.inner.dims.grass_cell_count as u32;
         let live = handle.live_grass_cell_count();
         assert!(
-            live <= GRASS_CELL_COUNT as u32,
-            "live_grass_cell_count={live} must not exceed GRASS_CELL_COUNT={GRASS_CELL_COUNT}"
+            live <= cell_count,
+            "live_grass_cell_count={live} must not exceed grass_cell_count={cell_count}"
         );
         // All density values counted must be > 0 (no double-counting empty cells).
         let manual: u32 = handle

@@ -7,11 +7,38 @@ the bounds invariant.
 
 A single-crate Rust simulation compiled to wasm. One `World` owns every
 piece of simulation state: a `CreatureSoA` (each per-creature attribute
-held as its own `Vec`), a `GrassGrid` (960×960 density field), a
-`SpatialGrid` (5u cells for neighbour queries), a `SimRng`, the live
+held as its own `Vec`), a `GrassGrid` (runtime-sized density field), a
+`SpatialGrid` (10u cells for neighbour queries), a `SimRng`, the live
 `DevSliders`, a `Profiler`, an `NnStats` block, and a small set of
 per-tick scratch buffers promoted to long-lived fields. `World::step()`
 runs one tick by sequentially executing the numbered phases below.
+
+### Runtime world sizing + wrap (v2.0 Wave 1a)
+
+The world is **runtime-sized**. `world_size` (default **9600u**) and
+`wrap_world` (default **true** = toroidal) are construction settings on
+`DevSliders`. At construction `WorldDims::from_world_size(world_size,
+wrap_world)` computes and caches the per-axis dims used everywhere:
+
+- `grass_dim = round(world_size / GRASS_CELL_SIZE)` — **5u** grass cells →
+  **1920** cells/axis at 9600u; `grass_cell_count = grass_dim²` = 3_686_400.
+- `hash_dim = ceil(world_size / HASH_CELL)` — **10u** spatial-hash cells →
+  **960** cells/axis at 9600u. (Bumped 2.5u→10u: the world grew 64× in area at
+  the same creature counts, so coarser cells keep the per-tick `hash_dim²`
+  rebuild cheap. Flagged for later profiler measurement.)
+
+`World` carries `dims: WorldDims` and a numeric `world_seed: u32` (separate from
+the string/XxHash64 RNG seed; Wave 1b uses it for biome gen). Every
+bounds/clamp/wrap/spawn site reads `self.dims` / `World::world_size()` instead of
+a compile-time constant.
+
+**Wrap-awareness** (gated on `dims.wrap_world`): position/movement step,
+`SpatialGrid` rebuild + neighbor queries (toroidal cell-index fold), creature &
+grass proximity sector distance + the starburst/AABB scans (toroidal
+minimum-image displacement), split-child placement, and eat reach all wrap across
+the seam when on. When off they keep the walled clamp-to-`[ri, world_size-ri]`
+behavior and the 4 wall-proximity NN inputs are present. The legacy test ctor
+`World::new` pins a walled 1200u world.
 
 ## What it owns
 
@@ -83,10 +110,15 @@ rayon_current_num_threads() -> u32
 ```
 
 The 22 per-typed `set_*` setters are gone. `set_slider(name, value)` is
-the sole mutation entry point. Bools (`full_grass_on_init`) ride the
-same path as `0|1` via a dedicated arm in `try_set_slider`. Slots 17–20
-are kept as `_reserved_curriculum_*` no-ops so SAB index ordering stays
-stable for older clients that still write into them.
+the sole mutation entry point. Bools (`wrap_world`) ride the same path as `0|1`.
+**v2.0 Wave 1a slider changes:** the four `_reserved_curriculum_*` slots and
+`full_grass_on_init` are **dropped** from `SLIDER_NAMES`; the construction
+settings `world_size` (18), `world_seed` (19), `wrap_world` (20) are **added**;
+`max_population` moves to 17 and `SLIDER_BUCKET_BASE` shifts 23→21
+(`SLIDER_COUNT = 45`). `full_grass_on_init` remains a `DevSliders` field carried
+through the boot construction call (`newWithFounderCount`), just not a live
+slider. Regenerate `web/src/generated/slider-ids.ts` via `cargo run --bin
+gen-bindings` (the `bindings_in_sync` test guards it).
 
 ## Tick step order
 
@@ -128,25 +160,37 @@ checks in `NnTopology::with_input_width`, which replaced the old compile-time
 `NN_INPUTS == 32` hard assert. `build_nn_input` writes into a
 `MAX_NN_INPUTS`-sized buffer; only the active `width()` lanes are populated.
 
-The **legacy layout** (`NnInputLayout::legacy()`, the only active configuration
-today) activates every group at its historical width and reproduces the
-width-32 semantic slot order bit-for-bit:
+The **active layout** is driven by construction settings
+(`NnInputLayout::for_settings(wrap_world)`, v2.0 Wave 1a): the
+`ReservedPredator` group is **dropped**, and `WallProximity` (4 slots) is present
+**only when `wrap_world == false`**. Both default layouts pad to the SIMD-aligned
+32, so the default topology input width (`NN_INPUTS = 32`) is unchanged.
+
+Default (wrap **on**) — real width 26 → padded 32:
 
 | Slot | Group / inputs |
 |---|---|
 | `[0..8)` | `SelfMemory`: hunger, age_frac, prev_vx, prev_vy, is_last_graze, is_last_eat, ticks_since_split_norm, cooldown_ready |
-| `[8..12)` | `WallProximity` N/S/E/W (range `WALL_PROXIMITY_RANGE = 50u`) |
-| `[12..20)` | `CreatureSectors` × 8 world-aligned sectors (range `PROXIMITY_RANGE = 20u`) |
-| `[20..28)` | `GrassSectors` × 8 sectors (range `GRASS_PROXIMITY_RANGE = 8u`) |
-| `[28]` | `ReservedPredator` (0.0) |
-| `[29]` | `CurrGrass`: curr_grass_density (under the body) |
-| `[30]` | `Bias` — `1.0` (bias-learning constant) |
-| `[31]` | trailing pad (0.0) — SIMD alignment, total rounded up to a multiple of 8 |
+| `[8..16)` | `CreatureSectors` × 8 world-aligned sectors (range `PROXIMITY_RANGE = 20u`) |
+| `[16..24)` | `GrassSectors` × 8 sectors (range `GRASS_PROXIMITY_RANGE = 20u`) |
+| `[24]` | `CurrGrass`: curr_grass_density (under the body) |
+| `[25]` | `Bias` — `1.0` (bias-learning constant) |
+| `[26..32)` | trailing pad (0.0) — SIMD alignment to 32 |
 
-Group offsets and the total width are **recomputed by the descriptor** whenever
-the active group set changes (future waves: wrap walls 4→8, biome, 8↔16
-creature sectors) — there are no hand-maintained slot constants in the build
-path. The legacy `weight_count` is unchanged: `32*48 + 48*24 + 24*5 = 2808`.
+Walled (wrap **off**) — real width 30 → padded 32 — inserts
+`WallProximity` N/S/E/W (range `WALL_PROXIMITY_RANGE = 50u`) at `[8..12)`,
+shifting `CreatureSectors`→`[12..20)`, `GrassSectors`→`[20..28)`,
+`CurrGrass`→`[28]`, `Bias`→`[29]`, pad `[30..32)`.
+
+`GRASS_PROXIMITY_RANGE` was raised **8u → 20u** so each of the 8 grass sectors
+spans `ceil(20/5) = 4` grass cells (≥3) at the 5u cell; the sector LUT radius
+`LUT_RADIUS` is recomputed to **4** (was 16 at the old 1.25u cell). The
+`NnInputLayout::legacy()` width-32 anchor (all 7 groups, ReservedPredator at
+`[28]`) survives as a **test-only** calibration baseline. Group offsets + total
+width are **recomputed by the descriptor** when the active group set changes — no
+hand-maintained slot constants in the build path. The legacy `weight_count` is
+unchanged: `32*48 + 48*24 + 24*5 = 2808`, and old brains are discarded (no
+save/load).
 
 Outputs: `out[0] = vx`, `out[1] = vy`, `out[2..5]` = action logits for
 `{Graze=0, Eat=1, Split=2}`. Hidden layers use Leaky ReLU (slope 0.01).
@@ -164,8 +208,9 @@ Founder weights are pure uniform-random — no hardwiring.
   `NnInputLayout` / `NnInputGroup` (composable input-layout descriptor),
   `decode_action`, `chunk_ranges`, `dynamic_chunks`, `PickTimings`.
 - `src/world/nn_stats.rs` → `NnStats`.
-- `src/world/proximity.rs` → `LUT_DIM`, sector LUT build, wall +
-  creature + grass proximity helpers.
+- `src/world/proximity.rs` → `LUT_RADIUS = 4` / `LUT_DIM`, sector LUT build,
+  wall + creature + grass proximity helpers (all wrap-aware via the grid/grass
+  `dims`).
 - `src/brain.rs` → `Brain`, `Brain::founder`, `Brain::forward`,
   `Brain::child_from`, `NnTopology` (runtime `input_width` field +
   `with_input_width`), the `lrelu` helper, the `NN_OUTPUTS == 5` compile-assert
@@ -174,10 +219,17 @@ Founder weights are pure uniform-random — no hardwiring.
 - `src/creature.rs` → `CreatureSoA`, `Action` (3 variants), `Action::ALL`.
 - `src/grass.rs` → `GrassGrid`, `compute_propagation`, `bilinear_sample`,
   `consume`, `for_each_cell_overlapping_circle`, `rebuild_row_bitset`.
-- `src/grid.rs` → `SpatialGrid`, `cell_of`, `rebuild`,
-  `for_each_in_radius`.
-- `src/constants.rs` → `WORLD_SIZE = 1200`, `GRASS_GRID_DIM = 960`,
-  `GRASS_CELL_COUNT = 921_600`, `MAX_POP_FOR_SIM = 32_000`,
+- `src/grid.rs` → `SpatialGrid` (carries `dims: WorldDims`), `cell_of`
+  (instance method: clamp walled / `rem_euclid` toroidal), `rebuild`,
+  `for_each_in_radius` (wrap-aware cell fold).
+- `src/constants.rs` → `WorldDims` (runtime `world_size` / `grass_dim` /
+  `grass_cell_count` / `hash_dim`; replaces the old compile-time `WORLD_SIZE` /
+  `GRASS_GRID_DIM` / `GRASS_CELL_COUNT` / `HASH_DIM` constants),
+  `WORLD_SIZE_DEFAULT = 9600`, `WRAP_WORLD_DEFAULT = true`,
+  `GRASS_CELL_SIZE = 5.0`, `HASH_CELL = 10.0`,
+  `GRASS_PROXIMITY_RANGE = 20.0`, `Biome` enum `{Plains=0, Water=1, Desert=2}`
+  (u8; Wave 1b populates it),
+  `MAX_POP_FOR_SIM = 32_000`,
   `MAX_POPULATION_DEFAULT = 8_000` (TS lowers to 2000 on first boot when
   `navigator.hardwareConcurrency < 8`),
   `NN_INPUTS = 32` (legacy/default input width), `MAX_NN_INPUTS = 48`
@@ -186,8 +238,9 @@ Founder weights are pure uniform-random — no hardwiring.
   `CREATURE_SIZE = 1.0`, `START_ENERGY_DEFAULT = 200.0`,
   `MAX_AGE_DEFAULT = 5000`, `SPLIT_THRESHOLD_DEFAULT = 99.0`,
   `SPLIT_GIFT_MAX_DEFAULT = 30.0`, `SPLIT_JITTER_DEFAULT = 1.0`,
-  `REPULSION_MAX = 0.1`, `GRASS_INITIAL_SEED_COUNT_DEFAULT = 1000`,
+  `REPULSION_MAX = 0.1`, `GRASS_INITIAL_SEED_COUNT_DEFAULT = 8000`,
   `FULL_GRASS_ON_INIT_DEFAULT = false`.
+  (`LUT_RADIUS = 4` lives in `src/world/proximity.rs`.)
 - `src/wasm_api.rs` → `WorldHandle`, `WorldHandle::set_slider`,
   `WorldHandle::write_snapshot_to`,
   `WorldHandle::sliders_defaults_json`,
@@ -210,6 +263,9 @@ Founder weights are pure uniform-random — no hardwiring.
   worker-runtime + decisions/sim docs).
 - A new chunking constant lands (`MIN_CHUNKS`, `MAX_CHUNKS`, or the
   dynamic formula).
+- The world-sizing model changes (`world_size` / `wrap_world` / `world_seed`
+  defaults, `GRASS_CELL_SIZE` / `HASH_CELL`, or the `WorldDims` derivation) — or
+  any wrap-awareness gap is found between sim math and the renderer mirror.
 
 ## Why is it shaped this way
 

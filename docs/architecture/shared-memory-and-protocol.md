@@ -5,8 +5,10 @@ the main ↔ sim-worker boundary.
 
 ## What it is
 
-Two SharedArrayBuffers — `controlSab` (≈30 KB) and `snapshotSab`
-(≈3.9 MB) — plus a one-shot `boot` message in each direction. v1.10:
+A `controlSab` (≈30 KB), the wasm-memory-resident snapshot region (runtime-sized;
+at the 9600u default ≈ 2 × (≈1 MB creatures + 3.69 MB u8 grass) ≈ 9.4 MB), and the
+dedicated wasm-memory `biomeSab` (`grass_cell_count` u8 ≈ 3.69 MB at default) —
+plus a one-shot `boot` message in each direction. v1.10:
 all main↔worker control is on SAB; the only postMessage payloads are
 the `boot` handshake and its `boot_ready` reply. Every other control
 signal (sliders, paused, target TPS, inspector requests, profile/NN
@@ -34,8 +36,14 @@ equal at boot — drift is a thrown error pointing at "rebuild wasm".
   and the codegen + drift-test that keep them in sync.
 - The `snapshotSab` two-slot layout: per-slot 20-byte stats header +
   12-byte alignment padding + creature SoA region + grass density
-  region.
-- The creature SoA stride: `CREATURE_STRIDE = 8` (= 32 bytes).
+  region. v2.0 Wave 1a: the grass region is **u8** (one byte per cell) and
+  **runtime-sized** from `world_size` (`grass_cell_count` bytes/slot); the
+  creature region is unchanged.
+- The dedicated **`biomeSab`** (v2.0 Wave 1a): one `Biome` u8 per grass cell,
+  sized from `grass_cell_count` at boot. Wave 1a fills it with `Plains` (0)
+  placeholder; Wave 1b populates it from `world_seed`.
+- The creature SoA stride: `CREATURE_STRIDE = 8` (= 32 bytes). **Unchanged** in
+  v2.0 — world-size independent.
 - The snapshot atomic-flip ordering (write inactive slot → flip
   `CTRL_CURRENT_SLOT` → bump `CTRL_SEQ`).
 - The epoch protocol for SAB request/response: producer writes
@@ -134,14 +142,38 @@ the user drags).
 |---|---|---|
 | `0..20` | 20 | Stats header — `[tick: u32, pop: u32, world_ended: u32, tps_bits: u32, jank_count: u32]`, all little-endian. |
 | `20..32` | 12 | Padding. Do not trim — `new Float32Array(buf, offset, len)` requires the offset to be element-stride-aligned (32 B). |
-| `32..(32 + MAX_POP_FOR_SIM*32)` | up to `MAX_POP_FOR_SIM × 32` | Creature SoA at stride 32 bytes. |
-| trailing | `GRASS_CELL_COUNT` | Grass density quantized to u8. |
+| `32..(32 + MAX_POP_FOR_SIM*32)` | `MAX_POP_FOR_SIM × 32` | Creature SoA at stride 32 bytes. **World-size independent.** |
+| trailing | `grass_cell_count` (runtime) | Grass density quantized to **u8** (`(d/GRASS_MAX).clamp(0,1)*255`, nearest). |
 
 `tps_bits` is `f32::to_bits` round-tripped via
 `DataView.getFloat32(byteOffset+12, true)`.
 
-Two slots: `SNAPSHOT_SAB_BYTES = 2 × SLOT_BYTES`. Nothing resizes
-after boot.
+**v2.0 Wave 1a runtime sizing.** Only the **grass** region (and thus
+`SLOT_BYTES` / `SNAPSHOT_SAB_BYTES`) is computed at boot — `grass_bytes =
+grass_cell_count` (u8), derived from the runtime `world_size`/`grass_dim`. The
+header + creature region remain compile-time constants. The snapshot writer
+quantizes the sim's internal f32 density (which stays f32 — dynamics unchanged)
+to u8 on write. Two slots: `SNAPSHOT_SAB_BYTES = 2 × SLOT_BYTES`. Nothing resizes
+after boot. The TS side sizes its grass view from the boot-time `grass_dim`
+(`grass_dim²` bytes), not a constant.
+
+### biomeSab (v2.0 Wave 1a)
+
+A **separate** buffer of `grass_cell_count` u8 — one `Biome`
+(`{Plains=0, Water=1, Desert=2}`) per grass cell, single-buffered (no slots). Its
+byte offset/length ride `boot_ready` (`biome_buf_byte_offset` /
+`biome_buf_byte_len`). Sized from the same `grass_cell_count` as the snapshot
+grass region — see "computed-dims-equality" below. Wave 1a fills it with all
+`Plains` (0); Wave 1b regenerates it from `world_seed`.
+
+### Computed-dims-equality safety model
+
+The old constant-equality guard (`GRASS_CELL_COUNT` Rust ↔ TS) is replaced by a
+*computed* one: the snapshot grass region and the biomeSab are **both** derived
+from `grass_cell_count` (= `grass_dim²`), so they must be byte-equal at boot. A
+Rust-side `debug_assert` in `SnapshotLayout::from_grass_cell_count` checks
+`grass_bytes == biome_bytes`. The TS side must size both views off the boot-time
+`grass_dim` it receives, never a hardcoded constant.
 
 ## Creature SoA (per-creature, 32 bytes)
 
@@ -162,22 +194,30 @@ after boot.
 
 | `kind` | Payload | Freq |
 |---|---|---|
-| `boot` | `{ seed, initial_grass_seed_count, energy_max, founder_count, full_grass_on_init, initial_sliders, initial_target_tps, initial_paused }` | once per worker lifetime |
+| `boot` | `{ seed, initial_grass_seed_count, energy_max, founder_count, full_grass_on_init, world_size, wrap_world, world_seed, initial_sliders, initial_target_tps, initial_paused }` | once per worker lifetime |
 
 Everything else moved to the control SAB. The `boot` message carries
 `initial_target_tps` and `initial_paused` so the worker can seed
 those SAB lanes before posting `boot_ready` — main's first reads then
-see canonical state.
+see canonical state. v2.0 Wave 1a: the boot construction call
+(`WorldHandle.newWithFounderCount`) gains `world_size: f32`,
+`wrap_world: bool`, `world_seed: u32` (a `world_seed` of 0 → the Rust side picks
+a random one). `world_seed` is **separate** from the string `seed` (the RNG seed)
+— they are not coupled.
 
 ## Worker → main replies (`SimReply`)
 
 | `kind` | Payload | Notes |
 |---|---|---|
-| `boot_ready` | `{ world_size, grass_dim, threads, rayon_ok, max_pop_for_sim, snapshot_sab, control_sab, sliders_defaults_json }` | Posted **after** the worker runs one tick + writes one snapshot to slot 0, guaranteeing main a valid first frame. |
+| `boot_ready` | `{ world_size, wrap_world, world_seed, grass_dim, threads, rayon_ok, max_pop_for_sim, wasm_memory, snapshot_buf_byte_offset, snapshot_buf_byte_len, biome_buf_byte_offset, biome_buf_byte_len, control_sab, sliders_defaults_json }` | Posted **after** the worker runs one tick + writes one snapshot to slot 0, guaranteeing main a valid first frame. |
 
-That is the entire v1.10 reply surface. Inspector / profile / NN
-stats responses are SAB byte buffers; main polls their epochs at
-60 Hz via `SimBridge`.
+v2.0 Wave 1a additions to the reply surface (fields TS must mirror): the
+**runtime `grass_dim`** (so main sizes its grass + biome views — `grass_dim²`
+bytes each), `wrap_world` + `world_seed`, and the **`biome_buf_byte_offset` /
+`biome_buf_byte_len`** for the dedicated biomeSab view (over `wasm_memory.buffer`
+like the snapshot buffer). The snapshot region's byte length
+(`snapshot_buf_byte_len`) is now a runtime value (u8 grass). Inspector / profile /
+NN stats responses remain SAB byte buffers polled at 60 Hz via `SimBridge`.
 
 ## Atomic-flip ordering
 
@@ -210,8 +250,14 @@ if it advanced, the bytes are guaranteed to be coherent.
 - `SLIDER_NAMES` + control-SAB layout — Rust `src/wasm_api.rs` +
   `src/control_sab.rs` ↔ TS `web/src/generated/`. Rust unit test
   `bindings_in_sync` fails CI on drift; fix by running
-  `cargo run --bin gen-bindings`.
+  `cargo run --bin gen-bindings`. v2.0 Wave 1a changed the slider table
+  (dropped 4 `_reserved_curriculum_*` + `full_grass_on_init`; added `world_size`
+  / `world_seed` / `wrap_world`; `SLIDER_COUNT = 45`, `SLIDER_BUCKET_BASE = 21`).
 - `CREATURE_STRIDE = 8` — renderer-side guard `if (stride !== 8) throw`.
+- **Grass + biome region sizes** — no longer a constant-equality assert. The
+  snapshot grass region (u8) and the biomeSab are both `grass_cell_count` bytes,
+  derived at boot from `grass_dim`; the TS side sizes both views off the
+  `boot_ready.grass_dim` it receives (computed-dims-equality, see above).
 
 ## Code anchors
 
@@ -239,7 +285,11 @@ if it advanced, the bytes are guaranteed to be coherent.
 - [`web/tests/e2e/sab-control.spec.ts`](../../web/tests/e2e/sab-control.spec.ts) —
   regression coverage for the v1.10 transport.
 - [`src/constants.rs`](../../src/constants.rs) → `MAX_POP_FOR_SIM`,
-  `GRASS_CELL_COUNT`, `GRASS_GRID_DIM`.
+  `WorldDims` (runtime `grass_dim` / `grass_cell_count` / `hash_dim`),
+  `WORLD_SIZE_DEFAULT = 9600`, `GRASS_CELL_SIZE = 5.0`, `Biome` enum.
+- [`src/wasm_api.rs`](../../src/wasm_api.rs) → `SnapshotLayout`
+  (runtime grass/slot/buf/biome byte sizes), `quantize_grass_into`
+  (f32→u8 on snapshot write), the `biome_buf_byte_offset/len` getters.
 
 ## Update when
 
@@ -253,7 +303,11 @@ if it advanced, the bytes are guaranteed to be coherent.
 - A new slider is added — append to `SLIDER_NAMES` in
   [`src/wasm_api.rs`](../../src/wasm_api.rs), add an
   `apply_slider_by_index` arm, run codegen, rebuild wasm.
-- The `boot` payload gains or loses a field.
+- The `boot` / `boot_ready` payload gains or loses a field (e.g. the v2.0 Wave 1a
+  `grass_dim` / `biome_buf_*` / `world_size` / `wrap_world` / `world_seed`).
+- The grass region encoding (u8 quantize) or the `WorldDims` derivation
+  (`GRASS_CELL_SIZE`, `world_size` default) changes, or the biomeSab format
+  changes (Wave 1b populates it).
 - The snapshot atomic-flip ordering changes (currently
   store-before-add).
 - `MAX_POP_FOR_SIM` or `CREATURE_STRIDE` changes value.

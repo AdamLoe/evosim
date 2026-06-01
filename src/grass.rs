@@ -1,27 +1,29 @@
-//! GrassGrid — 960×960 = 921_600 flat-Vec<f32> density field over the
-//! 1200u walled world. Each cell is 1.25u square (v1.5 S6 — 16× density bump
-//! from the 5u/120-dim v1.2 layout). Independent of SpatialGrid (5u, body
-//! queries). v1.2 grass-mechanic-brief §Grass storage / §Grass dynamics per
-//! tick / §Initial grass seed / §Bilinear sampling.
+//! GrassGrid — runtime-sized flat-`Vec<f32>` density field over the world.
+//!
+//! v2.0 Wave 1a: the grid is `grass_dim × grass_dim` cells (computed at
+//! construction from `world_size`; 1920² at the 9600u default), each
+//! `GRASS_CELL_SIZE` (5u) square. Independent of SpatialGrid (10u, body
+//! queries). The world may be toroidal (`dims.wrap_world`): propagation,
+//! overlap, and bilinear sampling wrap across the seam when so. v1.2
+//! grass-mechanic-brief §Grass storage / §Grass dynamics per tick /
+//! §Initial grass seed / §Bilinear sampling.
 
-use crate::constants::{GRASS_CELL_COUNT, GRASS_CELL_SIZE, GRASS_GRID_DIM, GRASS_MAX, WORLD_SIZE};
+use crate::constants::{WorldDims, GRASS_CELL_SIZE, GRASS_MAX};
 use crate::profiler::clock_now_us_threadsafe;
 use crate::rng::SimRng;
 #[cfg(feature = "threads")]
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-// Compile-time invariant checks.
-const _: () = assert!(GRASS_CELL_COUNT == 921_600);
-const _: () = assert!(GRASS_GRID_DIM == 960);
-
-/// 960×960 grass density field over the 1200u walled world.
+/// Runtime-sized grass density field over the world.
 ///
-/// Row-major layout: cell (ix, iy) is at index `iy * GRASS_GRID_DIM + ix`.
+/// Row-major layout: cell (ix, iy) is at index `iy * dims.grass_dim + ix`.
 /// Density values are clamped to `[0.0, GRASS_MAX]` after each `step` call.
 #[derive(Debug)]
 pub struct GrassGrid {
-    /// Row-major density, length GRASS_CELL_COUNT (= 921_600).
+    /// Runtime dimensions (grass_dim / cell_count / wrap). Set at construction.
+    pub dims: WorldDims,
+    /// Row-major density, length `dims.grass_cell_count`.
     pub density: Vec<f32>,
     /// Double-buffer scratch. Same length as `density`. Recomputed every
     /// `step` call; never read between ticks.
@@ -61,6 +63,7 @@ pub struct GrassGrid {
 impl Clone for GrassGrid {
     fn clone(&self) -> Self {
         Self {
+            dims: self.dims,
             density: self.density.clone(),
             scratch: self.scratch.clone(),
             row_has_density: self.row_has_density.clone(),
@@ -78,17 +81,19 @@ impl GrassGrid {
     /// World-init constructor. Seeds `initial_seed_count` random cells
     /// with `GRASS_MAX`; all others zero. Draws from `rng` via the same
     /// world RNG used everywhere else (deterministic given fixed seed).
-    pub fn new(rng: &mut SimRng, initial_seed_count: u32) -> Self {
-        let mut density = vec![0.0f32; GRASS_CELL_COUNT];
-        let scratch = vec![0.0f32; GRASS_CELL_COUNT];
+    pub fn new(rng: &mut SimRng, initial_seed_count: u32, dims: WorldDims) -> Self {
+        let cell_count = dims.grass_cell_count;
+        let mut density = vec![0.0f32; cell_count];
+        let scratch = vec![0.0f32; cell_count];
         for _ in 0..initial_seed_count {
-            let idx = rng.index(GRASS_CELL_COUNT);
+            let idx = rng.index(cell_count);
             density[idx] = GRASS_MAX;
         }
         let mut g = Self {
+            dims,
             density,
             scratch,
-            row_has_density: vec![0u64; GRASS_GRID_DIM.div_ceil(64)],
+            row_has_density: vec![0u64; dims.grass_dim.div_ceil(64)],
             par_chunks_us: AtomicU64::new(0),
             chunks_mut_us: AtomicU64::new(0),
             row_body_us: AtomicU64::new(0),
@@ -103,18 +108,17 @@ impl GrassGrid {
     /// Recompute the per-row "any non-empty" bitset. Called from `step()`
     /// after the density swap; exposed for tests that mutate `density` directly.
     pub fn rebuild_row_bitset(&mut self) {
-        let words = GRASS_GRID_DIM.div_ceil(64);
+        let dim = self.dims.grass_dim;
+        let words = dim.div_ceil(64);
         if self.row_has_density.len() != words {
             self.row_has_density.resize(words, 0);
         }
         for w in self.row_has_density.iter_mut() {
             *w = 0;
         }
-        for iy in 0..GRASS_GRID_DIM {
-            let row_off = iy * GRASS_GRID_DIM;
-            let any = self.density[row_off..row_off + GRASS_GRID_DIM]
-                .iter()
-                .any(|&d| d > 0.0);
+        for iy in 0..dim {
+            let row_off = iy * dim;
+            let any = self.density[row_off..row_off + dim].iter().any(|&d| d > 0.0);
             if any {
                 self.row_has_density[iy / 64] |= 1u64 << (iy % 64);
             }
@@ -160,8 +164,8 @@ impl GrassGrid {
     /// swap. Exposed separately so the World-side profiler can break the grass
     /// step into compute-vs-bitset sub-spans.
     pub fn compute_propagation(&mut self, r_in_cell: f32, k_propagate: f32) {
-        debug_assert_eq!(self.density.len(), GRASS_CELL_COUNT);
-        debug_assert_eq!(self.scratch.len(), GRASS_CELL_COUNT);
+        debug_assert_eq!(self.density.len(), self.dims.grass_cell_count);
+        debug_assert_eq!(self.scratch.len(), self.dims.grass_cell_count);
 
         // Reset per-tick timers at the top so the row_body closure (defined
         // below) can hold a shared borrow of row_body_self_us alongside the
@@ -174,32 +178,39 @@ impl GrassGrid {
         // v1.7.2: one dispatch per `compute_propagation` call.
         self.dispatch_calls.store(1, Ordering::Relaxed);
 
-        let dim = GRASS_GRID_DIM;
+        let dim = self.dims.grass_dim;
+        let wrap = self.dims.wrap_world;
         let inv_max = 1.0 / GRASS_MAX;
         let d = &self.density;
         let row_body_self_us = &self.row_body_self_us;
         let row_body_calls = &self.row_body_calls;
 
         // Single-row body: writes into `s_row` (one dim-long slice of scratch)
-        // by reading the (iy-1, iy, iy+1) rows from `d`. Ghost-zero N/S/E/W.
+        // by reading the (iy-1, iy, iy+1) rows from `d`. Walled: ghost-zero
+        // N/S/E/W at the boundary. Toroidal (wrap): the boundary neighbor is
+        // the opposite-edge row/column so density propagates across the seam.
         let row_body = |iy: usize, s_row: &mut [f32]| {
             let body_self_start = clock_now_us_threadsafe();
             let row_self = iy * dim;
-            let row_n = if iy == 0 { None } else { Some((iy - 1) * dim) };
+            let row_n = if iy == 0 {
+                if wrap { Some((dim - 1) * dim) } else { None }
+            } else {
+                Some((iy - 1) * dim)
+            };
             let row_s = if iy + 1 == dim {
-                None
+                if wrap { Some(0) } else { None }
             } else {
                 Some((iy + 1) * dim)
             };
             for ix in 0..dim {
                 let c = row_self + ix;
                 let ce = if ix + 1 == dim {
-                    None
+                    if wrap { Some(row_self) } else { None }
                 } else {
                     Some(row_self + ix + 1)
                 };
                 let cw = if ix == 0 {
-                    None
+                    if wrap { Some(row_self + dim - 1) } else { None }
                 } else {
                     Some(row_self + ix - 1)
                 };
@@ -267,22 +278,27 @@ impl GrassGrid {
         std::mem::swap(&mut self.density, &mut self.scratch);
     }
 
-    /// Walled bilinear sample at continuous world position `(x, y)`.
+    /// Bilinear sample at continuous world position `(x, y)`.
     ///
-    /// Clamps input to [0, WORLD_SIZE). Out-of-bounds indices return ghost zero
-    /// (Q-D7-3 default: ghost-zero).
+    /// Walled: clamps input to `[0, world_size)`; out-of-bounds cell indices read
+    /// as ghost zero. Toroidal (`dims.wrap_world`): the world position wraps into
+    /// `[0, world_size)` and the four sample cells wrap across the seam.
     pub fn bilinear_sample(&self, x: f32, y: f32) -> f32 {
-        let w = WORLD_SIZE;
-        // Clamp to world bounds instead of wrapping.
-        let xw = x.clamp(0.0, w - 1e-4);
-        let yw = y.clamp(0.0, w - 1e-4);
+        let w = self.dims.world_size;
+        let dim = self.dims.grass_dim as i32;
+        let wrap = self.dims.wrap_world;
+
+        let (xw, yw) = if wrap {
+            (x.rem_euclid(w), y.rem_euclid(w))
+        } else {
+            (x.clamp(0.0, w - 1e-4), y.clamp(0.0, w - 1e-4))
+        };
 
         // Convert to fractional cell coordinates. Cell i's center is at
         // (i + 0.5) * GRASS_CELL_SIZE. Subtract 0.5 so cell centers fall at integers.
         let fx = xw / GRASS_CELL_SIZE - 0.5;
         let fy = yw / GRASS_CELL_SIZE - 0.5;
 
-        let dim = GRASS_GRID_DIM as i32;
         let ix0 = fx.floor() as i32;
         let iy0 = fy.floor() as i32;
         let ix1 = ix0 + 1;
@@ -291,12 +307,19 @@ impl GrassGrid {
         let tx = fx - fx.floor(); // in [0, 1)
         let ty = fy - fy.floor();
 
-        // Ghost-zero: out-of-bounds indices read as 0.
+        let dimu = self.dims.grass_dim;
+        // Walled → ghost-zero out-of-bounds; wrap → fold indices into [0, dim).
         let sample = |iy: i32, ix: i32| -> f32 {
-            if iy < 0 || iy >= dim || ix < 0 || ix >= dim {
-                return 0.0;
+            if wrap {
+                let wy = iy.rem_euclid(dim) as usize;
+                let wx = ix.rem_euclid(dim) as usize;
+                self.density[wy * dimu + wx]
+            } else {
+                if iy < 0 || iy >= dim || ix < 0 || ix >= dim {
+                    return 0.0;
+                }
+                self.density[iy as usize * dimu + ix as usize]
             }
-            self.density[iy as usize * GRASS_GRID_DIM + ix as usize]
         };
 
         let d00 = sample(iy0, ix0);
@@ -351,21 +374,35 @@ impl GrassGrid {
         let r_cells = (search_r / GRASS_CELL_SIZE).ceil() as i32 + 1;
         let cx_cell = (cx / GRASS_CELL_SIZE).floor() as i32;
         let cy_cell = (cy / GRASS_CELL_SIZE).floor() as i32;
-        let dim = GRASS_GRID_DIM as i32;
+        let dim = self.dims.grass_dim as i32;
+        let dimu = self.dims.grass_dim;
+        let wrap = self.dims.wrap_world;
         let r2 = r * r;
 
         for jy in (cy_cell - r_cells)..=(cy_cell + r_cells) {
-            if jy < 0 || jy >= dim {
-                continue;
-            }
-            let iy = jy as usize;
-            for jx in (cx_cell - r_cells)..=(cx_cell + r_cells) {
-                if jx < 0 || jx >= dim {
+            // Walled: skip out-of-bounds rows; toroidal: fold to the cell index
+            // but keep the *un-folded* jy/jx for the world-space box so the
+            // nearest-point distance is measured across the seam, not clamped.
+            let iy = if wrap {
+                jy.rem_euclid(dim) as usize
+            } else {
+                if jy < 0 || jy >= dim {
                     continue;
                 }
-                let ix = jx as usize;
+                jy as usize
+            };
+            for jx in (cx_cell - r_cells)..=(cx_cell + r_cells) {
+                let ix = if wrap {
+                    jx.rem_euclid(dim) as usize
+                } else {
+                    if jx < 0 || jx >= dim {
+                        continue;
+                    }
+                    jx as usize
+                };
                 // Circle-vs-AABB: find nearest point on the cell box to (cx, cy),
-                // then check if that distance is ≤ r.
+                // then check if that distance is ≤ r. The box uses the unfolded
+                // jx/jy so a seam-straddling query measures the short way around.
                 let box_x_min = jx as f32 * GRASS_CELL_SIZE;
                 let box_x_max = box_x_min + GRASS_CELL_SIZE;
                 let box_y_min = jy as f32 * GRASS_CELL_SIZE;
@@ -376,7 +413,7 @@ impl GrassGrid {
                 let dy = nearest_y - cy;
 
                 if dx * dx + dy * dy <= r2 {
-                    f(iy * GRASS_GRID_DIM + ix);
+                    f(iy * dimu + ix);
                 }
             }
         }
@@ -388,8 +425,22 @@ mod tests {
     use super::*;
     use crate::rng::SimRng;
 
+    // v2.0 Wave 1a: grass dims are runtime. These module-local test constants
+    // pin a fixed *walled* grid so the existing walled-behavior assertions keep
+    // their meaning. 1200u world / 5u cell → 240² cells.
+    const TEST_DIMS: WorldDims = WorldDims {
+        world_size: 1200.0,
+        wrap_world: false,
+        grass_dim: 240,
+        grass_cell_count: 240 * 240,
+        hash_dim: 120,
+    };
+    const GRASS_GRID_DIM: usize = TEST_DIMS.grass_dim;
+    const GRASS_CELL_COUNT: usize = TEST_DIMS.grass_cell_count;
+
     fn fresh_grid() -> GrassGrid {
         GrassGrid {
+            dims: TEST_DIMS,
             density: vec![0.0f32; GRASS_CELL_COUNT],
             scratch: vec![0.0f32; GRASS_CELL_COUNT],
             row_has_density: vec![0u64; GRASS_GRID_DIM.div_ceil(64)],
@@ -457,6 +508,7 @@ mod tests {
     #[test]
     fn step_clamps_to_grass_max() {
         let mut g = GrassGrid {
+            dims: TEST_DIMS,
             density: vec![GRASS_MAX; GRASS_CELL_COUNT],
             scratch: vec![0.0f32; GRASS_CELL_COUNT],
             row_has_density: vec![0u64; GRASS_GRID_DIM.div_ceil(64)],
@@ -694,9 +746,9 @@ mod tests {
     #[test]
     fn initial_seed_is_deterministic() {
         let mut rng1 = SimRng::from_u64(42);
-        let g1 = GrassGrid::new(&mut rng1, 16);
+        let g1 = GrassGrid::new(&mut rng1, 16, TEST_DIMS);
         let mut rng2 = SimRng::from_u64(42);
-        let g2 = GrassGrid::new(&mut rng2, 16);
+        let g2 = GrassGrid::new(&mut rng2, 16, TEST_DIMS);
         assert_eq!(
             g1.density, g2.density,
             "same seed must produce identical density vectors"
@@ -743,7 +795,7 @@ mod tests {
     #[test]
     fn density_length_invariant() {
         let mut rng = SimRng::from_u64(0);
-        let g = GrassGrid::new(&mut rng, 8);
+        let g = GrassGrid::new(&mut rng, 8, TEST_DIMS);
         assert_eq!(
             g.density.len(),
             GRASS_CELL_COUNT,

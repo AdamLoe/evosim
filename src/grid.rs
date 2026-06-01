@@ -1,20 +1,25 @@
-//! Spatial hash grid for neighbor queries. HASH_CELL-wide cells over a
-//! 1200×1200 world (currently 2.5u → 480×480 = 230,400 cells). Single
-//! shared structure for raycasts and repulsion (v5 §3.3).
+//! Spatial hash grid for neighbor queries. `HASH_CELL`-wide cells over the
+//! runtime-sized world. v2.0 Wave 1a: `hash_dim = ceil(world_size / HASH_CELL)`
+//! is computed at construction and carried in `WorldDims` (960² at the 9600u
+//! default). Single shared structure for eat/repulsion neighbor queries
+//! (v5 §3.3). Walled worlds clamp cell indices; toroidal worlds (`dims.wrap_world`)
+//! wrap cell indices across the seam.
 
 use crate::constants::*;
 
 pub struct SpatialGrid {
+    /// Runtime dimensions (hash_dim / wrap). Set at construction; the cell
+    /// arrays are sized to `hash_dim²`.
+    pub(crate) dims: WorldDims,
     /// Flattened cell index → contiguous slice of creature indices.
     /// `starts[k]` is the index of the first creature in cell `k`,
     /// `starts[k+1]` is past-the-end. `indices` holds them in cell order.
     pub(crate) starts: Vec<u32>,
     pub(crate) indices: Vec<u32>,
     /// Scratch cursors for the scatter pass of `rebuild`.
-    /// Length matches `starts` (HASH_DIM * HASH_DIM + 1 = 57 601).
-    /// Reused across rebuilds via `copy_from_slice(&starts)` to
-    /// avoid the per-tick allocation that `starts.clone()` would
-    /// otherwise cost (~230 kB × 3 rebuilds/tick = ~691 kB/tick).
+    /// Length matches `starts` (`hash_dim² + 1`).
+    /// Reused across rebuilds via `copy_from_slice(&starts)` to avoid the
+    /// per-tick allocation that `starts.clone()` would otherwise cost.
     /// Must always be the same length as `starts`; resize both in lockstep.
     cursors: Vec<u32>,
     /// Per-creature cached cell index, computed once in `rebuild`.
@@ -24,17 +29,13 @@ pub struct SpatialGrid {
     pub(crate) cells: Vec<u32>,
 }
 
-impl Default for SpatialGrid {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl SpatialGrid {
-    pub fn new() -> Self {
-        let starts = vec![0; HASH_DIM * HASH_DIM + 1];
+    /// Construct a grid sized for the given world dims.
+    pub fn new(dims: WorldDims) -> Self {
+        let starts = vec![0; dims.hash_dim * dims.hash_dim + 1];
         let cursors = vec![0; starts.len()];
         Self {
+            dims,
             starts,
             indices: Vec::with_capacity(2048),
             cursors,
@@ -42,15 +43,19 @@ impl SpatialGrid {
         }
     }
 
+    /// Cell index for a world position. Walled: clamp the per-axis index to
+    /// `[0, hash_dim-1]`. Toroidal: wrap it into `[0, hash_dim)`.
     #[inline]
-    pub fn cell_of(x: f32, y: f32) -> usize {
-        // Walled world: clamp cell index to [0, HASH_DIM-1].
-        // Out-of-bounds positions (e.g. from float rounding) land in edge cells.
+    pub fn cell_of(&self, x: f32, y: f32) -> usize {
+        let dim = self.dims.hash_dim as i32;
         let ix = (x / HASH_CELL).floor() as i32;
         let iy = (y / HASH_CELL).floor() as i32;
-        let ix = ix.clamp(0, HASH_DIM as i32 - 1) as usize;
-        let iy = iy.clamp(0, HASH_DIM as i32 - 1) as usize;
-        iy * HASH_DIM + ix
+        let (ix, iy) = if self.dims.wrap_world {
+            (ix.rem_euclid(dim), iy.rem_euclid(dim))
+        } else {
+            (ix.clamp(0, dim - 1), iy.clamp(0, dim - 1))
+        };
+        iy as usize * self.dims.hash_dim + ix as usize
     }
 
     /// Rebuild the index from positions. O(N + cells).
@@ -62,7 +67,7 @@ impl SpatialGrid {
         self.cells.resize(n, 0);
         self.starts.iter_mut().for_each(|s| *s = 0);
         for k in 0..n {
-            let c = Self::cell_of(xs[k], ys[k]);
+            let c = self.cell_of(xs[k], ys[k]);
             self.cells[k] = c as u32;
             self.starts[c + 1] += 1;
         }
@@ -102,23 +107,33 @@ impl SpatialGrid {
         mut pred: impl FnMut(usize) -> bool,
     ) -> Option<usize> {
         debug_assert!(
-            radius < WORLD_SIZE * 0.5,
-            "find_first_in_radius requires radius < half-world (300u); got {radius}"
+            radius < self.dims.world_size * 0.5,
+            "find_first_in_radius requires radius < half-world; got {radius}"
         );
-        let dim = HASH_DIM as i32;
+        let dim = self.dims.hash_dim as i32;
+        let wrap = self.dims.wrap_world;
         let lo_x = ((x - radius) / HASH_CELL).floor() as i32;
         let hi_x = ((x + radius) / HASH_CELL).floor() as i32;
         let lo_y = ((y - radius) / HASH_CELL).floor() as i32;
         let hi_y = ((y + radius) / HASH_CELL).floor() as i32;
-        for iy in lo_y..=hi_y {
-            if iy < 0 || iy >= dim {
+        for jy in lo_y..=hi_y {
+            // Walled: skip out-of-bounds; toroidal: fold across the seam.
+            let iy = if wrap {
+                jy.rem_euclid(dim)
+            } else if jy < 0 || jy >= dim {
                 continue;
-            }
-            let row = iy as usize * HASH_DIM;
-            for ix in lo_x..=hi_x {
-                if ix < 0 || ix >= dim {
+            } else {
+                jy
+            };
+            let row = iy as usize * self.dims.hash_dim;
+            for jx in lo_x..=hi_x {
+                let ix = if wrap {
+                    jx.rem_euclid(dim)
+                } else if jx < 0 || jx >= dim {
                     continue;
-                }
+                } else {
+                    jx
+                };
                 let c = row + ix as usize;
                 let s = self.starts[c] as usize;
                 let e = self.starts[c + 1] as usize;
@@ -142,27 +157,38 @@ impl SpatialGrid {
     /// Iterate creature indices in cells inside a bounding box around
     /// `(x, y)` with the given radius. Caller must filter by exact distance.
     ///
-    /// Walled world: cell indices are clamped to [0, HASH_DIM-1]; no seam
-    /// wrapping. Out-of-bounds cells are simply skipped.
+    /// Walled world: cell indices are clamped to `[0, hash_dim-1]`; out-of-bounds
+    /// cells are skipped (no seam wrap). Toroidal world (`dims.wrap_world`):
+    /// cell indices wrap across the seam so a near-edge query also visits the
+    /// opposite edge. The caller's exact-distance filter must be wrap-aware too.
     pub fn for_each_in_radius(&self, x: f32, y: f32, radius: f32, mut f: impl FnMut(usize)) {
         debug_assert!(
-            radius < WORLD_SIZE * 0.5,
-            "for_each_in_radius requires radius < half-world (300u); got {radius}"
+            radius < self.dims.world_size * 0.5,
+            "for_each_in_radius requires radius < half-world; got {radius}"
         );
-        let dim = HASH_DIM as i32;
+        let dim = self.dims.hash_dim as i32;
+        let wrap = self.dims.wrap_world;
         let lo_x = ((x - radius) / HASH_CELL).floor() as i32;
         let hi_x = ((x + radius) / HASH_CELL).floor() as i32;
         let lo_y = ((y - radius) / HASH_CELL).floor() as i32;
         let hi_y = ((y + radius) / HASH_CELL).floor() as i32;
-        for iy in lo_y..=hi_y {
-            if iy < 0 || iy >= dim {
+        for jy in lo_y..=hi_y {
+            let iy = if wrap {
+                jy.rem_euclid(dim)
+            } else if jy < 0 || jy >= dim {
                 continue;
-            }
-            let row = iy as usize * HASH_DIM;
-            for ix in lo_x..=hi_x {
-                if ix < 0 || ix >= dim {
+            } else {
+                jy
+            };
+            let row = iy as usize * self.dims.hash_dim;
+            for jx in lo_x..=hi_x {
+                let ix = if wrap {
+                    jx.rem_euclid(dim)
+                } else if jx < 0 || jx >= dim {
                     continue;
-                }
+                } else {
+                    jx
+                };
                 let c = row + ix as usize;
                 let s = self.starts[c] as usize;
                 let e = self.starts[c + 1] as usize;
@@ -178,27 +204,42 @@ impl SpatialGrid {
 mod tests {
     use super::*;
 
+    // v2.0 Wave 1a: grid dims are runtime. Fixed *walled* test dims pin a 1200u
+    // world at the 10u hash cell → 120² cells, so the walled-behavior assertions
+    // below keep their meaning. The wrap-aware behavior has its own test file.
+    const TEST_DIMS: WorldDims = WorldDims {
+        world_size: 1200.0,
+        wrap_world: false,
+        grass_dim: 240,
+        grass_cell_count: 240 * 240,
+        hash_dim: 120,
+    };
+    const HASH_DIM: usize = TEST_DIMS.hash_dim;
+    const WORLD_SIZE: f32 = TEST_DIMS.world_size;
+
+    fn grid() -> SpatialGrid {
+        SpatialGrid::new(TEST_DIMS)
+    }
+
     /// Walled world: cell_of clamps negative x/y to 0 (not wrap to last column).
     #[test]
     fn cell_of_clamps_negative() {
+        let g = grid();
         // x = -1.0 → clamp to column 0.
-        let c = SpatialGrid::cell_of(-1.0, 0.0);
+        let c = g.cell_of(-1.0, 0.0);
         assert_eq!(c, 0, "negative x should clamp to column 0");
-        let c2 = SpatialGrid::cell_of(0.0, -1.0);
+        let c2 = g.cell_of(0.0, -1.0);
         assert_eq!(c2, 0, "negative y should clamp to row 0");
     }
 
     /// Walled world: cell_of with x/y >= WORLD_SIZE clamps to last cell.
     #[test]
     fn cell_of_clamps_above() {
-        // x = WORLD_SIZE = 1200.0 → floor(240) = 240 → clamp(239) → column 239.
-        let c = SpatialGrid::cell_of(WORLD_SIZE, 0.0);
-        assert_eq!(
-            c,
-            HASH_DIM - 1,
-            "x == WORLD_SIZE should clamp to last column"
-        );
-        let c2 = SpatialGrid::cell_of(0.0, WORLD_SIZE);
+        let g = grid();
+        // x = WORLD_SIZE = 1200.0 → floor(120) = 120 → clamp(119) → last column.
+        let c = g.cell_of(WORLD_SIZE, 0.0);
+        assert_eq!(c, HASH_DIM - 1, "x == WORLD_SIZE should clamp to last column");
+        let c2 = g.cell_of(0.0, WORLD_SIZE);
         assert_eq!(
             c2,
             (HASH_DIM - 1) * HASH_DIM,
@@ -212,7 +253,7 @@ mod tests {
     fn cell_of_cache_matches_recompute() {
         let xs = vec![0.0, 4.9, 5.1, 100.0, 299.9, 595.0];
         let ys = vec![0.0, 4.9, 5.1, 200.0, 300.0, 595.0];
-        let mut g = SpatialGrid::new();
+        let mut g = grid();
         g.rebuild(&xs, &ys);
         assert_eq!(
             g.cells.len(),
@@ -220,7 +261,7 @@ mod tests {
             "cells length must equal creature count"
         );
         for k in 0..xs.len() {
-            let expected = SpatialGrid::cell_of(xs[k], ys[k]);
+            let expected = g.cell_of(xs[k], ys[k]);
             assert_eq!(
                 g.cells[k] as usize, expected,
                 "cells[{k}] = {} != recomputed {} for ({}, {})",
@@ -233,7 +274,7 @@ mod tests {
     fn rebuild_indexes_correctly() {
         let xs = vec![0.0, 4.9, 5.1, 595.0];
         let ys = vec![0.0, 4.9, 5.1, 595.0];
-        let mut g = SpatialGrid::new();
+        let mut g = grid();
         g.rebuild(&xs, &ys);
         // Collect all (cell, idx) by scanning
         let mut found_idx0 = false;
@@ -257,7 +298,7 @@ mod tests {
     fn radius_query_includes_all_within_box() {
         let xs = vec![100.0, 110.0, 120.0, 200.0];
         let ys = vec![100.0, 100.0, 100.0, 100.0];
-        let mut g = SpatialGrid::new();
+        let mut g = grid();
         g.rebuild(&xs, &ys);
         let mut hits = vec![];
         g.for_each_in_radius(110.0, 100.0, 15.0, |i| hits.push(i));
@@ -270,7 +311,7 @@ mod tests {
         // First build: 3 creatures clustered near (0,0).
         let xs = vec![1.0, 2.0, 3.0];
         let ys = vec![1.0, 2.0, 3.0];
-        let mut g = SpatialGrid::new();
+        let mut g = grid();
         g.rebuild(&xs, &ys);
 
         // Second build: same creatures moved to the opposite corner.
@@ -303,7 +344,7 @@ mod tests {
     fn for_each_in_radius_no_seam_wrap() {
         let xs = vec![5.0, 595.0];
         let ys = vec![300.0, 300.0];
-        let mut g = SpatialGrid::new();
+        let mut g = grid();
         g.rebuild(&xs, &ys);
 
         let mut found_b = false;
@@ -324,7 +365,7 @@ mod tests {
     fn for_each_in_radius_edge_query_no_panic() {
         let xs = vec![1.0, 599.0];
         let ys = vec![300.0, 300.0];
-        let mut g = SpatialGrid::new();
+        let mut g = grid();
         g.rebuild(&xs, &ys);
 
         // Query that would go below 0 on x.

@@ -88,6 +88,8 @@ impl World {
         // D3: speed_cap = MOVE_SPEED_MAX for all creatures (constant).
         let speed_cap = MOVE_SPEED_MAX;
         let move_mult = self.sliders.move_cost_multiplier;
+        let world_size = self.dims.world_size;
+        let wrap = self.dims.wrap_world;
         for i in 0..n {
             let vx = self.creatures.vx[i];
             let vy = self.creatures.vy[i];
@@ -101,8 +103,16 @@ impl World {
             let dist = (cvx * cvx + cvy * cvy).sqrt();
             self.creatures.energy[i] -= dist * COST_MOVE_PER_DIST * move_mult;
             self.creatures.distance_travelled[i] += dist;
-            self.creatures.x[i] += cvx;
-            self.creatures.y[i] += cvy;
+            // Toroidal: wrap the velocity step into [0, world_size). Walled: the
+            // final wall-clamp below keeps positions in bounds.
+            let mut nx = self.creatures.x[i] + cvx;
+            let mut ny = self.creatures.y[i] + cvy;
+            if wrap {
+                nx = nx.rem_euclid(world_size);
+                ny = ny.rem_euclid(world_size);
+            }
+            self.creatures.x[i] = nx;
+            self.creatures.y[i] = ny;
         }
 
         self.grid.rebuild(&self.creatures.x, &self.creatures.y);
@@ -134,9 +144,22 @@ impl World {
                 for &j in &neighbors {
                     let xj = self.creatures.x[j];
                     let yj = self.creatures.y[j];
-                    // D3: rj == ri. D7: walled, raw Euclidean displacement.
-                    let dx = xj - xi;
-                    let dy = yj - yi;
+                    // D3: rj == ri. Walled: raw Euclidean displacement.
+                    // Toroidal: minimum-image so seam-neighbors repel the short way.
+                    let mut dx = xj - xi;
+                    let mut dy = yj - yi;
+                    if wrap {
+                        if dx > world_size * 0.5 {
+                            dx -= world_size;
+                        } else if dx < -world_size * 0.5 {
+                            dx += world_size;
+                        }
+                        if dy > world_size * 0.5 {
+                            dy -= world_size;
+                        } else if dy < -world_size * 0.5 {
+                            dy += world_size;
+                        }
+                    }
                     let d2 = dx * dx + dy * dy;
                     let rsum = ri + ri;
                     if d2 < rsum * rsum {
@@ -169,17 +192,23 @@ impl World {
         }
 
         // S31: track whether any position changed to skip the final grid rebuild.
-        // D7: wall-clamp (no wrap). D3: ri is constant CREATURE_SIZE * BODY_RADIUS_PER_SIZE.
+        // Walled: wall-clamp to [ri, world_size-ri]. Toroidal: wrap into
+        // [0, world_size). D3: ri is constant CREATURE_SIZE * BODY_RADIUS_PER_SIZE.
         let mut any_moved = false;
         let ri = CREATURE_SIZE * BODY_RADIUS_PER_SIZE;
         let lo = ri;
-        let hi = WORLD_SIZE - ri;
+        let hi = world_size - ri;
         for i in 0..n {
             if self.scratch_fx[i] != 0.0 || self.scratch_fy[i] != 0.0 {
                 any_moved = true;
             }
-            let new_x = (self.creatures.x[i] + self.scratch_fx[i]).clamp(lo, hi);
-            let new_y = (self.creatures.y[i] + self.scratch_fy[i]).clamp(lo, hi);
+            let px = self.creatures.x[i] + self.scratch_fx[i];
+            let py = self.creatures.y[i] + self.scratch_fy[i];
+            let (new_x, new_y) = if wrap {
+                (px.rem_euclid(world_size), py.rem_euclid(world_size))
+            } else {
+                (px.clamp(lo, hi), py.clamp(lo, hi))
+            };
             if new_x != self.creatures.x[i] || new_y != self.creatures.y[i] {
                 any_moved = true;
             }
@@ -230,6 +259,8 @@ impl World {
         let max_range_sq = max_range * max_range;
         let armor = 0.0_f32;
         let bite_frac = self.sliders.eat_bite_fraction;
+        let world_size = self.dims.world_size;
+        let wrap = self.dims.wrap_world;
 
         // Parallel scan: every per-i body only reads from xs/ys/actions/
         // cooldowns/energies/ids/grid (immutable across threads) and writes
@@ -268,8 +299,21 @@ impl World {
                     if j == i {
                         return false;
                     }
-                    let dx = xs[j] - xi;
-                    let dy = ys[j] - yi;
+                    let mut dx = xs[j] - xi;
+                    let mut dy = ys[j] - yi;
+                    // Toroidal minimum-image so a prey just over the seam is in reach.
+                    if wrap {
+                        if dx > world_size * 0.5 {
+                            dx -= world_size;
+                        } else if dx < -world_size * 0.5 {
+                            dx += world_size;
+                        }
+                        if dy > world_size * 0.5 {
+                            dy -= world_size;
+                        } else if dy < -world_size * 0.5 {
+                            dy += world_size;
+                        }
+                    }
                     let d2 = dx * dx + dy * dy;
                     d2 <= max_range_sq
                 });
@@ -409,6 +453,12 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::super::*;
+
+    // v2.0 Wave 1a: world dims are runtime. `World::new` builds a walled 1200u
+    // world (grass_dim 240), so these module-local constants reproduce the
+    // pre-v2.0 walled-world values the position/grass tests assume.
+    const WORLD_SIZE: f32 = 1200.0;
+    const GRASS_GRID_DIM: usize = 240;
 
     // ---- E.25.d tests ----
     // NOTE: HallOfFame fields (biggest_ever, weirdest, longest_lived, last_survivor)
@@ -644,7 +694,7 @@ mod tests {
     fn graze_n_cell_overlap_sums_capped_deltas() {
         use crate::constants::{
             GRASS_BITES_PER_BLOCK_DEFAULT, GRASS_CELL_SIZE, GRASS_ENERGY_PER_BITE_DEFAULT,
-            GRASS_GRID_DIM, GRASS_MAX,
+            GRASS_MAX,
         };
 
         let mut w = World::new("graze-patch");
@@ -699,7 +749,7 @@ mod tests {
     /// P1e test 3: creature at world seam (x ≈ WORLD_SIZE) overlaps cells on both sides.
     #[test]
     fn graze_wraps_across_world_seam() {
-        use crate::constants::{GRASS_CELL_SIZE, GRASS_GRID_DIM, GRASS_MAX};
+        use crate::constants::{GRASS_CELL_SIZE, GRASS_MAX};
 
         let mut w = World::new("graze-seam");
         let cx = 0.0_f32;
@@ -734,7 +784,7 @@ mod tests {
     fn graze_per_cell_cap_holds() {
         use crate::constants::{
             GRASS_BITES_PER_BLOCK_DEFAULT, GRASS_CELL_SIZE, GRASS_ENERGY_PER_BITE_DEFAULT,
-            GRASS_GRID_DIM, GRASS_MAX,
+            GRASS_MAX,
         };
 
         let mut w = World::new("graze-cap");
@@ -768,9 +818,7 @@ mod tests {
     /// P1e test 5: single ripe cell → gain == GRASS_ENERGY_PER_BITE_DEFAULT.
     #[test]
     fn graze_constant_efficiency_produces_correct_gain() {
-        use crate::constants::{
-            GRASS_CELL_SIZE, GRASS_ENERGY_PER_BITE_DEFAULT, GRASS_GRID_DIM, GRASS_MAX,
-        };
+        use crate::constants::{GRASS_CELL_SIZE, GRASS_ENERGY_PER_BITE_DEFAULT, GRASS_MAX};
 
         let mut w = World::new("graze-const-eff");
         let ix = 5usize;

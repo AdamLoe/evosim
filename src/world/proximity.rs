@@ -83,10 +83,20 @@ fn proximity_starburst() -> &'static [(i32, i32, f32)] {
 }
 
 /// Half-cell offset window used by `build_sector_lut`. The LUT covers integer
-/// cell offsets in `-LUT_RADIUS..=+LUT_RADIUS` along each axis. At v1.5 S6's
-/// `GRASS_CELL_SIZE = 1.25` this covers `PROXIMITY_RANGE = 20` exactly
-/// (20 / 1.25 = 16 cells).
-pub(crate) const LUT_RADIUS: i32 = 16;
+/// cell offsets in `-LUT_RADIUS..=+LUT_RADIUS` along each axis.
+///
+/// v2.0 Wave 1a: recomputed for the 5u grass cell + the raised
+/// `GRASS_PROXIMITY_RANGE = 20`: `ceil(20 / 5) = 4` cells. (Was 16 at the old
+/// 1.25u cell + 8u range.) The grass-sector scan asserts `r_cells <= LUT_RADIUS`.
+/// `f32::ceil` isn't const, so the value is pinned literally and checked below.
+pub(crate) const LUT_RADIUS: i32 = 4;
+// Keep the literal in lockstep with the proximity range / cell size it derives
+// from (ceil division, integer-arithmetic form).
+const _: () = assert!(
+    LUT_RADIUS as usize
+        == (GRASS_PROXIMITY_RANGE as usize).div_ceil(GRASS_CELL_SIZE as usize),
+    "LUT_RADIUS must equal ceil(GRASS_PROXIMITY_RANGE / GRASS_CELL_SIZE)"
+);
 /// LUT side length (`2*LUT_RADIUS + 1 = 33`).
 pub(crate) const LUT_DIM: usize = (LUT_RADIUS as usize) * 2 + 1;
 
@@ -147,12 +157,15 @@ pub(crate) fn build_sector_lut() -> Vec<(u8, u8, f32)> {
 
 /// Wall-proximity intensities — N/S/E/W. 1.0 at the wall, 0.0 at
 /// ≥ `WALL_PROXIMITY_RANGE` units away. Pure arithmetic; no spatial-grid query.
+///
+/// Only meaningful in a walled world (`wrap_world == false`); the NN
+/// `WallProximity` group is dropped entirely when the world wraps.
 #[inline]
-pub(crate) fn compute_wall_proximity(x: f32, y: f32) -> [f32; 4] {
+pub(crate) fn compute_wall_proximity(x: f32, y: f32, world_size: f32) -> [f32; 4] {
     let r = WALL_PROXIMITY_RANGE;
     let n = (1.0 - y / r).clamp(0.0, 1.0);
-    let s = (1.0 - (WORLD_SIZE - y) / r).clamp(0.0, 1.0);
-    let e = (1.0 - (WORLD_SIZE - x) / r).clamp(0.0, 1.0);
+    let s = (1.0 - (world_size - y) / r).clamp(0.0, 1.0);
+    let e = (1.0 - (world_size - x) / r).clamp(0.0, 1.0);
     let w = (1.0 - x / r).clamp(0.0, 1.0);
     [n, s, e, w]
 }
@@ -219,7 +232,10 @@ pub(crate) fn compute_creature_proximity_sectors(
     let range2 = range * range;
     let cell = HASH_CELL;
     let inv_cell = 1.0 / cell;
-    let dim = HASH_DIM as i32;
+    let dim = grid.dims.hash_dim as i32;
+    let wrap = grid.dims.wrap_world;
+    let world_size = grid.dims.world_size;
+    let half_world = world_size * 0.5;
 
     let ix0 = (x * inv_cell).floor() as i32;
     let iy0 = (y * inv_cell).floor() as i32;
@@ -249,12 +265,19 @@ pub(crate) fn compute_creature_proximity_sectors(
             break;
         }
 
-        let ix = ix0 + dxo;
-        let iy = iy0 + dyo;
-        if ix < 0 || ix >= dim || iy < 0 || iy >= dim {
-            continue;
-        }
-        let c = iy as usize * HASH_DIM + ix as usize;
+        let ix_raw = ix0 + dxo;
+        let iy_raw = iy0 + dyo;
+        // Walled: skip out-of-bounds cells. Toroidal: fold the cell across the
+        // seam so the home-cell-relative starburst still lands in a real cell.
+        let (ix, iy) = if wrap {
+            (ix_raw.rem_euclid(dim), iy_raw.rem_euclid(dim))
+        } else {
+            if ix_raw < 0 || ix_raw >= dim || iy_raw < 0 || iy_raw >= dim {
+                continue;
+            }
+            (ix_raw, iy_raw)
+        };
+        let c = iy as usize * grid.dims.hash_dim + ix as usize;
         let s = grid.starts[c] as usize;
         let e = grid.starts[c + 1] as usize;
         for &idx_u32 in &grid.indices[s..e] {
@@ -262,8 +285,22 @@ pub(crate) fn compute_creature_proximity_sectors(
             if j == self_id {
                 continue;
             }
-            let dx = creatures.x[j] - x;
-            let dy = creatures.y[j] - y;
+            let mut dx = creatures.x[j] - x;
+            let mut dy = creatures.y[j] - y;
+            // Toroidal minimum-image: take the short way around each axis so a
+            // neighbor just over the seam reads as close, not a full world away.
+            if wrap {
+                if dx > half_world {
+                    dx -= world_size;
+                } else if dx < -half_world {
+                    dx += world_size;
+                }
+                if dy > half_world {
+                    dy -= world_size;
+                } else if dy < -half_world {
+                    dy += world_size;
+                }
+            }
             let d2 = dx * dx + dy * dy;
             if d2 > range2 {
                 continue;
@@ -325,53 +362,78 @@ pub(crate) fn compute_grass_density_sectors(
     let cell = GRASS_CELL_SIZE;
     let inv_cell = 1.0 / cell;
     let cell_area = cell * cell;
-    let dim = GRASS_GRID_DIM as i32;
+    let dim = grass.dims.grass_dim as i32;
+    let dimu = grass.dims.grass_dim;
+    let wrap = grass.dims.wrap_world;
+    let world_size = grass.dims.world_size;
+    let half_world = world_size * 0.5;
 
-    // Creature cell (in-bounds query positions are clamped at world edges; the
-    // grid walk's lo/hi guards do the rest).
     let cx_cell = (x * inv_cell).floor() as i32;
     let cy_cell = (y * inv_cell).floor() as i32;
-    // No `+ 1` slack: a cell with center at offset (r_cells, 0) is at
-    // `r_cells * cell` world units away. With `r_cells = ceil(range / cell)`,
-    // the farthest in-range cell is at offset `floor(range / cell)`, which
-    // equals LUT_RADIUS at default params. Any cell at offset > LUT_RADIUS is
-    // strictly past `range` and gets culled by `d2 > range2` — no LUT access
-    // outside the ±LUT_RADIUS window.
+    // The farthest in-range cell is at offset ≤ LUT_RADIUS; offsets beyond are
+    // strictly past `range` and culled by `d2 > range2`. Walked by *relative*
+    // offset (dyo, dxo) so the LUT index is the offset itself; wrap folds the
+    // real cell index across the seam, and the displacement uses minimum-image.
     let r_cells = (range * inv_cell).ceil() as i32;
     debug_assert!(
         r_cells <= LUT_RADIUS,
         "r_cells={r_cells} > LUT_RADIUS={LUT_RADIUS}: bump LUT_RADIUS or shrink range"
     );
 
-    let iy_lo = (cy_cell - r_cells).max(0);
-    let iy_hi = (cy_cell + r_cells).min(dim - 1);
-    let ix_lo = (cx_cell - r_cells).max(0);
-    let ix_hi = (cx_cell + r_cells).min(dim - 1);
-
-    for iy in iy_lo..=iy_hi {
+    for dyo in -r_cells..=r_cells {
+        let iy_raw = cy_cell + dyo;
+        let iy = if wrap {
+            iy_raw.rem_euclid(dim)
+        } else {
+            if iy_raw < 0 || iy_raw >= dim {
+                continue;
+            }
+            iy_raw
+        };
         if !grass.row_nonempty(iy as usize) {
             continue;
         }
-        let row_off = iy as usize * GRASS_GRID_DIM;
-        let lut_y = (iy - cy_cell + LUT_RADIUS) as usize;
-        for ix in ix_lo..=ix_hi {
+        let row_off = iy as usize * dimu;
+        let lut_y = (dyo + LUT_RADIUS) as usize;
+        for dxo in -r_cells..=r_cells {
+            let ix_raw = cx_cell + dxo;
+            let ix = if wrap {
+                ix_raw.rem_euclid(dim)
+            } else {
+                if ix_raw < 0 || ix_raw >= dim {
+                    continue;
+                }
+                ix_raw
+            };
             let d = grass.density[row_off + ix as usize];
             if d <= 0.0 {
                 continue;
             }
-            // Cell center in world-units.
-            let cx = (ix as f32 + 0.5) * cell;
-            let cy = (iy as f32 + 0.5) * cell;
-            let dx = cx - x;
-            let dy = cy - y;
+            // Cell center relative to the creature. Use the *unfolded* offset so
+            // wrap measures the short way; equals (cell_center - pos) when walled.
+            let cell_center_x = (cx_cell + dxo) as f32 * cell + 0.5 * cell;
+            let cell_center_y = (cy_cell + dyo) as f32 * cell + 0.5 * cell;
+            let mut dx = cell_center_x - x;
+            let mut dy = cell_center_y - y;
+            if wrap {
+                if dx > half_world {
+                    dx -= world_size;
+                } else if dx < -half_world {
+                    dx += world_size;
+                }
+                if dy > half_world {
+                    dy -= world_size;
+                } else if dy < -half_world {
+                    dy += world_size;
+                }
+            }
             let d2 = dx * dx + dy * dy;
             if d2 > range2 {
                 continue;
             }
-            // LUT covers ±LUT_RADIUS along each axis; r_cells <= LUT_RADIUS
-            // (guaranteed by the debug_assert above + per-frame constants) so
-            // no clamp is needed and the lookup is pure arithmetic.
-            let lut_x = (ix - cx_cell + LUT_RADIUS) as usize;
+            // LUT is indexed by the relative offset; r_cells <= LUT_RADIUS so the
+            // index is always in the ±LUT_RADIUS window.
+            let lut_x = (dxo + LUT_RADIUS) as usize;
             debug_assert!(lut_x < LUT_DIM && lut_y < LUT_DIM);
             let (primary, adj, w) = sector_lut[lut_y * LUT_DIM + lut_x];
             // 1/d² weight, with a small floor to avoid singularity at d=0.
@@ -392,9 +454,13 @@ pub(crate) fn compute_grass_density_sectors(
 mod tests {
     use super::*;
 
+    /// Test world extent (replaces the old `WORLD_SIZE` constant in these
+    /// wall-proximity unit tests, which only need a walled-world size).
+    const WORLD_SIZE: f32 = 1200.0;
+
     #[test]
     fn wall_proximity_corner_is_near_one() {
-        let p = compute_wall_proximity(1.0, 1.0);
+        let p = compute_wall_proximity(1.0, 1.0, WORLD_SIZE);
         // N (y=1) and W (x=1) should be ~0.98; S/E ~0.
         assert!((p[0] - 0.98).abs() < 1e-3, "N = {}", p[0]);
         assert_eq!(p[1], 0.0, "S = {}", p[1]);
@@ -404,7 +470,7 @@ mod tests {
 
     #[test]
     fn wall_proximity_far_from_walls_is_zero() {
-        let p = compute_wall_proximity(WORLD_SIZE * 0.5, WORLD_SIZE * 0.5);
+        let p = compute_wall_proximity(WORLD_SIZE * 0.5, WORLD_SIZE * 0.5, WORLD_SIZE);
         for v in p {
             assert_eq!(v, 0.0, "interior must have all walls at 0");
         }

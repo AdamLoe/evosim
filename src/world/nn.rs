@@ -44,6 +44,7 @@ impl World {
                 let energy_max = self.sliders.energy_max;
                 let split_threshold = self.sliders.split_threshold;
                 let max_age = self.sliders.max_age;
+                let world_size = self.dims.world_size;
                 let stats_ref = std::sync::Arc::clone(&self.nn_stats);
 
                 let chunk_size = chunk_base_size_from_ranges(ranges, n);
@@ -101,6 +102,7 @@ impl World {
                                     energy_max,
                                     split_threshold,
                                     max_age,
+                                    world_size,
                                     pick_t,
                                 );
                                 vx_sub[k] = vx;
@@ -147,6 +149,7 @@ impl World {
             let energy_max = self.sliders.energy_max;
             let split_threshold = self.sliders.split_threshold;
             let max_age = self.sliders.max_age;
+            let world_size = self.dims.world_size;
             let layout = self.nn_input_layout.clone();
             for &(lo, hi) in ranges {
                 let mut input_buf = [0.0f32; MAX_NN_INPUTS];
@@ -177,6 +180,7 @@ impl World {
                         energy_max,
                         split_threshold,
                         max_age,
+                        world_size,
                         pick_t,
                     );
                     self.creatures.vx[i] = vx;
@@ -466,10 +470,42 @@ impl NnInputLayout {
         Self { groups, width }
     }
 
+    /// v2.0 Wave 1a active layout, driven by construction settings.
+    ///
+    /// Drops the `ReservedPredator` group entirely and includes `WallProximity`
+    /// (4 slots) ONLY when the world is walled (`wrap_world == false`).
+    ///
+    /// Wrap on: `SelfMemory(8) + CreatureSectors(8) + GrassSectors(8) +
+    /// CurrGrass(1) + Bias(1) = 26 → padded to 32`. Wrap off adds
+    /// `WallProximity(4)` → `30 → padded to 32`. Both pad to the SIMD-aligned 32,
+    /// so the default topology input width (`NN_INPUTS`) is unchanged and old
+    /// brains (discarded — no save/load) need no migration.
+    pub(crate) fn for_settings(wrap_world: bool) -> Self {
+        let mut groups: Vec<(NnInputGroup, usize)> = Vec::with_capacity(6);
+        groups.push((NnInputGroup::SelfMemory, 8));
+        if !wrap_world {
+            groups.push((NnInputGroup::WallProximity, 4));
+        }
+        groups.push((NnInputGroup::CreatureSectors, NN_SECTORS));
+        groups.push((NnInputGroup::GrassSectors, NN_SECTORS));
+        groups.push((NnInputGroup::CurrGrass, 1));
+        groups.push((NnInputGroup::Bias, 1));
+        let layout = Self::from_groups(&groups);
+        debug_assert_eq!(
+            layout.width(),
+            NN_INPUTS,
+            "default layout (wrap_world={wrap_world}) must pad to NN_INPUTS=32"
+        );
+        layout
+    }
+
     /// Legacy width-32 layout: every group active at its historical width.
     /// Reproduces the pre-v2.0 slot order exactly (8/4/8/8/1/1/1 + 1 pad = 32).
     /// The computed offsets are pinned to the documented legacy slot
     /// constants (`NN_WALL_OFFSET`, …) so any drift is caught at construction.
+    /// v2.0: this is the *calibration anchor* (drift/layout tests) — the active
+    /// world layout comes from `for_settings`, which drops `ReservedPredator`.
+    #[cfg(test)]
     pub(crate) fn legacy() -> Self {
         let layout = Self::from_groups(&[
             (NnInputGroup::SelfMemory, 8),
@@ -549,6 +585,7 @@ pub(crate) fn build_nn_input(
     prev_vy: f32,
     energy_max: f32,
     max_age: u32,
+    world_size: f32,
     timings: Option<&mut BuildTimings>,
 ) -> [f32; MAX_NN_INPUTS] {
     use crate::profiler::clock_now_us_threadsafe;
@@ -581,9 +618,9 @@ pub(crate) fn build_nn_input(
         buf[o + 7] = if cooldown == 0 { 1.0 } else { 0.0 };
     }
 
-    // --- wall_proximity N/S/E/W ---
+    // --- wall_proximity N/S/E/W (present only in walled worlds) ---
     if let Some(o) = layout.offset_of(NnInputGroup::WallProximity) {
-        let walls = proximity::compute_wall_proximity(x, y);
+        let walls = proximity::compute_wall_proximity(x, y, world_size);
         buf[o] = walls[0];
         buf[o + 1] = walls[1];
         buf[o + 2] = walls[2];
@@ -749,6 +786,7 @@ pub(crate) fn pick_action_d(
     energy_max: f32,
     split_threshold: f32,
     max_age: u32,
+    world_size: f32,
     mut timings: Option<&mut PickTimings>,
 ) -> (f32, f32, Action, u8) {
     use crate::profiler::clock_now_us_threadsafe;
@@ -767,6 +805,7 @@ pub(crate) fn pick_action_d(
         prev_vy,
         energy_max,
         max_age,
+        world_size,
         build_arg,
     );
     let t_build_end = if timed { clock_now_us_threadsafe() } else { 0 };
@@ -846,6 +885,7 @@ mod tests {
         let prev_vy = w.creatures.vy[0];
         let energy_max = w.sliders.energy_max;
         let max_age = w.sliders.max_age;
+        let world_size = w.dims.world_size;
         let layout = w.nn_input_layout.clone();
         build_nn_input(
             0,
@@ -859,6 +899,7 @@ mod tests {
             prev_vy,
             energy_max,
             max_age,
+            world_size,
             None,
         )
     }
@@ -875,20 +916,30 @@ mod tests {
         assert!((inp[1] - 0.5).abs() < 1e-5, "age_frac = {}", inp[1]);
     }
 
-    /// Slot 28 is padding — always 0.0 (user override: no predator-color input).
+    /// v2.0: the SIMD trailing-pad lanes (31 in the walled width-32 layout) are
+    /// always 0.0. (The old slot-28 ReservedPredator padding is gone — that slot
+    /// now holds CurrGrass.)
     #[test]
-    fn nn_input_slot_28_is_padding() {
-        let mut w = World::new("s5b-pad28");
+    fn nn_input_trailing_pad_is_zero() {
+        let mut w = World::new("s5b-pad");
         let inp = build_for_founder(&mut w);
-        assert_eq!(inp[28], 0.0, "slot 28 must be padding");
+        // Width is 32; the real layout ends before that, so the last lane is pad.
+        assert_eq!(w.nn_input_layout.width(), 32);
+        assert_eq!(inp[31], 0.0, "trailing SIMD pad lane must be 0.0");
     }
 
-    /// Slot 30 is the bias-learning constant — always 1.0.
+    /// The bias-learning constant lane is always 1.0 (at the layout's Bias
+    /// offset — slot 29 in the walled active layout, no longer the legacy 30).
     #[test]
-    fn nn_input_slot_30_is_one() {
+    fn nn_input_bias_is_one() {
         let mut w = World::new("s5b-bias");
+        let bias_off = w
+            .nn_input_layout
+            .offset_of(NnInputGroup::Bias)
+            .expect("Bias group must be active");
         let inp = build_for_founder(&mut w);
-        assert_eq!(inp[NN_BIAS_SLOT], 1.0, "bias slot must be 1.0");
+        assert_eq!(inp[bias_off], 1.0, "bias slot must be 1.0");
+        assert_eq!(bias_off, 29, "walled active layout puts Bias at 29");
     }
 
     /// Wall-proximity at corner: N≈0.98, W≈0.98 (creature at (1,1), range 50).

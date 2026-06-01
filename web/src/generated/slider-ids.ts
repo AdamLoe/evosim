@@ -23,12 +23,10 @@ export const SLIDER_NAMES = [
   "split_gift",
   "split_jitter",
   "founder_count",
-  "_reserved_curriculum_min_pop",
-  "_reserved_curriculum_max_pop",
-  "_reserved_curriculum_min_factor",
-  "_reserved_auto_curriculum",
-  "full_grass_on_init",
   "max_population",
+  "world_size",
+  "world_seed",
+  "wrap_world",
   "bucket_0_weight",
   "bucket_0_rate",
   "bucket_0_sigma",
@@ -55,7 +53,7 @@ export const SLIDER_NAMES = [
   "bucket_7_sigma",
 ] as const;
 
-export const SLIDER_COUNT = 47 as const;
+export const SLIDER_COUNT = 45 as const;
 
 export type SliderName = (typeof SLIDER_NAMES)[number];
 
