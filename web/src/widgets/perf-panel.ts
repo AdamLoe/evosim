@@ -101,6 +101,33 @@ let popCanvas: HTMLCanvasElement | null = null;
 let popResizeObserver: ResizeObserver | null = null;
 const CHART_HEIGHT_CSS = 120;
 
+// ─── v2.0 Wave 5: per-species population time series ───────────────────────
+//
+// In species mode the pop chart draws one line per LIVE species, each colored
+// by the species' `color_u32` (so chart hues match the canvas exactly). The
+// series are fed by the polled species-table report (`species_table_json`,
+// epoch-gated by the bridge; written every 45 ticks). The producer is empty in
+// single-pool mode, so `speciesMode` stays false and the single pop line draws.
+//
+// Storage: a sparse per-tick sample (`{tick, counts: Map<id,count>}`) plus a
+// species registry (`id → {color_u32, name}`) refreshed from each report.
+// Species appearing/disappearing is handled naturally — a sample simply omits
+// ids absent that tick, and the draw loop treats a missing id as a gap.
+interface SpeciesSample { tick: number; counts: Map<number, number>; }
+interface SpeciesMeta { colorU32: number; name: string; }
+const speciesSamples: SpeciesSample[] = [];
+const speciesRegistry = new Map<number, SpeciesMeta>();
+let speciesMode = false;
+let lastSpeciesSampledTick = -1;
+const SPECIES_SAMPLE_CAP = 500;
+
+// The bridge reference, captured at install so the painted-frame sampler can
+// poll the (epoch-gated, non-blocking) species-table report.
+let moduleBridge: SimBridge | null = null;
+
+interface SpeciesTableEntry { id: number; color_u32: number; name: string; count: number; }
+interface SpeciesTableJson { tick: number; species: SpeciesTableEntry[]; }
+
 // TPS / max-pop selector references (for live syncing).
 let tpsNumInput: HTMLInputElement | null = null;
 let tpsPillButtons: HTMLButtonElement[] = [];
@@ -178,7 +205,52 @@ export function setPanelStatus(args: {
       if (panelVisible) redrawPopChart();
     }
   }
+
+  // v2.0 Wave 5: per-species sampler. Polls the (epoch-gated, non-blocking)
+  // species-table report and pushes one sparse sample per new table tick. In
+  // single-pool mode the report is never written, so this no-ops and the chart
+  // keeps the single pop line.
+  sampleSpeciesTable();
+
   if (panelVisible) redrawFpsTpsChart();
+}
+
+/**
+ * Poll the latest species-table report and, if it carries a newer tick than
+ * the last sampled one, fold it into the per-species time series. The bridge
+ * mirror is epoch-gated and the resolved promise is already settled, so this
+ * never blocks the RAF loop. Marks `speciesMode = true` once any species data
+ * arrives, switching the pop chart to multi-line.
+ */
+function sampleSpeciesTable(): void {
+  if (!moduleBridge) return;
+  // The bridge keeps the freshest species-table JSON in a synchronous mirror
+  // (updated only when the SAB epoch advances), so this read is allocation-free
+  // and never blocks the RAF loop.
+  const cached = moduleBridge.latestSpeciesTable();
+  if (cached === null) return;
+  let table: SpeciesTableJson;
+  try {
+    table = JSON.parse(cached) as SpeciesTableJson;
+  } catch {
+    return;
+  }
+  if (!Array.isArray(table.species)) return;
+  // Single-pool reports (should never reach here since the producer skips them)
+  // carry an empty list — ignore so we don't flip into species mode.
+  if (table.species.length === 0 && !speciesMode) return;
+  speciesMode = true;
+  if (table.tick === lastSpeciesSampledTick) return;
+  lastSpeciesSampledTick = table.tick;
+
+  const counts = new Map<number, number>();
+  for (const e of table.species) {
+    counts.set(e.id, e.count);
+    speciesRegistry.set(e.id, { colorU32: e.color_u32 >>> 0, name: e.name });
+  }
+  speciesSamples.push({ tick: table.tick, counts });
+  if (speciesSamples.length > SPECIES_SAMPLE_CAP) speciesSamples.shift();
+  if (panelVisible) redrawPopChart();
 }
 
 /** Drop all recorded samples so charts start fresh after a world restart. */
@@ -187,10 +259,27 @@ export function resetPanelSamples(): void {
   popSamples.length = 0;
   lastPopSampledTick = -1;
   paintedFrameTimestamps.length = 0;
+  // v2.0 Wave 5: clear the per-species series + drop back to single-pool mode.
+  // A restart into single-pool must not keep painting stale species lines; a
+  // restart into species mode re-arms `speciesMode` on the first fresh report.
+  speciesSamples.length = 0;
+  speciesRegistry.clear();
+  speciesMode = false;
+  lastSpeciesSampledTick = -1;
   if (panelVisible) {
     redrawFpsTpsChart();
     redrawPopChart();
   }
+}
+
+/**
+ * v2.0 Wave 5: re-point the species-table poll at a fresh bridge after a world
+ * restart (each restart spawns a new SimBridge; the old one is terminated and
+ * its cached report frozen). Call this from `restart()` right after the new
+ * bridge is live so the per-species graph reads the new world's table.
+ */
+export function setPanelBridge(simBridge: SimBridge): void {
+  moduleBridge = simBridge;
 }
 
 // ─── Installer ────────────────────────────────────────────────────────────
@@ -198,6 +287,11 @@ export function resetPanelSamples(): void {
 export function installProfilerPanel(simBridge: SimBridge): void {
   const box = document.getElementById("perf-box") as HTMLDivElement | null;
   if (!box) return;
+
+  // v2.0 Wave 5: capture the bridge so the painted-frame sampler can poll the
+  // species-table report for the per-species pop graph. main.ts re-points this
+  // via `setPanelBridge` on every restart (each restart is a fresh bridge).
+  moduleBridge = simBridge;
 
   buildPanelDom(box, simBridge);
 
@@ -640,7 +734,20 @@ function drawSeries(
   ctx.stroke();
 }
 
+// v2.0 Wave 5: RGBA8-packed u32 (LE: R bits 0..8, G 8..16, B 16..24) → CSS
+// rgb() string. Same decode the renderer + inspector use for the body color, so
+// chart hues match the canvas exactly.
+function colorU32ToCss(packed: number): string {
+  const p = packed >>> 0;
+  return `rgb(${p & 0xff}, ${(p >>> 8) & 0xff}, ${(p >>> 16) & 0xff})`;
+}
+
 function redrawPopChart(): void {
+  // Species mode: one line per live species, fed by the polled species table.
+  if (speciesMode) {
+    redrawSpeciesChart();
+    return;
+  }
   const canvas = popCanvas;
   if (!canvas) return;
   const ctx = canvas.getContext("2d");
@@ -702,6 +809,108 @@ function redrawPopChart(): void {
   ctx.fillText(`max: ${ymax.toFixed(0)}`, padLeft, 2);
   ctx.textAlign = "right";
   ctx.fillText(`now: ${last.population.toFixed(0)}`, Wcss - padRight, 2);
+  ctx.textBaseline = "bottom";
+  ctx.textAlign = "left";
+  ctx.fillText(`t=${xmin}`, padLeft, Hcss - 2);
+  ctx.textAlign = "right";
+  ctx.fillText(`t=${xmax}`, Wcss - padRight, Hcss - 2);
+}
+
+// v2.0 Wave 5: per-species population chart. Draws one line per species that
+// appears in the sample window, colored by its `color_u32`. Handles species
+// appearing/disappearing: each sample is a sparse `id → count` map, so a line
+// only spans the ticks where its species was alive (a missing id breaks the
+// line, leaving a gap rather than a drop to zero).
+function redrawSpeciesChart(): void {
+  const canvas = popCanvas;
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const Wcss = canvas.width / dpr;
+  const Hcss = canvas.height / dpr;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.scale(dpr, dpr);
+
+  const gridColor = readCssVar("--chart-grid", "rgba(255,255,255,0.10)");
+  const fgFaint = readCssVar("--fg-faint", "rgba(255,255,255,0.5)");
+
+  if (speciesSamples.length < 2) {
+    ctx.fillStyle = fgFaint;
+    ctx.font = "10px ui-monospace, monospace";
+    ctx.fillText("species pop: waiting…", 4, 14);
+    return;
+  }
+
+  // Shared y-axis: max single-species count across the window (hard floor 1).
+  let ymax = 1;
+  for (const s of speciesSamples) {
+    for (const c of s.counts.values()) if (c > ymax) ymax = c;
+  }
+  const xmin = speciesSamples[0].tick;
+  const xmax = speciesSamples[speciesSamples.length - 1].tick;
+  const xrange = Math.max(1, xmax - xmin);
+
+  const padLeft = 4;
+  const padRight = 4;
+  const padTop = 16;
+  const padBottom = 14;
+  const plotW = Math.max(1, Wcss - padLeft - padRight);
+  const plotH = Math.max(1, Hcss - padTop - padBottom);
+
+  // Midline gridline (matches the single-pool chart's grid).
+  ctx.strokeStyle = gridColor;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  const midY = padTop + plotH * 0.5;
+  ctx.moveTo(padLeft, midY);
+  ctx.lineTo(Wcss - padRight, midY);
+  ctx.stroke();
+
+  // Union of all species ids that appear anywhere in the window.
+  const ids = new Set<number>();
+  for (const s of speciesSamples) for (const id of s.counts.keys()) ids.add(id);
+
+  const lastSample = speciesSamples[speciesSamples.length - 1];
+  let total = 0;
+  for (const c of lastSample.counts.values()) total += c;
+
+  // Draw one polyline per species; break the path across ticks where the
+  // species is absent so disappearing species leave a gap, not a false zero.
+  ctx.lineWidth = 1.5;
+  for (const id of ids) {
+    const meta = speciesRegistry.get(id);
+    ctx.strokeStyle = meta ? colorU32ToCss(meta.colorU32) : "#888";
+    ctx.beginPath();
+    let penDown = false;
+    for (let i = 0; i < speciesSamples.length; i++) {
+      const sample = speciesSamples[i];
+      const count = sample.counts.get(id);
+      if (count === undefined) {
+        penDown = false;
+        continue;
+      }
+      const sx = padLeft + ((sample.tick - xmin) / xrange) * plotW;
+      const sy = padTop + (1 - count / ymax) * plotH;
+      if (!penDown) {
+        ctx.moveTo(sx, sy);
+        penDown = true;
+      } else {
+        ctx.lineTo(sx, sy);
+      }
+    }
+    ctx.stroke();
+  }
+
+  // Labels: ymax + live-species count top corners; tick span along the bottom.
+  ctx.fillStyle = fgFaint;
+  ctx.font = "10px ui-monospace, monospace";
+  ctx.textBaseline = "top";
+  ctx.textAlign = "left";
+  ctx.fillText(`max: ${ymax.toFixed(0)}`, padLeft, 2);
+  ctx.textAlign = "right";
+  ctx.fillText(`${lastSample.counts.size} species · ${total}`, Wcss - padRight, 2);
   ctx.textBaseline = "bottom";
   ctx.textAlign = "left";
   ctx.fillText(`t=${xmin}`, padLeft, Hcss - 2);

@@ -156,6 +156,9 @@ function renderInspector(data: CreatureInspectJson): void {
   const speciesBlock = document.getElementById("ins-species-block");
   if (data.species_id !== undefined && data.species_color !== undefined) {
     if (speciesBlock) speciesBlock.style.display = "";
+    // v2.0 Wave 5: lead with the human species name (e.g. "Species-I"); keep
+    // the numeric id as a dim trailing tag for disambiguation.
+    set("ins-species-name", data.species_name ?? `Species-#${data.species_id}`);
     set("ins-species-id", `#${data.species_id}`);
     // species_color is an RGBA8-packed u32 (LE: R bits 0..8, G 8..16, B 16..24)
     // — the same lane/decode the renderer uses for the body color.
@@ -165,6 +168,9 @@ function renderInspector(data: CreatureInspectJson): void {
     const b255 = (packed >>> 16) & 0xff;
     const swatch = document.getElementById("ins-species-swatch");
     if (swatch) swatch.style.backgroundColor = `rgb(${r255}, ${g255}, ${b255})`;
+    // v2.0 Wave 5: species-history breadcrumb. Always empty in v2.0 (no splits
+    // yet) — render an em-dash placeholder; the area is plumbed for v2.1 to
+    // show the ancestral lineage as "Species-A → Species-D → …".
     const history = data.species_history ?? [];
     set("ins-species-history", history.length === 0 ? "—" : history.join(" → "));
   } else if (speciesBlock) {
@@ -210,9 +216,11 @@ export interface CreatureInspectJson {
   // v2.0 Wave 3b: species fields — present only in species mode (the Rust
   // creature_inspect_json omits them in single-pool mode). `species_color` is
   // the RGBA8-packed u32 the renderer paints into color_u32 (r | g<<8 | b<<16 |
-  // a<<24). `species_history` is the Wave-5 breadcrumb — always empty in v2.0.
+  // a<<24). `species_name` is the human label (e.g. "Species-I"). `species_history`
+  // is the breadcrumb — always empty in v2.0 (no splits yet), plumbed for v2.1.
   species_id?: number;
   species_color?: number;
+  species_name?: string;
   species_history?: number[];
 }
 

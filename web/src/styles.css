@@ -689,6 +689,17 @@ button {
   color: var(--fg);
 }
 
+/* v2.0 Wave 5: inspector species name + numeric-id tag + history breadcrumb. */
+.ins-species-id-tag {
+  margin-left: 6px;
+  font: 11px ui-monospace, monospace;
+  color: var(--fg-faint);
+}
+.ins-species-history {
+  font: 11px ui-monospace, monospace;
+  color: var(--fg-muted);
+}
+
 /* CPU Process Monitor table (lives inside the bottom perf panel as of
    v1.13 Wave 2; was the right-rail Monitor tab's worker-stats panel). */
 .worker-stats-table {

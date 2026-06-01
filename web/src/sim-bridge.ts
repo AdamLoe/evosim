@@ -45,6 +45,8 @@ import {
   CTRL_RESET_JANK_EPOCH,
   CTRL_SEQ,
   CTRL_SLIDERS_BASE,
+  CTRL_SPECIES_TABLE_EPOCH,
+  CTRL_SPECIES_TABLE_LEN,
   CTRL_TARGET_TPS_BITS,
   INSPECT_RESP_CAP,
   INSPECT_RESP_OFFSET,
@@ -52,6 +54,8 @@ import {
   NN_STATS_OFFSET,
   PROFILE_REPORT_CAP,
   PROFILE_REPORT_OFFSET,
+  SPECIES_TABLE_CAP,
+  SPECIES_TABLE_OFFSET,
 } from "./generated/control-sab";
 import { SLIDER_INDEX } from "./generated/slider-ids";
 
@@ -326,10 +330,12 @@ export class SimBridge {
   private lastInspectRespEpoch = 0;
   private lastProfileReportEpoch = 0;
   private lastNnStatsEpoch = 0;
+  private lastSpeciesTableEpoch = 0;
 
   // Cached latest payload bytes per response slot. Filled by the response poller.
   private latestProfileReportJson: string | null = null;
   private latestNnStatsJson: string | null = null;
+  private latestSpeciesTableJson: string | null = null;
 
   // Drives the per-frame poll of all SAB response slots. Started on attach,
   // stopped on terminate. Uses `setInterval` at 60 Hz so inspector responses
@@ -369,6 +375,7 @@ export class SimBridge {
     this.lastInspectRespEpoch = Atomics.load(this.ctrlI32, CTRL_INSPECT_RESP_EPOCH);
     this.lastProfileReportEpoch = Atomics.load(this.ctrlI32, CTRL_PROFILE_REPORT_EPOCH);
     this.lastNnStatsEpoch = Atomics.load(this.ctrlI32, CTRL_NN_STATS_EPOCH);
+    this.lastSpeciesTableEpoch = Atomics.load(this.ctrlI32, CTRL_SPECIES_TABLE_EPOCH);
     this.responsePoller = setInterval(() => this.pollResponses(), 1000 / 60);
   }
 
@@ -521,6 +528,18 @@ export class SimBridge {
     return Promise.resolve(this.latestNnStatsJson);
   }
 
+  /**
+   * Latest species-table report JSON mirrored from SAB, or null if none has
+   * been observed yet. Synchronous (no Promise) so the pop-graph RAF sampler
+   * can read it allocation-free on the hot path. The worker writes this every
+   * 45 ticks in species mode only — single-pool never writes it, so this stays
+   * null and the Wave-5 pop graph keeps its single-pool line. Shape:
+   * `{ tick, species: [{ id, color_u32, name, count }, …] }`.
+   */
+  latestSpeciesTable(): string | null {
+    return this.latestSpeciesTableJson;
+  }
+
   // ─── Tear-down ──────────────────────────────────────────────────────────
 
   terminate(): void {
@@ -575,6 +594,15 @@ export class SimBridge {
       const len = Atomics.load(this.ctrlI32, CTRL_NN_STATS_LEN) >>> 0;
       this.latestNnStatsJson = this.decodeBytes(NN_STATS_OFFSET, NN_STATS_CAP, len);
       this.lastNnStatsEpoch = nnEpoch;
+    }
+
+    // v2.0 Wave 5: per-species table (species mode only; epoch never advances
+    // in single-pool so this stays untouched).
+    const speciesEpoch = Atomics.load(this.ctrlI32, CTRL_SPECIES_TABLE_EPOCH);
+    if (speciesEpoch !== this.lastSpeciesTableEpoch) {
+      const len = Atomics.load(this.ctrlI32, CTRL_SPECIES_TABLE_LEN) >>> 0;
+      this.latestSpeciesTableJson = this.decodeBytes(SPECIES_TABLE_OFFSET, SPECIES_TABLE_CAP, len);
+      this.lastSpeciesTableEpoch = speciesEpoch;
     }
 
     // GC stale inspect request.

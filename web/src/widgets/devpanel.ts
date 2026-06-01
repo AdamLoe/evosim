@@ -802,10 +802,13 @@ export function installDevPanel(getBridge: () => SimBridge): void {
   speciesSec.appendChild(matingCooldownRow);
   box.appendChild(speciesSec);
 
-  // ── Eat ──
-  const eatSec = section("Eat");
+  // ── Attack ──
+  // v2.0 Wave 5: the action was renamed Eat→Attack; label text only. The
+  // slider's `simName` ("eat_bite_fraction") is the Rust wire name — DO NOT
+  // rename it or the slider stops applying.
+  const eatSec = section("Attack");
   eatSec.appendChild(makeStagedSlider({
-    label: "Bite fraction",
+    label: "Attack bite fraction",
     simName: "eat_bite_fraction",
     settingKey: "eatBiteFrac",
     min: 0, max: 1, step: 0.01,

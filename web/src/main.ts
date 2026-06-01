@@ -12,6 +12,7 @@ import {
   setProfilerVisible,
   setPanelStatus,
   resetPanelSamples,
+  setPanelBridge,
 } from "./widgets/perf-panel";
 import {
   installDevPanel,
@@ -229,6 +230,9 @@ async function main(): Promise<void> {
     const oldBridge = simBridge;
     simBridge = await spawnSimWorker("");
     oldBridge.terminate();
+    // v2.0 Wave 5: re-point the perf panel's species-table poll at the new
+    // bridge (the old one is now terminated, its species report frozen).
+    setPanelBridge(simBridge);
     resetPanelSamples();
     resetInspectorSelection(rail);
     highlights.clear();
