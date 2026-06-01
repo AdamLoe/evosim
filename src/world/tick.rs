@@ -91,17 +91,25 @@ impl World {
         let world_size = self.dims.world_size;
         let wrap = self.dims.wrap_world;
         for i in 0..n {
+            // v2.0 Wave 1b: biome base-severity penalty `p` for the cell the
+            // creature currently occupies. Two of its three effects apply here:
+            // a reduced effective speed cap and a higher move-cost multiplier.
+            // (The third — extra upkeep — is in energy_bookkeeping.) Wave 2 will
+            // modulate `p` per genome; here it's genome-independent.
+            let p = self.movement_penalty_at(self.creatures.x[i], self.creatures.y[i]);
+            let eff_speed_cap = speed_cap * (1.0 - K_BIOME_SPEED * p);
+            let eff_move_mult = move_mult * (1.0 + K_BIOME_COST * p);
             let vx = self.creatures.vx[i];
             let vy = self.creatures.vy[i];
             let mag2 = vx * vx + vy * vy;
-            let (cvx, cvy) = if speed_cap > 0.0 && mag2 > speed_cap * speed_cap {
-                let s = speed_cap / mag2.sqrt();
+            let (cvx, cvy) = if eff_speed_cap > 0.0 && mag2 > eff_speed_cap * eff_speed_cap {
+                let s = eff_speed_cap / mag2.sqrt();
                 (vx * s, vy * s)
             } else {
                 (vx, vy)
             };
             let dist = (cvx * cvx + cvy * cvy).sqrt();
-            self.creatures.energy[i] -= dist * COST_MOVE_PER_DIST * move_mult;
+            self.creatures.energy[i] -= dist * COST_MOVE_PER_DIST * eff_move_mult;
             self.creatures.distance_travelled[i] += dist;
             // Toroidal: wrap the velocity step into [0, world_size). Walled: the
             // final wall-clamp below keeps positions in bounds.
@@ -386,6 +394,13 @@ impl World {
                 let age_mult = PAST_LIFESPAN_MULT.powf(excess / 1000.0);
                 up *= age_mult.min(1e6);
             }
+
+            // v2.0 Wave 1b: extra per-tick upkeep for standing in a penalized
+            // biome (the third movement-penalty effect). Added AFTER the
+            // age-multiplier so the biome surcharge is a flat additive drain,
+            // not amplified by old age. Genome-independent in Wave 1b.
+            let p = self.movement_penalty_at(self.creatures.x[i], self.creatures.y[i]);
+            up += K_BIOME_UPKEEP * p;
 
             // D3: max_size_reached removed (was always CREATURE_SIZE anyway).
             self.creatures.energy[i] -= up;

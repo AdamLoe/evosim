@@ -40,6 +40,42 @@ the seam when on. When off they keep the walled clamp-to-`[ri, world_size-ri]`
 behavior and the 4 wall-proximity NN inputs are present. The legacy test ctor
 `World::new` pins a walled 1200u world.
 
+### Biome map + movement penalty (v2.0 Wave 1b)
+
+At construction the world generates a **static biome grid** (one `Biome` u8 per
+grass cell: `Plains=0, Water=1, Desert=2`) deterministically from the numeric
+`world_seed`, using a **dedicated SplitMix64 PRNG** that is *independent* of the
+string/XxHash64 sim RNG (so the biome map pins to `world_seed` alone while the
+live run still varies). The generator (`src/world/biome.rs`) scatters a few
+large **blobs** — 2..4 water centers + 2..4 desert centers, each radius
+`0.13..0.18 × world_size` — over a Plains background; a cell inside a water blob
+is Water, inside a desert blob (and no water) is Desert, else Plains (water wins
+overlaps). Distance to a blob center is **toroidal** when `wrap_world`. Tuned
+proportions land near **plains ~60% / water ~20% / desert ~20%** (plains always
+the plurality). The grid is stored sim-side on `World.biome_grid` for O(1)
+per-tick `biome_at` / `movement_penalty_at` lookups and copied byte-for-byte
+into the boot `biome_buf` SAB.
+
+Each non-Plains biome carries a **base severity** `p ∈ [0, 1]` — the
+live-tunable `water_movement_penalty` (default **0.8**) / `desert_movement_penalty`
+(default **0.4**) sliders; Plains = 0. (Wave 2 will modulate `p` per genome via
+`water_affinity` / `heat_tolerance`; in Wave 1b the penalty is
+genome-independent.) While a creature stands in a penalized cell, `p` drives
+**three effects each tick**, each scaled by a built-in balance-knob coefficient
+(`src/constants.rs`):
+
+- **reduced effective move speed** — the speed cap is `MOVE_SPEED_MAX ×
+  (1 − K_BIOME_SPEED·p)`, `K_BIOME_SPEED = 0.6` (`apply_movement_and_repulsion`);
+- **higher move-cost multiplier** — the per-distance move cost is `×
+  (1 + K_BIOME_COST·p)`, `K_BIOME_COST = 1.0` (same pass);
+- **extra per-tick upkeep** — `upkeep += K_BIOME_UPKEEP·p`, `K_BIOME_UPKEEP = 0.5`,
+  added as a flat surcharge after the age multiplier (`energy_bookkeeping`).
+
+Coefficients are tuned **survivable short-term**: at default sliders a
+full-energy (100) creature drains ≈0.75 energy/tick on water (≈130 ticks) and
+≈0.5/tick on desert (≈195 ticks), so a dash across is easily survivable but
+sustained residence is not.
+
 ## What it owns
 
 - The `World` struct, `CreatureSoA`, `GrassGrid`, `SpatialGrid`, `SimRng`,
@@ -114,11 +150,14 @@ the sole mutation entry point. Bools (`wrap_world`) ride the same path as `0|1`.
 **v2.0 Wave 1a slider changes:** the four `_reserved_curriculum_*` slots and
 `full_grass_on_init` are **dropped** from `SLIDER_NAMES`; the construction
 settings `world_size` (18), `world_seed` (19), `wrap_world` (20) are **added**;
-`max_population` moves to 17 and `SLIDER_BUCKET_BASE` shifts 23→21
-(`SLIDER_COUNT = 45`). `full_grass_on_init` remains a `DevSliders` field carried
-through the boot construction call (`newWithFounderCount`), just not a live
-slider. Regenerate `web/src/generated/slider-ids.ts` via `cargo run --bin
-gen-bindings` (the `bindings_in_sync` test guards it).
+`max_population` moves to 17. `full_grass_on_init` remains a `DevSliders` field
+carried through the boot construction call (`newWithFounderCount`), just not a
+live slider.
+**v2.0 Wave 1b slider changes:** two live biome movement-penalty sliders are
+added — `water_movement_penalty` (**21**, default 0.8) and
+`desert_movement_penalty` (**22**, default 0.4) — so `SLIDER_BUCKET_BASE` shifts
+21→**23** and `SLIDER_COUNT = 47`. Regenerate `web/src/generated/slider-ids.ts`
+via `cargo run --bin gen-bindings` (the `bindings_in_sync` test guards it).
 
 ## Tick step order
 
@@ -161,36 +200,47 @@ checks in `NnTopology::with_input_width`, which replaced the old compile-time
 `MAX_NN_INPUTS`-sized buffer; only the active `width()` lanes are populated.
 
 The **active layout** is driven by construction settings
-(`NnInputLayout::for_settings(wrap_world)`, v2.0 Wave 1a): the
-`ReservedPredator` group is **dropped**, and `WallProximity` (4 slots) is present
-**only when `wrap_world == false`**. Both default layouts pad to the SIMD-aligned
-32, so the default topology input width (`NN_INPUTS = 32`) is unchanged.
+(`NnInputLayout::for_settings(wrap_world)`, v2.0 Wave 1b): the
+`ReservedPredator` group is **dropped**, `WallProximity` (4 slots) is present
+**only when `wrap_world == false`**, and the two biome groups — `BiomeDir` (4:
+N/S/E/W) + `CurrCellPenalty` (1) — are **always-on in BOTH wrap modes**. So the
+active width is **32 (wrap on)** or **40 (wrap off)**; the topology's
+`input_width` is reconciled to the layout width at construction (the wrap-off
+width grew 32→40 vs Wave 1a — old brains are discarded, no save/load).
 
-Default (wrap **on**) — real width 26 → padded 32:
+Default (wrap **on**) — real width 31 → padded 32:
 
 | Slot | Group / inputs |
 |---|---|
 | `[0..8)` | `SelfMemory`: hunger, age_frac, prev_vx, prev_vy, is_last_graze, is_last_eat, ticks_since_split_norm, cooldown_ready |
 | `[8..16)` | `CreatureSectors` × 8 world-aligned sectors (range `PROXIMITY_RANGE = 20u`) |
 | `[16..24)` | `GrassSectors` × 8 sectors (range `GRASS_PROXIMITY_RANGE = 20u`) |
-| `[24]` | `CurrGrass`: curr_grass_density (under the body) |
-| `[25]` | `Bias` — `1.0` (bias-learning constant) |
-| `[26..32)` | trailing pad (0.0) — SIMD alignment to 32 |
+| `[24..28)` | `BiomeDir`: movement penalty one cell N/S/E/W (base severity, wrap-aware) |
+| `[28]` | `CurrCellPenalty`: movement penalty under the body |
+| `[29]` | `CurrGrass`: curr_grass_density (under the body) |
+| `[30]` | `Bias` — `1.0` (bias-learning constant) |
+| `[31]` | trailing pad (0.0) — SIMD alignment to 32 |
 
-Walled (wrap **off**) — real width 30 → padded 32 — inserts
+Walled (wrap **off**) — real width 35 → padded **40** — inserts
 `WallProximity` N/S/E/W (range `WALL_PROXIMITY_RANGE = 50u`) at `[8..12)`,
 shifting `CreatureSectors`→`[12..20)`, `GrassSectors`→`[20..28)`,
-`CurrGrass`→`[28]`, `Bias`→`[29]`, pad `[30..32)`.
+`BiomeDir`→`[28..32)`, `CurrCellPenalty`→`[32]`, `CurrGrass`→`[33]`,
+`Bias`→`[34]`, pad `[35..40)`.
+
+Width table (wrap × {on, off}): **wrap on = 26+5 = 31 → pad 32; wrap off =
+30+5 = 35 → pad 40** (the `+5` is the always-on `BiomeDir`+`CurrCellPenalty`).
+The biome inputs are all base-severity penalties in `[0, 1]`, sampled wrap-aware
+alongside the existing input build (`BiomeSampler` in `src/world/nn.rs`).
 
 `GRASS_PROXIMITY_RANGE` was raised **8u → 20u** so each of the 8 grass sectors
 spans `ceil(20/5) = 4` grass cells (≥3) at the 5u cell; the sector LUT radius
 `LUT_RADIUS` is recomputed to **4** (was 16 at the old 1.25u cell). The
-`NnInputLayout::legacy()` width-32 anchor (all 7 groups, ReservedPredator at
-`[28]`) survives as a **test-only** calibration baseline. Group offsets + total
-width are **recomputed by the descriptor** when the active group set changes — no
-hand-maintained slot constants in the build path. The legacy `weight_count` is
-unchanged: `32*48 + 48*24 + 24*5 = 2808`, and old brains are discarded (no
-save/load).
+`NnInputLayout::legacy()` width-32 anchor (the historical 7 groups,
+ReservedPredator at `[28]`, no biome groups) survives as a **test-only**
+calibration baseline. Group offsets + total width are **recomputed by the
+descriptor** when the active group set changes — no hand-maintained slot
+constants in the build path. The SIMD-vs-scalar drift guard now exercises BOTH
+input widths (32 and 40). Old brains are discarded (no save/load).
 
 Outputs: `out[0] = vx`, `out[1] = vy`, `out[2..5]` = action logits for
 `{Graze=0, Eat=1, Split=2}`. Hidden layers use Leaky ReLU (slope 0.01).
@@ -205,8 +255,12 @@ Founder weights are pure uniform-random — no hardwiring.
 - `src/world/tick.rs` → `apply_movement_and_repulsion`, `graze`, `eat`,
   `energy_bookkeeping`, `collect_deaths`, `color_ema_update`.
 - `src/world/nn.rs` → `nn_forward_all_chunks`, `build_nn_input`,
-  `NnInputLayout` / `NnInputGroup` (composable input-layout descriptor),
-  `decode_action`, `chunk_ranges`, `dynamic_chunks`, `PickTimings`.
+  `NnInputLayout` / `NnInputGroup` (composable input-layout descriptor, incl.
+  the `BiomeDir` + `CurrCellPenalty` groups), `BiomeSampler` (biome NN-input
+  view), `decode_action`, `chunk_ranges`, `dynamic_chunks`, `PickTimings`.
+- `src/world/biome.rs` → `generate_biome_grid` (SplitMix64 blob generator from
+  `world_seed`), `biome_from_u8`. `World::biome_at` / `movement_penalty_at` /
+  `biome_grid_bytes` live in `src/world/mod.rs`.
 - `src/world/nn_stats.rs` → `NnStats`.
 - `src/world/proximity.rs` → `LUT_RADIUS = 4` / `LUT_DIM`, sector LUT build,
   wall + creature + grass proximity helpers (all wrap-aware via the grid/grass
@@ -228,7 +282,11 @@ Founder weights are pure uniform-random — no hardwiring.
   `WORLD_SIZE_DEFAULT = 9600`, `WRAP_WORLD_DEFAULT = true`,
   `GRASS_CELL_SIZE = 5.0`, `HASH_CELL = 10.0`,
   `GRASS_PROXIMITY_RANGE = 20.0`, `Biome` enum `{Plains=0, Water=1, Desert=2}`
-  (u8; Wave 1b populates it),
+  (u8; generated from `world_seed` in `src/world/biome.rs`),
+  the biome movement-penalty balance knobs `K_BIOME_SPEED = 0.6` /
+  `K_BIOME_UPKEEP = 0.5` / `K_BIOME_COST = 1.0` + slider defaults
+  `WATER_MOVEMENT_PENALTY_DEFAULT = 0.8` / `DESERT_MOVEMENT_PENALTY_DEFAULT = 0.4`
+  and `NN_BIOME_DIRS = 4`,
   `MAX_POP_FOR_SIM = 32_000`,
   `MAX_POPULATION_DEFAULT = 8_000` (TS lowers to 2000 on first boot when
   `navigator.hardwareConcurrency < 8`),

@@ -322,6 +322,73 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 - **Revisit when**: a use case appears that genuinely needs durable
   per-creature identity or cross-session continuity.
 
+### Biome map: a few large blobs from `world_seed` via a dedicated PRNG (v2.0 Wave 1b)
+
+- **Decision**: The static biome grid is generated from a **dedicated
+  SplitMix64 PRNG seeded by `world_seed`**, independent of the
+  string/XxHash64 sim RNG. The generator scatters a few **large blobs**
+  (2..4 water + 2..4 desert, radius `0.13..0.18 × world_size`) over a
+  Plains background; water wins overlaps; distance is toroidal when
+  `wrap_world`. Tuned to ~plains 60% / water 20% / desert 20%.
+- **Why**: A separate stream lets the map pin to `world_seed` alone (so
+  it is reproducible / shareable) while the live run still varies on the
+  sim RNG. Large blobs (not noise speckle) give creatures a navigable,
+  legible landscape and let the directional biome NN inputs carry a real
+  gradient. SplitMix64 is trivial, fast, and never touches the sim RNG
+  draw order.
+- **Applies to**: `architecture/simulation-core.md`,
+  `src/world/biome.rs → generate_biome_grid`, `src/world/mod.rs`.
+- **Tradeoffs**: Blob count/radius are balance knobs (constants in
+  `biome.rs`); proportions are statistical, not exact per seed. The grid
+  is `grass_cell_count` u8 — same size as the snapshot grass region.
+- **Revisit when**: biomes need finer structure (rivers, gradients) or a
+  third+ biome kind, or the target proportions change.
+
+### Biome movement penalty: one base severity → three effects, survivable short-term (v2.0 Wave 1b)
+
+- **Decision**: Each non-Plains biome carries a single live-tunable base
+  severity `p ∈ [0, 1]` (`water_movement_penalty` 0.8 /
+  `desert_movement_penalty` 0.4; Plains 0). While a creature is on that
+  cell, `p` drives three effects — reduced speed cap (`× (1 −
+  0.6·p)`), higher move cost (`× (1 + 1.0·p)`), and extra upkeep (`+
+  0.5·p`) — each with a built-in coefficient constant (`K_BIOME_*`).
+  Genome modulation (`water_affinity` / `heat_tolerance`) is deferred to
+  Wave 2; in Wave 1b the penalty is genome-independent.
+- **Why**: One knob per biome keeps the live tuning surface tiny while
+  the three effects make a biome both *slower to cross* and *costly to
+  linger in*. The coefficients are tuned **survivable short-term**: a
+  full-energy creature can dash across water/desert (~130 / ~195 ticks of
+  budget) but cannot homestead there. The directional biome NN inputs let
+  brains learn to route around penalized cells.
+- **Applies to**: `architecture/simulation-core.md`,
+  `src/world/tick.rs → apply_movement_and_repulsion / energy_bookkeeping`,
+  `src/constants.rs` (the `K_BIOME_*` balance knobs).
+- **Tradeoffs**: `K_BIOME_*` are global balance knobs, not per-biome; the
+  per-biome severity is the live knob. The penalty samples the cell under
+  the body (and one cell N/S/E/W for the NN), not a sub-cell gradient.
+- **Revisit when**: Wave 2 adds genome modulation, or the
+  survivability/cross-time balance needs retuning.
+
+### Biome NN inputs: always-on `BiomeDir` (4) + `CurrCellPenalty` (1) (v2.0 Wave 1b)
+
+- **Decision**: Two input groups are added to the composable layout and
+  are **always-on in both wrap modes**: `BiomeDir` (4 = the penalty one
+  cell N/S/E/W, base severity, wrap-aware) and `CurrCellPenalty` (1 = the
+  penalty under the body). New active widths: **wrap on = 32, wrap off =
+  40** (was 32 in Wave 1a — old brains discarded).
+- **Why**: A creature can't evolve to avoid water/desert without sensing
+  it. Directional inputs give a local gradient (route around); the
+  current-cell input gives an "I'm being penalized now" signal. Always-on
+  keeps the two wrap modes' sensoria comparable.
+- **Applies to**: `architecture/simulation-core.md`,
+  `src/world/nn.rs → NnInputGroup / NnInputLayout::for_settings /
+  build_nn_input`, `src/brain.rs` (drift guard now covers widths 32 + 40).
+- **Tradeoffs**: Wrap-off NN width grows 32→40, so the wrap-off first
+  matmul is wider; the SIMD invariants (multiple-of-8) still hold (40 is
+  a multiple of 8). No genome inputs yet (Wave 2).
+- **Revisit when**: more biome senses are added, or the input width
+  approaches `MAX_NN_INPUTS = 48`.
+
 ## See also
 
 - [`../architecture/simulation-core.md`](../architecture/simulation-core.md)

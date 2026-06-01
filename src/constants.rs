@@ -224,21 +224,55 @@ pub const NN_CURR_GRASS_SLOT: usize = 29;
 #[cfg(test)]
 pub const NN_BIAS_SLOT: usize = 30;
 
-// ---- Biome (v2.0 Wave 1a placeholder; populated by Wave 1b) ----
+// ---- Biome (v2.0 Wave 1b) ----
 /// Per-cell biome tag stored in the dedicated `biomeSab` (one u8 per grass
-/// cell). v2.0 Wave 1a fills the whole grid with `Plains` (0) as a placeholder —
-/// real biome generation (water/desert regions seeded from `world_seed`) lands
-/// in Wave 1b. The enum is `#[repr(u8)]` so the SAB byte maps directly.
+/// cell). v2.0 Wave 1b generates the grid from `world_seed` (a few large
+/// water/desert blobs over a Plains background — see `src/world/biome.rs`).
+/// The enum is `#[repr(u8)]` so the SAB byte maps directly.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-// Water/Desert are populated by Wave 1b biome generation; Wave 1a only uses
-// `Plains` (the placeholder fill), so the other variants are not yet constructed.
-#[allow(dead_code)]
 pub enum Biome {
     Plains = 0,
     Water = 1,
     Desert = 2,
 }
+
+// ---- Biome movement penalty (v2.0 Wave 1b) ----
+//
+// Each non-Plains biome carries a *base severity* `p ∈ [0, 1]` (the live-tunable
+// `water_movement_penalty` / `desert_movement_penalty` sliders; Plains = 0).
+// While a creature stands in that cell, `p` drives THREE effects, each scaled by
+// a built-in coefficient below (constants = balance knobs; the per-biome
+// severity is the live knob):
+//   * effective move speed   `speed   *= (1 - K_BIOME_SPEED  * p)`
+//   * per-tick energy upkeep  `upkeep +=     K_BIOME_UPKEEP * p`
+//   * one-time move-cost mult `cost    *= (1 + K_BIOME_COST  * p)`
+//
+// Wave 2 will modulate `p` per genome (water_affinity / heat_tolerance); in
+// Wave 1b the penalty is genome-independent (base severity only).
+//
+// Survivability check (default sliders, energy_max = 100, idle upkeep 0.17/tick):
+//   Water p = 0.8 → extra upkeep +0.40 (=> ~0.57/tick idle) + move cost ×1.8
+//     (≤ ~0.18/tick at MOVE_SPEED_MAX, but speed ×0.52 so usually less). Worst
+//     ≈ 0.75/tick ⇒ a full-energy creature lasts ~130 ticks in water — a dash
+//     across is easily survivable, sustained residence is not.
+//   Desert p = 0.4 → extra upkeep +0.20 (=> ~0.37/tick) + move cost ×1.4 ⇒
+//     ≈ 0.51/tick worst ⇒ ~195 ticks. Survivable short-term.
+/// Effective-move-speed coefficient. `speed *= (1 - K_BIOME_SPEED * p)`.
+/// Balance knob. At water (p=0.8) this is ×0.52 of nominal speed.
+pub const K_BIOME_SPEED: f32 = 0.6;
+/// Per-tick extra-upkeep coefficient. `upkeep += K_BIOME_UPKEEP * p`.
+/// Balance knob. At water (p=0.8) adds 0.40 energy/tick (vs ~0.17 idle base).
+pub const K_BIOME_UPKEEP: f32 = 0.5;
+/// One-time move-cost multiplier coefficient. `move_cost *= (1 + K_BIOME_COST * p)`.
+/// Balance knob. At water (p=0.8) the per-distance move cost is ×1.8.
+pub const K_BIOME_COST: f32 = 1.0;
+/// Default base severity for the Water biome (live-tunable slider).
+pub const WATER_MOVEMENT_PENALTY_DEFAULT: f32 = 0.8;
+/// Default base severity for the Desert biome (live-tunable slider).
+pub const DESERT_MOVEMENT_PENALTY_DEFAULT: f32 = 0.4;
+/// Number of directional biome NN inputs (N/S/E/W) in the `BiomeDir` group.
+pub const NN_BIOME_DIRS: usize = 4;
 
 /// Runtime world dimensions, computed once at construction from `world_size`.
 ///

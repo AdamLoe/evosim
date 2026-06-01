@@ -3,6 +3,7 @@
 //! decode_action/is_valid_action take no Genome param (genome removed in D3).
 //! v1.5 S5b: build_nn_input rewritten to 32-input semantic layout; vision deleted.
 
+use super::biome::biome_from_u8;
 use super::proximity;
 use super::World;
 use crate::constants::*;
@@ -11,6 +12,59 @@ use crate::grass::GrassGrid;
 use crate::grid::SpatialGrid;
 #[cfg(feature = "threads")]
 use rayon::prelude::*;
+
+/// Read-only view over the static biome grid + the live per-biome severities,
+/// used by `build_nn_input` to compute the biome NN inputs. `Copy` so the
+/// threaded NN pass can hand a cheap value to every chunk. (v2.0 Wave 1b.)
+#[derive(Clone, Copy)]
+pub(crate) struct BiomeSampler<'a> {
+    grid: &'a [u8],
+    grass_dim: usize,
+    world_size: f32,
+    wrap: bool,
+    water_penalty: f32,
+    desert_penalty: f32,
+}
+
+impl<'a> BiomeSampler<'a> {
+    pub(crate) fn new(
+        grid: &'a [u8],
+        grass_dim: usize,
+        world_size: f32,
+        wrap: bool,
+        water_penalty: f32,
+        desert_penalty: f32,
+    ) -> Self {
+        Self {
+            grid,
+            grass_dim,
+            world_size,
+            wrap,
+            water_penalty,
+            desert_penalty,
+        }
+    }
+
+    /// Base movement-penalty severity `p ∈ [0, 1]` for the cell under a world
+    /// position. Wrap-aware. Genome-independent (Wave 2 modulates per genome).
+    #[inline]
+    pub(crate) fn penalty_at(&self, x: f32, y: f32) -> f32 {
+        let dim = self.grass_dim;
+        let ws = self.world_size;
+        let (px, py) = if self.wrap {
+            (x.rem_euclid(ws), y.rem_euclid(ws))
+        } else {
+            (x.clamp(0.0, ws), y.clamp(0.0, ws))
+        };
+        let ix = ((px / GRASS_CELL_SIZE) as usize).min(dim - 1);
+        let iy = ((py / GRASS_CELL_SIZE) as usize).min(dim - 1);
+        match biome_from_u8(self.grid[iy * dim + ix]) {
+            Biome::Plains => 0.0,
+            Biome::Water => self.water_penalty,
+            Biome::Desert => self.desert_penalty,
+        }
+    }
+}
 
 impl World {
     /// Run the NN forward pass for all creatures across fixed chunks (v6 §J).
@@ -45,6 +99,16 @@ impl World {
                 let split_threshold = self.sliders.split_threshold;
                 let max_age = self.sliders.max_age;
                 let world_size = self.dims.world_size;
+                // v2.0 Wave 1b: cheap Copy view over the static biome grid +
+                // live severities, shared read-only across all chunks.
+                let biome_ref = BiomeSampler::new(
+                    &self.biome_grid[..],
+                    self.dims.grass_dim,
+                    self.dims.world_size,
+                    self.dims.wrap_world,
+                    self.sliders.water_movement_penalty,
+                    self.sliders.desert_movement_penalty,
+                );
                 let stats_ref = std::sync::Arc::clone(&self.nn_stats);
 
                 let chunk_size = chunk_base_size_from_ranges(ranges, n);
@@ -97,6 +161,7 @@ impl World {
                                     grid_ref,
                                     sector_lut_ref,
                                     &mut sec_sub[k],
+                                    biome_ref,
                                     prev_vx,
                                     prev_vy,
                                     energy_max,
@@ -151,6 +216,16 @@ impl World {
             let max_age = self.sliders.max_age;
             let world_size = self.dims.world_size;
             let layout = self.nn_input_layout.clone();
+            // v2.0 Wave 1b: biome view, built once (borrows self.biome_grid +
+            // dims + slider severities, none of which the loop mutates).
+            let biome = BiomeSampler::new(
+                &self.biome_grid[..],
+                self.dims.grass_dim,
+                self.dims.world_size,
+                self.dims.wrap_world,
+                self.sliders.water_movement_penalty,
+                self.sliders.desert_movement_penalty,
+            );
             for &(lo, hi) in ranges {
                 let mut input_buf = [0.0f32; MAX_NN_INPUTS];
                 let mut scratch_a = [0.0f32; NN_MAX_HIDDEN_WIDTH];
@@ -175,6 +250,7 @@ impl World {
                         &self.grid,
                         &self.sector_lut,
                         &mut self.scratch_sector_accum[i],
+                        biome,
                         prev_vx,
                         prev_vy,
                         energy_max,
@@ -396,6 +472,12 @@ pub(crate) enum NnInputGroup {
     WallProximity,
     CreatureSectors,
     GrassSectors,
+    /// v2.0 Wave 1b: the movement penalty the creature would pay one cell
+    /// N/S/E/W (4 slots, base severity, wrap-aware). Always-on in both wrap
+    /// modes.
+    BiomeDir,
+    /// v2.0 Wave 1b: movement penalty under the body (1 slot). Always-on.
+    CurrCellPenalty,
     ReservedPredator,
     CurrGrass,
     Bias,
@@ -404,11 +486,13 @@ pub(crate) enum NnInputGroup {
 impl NnInputGroup {
     /// Canonical group order. The legacy layout activates every group; future
     /// waves choose a subset / wider variants from this same ordering.
-    const ORDER: [NnInputGroup; 7] = [
+    const ORDER: [NnInputGroup; 9] = [
         NnInputGroup::SelfMemory,
         NnInputGroup::WallProximity,
         NnInputGroup::CreatureSectors,
         NnInputGroup::GrassSectors,
+        NnInputGroup::BiomeDir,
+        NnInputGroup::CurrCellPenalty,
         NnInputGroup::ReservedPredator,
         NnInputGroup::CurrGrass,
         NnInputGroup::Bias,
@@ -470,31 +554,38 @@ impl NnInputLayout {
         Self { groups, width }
     }
 
-    /// v2.0 Wave 1a active layout, driven by construction settings.
+    /// v2.0 Wave 1b active layout, driven by construction settings.
     ///
     /// Drops the `ReservedPredator` group entirely and includes `WallProximity`
-    /// (4 slots) ONLY when the world is walled (`wrap_world == false`).
+    /// (4 slots) ONLY when the world is walled (`wrap_world == false`). The two
+    /// biome groups (`BiomeDir` = 4, `CurrCellPenalty` = 1) are always-on in
+    /// BOTH wrap modes.
     ///
     /// Wrap on: `SelfMemory(8) + CreatureSectors(8) + GrassSectors(8) +
-    /// CurrGrass(1) + Bias(1) = 26 → padded to 32`. Wrap off adds
-    /// `WallProximity(4)` → `30 → padded to 32`. Both pad to the SIMD-aligned 32,
-    /// so the default topology input width (`NN_INPUTS`) is unchanged and old
-    /// brains (discarded — no save/load) need no migration.
+    /// BiomeDir(4) + CurrCellPenalty(1) + CurrGrass(1) + Bias(1) = 31 → padded
+    /// to 32`. Wrap off adds `WallProximity(4)` → `35 → padded to 40`. So the
+    /// wrap-off NN width is 40 (was 32 pre-1b); old brains are discarded (no
+    /// save/load). The topology's `input_width` must match `width()` — the
+    /// construction path widens it to suit (see `World::new_with_sliders_topology`).
     pub(crate) fn for_settings(wrap_world: bool) -> Self {
-        let mut groups: Vec<(NnInputGroup, usize)> = Vec::with_capacity(6);
+        let mut groups: Vec<(NnInputGroup, usize)> = Vec::with_capacity(8);
         groups.push((NnInputGroup::SelfMemory, 8));
         if !wrap_world {
             groups.push((NnInputGroup::WallProximity, 4));
         }
         groups.push((NnInputGroup::CreatureSectors, NN_SECTORS));
         groups.push((NnInputGroup::GrassSectors, NN_SECTORS));
+        groups.push((NnInputGroup::BiomeDir, NN_BIOME_DIRS));
+        groups.push((NnInputGroup::CurrCellPenalty, 1));
         groups.push((NnInputGroup::CurrGrass, 1));
         groups.push((NnInputGroup::Bias, 1));
         let layout = Self::from_groups(&groups);
+        // Wrap on → 31 real → 32; wrap off → 35 real → 40.
+        let expected = if wrap_world { 32 } else { 40 };
         debug_assert_eq!(
             layout.width(),
-            NN_INPUTS,
-            "default layout (wrap_world={wrap_world}) must pad to NN_INPUTS=32"
+            expected,
+            "Wave 1b layout (wrap_world={wrap_world}) must pad to {expected}"
         );
         layout
     }
@@ -581,6 +672,7 @@ pub(crate) fn build_nn_input(
     grid: &SpatialGrid,
     sector_lut: &[(u8, u8, f32)],
     sector_scratch: &mut [f32; 8],
+    biome: BiomeSampler,
     prev_vx: f32,
     prev_vy: f32,
     energy_max: f32,
@@ -657,6 +749,23 @@ pub(crate) fn build_nn_input(
     } else {
         0
     };
+
+    // --- biome direction penalties N/S/E/W (one cell away; v2.0 Wave 1b) ---
+    // The movement penalty the creature would pay one grass cell in each
+    // cardinal direction. Sector convention matches walls: 0=N (-y), 1=S (+y),
+    // 2=E (+x), 3=W (-x). Wrap-aware sampling lives in `BiomeSampler`.
+    if let Some(o) = layout.offset_of(NnInputGroup::BiomeDir) {
+        let step = GRASS_CELL_SIZE;
+        buf[o] = biome.penalty_at(x, y - step); // N
+        buf[o + 1] = biome.penalty_at(x, y + step); // S
+        buf[o + 2] = biome.penalty_at(x + step, y); // E
+        buf[o + 3] = biome.penalty_at(x - step, y); // W
+    }
+
+    // --- current-cell penalty (under the body; v2.0 Wave 1b) ---
+    if let Some(o) = layout.offset_of(NnInputGroup::CurrCellPenalty) {
+        buf[o] = biome.penalty_at(x, y);
+    }
 
     // --- reserved-predator padding (explicit 0.0) ---
     if let Some(o) = layout.offset_of(NnInputGroup::ReservedPredator) {
@@ -781,6 +890,7 @@ pub(crate) fn pick_action_d(
     grid: &SpatialGrid,
     sector_lut: &[(u8, u8, f32)],
     sector_scratch: &mut [f32; 8],
+    biome: BiomeSampler,
     prev_vx: f32,
     prev_vy: f32,
     energy_max: f32,
@@ -801,6 +911,7 @@ pub(crate) fn pick_action_d(
         grid,
         sector_lut,
         sector_scratch,
+        biome,
         prev_vx,
         prev_vy,
         energy_max,
@@ -887,6 +998,14 @@ mod tests {
         let max_age = w.sliders.max_age;
         let world_size = w.dims.world_size;
         let layout = w.nn_input_layout.clone();
+        let biome = BiomeSampler::new(
+            &w.biome_grid[..],
+            w.dims.grass_dim,
+            w.dims.world_size,
+            w.dims.wrap_world,
+            w.sliders.water_movement_penalty,
+            w.sliders.desert_movement_penalty,
+        );
         build_nn_input(
             0,
             &layout,
@@ -895,6 +1014,7 @@ mod tests {
             &w.grid,
             &w.sector_lut,
             &mut scratch,
+            biome,
             prev_vx,
             prev_vy,
             energy_max,
@@ -916,20 +1036,21 @@ mod tests {
         assert!((inp[1] - 0.5).abs() < 1e-5, "age_frac = {}", inp[1]);
     }
 
-    /// v2.0: the SIMD trailing-pad lanes (31 in the walled width-32 layout) are
-    /// always 0.0. (The old slot-28 ReservedPredator padding is gone — that slot
-    /// now holds CurrGrass.)
+    /// v2.0 Wave 1b: the SIMD trailing-pad lanes are always 0.0. The walled
+    /// active layout is now width 40 (biome groups always-on add 5 slots), so
+    /// the real layout ends at slot 35 and lanes 35..40 are pad.
     #[test]
     fn nn_input_trailing_pad_is_zero() {
         let mut w = World::new("s5b-pad");
         let inp = build_for_founder(&mut w);
-        // Width is 32; the real layout ends before that, so the last lane is pad.
-        assert_eq!(w.nn_input_layout.width(), 32);
-        assert_eq!(inp[31], 0.0, "trailing SIMD pad lane must be 0.0");
+        assert_eq!(w.nn_input_layout.width(), 40, "walled Wave 1b width is 40");
+        for s in 35..40 {
+            assert_eq!(inp[s], 0.0, "trailing SIMD pad lane {s} must be 0.0");
+        }
     }
 
     /// The bias-learning constant lane is always 1.0 (at the layout's Bias
-    /// offset — slot 29 in the walled active layout, no longer the legacy 30).
+    /// offset — slot 34 in the walled Wave 1b active layout: 8/4/8/8/4/1/1 = 34).
     #[test]
     fn nn_input_bias_is_one() {
         let mut w = World::new("s5b-bias");
@@ -939,7 +1060,7 @@ mod tests {
             .expect("Bias group must be active");
         let inp = build_for_founder(&mut w);
         assert_eq!(inp[bias_off], 1.0, "bias slot must be 1.0");
-        assert_eq!(bias_off, 29, "walled active layout puts Bias at 29");
+        assert_eq!(bias_off, 34, "walled Wave 1b layout puts Bias at 34");
     }
 
     /// Wall-proximity at corner: N≈0.98, W≈0.98 (creature at (1,1), range 50).

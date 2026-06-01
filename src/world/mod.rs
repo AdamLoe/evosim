@@ -3,6 +3,7 @@
 //! Within-tick ordering follows v5 §3.5. NN forward pass is live (Milestone D).
 //! D3: genome removed; D9: Action enum collapsed to {Graze, Eat, Split}.
 
+pub(crate) mod biome;
 pub(crate) mod nn;
 pub(crate) mod nn_stats;
 pub(crate) mod proximity;
@@ -13,6 +14,12 @@ pub(crate) mod tick;
 #[cfg(test)]
 #[path = "wrap_tests.rs"]
 mod wrap_tests;
+
+// v2.0 Wave 1b: biome generation + movement-penalty + biome NN-input tests in
+// their own file/module (same merge-hazard rule).
+#[cfg(test)]
+#[path = "biome_tests.rs"]
+mod biome_tests;
 
 use self::nn::{chunk_ranges, dynamic_chunks};
 use self::tick::EatPick;
@@ -97,6 +104,13 @@ pub struct DevSliders {
     /// construction/boot; Wave 1b uses it for biome generation. SEPARATE from
     /// the string/XxHash64 sim RNG seed — they are not coupled.
     pub world_seed: u32,
+    /// Live-tunable Water biome base movement-penalty severity `p ∈ [0, 1]`
+    /// (v2.0 Wave 1b). Drives reduced speed / extra upkeep / higher move-cost
+    /// while a creature is on a Water cell. Genome-independent in Wave 1b.
+    pub water_movement_penalty: f32,
+    /// Live-tunable Desert biome base movement-penalty severity `p ∈ [0, 1]`
+    /// (v2.0 Wave 1b). Same three effects as `water_movement_penalty`.
+    pub desert_movement_penalty: f32,
 }
 
 impl Default for DevSliders {
@@ -128,6 +142,8 @@ impl Default for DevSliders {
             // Default: random per construction (caller may override). Kept
             // separate from the string RNG seed — see `world_seed` doc.
             world_seed: 0,
+            water_movement_penalty: WATER_MOVEMENT_PENALTY_DEFAULT,
+            desert_movement_penalty: DESERT_MOVEMENT_PENALTY_DEFAULT,
         }
     }
 }
@@ -156,6 +172,12 @@ pub struct World {
     /// Numeric world seed (v2.0 Wave 1a). Carried for biome gen (Wave 1b);
     /// separate from the string RNG seed.
     pub world_seed: u32,
+    /// Static biome grid (v2.0 Wave 1b): one `Biome as u8` per grass cell,
+    /// row-major `grass_dim × grass_dim`. Generated deterministically from
+    /// `world_seed` at construction (see `biome::generate_biome_grid`) and
+    /// copied byte-for-byte into the boot `biome_buf` SAB. Read O(1) per tick
+    /// via `biome_at`.
+    pub(crate) biome_grid: Vec<u8>,
     /// Grass density field (v1.2 grass mechanic).
     pub grass: GrassGrid,
     pub grid: SpatialGrid,
@@ -274,6 +296,9 @@ impl World {
         // v2.0 Wave 1a: runtime dims computed once from the construction settings.
         let dims = WorldDims::from_world_size(sliders.world_size, sliders.wrap_world);
         let world_seed = sliders.world_seed;
+        // v2.0 Wave 1b: static biome map from `world_seed` (independent of the
+        // sim RNG above). Built once; read O(1) per tick via `biome_at`.
+        let biome_grid = biome::generate_biome_grid(world_seed, &dims);
         let mut grass = GrassGrid::new(&mut rng, sliders.grass_initial_seed_count, dims);
         if sliders.full_grass_on_init {
             for d in grass.density.iter_mut() {
@@ -281,6 +306,31 @@ impl World {
             }
             grass.rebuild_row_bitset();
         }
+        // v2.0 Wave 1b: the active input layout is driven by `wrap_world`
+        // (drops ReservedPredator; WallProximity only when walled; biome groups
+        // always-on). The active width is 32 (wrap on) or 40 (wrap off). The
+        // topology's `input_width` must agree with the layout the founders are
+        // drawn for, so reconcile the topology to the layout width BEFORE
+        // founder draws. The incoming `nn_topology` carries its hidden layers
+        // (from the boot payload or legacy default) at the default 32-input
+        // width; we widen its first matmul fan-in to match the layout.
+        let nn_input_layout = self::nn::NnInputLayout::for_settings(dims.wrap_world);
+        let nn_topology = if nn_topology.input_width() == nn_input_layout.width() {
+            nn_topology
+        } else {
+            NnTopology::with_input_width(
+                nn_input_layout.width(),
+                nn_topology.hidden_sizes().to_vec(),
+                nn_topology.activations().to_vec(),
+            )
+            .expect("layout width is a valid multiple-of-8 input width in [8, MAX_NN_INPUTS]")
+        };
+        debug_assert_eq!(
+            nn_input_layout.width(),
+            nn_topology.input_width(),
+            "NN input layout width must equal topology input_width"
+        );
+
         let mut creatures = CreatureSoA::with_capacity(2048);
         let founder_count = sliders.founder_count.clamp(1, 32);
         let founder_energy = START_ENERGY_DEFAULT.min(sliders.energy_max);
@@ -305,20 +355,12 @@ impl World {
         let mut grid = SpatialGrid::new(dims);
         grid.rebuild(&creatures.x, &creatures.y);
         let sector_lut = proximity::build_sector_lut();
-        // v2.0 Wave 1a: the active input layout is driven by `wrap_world`
-        // (drops ReservedPredator; WallProximity only when walled). Its width
-        // must agree with the topology the founders were drawn for.
-        let nn_input_layout = self::nn::NnInputLayout::for_settings(dims.wrap_world);
-        debug_assert_eq!(
-            nn_input_layout.width(),
-            nn_topology.input_width(),
-            "NN input layout width must equal topology input_width"
-        );
         Self {
             tick: 0,
             seed: seed_string,
             dims,
             world_seed,
+            biome_grid,
             rng,
             grass,
             grid,
@@ -364,6 +406,49 @@ impl World {
     #[inline]
     pub fn world_size(&self) -> f32 {
         self.dims.world_size
+    }
+
+    /// Grass-cell index for a world-unit position. Wrap-aware: toroidal worlds
+    /// wrap the coordinate into `[0, world_size)` before indexing; walled worlds
+    /// clamp to the valid cell range. Returns a flat row-major index into the
+    /// `grass_dim × grass_dim` biome grid. (v2.0 Wave 1b.)
+    #[inline]
+    pub(crate) fn biome_cell_index(&self, x: f32, y: f32) -> usize {
+        let dim = self.dims.grass_dim;
+        let ws = self.dims.world_size;
+        let (px, py) = if self.dims.wrap_world {
+            (x.rem_euclid(ws), y.rem_euclid(ws))
+        } else {
+            (x.clamp(0.0, ws), y.clamp(0.0, ws))
+        };
+        let ix = ((px / GRASS_CELL_SIZE) as usize).min(dim - 1);
+        let iy = ((py / GRASS_CELL_SIZE) as usize).min(dim - 1);
+        iy * dim + ix
+    }
+
+    /// Biome under a world-unit position. Wrap-aware. (v2.0 Wave 1b.)
+    #[inline]
+    pub(crate) fn biome_at(&self, x: f32, y: f32) -> Biome {
+        biome::biome_from_u8(self.biome_grid[self.biome_cell_index(x, y)])
+    }
+
+    /// The raw biome grid bytes (one `Biome as u8` per grass cell, row-major).
+    /// Used to fill the boot `biome_buf` SAB. (v2.0 Wave 1b.)
+    #[inline]
+    pub(crate) fn biome_grid_bytes(&self) -> &[u8] {
+        &self.biome_grid
+    }
+
+    /// Base movement-penalty severity `p ∈ [0, 1]` for the cell under a
+    /// position. Genome-independent in Wave 1b (Wave 2 will modulate per
+    /// genome). Plains = 0; Water/Desert read their live-tunable sliders.
+    #[inline]
+    pub(crate) fn movement_penalty_at(&self, x: f32, y: f32) -> f32 {
+        match self.biome_at(x, y) {
+            Biome::Plains => 0.0,
+            Biome::Water => self.sliders.water_movement_penalty,
+            Biome::Desert => self.sliders.desert_movement_penalty,
+        }
     }
 
     /// Run one sim tick. Returns true while there is meaningful work happening.
@@ -818,6 +903,7 @@ impl World {
             seed: self.seed.clone(),
             dims: self.dims,
             world_seed: self.world_seed,
+            biome_grid: self.biome_grid.clone(),
             rng: self.rng.clone(),
             grass: self.grass.clone(),
             grid,

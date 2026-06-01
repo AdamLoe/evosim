@@ -769,10 +769,15 @@ mod tests {
     }
 
     /// CRITICAL: SIMD and scalar agree within 1e-5 relative error across
-    /// three topologies (parameterised drift-guard from v1.12 plan).
+    /// several topologies (parameterised drift-guard from v1.12 plan).
+    ///
+    /// v2.0 Wave 1b: the active NN width is now 32 (wrap on) OR 40 (wrap off).
+    /// The drift guard must cover BOTH input widths, so the topology list
+    /// includes width-32 and width-40 variants (via `with_input_width`).
     #[test]
     fn forward_pass_matches_scalar_reference_multiple_topologies() {
         let topologies = [
+            // width-32 (wrap-on) compositions
             NnTopology::legacy(),
             NnTopology::new(
                 vec![64, 32, 16],
@@ -780,6 +785,16 @@ mod tests {
             )
             .unwrap(),
             NnTopology::new(vec![8], vec![Activation::LReLU]).unwrap(),
+            // width-40 (wrap-off) compositions — exercise the wider first matmul.
+            NnTopology::with_input_width(40, vec![48, 24], vec![Activation::LReLU, Activation::LReLU])
+                .unwrap(),
+            NnTopology::with_input_width(
+                40,
+                vec![64, 32, 16],
+                vec![Activation::LReLU, Activation::LReLU, Activation::LReLU],
+            )
+            .unwrap(),
+            NnTopology::with_input_width(40, vec![8], vec![Activation::LReLU]).unwrap(),
         ];
 
         for topology in topologies {

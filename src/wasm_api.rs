@@ -68,22 +68,24 @@ pub const SLIDER_NAMES: &[&str] = &[
     "world_size",                          // 18 f32 (construction) — world extent
     "world_seed",                          // 19 u32 (carried as f32) — biome seed (Wave 1b)
     "wrap_world",                          // 20 bool (0.0 / non-zero) — torus vs walled
+    // v2.0 Wave 1b: live-tunable biome movement-penalty base severities [0,1].
+    "water_movement_penalty",              // 21 f32 — Water biome base severity
+    "desert_movement_penalty",             // 22 f32 — Desert biome base severity
     // v1.12: 8 mutation buckets × 3 floats. Index = SLIDER_BUCKET_BASE + bucket*3 + field.
     // field 0 = weight, 1 = rate, 2 = sigma. See MUTATION_BUCKET_COUNT.
-    "bucket_0_weight", "bucket_0_rate", "bucket_0_sigma", // 21..24
-    "bucket_1_weight", "bucket_1_rate", "bucket_1_sigma", // 24..27
-    "bucket_2_weight", "bucket_2_rate", "bucket_2_sigma", // 27..30
-    "bucket_3_weight", "bucket_3_rate", "bucket_3_sigma", // 30..33
-    "bucket_4_weight", "bucket_4_rate", "bucket_4_sigma", // 33..36
-    "bucket_5_weight", "bucket_5_rate", "bucket_5_sigma", // 36..39
-    "bucket_6_weight", "bucket_6_rate", "bucket_6_sigma", // 39..42
-    "bucket_7_weight", "bucket_7_rate", "bucket_7_sigma", // 42..45
+    "bucket_0_weight", "bucket_0_rate", "bucket_0_sigma", // 23..26
+    "bucket_1_weight", "bucket_1_rate", "bucket_1_sigma", // 26..29
+    "bucket_2_weight", "bucket_2_rate", "bucket_2_sigma", // 29..32
+    "bucket_3_weight", "bucket_3_rate", "bucket_3_sigma", // 32..35
+    "bucket_4_weight", "bucket_4_rate", "bucket_4_sigma", // 35..38
+    "bucket_5_weight", "bucket_5_rate", "bucket_5_sigma", // 38..41
+    "bucket_6_weight", "bucket_6_rate", "bucket_6_sigma", // 41..44
+    "bucket_7_weight", "bucket_7_rate", "bucket_7_sigma", // 44..47
 ];
 
-/// First mutation-bucket slider slot. v2.0 Wave 1a (shifted from 23 to 21 after
-/// dropping the 4 reserved-curriculum + full_grass_on_init slots and adding the
-/// 3 world_size/world_seed/wrap_world construction slots).
-pub const SLIDER_BUCKET_BASE: usize = 21;
+/// First mutation-bucket slider slot. v2.0 Wave 1b (shifted from 21 to 23 after
+/// adding the 2 biome movement-penalty slots).
+pub const SLIDER_BUCKET_BASE: usize = 23;
 
 /// Number of slots in `CTRL_SLIDERS`. Equal to `SLIDER_NAMES.len()`.
 pub const SLIDER_COUNT: usize = SLIDER_NAMES.len();
@@ -211,9 +213,15 @@ impl WorldHandle {
     fn from_world(inner: World) -> Self {
         let grass_cell_count = inner.dims.grass_cell_count;
         let layout = SnapshotLayout::from_grass_cell_count(grass_cell_count);
-        // biomeSab placeholder: all Plains (0) for Wave 1a. `vec![0u8; …]`
-        // already encodes `Biome::Plains as u8 == 0`.
-        let biome_buf = vec![crate::constants::Biome::Plains as u8; layout.biome_bytes];
+        // v2.0 Wave 1b: fill the biomeSab from the world's generated biome grid
+        // (deterministic from `world_seed`). The grid is exactly
+        // `grass_cell_count` u8 tags, matching `biome_bytes`.
+        debug_assert_eq!(
+            inner.biome_grid_bytes().len(),
+            layout.biome_bytes,
+            "biome grid length must equal biomeSab byte size"
+        );
+        let biome_buf = inner.biome_grid_bytes().to_vec();
         Self {
             inner,
             snapshot_buf: vec![0u8; layout.buf_bytes],
@@ -663,6 +671,14 @@ impl WorldHandle {
     fn apply_wrap_world(&mut self, value: bool) {
         self.inner.sliders.wrap_world = value;
     }
+    /// v2.0 Wave 1b live: Water biome base movement-penalty severity, clamped [0, 1].
+    fn apply_water_movement_penalty(&mut self, value: f32) {
+        self.inner.sliders.water_movement_penalty = value.clamp(0.0, 1.0);
+    }
+    /// v2.0 Wave 1b live: Desert biome base movement-penalty severity, clamped [0, 1].
+    fn apply_desert_movement_penalty(&mut self, value: f32) {
+        self.inner.sliders.desert_movement_penalty = value.clamp(0.0, 1.0);
+    }
     fn apply_max_population(&mut self, value: u32) {
         // Clamp into [1, MAX_POP_FOR_SIM]. The SAB-bound cap is structural —
         // we never let the soft cap exceed it (extra births above MAX_POP_FOR_SIM
@@ -733,6 +749,9 @@ impl WorldHandle {
             18 => self.apply_world_size(value),
             19 => self.apply_world_seed(value.max(0.0) as u32),
             20 => self.apply_wrap_world(value != 0.0),
+            // v2.0 Wave 1b live biome movement-penalty severities [0, 1].
+            21 => self.apply_water_movement_penalty(value),
+            22 => self.apply_desert_movement_penalty(value),
             // v1.12: 8 mutation buckets × 3 fields.
             n if n >= SLIDER_BUCKET_BASE
                 && n < SLIDER_BUCKET_BASE + MUTATION_BUCKET_COUNT * 3 =>
@@ -947,6 +966,9 @@ impl WorldHandle {
             "world_size": d.world_size,
             "world_seed": d.world_seed as f32,
             "wrap_world": if d.wrap_world { 1.0_f32 } else { 0.0 },
+            // v2.0 Wave 1b live biome movement-penalty severities.
+            "water_movement_penalty": d.water_movement_penalty,
+            "desert_movement_penalty": d.desert_movement_penalty,
         });
         // v1.12: 8 mutation buckets × 3 fields. Names match SLIDER_NAMES.
         let obj = json.as_object_mut().expect("json! produced an object");

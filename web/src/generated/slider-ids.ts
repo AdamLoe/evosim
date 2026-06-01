@@ -27,6 +27,8 @@ export const SLIDER_NAMES = [
   "world_size",
   "world_seed",
   "wrap_world",
+  "water_movement_penalty",
+  "desert_movement_penalty",
   "bucket_0_weight",
   "bucket_0_rate",
   "bucket_0_sigma",
@@ -53,7 +55,7 @@ export const SLIDER_NAMES = [
   "bucket_7_sigma",
 ] as const;
 
-export const SLIDER_COUNT = 45 as const;
+export const SLIDER_COUNT = 47 as const;
 
 export type SliderName = (typeof SLIDER_NAMES)[number];
 
