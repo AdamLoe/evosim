@@ -110,19 +110,38 @@ the discoverable surface, the perf widget is for heavy debugging.
 ## Per-creature instance pack
 
 Inside `renderWorld`, the JS frustum cull walks `pop` creatures from the
-Float32Array view in stride-8 chunks:
+Float32Array view in stride-8 chunks. **v2.0 Wave 2a/2b repacked the
+creature lanes** (stride/byte-size unchanged: 8 lanes / 32 B):
 
 ```text
+// SoA lane layout (Float32Array view, plus a Uint32Array view over the
+// same backing buffer for the raw-u32 lanes 3/4/5/6):
+//   [0] x (f32)   [1] y (f32)   [2] radius (f32, body_size-derived)
+//   [3] color_u32 (RGBA8 LE, A=255)   [4] id_lo (u32)   [5] id_hi (u32)
+//   [6] packed_u32   [7] pad
 for i in 0..pop:
   base = i * 8
-  x  = creatures[base + 0]
-  y  = creatures[base + 1]
-  r  = creatures[base + 2]
+  x       = f32[base + 0]
+  y       = f32[base + 1]
+  radius  = f32[base + 2]                 // body_size-driven (genome 0.5..1.5)
+  packed  = u32[base + 3]                 // display color, packed RGBA8
+  r = (packed       ) & 0xFF;  g = (packed >> 8) & 0xFF;  b = (packed >> 16) & 0xFF
+  idLo    = u32[base + 4];  idHi = u32[base + 5];  cid = idHi*2^32 + idLo
+  flags   = u32[base + 6]                 // ring-flash + reserved species_id
+  flashTag   =  flags        & 0x7        // FlashTag 0..5 (src/creature.rs)
+  flashTicks = (flags >> 3)  & 0xF        // 0..FLASH_TICKS(5) countdown
   // v2.0 Wave 1c: for each wrap offset (see below):
   //   cull if (x+ox, y+oy) ± (r + margin) is outside the camera viewport
-  //   emit one 8-float record into the instance scratch buffer:
-  //     [x, y, radius_px, inner_px, color_r, color_g, color_b, alpha]
+  //   emit one 8-float instance record into the instance scratch buffer:
+  //     [x, y, radius_px, inner_px, r, g, b, alpha]
 ```
+
+The `color_u32` lane **replaces** the old three `color_r/g/b` f32 lanes
+(the action-EMA display color is gone). The Rust side now derives the
+display color from the genome via an HSV mapping (hue ← diet, saturation
+← body_size, value ← max_speed) and packs it RGBA8 little-endian with
+A=255, so the old 125/255 brightness floor was dropped — creatures stay
+legible by construction.
 
 Then one `gl.drawArraysInstanced(TRIANGLE_STRIP, 0, 4, bodyCount)` call
 covers every visible body (including wrapped ghost copies). Bodies are
@@ -160,8 +179,8 @@ runs the new shading:
 - **AA edge.** `alpha = 1 - smoothstep(1 - aa, 1, r)` against a per-
   fragment `aa = fwidth(r) * 1.5`. Soft at low zoom, crisp at high.
 - **Radial shade.** `shade = mix(1.15, 0.85, r)` — 15% brighter at
-  center, 15% darker at the rim. Pure multiplication so action-EMA
-  color identity stays readable.
+  center, 15% darker at the rim. Pure multiplication so the genome
+  display color (v2.0 Wave 2a; was the action-EMA color) stays readable.
 - **Outline ring.** Two `smoothstep`s carve a soft annulus between
   `u_ring_inner = 0.84` and `u_ring_outer = 0.92`. Stops are constants
   set once at link time (not theme-owned — thickness doesn't need to
@@ -250,21 +269,53 @@ tails and small ones stay legible at low zoom. Trails are skipped
 when `dx² + dy² < 0.04` (stationary creatures) and the whole pass is
 disabled when `pop > 12000`.
 
+## Action ring-flash pass (v2.0 Wave 2b)
+
+Drawn **on top of the bodies**, inside the body-pack loop. For each
+creature with `flashTicks > 0` (decoded from `packed_u32` lane 6), the
+pack emits a transient outer annulus instance (`outer = radiusPx + 5`,
+`inner = radiusPx + 2`, the `inner_px > 0` annulus branch of `DISC_FS`)
+in the flash tag's color, with the per-instance alpha set to
+`flashTicks / FLASH_TICKS(5)` so the ring fades over its ~5-tick life.
+The ring follows the same wrap-aware ghost-copy offsets as the body, so
+a flashing creature near a seam rings at every visible ghost position.
+The flash instances are accumulated into a **separate** `flashScratch`
+buffer (the highlight pass below reuses the body `instanceScratch`, so a
+shared buffer would clobber it) and drawn with a second
+`drawArraysInstanced` after the body draw.
+
+**FlashTag → color legend** (RGBs owned TS-side in `render-gl.ts`,
+matching the `FlashTag` enum order in `src/creature.rs`):
+
+| tag | name | meaning | color |
+|----:|------|---------|-------|
+| 1 | Born | just born | teal |
+| 2 | Grazed | grazed | green |
+| 3 | Attacked | attacked | yellow |
+| 4 | CreatedChild | created a child (split initiator) | blue |
+| 5 | Killed | killed another creature | red |
+
+Tag 0 (`None`) is never drawn. The action ring-flash is **distinct from
+and coexists with** the inspector selection ring (the yellow highlight
+pass below) — a selected, flashing creature shows both rings at once.
+
 ## Highlight pass
 
 Triggered when `highlightMap.size > 0` and `pop > 0`. Builds a
 `Uint32Array` view over the same backing buffer as `creatures` and
-reads `id_lo` / `id_hi` from each creature's 32-byte stride:
+reads `id_lo` / `id_hi` from each creature's 32-byte stride. **v2.0
+Wave 2b moved the id halves to lanes 4/5** (were 6/7):
 
 ```ts
 const idView = new Uint32Array(creatures.buffer, creatures.byteOffset,
                                 pop * stride * (creatures.BYTES_PER_ELEMENT / 4));
-const idLo = idView[i*8 + 6];
-const idHi = idView[i*8 + 7];
+const idLo = idView[i*8 + 4];
+const idHi = idView[i*8 + 5];
 const cid  = idHi * 4294967296 + idLo;       // exact in f64 up to 2^53
 const exp  = highlightMap.get(cid);
 if (exp === undefined || nowMs >= exp) continue;
-// emit one ring instance: outer = radiusPx + 4, inner = radiusPx + 2
+// emit one ring instance: outer = radiusPx + 4, inner = radiusPx + 2,
+// color (255,200,50) — the distinct yellow selection ring.
 ```
 
 The pass is rare (≤ 1–2 rings/frame typically) so it does not need to

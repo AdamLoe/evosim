@@ -19,7 +19,10 @@
 // single-`v=1` scheme, so every legacy v1 blob resets cleanly to defaults.
 const STORAGE_KEY = "evosim.settings.v2";
 const SCHEMA_MAJOR = 2;
-const SCHEMA_MINOR = 0;
+// v2.0 Wave 2b: added `traitMutationSigmaMultiplier` (a new additive key with a
+// default) → MINOR bump 0 → 1. Existing v2 blobs keep their values and pick up
+// the new key from DEFAULTS via the `{...DEFAULTS, ...stored}` merge.
+const SCHEMA_MINOR = 1;
 
 /** v1.12: one row of the 8-row mutation policy table. Mirrors the Rust
  * `Bucket` struct (`src/brain.rs`). `weight` is any non-negative float;
@@ -106,6 +109,10 @@ export interface Settings {
   // Plains = 0 (implicit); Water/Desert read these. Apply to the running world.
   waterMovementPenalty: number;
   desertMovementPenalty: number;
+  // v2.0 Wave 2b: live-tunable multiplier on the per-birth genome-trait
+  // mutation sigma (× the active mutation bucket's sigma). Apply to the running
+  // world. Must match Rust TRAIT_MUTATION_SIGMA_MULTIPLIER_DEFAULT.
+  traitMutationSigmaMultiplier: number;
   mutRate: number;
   // v1.12: 8 mutation buckets × {weight, rate, sigma}. Replaces the legacy
   // single-knob nnSigma. Bucket 0 carries the legacy `(1.0, 0.02, 0.02)`.
@@ -144,7 +151,7 @@ export const DEFAULTS: Settings = {
   upkeepMultiplier: 1.0,
   moveCostMultiplier: 1.0,
   energyMax: 100,
-  eatBiteFrac: 1.0,
+  eatBiteFrac: 0.5,
   grassPropagK: 0.003,
   grassGrowthR: 0.01,
   grassEnergyPerBite: 10,
@@ -156,6 +163,8 @@ export const DEFAULTS: Settings = {
   // v2.0 Wave 1b: must match Rust WATER/DESERT_MOVEMENT_PENALTY_DEFAULT.
   waterMovementPenalty: 0.8,
   desertMovementPenalty: 0.4,
+  // v2.0 Wave 2b: must match Rust TRAIT_MUTATION_SIGMA_MULTIPLIER_DEFAULT.
+  traitMutationSigmaMultiplier: 0.3,
   mutRate: 1.0,
   mutationBuckets: DEFAULT_MUTATION_BUCKETS.map((b) => ({ ...b })),
   nnTopology: {

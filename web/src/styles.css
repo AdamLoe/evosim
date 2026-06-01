@@ -659,6 +659,36 @@ button {
   background-color: rgb(38, 38, 38);
 }
 
+/* v2.0 Wave 2b: inspector genome trait bars. */
+.ins-genome-title {
+  margin: 6px 0 2px;
+  font: 11px ui-monospace, monospace;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.trait-bar {
+  display: inline-block;
+  width: 90px;
+  height: 8px;
+  margin-right: 6px;
+  vertical-align: middle;
+  border: 1px solid var(--border-strong);
+  border-radius: 2px;
+  background-color: rgb(38, 38, 38);
+  overflow: hidden;
+}
+.trait-fill {
+  display: block;
+  height: 100%;
+  width: 0%;
+  background-color: var(--accent, #6cf);
+}
+.trait-val {
+  font: 11px ui-monospace, monospace;
+  color: var(--fg);
+}
+
 /* CPU Process Monitor table (lives inside the bottom perf panel as of
    v1.13 Wave 2; was the right-rail Monitor tab's worker-stats panel). */
 .worker-stats-table {

@@ -696,6 +696,15 @@ export function installDevPanel(getBridge: () => SimBridge): void {
     min: 0, max: 5, step: 0.05,
     formatValue: (v) => v.toFixed(2),
   }));
+  // v2.0 Wave 2b: genome trait-mutation sigma multiplier (live-tunable). Scales
+  // the per-birth Gaussian nudge applied to each of the 6 body-genome traits.
+  lifeSec.appendChild(makeStagedSlider({
+    label: "Trait mutation σ ×",
+    simName: "trait_mutation_sigma_multiplier",
+    settingKey: "traitMutationSigmaMultiplier",
+    min: 0, max: 2, step: 0.05,
+    formatValue: (v) => v.toFixed(2),
+  }));
   // v1.12: legacy NN σ slider replaced by the 8-bucket mutation policy editor
   // in the NN rail tab. See docs/plans/v1.12-mission.md.
   lifeSec.appendChild(makeStagedSlider({

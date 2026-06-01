@@ -91,7 +91,7 @@ left column uses a row grid for top-bar / canvas / profiler.
 | `#perf-close` | ✕ button that hides the profiler. | Flips `showProfiler` to false; perf-panel reacts. |
 | `#right-rail` | Persistent right column, 420 px. | `rail/index.ts → installRail`. |
 | `#rail-tabs` | Three tab buttons: Inspector / Monitor / Settings. | `rail/index.ts`. |
-| `#rail-inspector` | Inspector body or empty-state. | `rail/inspector.ts` reads / writes `#inspector-empty` and the `#ins-*` rows inside `#inspector-body`. |
+| `#rail-inspector` | Inspector body or empty-state. | `rail/inspector.ts` reads / writes `#inspector-empty` and the `#ins-*` rows inside `#inspector-body`. v2.0 Wave 2b: dropped the EMA color readout; shows a packed-color swatch, the genome-modulated `movement_penalty`, and the 6 genome traits (`#ins-trait-*` bars from `creature_inspect_json`'s `genome` object). |
 | `#rail-monitor` | Population graph + worker-stats host. | `rail/monitor.ts → installMonitorTab`; pop-graph paint via `rail/stats.ts → maybeSampleStats`. |
 | `#rail-settings` | Dev-panel content + Apply / Cancel / Reset footer. | `widgets/devpanel.ts → installDevPanel`. |
 | `#toast-host` | Bottom-center transient notice slot. | `toast.ts → showToast`. |
@@ -165,6 +165,11 @@ construction-only toast. **`full_grass_on_init` was removed** from the UI
 The new **World** Settings section also hosts two *live* (apply-to-running-
 world) sliders: `water_movement_penalty` / `desert_movement_penalty`
 (biome base severities, Wave 1b).
+
+The **Lifecycle** section gained a *live* `trait_mutation_sigma_multiplier`
+slider (v2.0 Wave 2b, default 0.3, mirrored by the
+`traitMutationSigmaMultiplier` setting). It scales the per-birth Gaussian
+nudge applied to each of the 6 evolving body-genome traits.
 
 **Toast text** lives in one place
 (`widgets/devpanel.ts → TOAST_CONSTRUCTION`) and fires through
@@ -268,7 +273,9 @@ rebuilt per boot.
   so every v1 blob resets cleanly.
 - **`SCHEMA_MINOR` mismatch** (additive-only) → user values are kept; the
   `{...DEFAULTS, ...stored}` merge fills any keys the older blob lacked.
-  No reset.
+  No reset. **v2.0 Wave 2b** added `traitMutationSigmaMultiplier` (default
+  0.3) as exactly such an additive key — a MINOR bump (0 → 1), so existing
+  v2 blobs pick it up from `DEFAULTS` without a reset.
 
 On persist the live copy always restamps `vMajor`/`vMinor` to the current
 values.

@@ -23,10 +23,15 @@ import { CREATURE_STRIDE, MAX_POP_FOR_SIM } from "./sim-bridge";
 // v1.6 Wave C: the renderer reads typed-array views over the live SAB slot
 // directly (no postMessage payload, no copy). `creatures` is a Float32Array
 // view over the stride-8 SoA in the snapshot slot; `grass` is a Uint8Array
-// view over the same slot's density region. IDs are interleaved at byte offset
-// +24 within each 32-byte creature stride (two raw u32s reinterpreted as f32
-// by Rust via `f32::from_bits`) — the highlight pass extracts them inline by
-// constructing a Uint32Array view over the creatures' underlying buffer.
+// view over the same slot's density region.
+//
+// v2.0 Wave 2a/2b creature lane order (8 f32-lanes / 32 B per record):
+//   [0] x (f32)  [1] y (f32)  [2] radius (f32, body_size-derived)
+//   [3] color_u32 (RGBA8 LE, A=255)  [4] id_lo (u32)  [5] id_hi (u32)
+//   [6] packed_u32 (flash_tag bits 0..2, flash_ticks bits 3..6,
+//       species_id bits 7..22 — 0 single-pool)  [7] pad
+// color_u32 / id halves / packed_u32 are raw u32 bits; the loops build a
+// Uint32Array view over the creatures' backing buffer to read them directly.
 
 // ─── Shader sources ──────────────────────────────────────────────────────
 
@@ -348,6 +353,25 @@ const TRAIL_FLOATS_PER_INSTANCE = 9;
 const PERMANENT_EXP = Number.MAX_SAFE_INTEGER;
 const HIGHLIGHT_FADE_MS = 1500;
 
+// v2.0 Wave 2b: action ring-flash. The Rust packs a transient FlashTag (0..5)
+// + a ticks-remaining countdown into the creature snapshot's packed_u32 lane.
+// When flash_ticks > 0 we draw a transient outer ring in the tag's color, on
+// top of the body. This is distinct from (and coexists with) the inspector
+// selection ring (the yellow highlight pass below). The tag→RGB legend (these
+// RGBs are owned here, the visual-identity flags):
+//   1 Born=teal, 2 Grazed=green, 3 Attacked=yellow, 4 CreatedChild=blue,
+//   5 Killed=red. Index 0 (None) is never drawn. Matches FlashTag in
+//   src/creature.rs.
+const FLASH_TICKS_MAX = 5; // src/creature.rs FLASH_TICKS
+const FLASH_COLORS: ReadonlyArray<readonly [number, number, number]> = [
+  [0, 0, 0], // 0 None — unused
+  [0.18, 0.85, 0.78], // 1 Born — teal
+  [0.30, 0.85, 0.30], // 2 Grazed — green
+  [0.95, 0.85, 0.20], // 3 Attacked — yellow
+  [0.30, 0.55, 1.0], // 4 CreatedChild — blue
+  [0.95, 0.25, 0.25], // 5 Killed — red
+];
+
 interface GLState {
   gl: WebGL2RenderingContext;
   discProgram: WebGLProgram;
@@ -415,6 +439,9 @@ interface GLState {
   frameBuf: WebGLBuffer;
   // Scratch buffer for packing instance data; grown on demand.
   instanceScratch: Float32Array;
+  // v2.0 Wave 2b: separate scratch for the action ring-flash annulus pass so
+  // it survives the body draw (the highlight pass reuses instanceScratch).
+  flashScratch: Float32Array;
 }
 
 let state: GLState | null = null;
@@ -703,6 +730,7 @@ function initRenderer(gl: WebGL2RenderingContext): GLState {
     grassProgram, grassU, grassVao, grassTex, grassTexDim: 0,
     frameProgram, frameU, frameVao, frameBuf,
     instanceScratch: new Float32Array(4096 * FLOATS_PER_INSTANCE),
+    flashScratch: new Float32Array(1024 * FLOATS_PER_INSTANCE),
   };
 }
 
@@ -1004,8 +1032,9 @@ function renderWorldImpl(
       currById.clear();
       for (let i = 0; i < pop; i++) {
         const base = i * stride;
-        const idLo = idView[base + 6];
-        const idHi = idView[base + 7];
+        // v2.0 Wave 2b: id halves moved to lanes 4/5 (were 6/7).
+        const idLo = idView[base + 4];
+        const idHi = idView[base + 5];
         const cid = idHi * 4294967296 + idLo;
         currById.set(cid, { x: creatures[base], y: creatures[base + 1] });
       }
@@ -1016,6 +1045,12 @@ function renderWorldImpl(
     const trailScratch = s.trailScratch;
     let trailOff = 0;
     const enableTrails = pop <= 12000;
+
+    // v2.0 Wave 2b: action ring-flash scratch (annulus instances). Filled in
+    // the body loop for creatures with flash_ticks > 0 and drawn after the
+    // bodies. Reuses the same wrap-aware ghost positions as the body.
+    let flashScratch = s.flashScratch;
+    let flashOff = 0;
 
     // v2.0 Wave 1c: wrap-aware draw. On a toroidal world a creature near x=0
     // must also render at x=world_size+δ when the camera straddles the x=0 (or
@@ -1055,8 +1090,9 @@ function renderWorldImpl(
       const radiusWorld = creatures[base + 2];
       // Look up prev by id for the trail pass; the body itself draws at
       // the raw SoA position.
-      const idLo = idView[base + 6];
-      const idHi = idView[base + 7];
+      // v2.0 Wave 2b: id halves moved to lanes 4/5 (were 6/7).
+      const idLo = idView[base + 4];
+      const idHi = idView[base + 5];
       const cid = idHi * 4294967296 + idLo;
       const prev = prevById.get(cid);
       const rawRadiusPx = radiusWorld * PX_PER_SIZE * cam.zoom;
@@ -1064,23 +1100,19 @@ function renderWorldImpl(
       const radiusPx = isPoint ? 1 : rawRadiusPx;
       // inner_px sentinel: -1 ⇒ flat point (no shading), 0 ⇒ shaded disc.
       const innerPx = isPoint ? -1 : 0;
-      let cr = creatures[base + 3];
-      let cg = creatures[base + 4];
-      let cb = creatures[base + 5];
-      // Brightness floor: creatures whose action-EMA leaves them
-      // near-black are invisible against the canvas. Lift the max
-      // channel to ~125/255 while preserving hue; true zero (no
-      // history at all) becomes mid-gray.
-      const COLOR_FLOOR = 125 / 255;
-      const maxC = Math.max(cr, cg, cb);
-      if (maxC < COLOR_FLOOR) {
-        if (maxC < 1e-4) {
-          cr = cg = cb = COLOR_FLOOR;
-        } else {
-          const scale = COLOR_FLOOR / maxC;
-          cr *= scale; cg *= scale; cb *= scale;
-        }
-      }
+      // v2.0 Wave 2b: display color is a single packed RGBA8 u32 (lane 3),
+      // little-endian (R = bits 0..8, G = 8..16, B = 16..24, A = 24..32 = 255).
+      // This replaces the old color_r/g/b f32 lanes. The Rust HSV mapping
+      // already keeps creatures legible, so the old 125/255 floor is dropped.
+      const packedColor = idView[base + 3];
+      const cr = (packedColor & 0xff) / 255;
+      const cg = ((packedColor >>> 8) & 0xff) / 255;
+      const cb = ((packedColor >>> 16) & 0xff) / 255;
+      // v2.0 Wave 2b: packed render flags (lane 6). flash_tag = bits 0..2,
+      // flash_ticks = bits 3..6, species_id = bits 7..22 (ignored single-pool).
+      const packedFlags = idView[base + 6];
+      const flashTag = packedFlags & 0x7;
+      const flashTicks = (packedFlags >>> 3) & 0xf;
       const margin = radiusWorld + 2;
 
       // Trail displacement (computed once; skip if it crosses the seam on a
@@ -1111,6 +1143,33 @@ function renderWorldImpl(
           bodyScratch[off + 6] = cb;
           bodyScratch[off + 7] = 1; // alpha
           off += FLOATS_PER_INSTANCE;
+
+          // v2.0 Wave 2b: action ring-flash. Draw a transient outer annulus in
+          // the tag's color when flash_ticks > 0. Fades with the countdown.
+          // Coexists with the inspector selection ring (separate pass below).
+          if (flashTicks > 0 && flashTag > 0 && flashTag < FLASH_COLORS.length) {
+            if (flashOff + FLOATS_PER_INSTANCE > flashScratch.length) {
+              const grown = new Float32Array(flashScratch.length * 2);
+              grown.set(flashScratch);
+              flashScratch = grown;
+              s.flashScratch = grown;
+            }
+            const fc = FLASH_COLORS[flashTag];
+            const fade = flashTicks / FLASH_TICKS_MAX;
+            // Annulus just outside the body; inner_px > 0 selects the flat
+            // annulus branch in DISC_FS.
+            const outer = radiusPx + 5;
+            const inner = radiusPx + 2;
+            flashScratch[flashOff] = x;
+            flashScratch[flashOff + 1] = y;
+            flashScratch[flashOff + 2] = outer;
+            flashScratch[flashOff + 3] = inner;
+            flashScratch[flashOff + 4] = fc[0];
+            flashScratch[flashOff + 5] = fc[1];
+            flashScratch[flashOff + 6] = fc[2];
+            flashScratch[flashOff + 7] = fade;
+            flashOff += FLOATS_PER_INSTANCE;
+          }
 
           // Trail: start = prev (one paint behind), end = current body, both
           // shifted by the same wrap offset so the segment stays attached to
@@ -1185,15 +1244,30 @@ function renderWorldImpl(
       );
       gl.bindVertexArray(s.discVao);
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, bodyCount);
+
+      // ─── Action ring-flash pass (v2.0 Wave 2b) ───
+      // Transient outer annulus drawn on top of the bodies in the flash tag's
+      // color. The annulus branch in DISC_FS (inner_px > 0) flat-fills, so the
+      // per-creature color rides in the instance a_color; the disc-level
+      // u_ring_color is left at the body value (unused for annulus instances).
+      const flashCount = (flashOff / FLOATS_PER_INSTANCE) | 0;
+      if (flashCount > 0) {
+        gl.bindBuffer(gl.ARRAY_BUFFER, s.discInstanceBuf);
+        gl.bufferData(
+          gl.ARRAY_BUFFER,
+          flashScratch.subarray(0, flashOff),
+          gl.DYNAMIC_DRAW,
+        );
+        gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, flashCount);
+      }
     }
   }
 
   // ─── Highlight rings (rare path) ───
   // Inspector selection + transient highlights produce ≤ 1–2 rings/frame.
-  // Wave C: id is interleaved into the creature SoA at byte offset +24
-  // (id_lo) / +28 (id_hi) of each 32-byte stride — Rust stores the two u32
-  // halves of the stable u64 id via `f32::from_bits`. Build a Uint32Array
-  // view over the same backing SAB to read them without conversion cost.
+  // v2.0 Wave 2b: id is at byte offset +16 (id_lo) / +20 (id_hi) of each
+  // 32-byte stride (lanes 4/5). Build a Uint32Array view over the same backing
+  // SAB to read the raw u32 halves without conversion cost.
   if (highlightMap.size > 0 && pop > 0) {
     const nowMs = performance.now();
     const idView = new Uint32Array(
@@ -1223,8 +1297,9 @@ function renderWorldImpl(
       // u32-pair → number via the f64 ladder. The max u64 a v1 session ever
       // mints stays under 2^53 (DECISIONS E.21), so the f64 round-trip is
       // lossless and `Map<number, …>` lookups stay correct.
-      const idLo = idView[base + 6];
-      const idHi = idView[base + 7];
+      // v2.0 Wave 2b: id halves moved to lanes 4/5 (were 6/7).
+      const idLo = idView[base + 4];
+      const idHi = idView[base + 5];
       const cid = idHi * 4294967296 + idLo;
       const exp = highlightMap.get(cid);
       if (exp === undefined || nowMs >= exp) continue;

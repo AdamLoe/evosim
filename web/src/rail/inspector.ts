@@ -49,8 +49,9 @@ export function updateLatestSoA(creatures: Float32Array, pop: number): void {
 
 function idAt(soa: SoASnapshot, i: number): number {
   const base = i * CREATURE_STRIDE;
-  const lo = soa.creaturesU32[base + 6];
-  const hi = soa.creaturesU32[base + 7];
+  // v2.0 Wave 2b: id halves moved to lanes 4/5 (were 6/7).
+  const lo = soa.creaturesU32[base + 4];
+  const hi = soa.creaturesU32[base + 5];
   return hi * 0x100000000 + lo;
 }
 
@@ -106,17 +107,16 @@ function renderInspectorSoA(soa: SoASnapshot, idx: number, id: number): void {
   const base = idx * CREATURE_STRIDE;
   const x = soa.creatures[base];
   const y = soa.creatures[base + 1];
-  const r = soa.creatures[base + 3];
-  const g = soa.creatures[base + 4];
-  const b = soa.creatures[base + 5];
   set("ins-id", `${id}`);
   set("ins-pos", `(${x.toFixed(1)}, ${y.toFixed(1)})`);
-  const r255 = Math.round(Math.max(r, 0.15) * 255);
-  const g255 = Math.round(Math.max(g, 0.15) * 255);
-  const b255 = Math.round(Math.max(b, 0.15) * 255);
-  const swatch = document.getElementById("ins-ema-swatch");
+  // v2.0 Wave 2b: display color is a single packed RGBA8 u32 at lane 3
+  // (LE: R = bits 0..8, G = 8..16, B = 16..24).
+  const packed = soa.creaturesU32[base + 3];
+  const r255 = packed & 0xff;
+  const g255 = (packed >>> 8) & 0xff;
+  const b255 = (packed >>> 16) & 0xff;
+  const swatch = document.getElementById("ins-color-swatch");
   if (swatch) swatch.style.backgroundColor = `rgb(${r255}, ${g255}, ${b255})`;
-  set("ins-ema-values", `${r.toFixed(2)} / ${g.toFixed(2)} / ${b.toFixed(2)}`);
 }
 
 let actionHistory: string[] = [];
@@ -138,18 +138,34 @@ function renderInspector(data: CreatureInspectJson): void {
   set("ins-age", `${data.age} / ${data.max_age}`);
   set("ins-energy", `${data.energy.toFixed(1)} (${(data.energy_frac * 100).toFixed(0)}%)`);
   set("ins-cooldown", `${data.cooldown_remaining}`);
-  const [r, g, b] = data.color_ema;
-  const r255 = Math.round(Math.max(r, 0.15) * 255);
-  const g255 = Math.round(Math.max(g, 0.15) * 255);
-  const b255 = Math.round(Math.max(b, 0.15) * 255);
-  const swatch = document.getElementById("ins-ema-swatch");
-  if (swatch) swatch.style.backgroundColor = `rgb(${r255}, ${g255}, ${b255})`;
-  set("ins-ema-values", `${r.toFixed(2)} / ${g.toFixed(2)} / ${b.toFixed(2)}`);
+  // v2.0 Wave 2b: genome-modulated biome movement penalty [0,1].
+  set("ins-move-penalty", data.movement_penalty.toFixed(2));
+  // v2.0 Wave 2b: render the 6 genome traits as labeled bars (raw [0,1]).
+  const genome = data.genome;
+  if (genome) {
+    for (const key of GENOME_TRAIT_KEYS) {
+      const v = genome[key];
+      const fill = document.getElementById(`ins-trait-${key}`);
+      if (fill) fill.style.width = `${Math.round(Math.max(0, Math.min(1, v)) * 100)}%`;
+      set(`ins-trait-${key}-v`, v.toFixed(2));
+    }
+  }
   const [wn, ws, we, ww] = data.wall_proximity;
   set("ins-walls", `${wn.toFixed(2)} / ${ws.toFixed(2)} / ${we.toFixed(2)} / ${ww.toFixed(2)}`);
   pushHistory(data.id, data.current_action);
   set("ins-history", actionHistory.slice(-30).map(a => a[0]).join(""));
   set("ins-nn-count", `${data.nn_weight_count}`);
+}
+
+// v2.0 Wave 2a: the evolving 6-trait body genome (raw [0,1]). Field names
+// mirror src/wasm_api.rs creature_inspect_json's "genome" object.
+export interface CreatureGenome {
+  body_size: number;
+  max_speed: number;
+  metabolism: number;
+  diet: number;
+  water_affinity: number;
+  heat_tolerance: number;
 }
 
 export interface CreatureInspectJson {
@@ -165,10 +181,23 @@ export interface CreatureInspectJson {
   current_action: string;
   move_speed: number;
   cooldown_remaining: number;
-  color_ema: [number, number, number];
+  // v2.0 Wave 2a: dropped `color_ema`; added the 6 genome traits + the
+  // creature's current genome-modulated biome movement penalty [0,1].
+  genome: CreatureGenome;
+  movement_penalty: number;
   wall_proximity: [number, number, number, number];
   nn_weight_count: number;
 }
+
+// Trait display order + labels (label only used in HTML; ids derive from key).
+const GENOME_TRAIT_KEYS: ReadonlyArray<keyof CreatureGenome> = [
+  "body_size",
+  "max_speed",
+  "metabolism",
+  "diet",
+  "water_affinity",
+  "heat_tolerance",
+];
 
 function openInspector(data: CreatureInspectJson, rail: RailState): void {
   if (state.kind === "selected" && state.creatureId !== data.id) {

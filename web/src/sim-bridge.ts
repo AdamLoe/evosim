@@ -84,9 +84,12 @@ export const MAX_POP_FOR_SIM = 32_000;
 /**
  * Number of f32 lanes per creature in the snapshot SoA.
  *
- * Layout: `[x, y, body_radius, color_r, color_g, color_b, id_lo, id_hi]`
- * where `id_lo` / `id_hi` are the u32 halves of the creature id reinterpreted
- * as f32 via `f32::from_bits` (Rust side) and `Uint32Array` view (JS side).
+ * v2.0 Wave 2a/2b layout (stride unchanged at 8 lanes / 32 B):
+ * `[x, y, radius, color_u32, id_lo, id_hi, packed_u32, pad]`.
+ * `color_u32` is a packed RGBA8 (LE, A=255) display color; `id_lo` / `id_hi`
+ * are the u32 halves of the creature id; `packed_u32` bit-packs the ring-flash
+ * tag (bits 0..2), flash-ticks countdown (bits 3..6), and a reserved species_id
+ * (bits 7..22). The raw-u32 lanes are read via a `Uint32Array` view (JS side).
  */
 export const CREATURE_STRIDE = 8;
 
