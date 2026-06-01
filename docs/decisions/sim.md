@@ -509,26 +509,89 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 - **Revisit when**: brains grow deep enough that anti-cannibalism could plausibly
   evolve and be retained against drift.
 
-### Species seeding + identity: dynamic registry, placeholder color, fixed-set seed (v2.0 Wave 3a scaffolding)
+### Species seeding + identity: dynamic registry, hand-spread palette, biome-adapted N-anchor founders (v2.0 Wave 4)
 
 - **Decision**: `World.species` is a **dynamic** `SpeciesRegistry`
-  (`Vec<Species { id, color_u32 }>`, add/remove-capable) even though v3 seeds a
-  fixed `starting_species_count` (default 10). Each species gets an evenly-spread
-  saturated **placeholder hue** written sim-side into the snapshot `color_u32`
-  lane (so the renderer needs no change). Per-creature `species_id` keys the
-  color + gates. Wave-3 seeding is a **placeholder**: cluster
-  `starting_species_member_count` founders near a random Halton anchor with basic
-  uniform-random genomes; `starting_species_member_variance` is wired + plumbed
-  but **inert** until Wave 4 (which does biome-appropriate founders + the spread).
-- **Why**: Building the registry dynamic now means the V2.1 split/merge work
-  needs no protocol change. Writing the species color into the existing lane
-  keeps the renderer unchanged this wave; Wave 4 swaps the source for a polled
-  species→color table (noted seam). The placeholder seeding is just enough to
-  exercise mating + the gates without front-loading Wave-4 balance work.
-- **Applies to**: `src/world/species.rs`, `World::new_with_sliders` (species
-  seeding branch), `fill_creature_bytes` (species color lane).
-- **Revisit when**: Wave 4 lands real biome-adapted founders + the polled
-  color table; v2.1 adds splits/merges.
+  (`Vec<Species { id, color_u32, name }>`, add/remove/recolor-capable) even
+  though v2.0 seeds a fixed `starting_species_count` (default 10). Real
+  **N-anchor biome-adapted seeding** replaces the Wave-3 placeholder:
+  1. Pick anchors spread across the world (rejection-sampled min spacing).
+  2. Per anchor, roll a canonical "first member" = random founder brain + a
+     genome **biased to survive the biome under the anchor**
+     (`Genome::canonical_for_biome`): Water → high `water_affinity`, Desert →
+     high `heat_tolerance`, Plains → moderate both; the other four traits stay
+     random per species.
+  3. Spawn `starting_species_member_count - 1` more founders clustered near the
+     anchor, each = the canonical brain+genome through **one per-birth bucket
+     draw** with that bucket's **rate AND sigma both ×
+     `starting_species_member_variance`** (default 3.0, now active;
+     `Brain::founder_spread_with_sigma`).
+  All of seeding is **deterministic from `world_seed`** via a *dedicated* setup
+  PRNG (`SimRng::from_u64(world_seed ^ SEEDING_PRNG_SALT)`) — separate from the
+  biome generator and from the sim RNG, so the same `world_seed` reproduces the
+  same tick-0 layout while the run still varies per launch. Species colors come
+  from a **hand-spread 10-hue saturated palette** (`SPECIES_PALETTE`),
+  single-sourced for both the per-creature `color_u32` lane and the polled
+  species→color table. Labels are `Species-A..J`. Species extinct = extinct.
+- **Why**: Dynamic registry means V2.1 splits/merges need no protocol change.
+  Biome-adapting the founder genome (a deliberate reversal of "random founders,
+  let the world filter them") keeps a clump alive through the opening moves — at
+  gen 0 there's no learned behavior to keep a maladapted clump alive long enough
+  to evolve. Biasing only the genome, not the anchor *position*, keeps the map
+  honest. The dedicated seeding PRNG satisfies the determinism guarantee without
+  coupling the whole run to `world_seed`. A hand-spread palette (vs an even-hue
+  ring) keeps adjacent species readable.
+- **Applies to**: `src/world/species.rs` (palette + registry),
+  `Genome::canonical_for_biome` (`src/creature.rs`),
+  `Brain::founder_spread_with_sigma` (`src/brain.rs`), `pick_anchors` +
+  `World::new_with_sliders_topology` seeding branch (`src/world/mod.rs`),
+  `fill_creature_bytes` (species color lane).
+- **Revisit when**: v2.1 adds splits/merges (split-aware "one color → two
+  similar-but-distinct" generator); founders survive comfortably and the gen-0
+  pre-adapt masks rather than enables interesting selection.
+
+### Polled species→color/name/count table (v2.0 Wave 4 producer)
+
+- **Decision**: A cadence-written SAB report
+  (`WorldHandle::species_table_json` → `CTRL_SPECIES_TABLE_EPOCH/LEN` + the
+  `SPECIES_TABLE` byte window, written every ~45 ticks in species mode) exposes
+  every **live** species as `{ id, color_u32, name, count }` + the world tick.
+  Per-species counts are aggregated **sim-side**; the table is **dynamic**
+  (extinct species drop out). Mirrors the `nn_worker_stats_json`
+  cadence-producer pattern (no request side). This is the **producer**; the
+  Monitor pop-graph + canvas color-table **consumers are Wave 5**.
+- **Why**: Sending `species_id` per creature + a shared polled table (rather
+  than per-creature color bytes) keeps the snapshot lean and single-sources the
+  palette so canvas and chart can't drift. Building it dynamic now saves a
+  protocol break when v2.1 splits arrive.
+- **Applies to**: `src/wasm_api.rs` (`species_table_json`), `src/control_sab.rs`
+  (slots + byte window), `web/src/sim-worker.ts` (`maybeWriteSpeciesTable`),
+  `web/src/generated/control-sab.ts` (regenerated).
+
+### Population balance: ship sane defaults, the cap never binds via random cull (v2.0 Wave 4)
+
+- **Decision**: Ship the plan's reproduction-economy defaults unchanged —
+  mating energy cost = `split_gift` (30), initiator `mating_cooldown_ticks`
+  (200), birth gift = the mating cost (30), 10 species × 10 founders ×
+  variance 3.0. An in-process long run confirms the soft pop cap (8k) **never
+  binds via random cull**: at the default 9600u world the population sits well
+  under 200 at all times (boot 100 → low-tens steady state), and at a denser
+  2400u world it holds ~100–122. Multiple species persist for thousands of
+  ticks (no extinct-end). Cold-start did **not** fire, so no cold-start lever
+  was applied (per the plan, change defaults only *if* a default run extinct-ends
+  before learning).
+- **Why**: Per the contract, balance is the *user's* — the implementation job is
+  "runs without the cap binding via random cull + the mechanism demonstrably
+  works," not hand-tuned fun. At 64× area with the same pop ceiling the cap is
+  nowhere near binding; the observed population *decline* at the default world is
+  an encounter-rate (geographic-sparsity) characteristic the user tunes via the
+  live/construction knobs (`world_size`, biome severities, grass richness,
+  `mating_cooldown_ticks`), not a mechanism bug.
+- **Applies to**: `MATING_COOLDOWN_TICKS_DEFAULT`, `SPLIT_GIFT_MAX_DEFAULT`
+  (= mating cost + gift), the `starting_species_*` defaults (`src/constants.rs`).
+- **Revisit when**: playtest wants growth at the default world — first lever is
+  cranking `starting_species_member_count` (denser clumps); next is the 8-dir
+  mate-proximity NN inputs (`v2-possible-next-steps.md`).
 
 ## See also
 

@@ -51,6 +51,8 @@ import {
   CTRL_PROFILE_WINDOW_MS,
   CTRL_RESET_JANK_EPOCH,
   CTRL_SLIDERS_BASE,
+  CTRL_SPECIES_TABLE_EPOCH,
+  CTRL_SPECIES_TABLE_LEN,
   CTRL_TARGET_TPS_BITS,
   INSPECT_RESP_CAP,
   INSPECT_RESP_OFFSET,
@@ -58,6 +60,8 @@ import {
   NN_STATS_OFFSET,
   PROFILE_REPORT_CAP,
   PROFILE_REPORT_OFFSET,
+  SPECIES_TABLE_CAP,
+  SPECIES_TABLE_OFFSET,
 } from "./generated/control-sab";
 import { SLIDER_COUNT, SLIDER_NAMES } from "./generated/slider-ids";
 
@@ -76,11 +80,20 @@ const TARGET_RAYON_WORKERS = 12;
 const PROFILE_REPORT_EVERY_N_TICKS = 60;
 /** Tick cadence for emitting the NN-stats payload (~750 ms at 60 TPS). */
 const NN_STATS_EVERY_N_TICKS = 45;
+/**
+ * Tick cadence for emitting the v2.0 species-table payload (~750 ms at 60 TPS).
+ * The Wave-5 Monitor pop-graph + canvas color table consume it; the producer is
+ * cadence-written here (mirrors NN-stats). Only emitted in species mode.
+ */
+const SPECIES_TABLE_EVERY_N_TICKS = 45;
 
 // ─── Worker-local state ─────────────────────────────────────────────────────
 
 let world: WorldHandle | null = null;
 let booted = false;
+/** v2.0 Wave 4: true when the running world is in species mode (gates the
+ * polled species-table report, which is empty/meaningless in single-pool). */
+let speciesMode = false;
 
 let controlSab: SharedArrayBuffer | null = null;
 let ctrlI32: Int32Array | null = null;
@@ -188,6 +201,7 @@ async function handleBoot(boot: SimMessageBoot): Promise<void> {
     boot.starting_species_member_count,
     boot.starting_species_member_variance,
   );
+  speciesMode = !!boot.species_mode;
   world.profile_enable(true);
 
   // Apply persisted slider state by name (initial_sliders is name→value).
@@ -382,6 +396,21 @@ function maybeWriteNnStats(tickIdx: number): void {
   Atomics.add(ctrlI32, CTRL_NN_STATS_EPOCH, 1);
 }
 
+// v2.0 Wave 4: cadence-write the polled species-table report (species_id →
+// {color, name, count}). Mirrors the NN-stats producer. Species mode only — in
+// single-pool the table is empty and the Wave-5 consumer never asks. The
+// pop-graph + canvas color-table consumers land in Wave 5; this is the producer.
+function maybeWriteSpeciesTable(tickIdx: number): void {
+  if (!world || !ctrlI32 || !ctrlBytes || !speciesMode) return;
+  if (tickIdx % SPECIES_TABLE_EVERY_N_TICKS !== 0) return;
+  const json = world.species_table_json();
+  const encoded = new TextEncoder().encode(json);
+  const len = Math.min(encoded.length, SPECIES_TABLE_CAP);
+  ctrlBytes.set(encoded.subarray(0, len), SPECIES_TABLE_OFFSET);
+  Atomics.store(ctrlI32, CTRL_SPECIES_TABLE_LEN, len);
+  Atomics.add(ctrlI32, CTRL_SPECIES_TABLE_EPOCH, 1);
+}
+
 // ─── Snapshot write ─────────────────────────────────────────────────────────
 //
 // v1.11 (A+D): the snapshot region lives in wasm linear memory. The worker
@@ -454,6 +483,7 @@ function simLoop(): void {
     serveInspectRequest();
     maybeWriteProfileReport(tickIdx);
     maybeWriteNnStats(tickIdx);
+    maybeWriteSpeciesTable(tickIdx);
     const writeEnd = performance.now();
     world.record_profile_sample(
       "sim_worker",

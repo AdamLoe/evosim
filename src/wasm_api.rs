@@ -935,6 +935,7 @@ impl WorldHandle {
         let species_mode = self.inner.sliders.species_mode;
         let species_id = self.inner.creatures.species_id[i];
         let species_color = self.inner.species.color_of(species_id);
+        let species_name = self.inner.species.name_of(species_id);
         let mut json = serde_json::json!({
             "index": idx,
             "id": self.inner.creatures.id[i],
@@ -969,6 +970,8 @@ impl WorldHandle {
             if let Some(obj) = json.as_object_mut() {
                 obj.insert("species_id".into(), serde_json::json!(species_id));
                 obj.insert("species_color".into(), serde_json::json!(species_color));
+                // v2.0 Wave 4: species name (Wave 5 wires the display).
+                obj.insert("species_name".into(), serde_json::json!(species_name));
                 obj.insert("species_history".into(), serde_json::json!([] as [u16; 0]));
             }
         }
@@ -1118,6 +1121,57 @@ impl WorldHandle {
     pub fn nn_worker_stats_json(&self) -> String {
         let now = crate::profiler::clock_now_us_threadsafe();
         self.inner.nn_stats.to_json(now)
+    }
+
+    /// v2.0 Wave 4: polled species-table report. JSON map of every LIVE species
+    /// (population_count > 0) → `{ color_u32, name, population_count }`, plus the
+    /// current world tick (so the Wave-5 pop-graph consumer can stamp samples).
+    ///
+    /// Per-species counts are aggregated sim-side here (O(N) over the SoA). The
+    /// table is **dynamic** — it reads the runtime registry + live counts, so a
+    /// species that has gone extinct simply drops out, and v2.1 split/merge needs
+    /// no protocol change. Single-pool mode returns an empty `species` list (no
+    /// species exist). Mirrors the `nn_worker_stats_json` producer shape; the
+    /// worker writes this into the `SPECIES_TABLE` SAB window on a cadence and
+    /// bumps `CTRL_SPECIES_TABLE_EPOCH`.
+    ///
+    /// Shape:
+    /// ```json
+    /// { "tick": 1234, "species": [
+    ///     { "id": 0, "color_u32": 4281545446, "name": "Species-A", "count": 73 },
+    ///     ...
+    /// ] }
+    /// ```
+    #[wasm_bindgen]
+    pub fn species_table_json(&self) -> String {
+        let w = &self.inner;
+        let registry = w.species.all();
+        // Aggregate live per-species counts. Index by species id over a tiny
+        // registry (≤ tens), so a flat scan + linear find is fine.
+        let mut counts: Vec<u32> = vec![0; registry.len()];
+        for &sid in w.creatures.species_id.iter() {
+            if let Some(pos) = registry.iter().position(|s| s.id == sid) {
+                counts[pos] += 1;
+            }
+        }
+        let entries: Vec<serde_json::Value> = registry
+            .iter()
+            .enumerate()
+            .filter(|(pos, _)| counts[*pos] > 0)
+            .map(|(pos, sp)| {
+                serde_json::json!({
+                    "id": sp.id,
+                    "color_u32": sp.color_u32,
+                    "name": sp.name,
+                    "count": counts[pos],
+                })
+            })
+            .collect();
+        let obj = serde_json::json!({
+            "tick": w.tick,
+            "species": entries,
+        });
+        serde_json::to_string(&obj).unwrap_or_else(|_| "{\"tick\":0,\"species\":[]}".into())
     }
 }
 

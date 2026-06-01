@@ -82,6 +82,58 @@ impl Genome {
         }
     }
 
+    /// v2.0 Wave 4: the canonical "first member" genome for a species anchor,
+    /// rolled BIASED to survive the biome under the anchor. Only the
+    /// terrain-survival traits (`water_affinity`, `heat_tolerance`) are biased;
+    /// `body_size` / `max_speed` / `metabolism` / `diet` stay uniform-random so
+    /// species still differ in grazer/predator lean + body.
+    ///
+    /// Bias mapping (LOG + FLAG — feel-affecting):
+    ///   * `Biome::Water`  → `water_affinity` ∈ [HIGH_LO, HIGH_HI], `heat_tolerance` random.
+    ///   * `Biome::Desert` → `heat_tolerance` ∈ [HIGH_LO, HIGH_HI], `water_affinity` random.
+    ///   * `Biome::Plains` → both ∈ [MODERATE_LO, MODERATE_HI].
+    ///
+    /// RNG draw order is fixed for determinism: body_size, max_speed, metabolism,
+    /// diet, then water_affinity, then heat_tolerance (each one draw), so the
+    /// stream is well-defined regardless of biome. `rng` is the dedicated
+    /// `world_seed`-derived seeding PRNG (NOT the sim RNG).
+    pub fn canonical_for_biome(rng: &mut crate::rng::SimRng, biome: crate::constants::Biome) -> Self {
+        use crate::constants::{
+            Biome, BIOME_BIAS_HIGH_HI, BIOME_BIAS_HIGH_LO, BIOME_BIAS_MODERATE_HI,
+            BIOME_BIAS_MODERATE_LO,
+        };
+        let body_size = rng.unit();
+        let max_speed = rng.unit();
+        let metabolism = rng.unit();
+        let diet = rng.unit();
+        // Always draw water then heat in fixed order (even when one is overwritten
+        // by the biased band) so the RNG stream is biome-independent in length.
+        let water_rand = rng.unit();
+        let heat_rand = rng.unit();
+        let (water_affinity, heat_tolerance) = match biome {
+            Biome::Water => (
+                BIOME_BIAS_HIGH_LO + water_rand * (BIOME_BIAS_HIGH_HI - BIOME_BIAS_HIGH_LO),
+                heat_rand,
+            ),
+            Biome::Desert => (
+                water_rand,
+                BIOME_BIAS_HIGH_LO + heat_rand * (BIOME_BIAS_HIGH_HI - BIOME_BIAS_HIGH_LO),
+            ),
+            Biome::Plains => (
+                BIOME_BIAS_MODERATE_LO + water_rand * (BIOME_BIAS_MODERATE_HI - BIOME_BIAS_MODERATE_LO),
+                BIOME_BIAS_MODERATE_LO + heat_rand * (BIOME_BIAS_MODERATE_HI - BIOME_BIAS_MODERATE_LO),
+            ),
+        };
+        Self {
+            body_size,
+            max_speed,
+            metabolism,
+            diet,
+            water_affinity,
+            heat_tolerance,
+        }
+    }
+
     /// Mutating child genome: each trait takes one Gaussian nudge
     /// `+= rng.normal() * step` then is clamped to `[0, 1]`. Six normal draws
     /// in fixed trait order (RNG determinism). `step` is the bucket sigma scaled

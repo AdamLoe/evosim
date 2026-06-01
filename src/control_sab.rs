@@ -96,6 +96,14 @@ pub const CTRL_NN_STATS_EPOCH: usize = 104;
 /// Length of the NN stats JSON in bytes.
 pub const CTRL_NN_STATS_LEN: usize = 105;
 
+/// v2.0 Wave 4: polled species-table report (species_id → {color, name, count}).
+/// Cadence-written by the worker (mirrors the NN-stats epoch/len pattern — no
+/// request side); epoch bumped after the bytes are written. The Monitor
+/// pop-graph + canvas color table consume this (consumer lands in Wave 5).
+pub const CTRL_SPECIES_TABLE_EPOCH: usize = 112;
+/// Length of the species-table JSON in bytes.
+pub const CTRL_SPECIES_TABLE_LEN: usize = 113;
+
 /// Length of the leading i32 region in i32 slots. Byte buffers start
 /// at `CTRL_I32_REGION_LEN * 4`.
 pub const CTRL_I32_REGION_LEN: usize = 256;
@@ -117,9 +125,16 @@ pub const NN_STATS_OFFSET: usize = PROFILE_REPORT_OFFSET + PROFILE_REPORT_CAP;
 /// Maximum NN-stats payload size in bytes (4 KB).
 pub const NN_STATS_CAP: usize = 4 * 1024;
 
+/// Byte offset of the v2.0 Wave 4 species-table payload.
+pub const SPECIES_TABLE_OFFSET: usize = NN_STATS_OFFSET + NN_STATS_CAP;
+/// Maximum species-table payload size in bytes (4 KB). At ~64 B/species
+/// (id + color + name + count) this holds ~60 species — far above the v2.0
+/// fixed 10 and well into v2.1 split territory. The producer clamps to this.
+pub const SPECIES_TABLE_CAP: usize = 4 * 1024;
+
 /// Total control SAB size in bytes. Includes some trailing padding so future
 /// fields can be added without breaking on-disk SAB shape assumptions.
-pub const CONTROL_SAB_BYTES: usize = NN_STATS_OFFSET + NN_STATS_CAP + 1024;
+pub const CONTROL_SAB_BYTES: usize = SPECIES_TABLE_OFFSET + SPECIES_TABLE_CAP + 1024;
 
 // ─── Compile-time sanity ────────────────────────────────────────────────────
 
@@ -130,6 +145,10 @@ const _: () = assert!(
 const _: () = assert!(
     NN_STATS_OFFSET + NN_STATS_CAP <= CONTROL_SAB_BYTES,
     "NN-stats buffer must fit within the control SAB",
+);
+const _: () = assert!(
+    SPECIES_TABLE_OFFSET + SPECIES_TABLE_CAP <= CONTROL_SAB_BYTES,
+    "species-table buffer must fit within the control SAB",
 );
 const _: () = assert!(
     CTRL_I32_REGION_LEN * 4 <= INSPECT_RESP_OFFSET,

@@ -52,6 +52,13 @@ mod mating_tests;
 #[path = "mating_grid_regression_tests.rs"]
 mod mating_grid_regression_tests;
 
+// v2.0 Wave 4: species seeding (biome-adapted founders, member_variance spread,
+// deterministic-from-world_seed) + balance smoke tests, in their own
+// file/module (same merge-hazard rule).
+#[cfg(test)]
+#[path = "seeding_tests.rs"]
+mod seeding_tests;
+
 use self::nn::{chunk_ranges, dynamic_chunks};
 use self::tick::AttackPick;
 use crate::brain::{Brain, MutationPolicy, NnTopology};
@@ -224,6 +231,62 @@ fn halton(mut i: u32, b: u32) -> f32 {
         i /= b;
     }
     r
+}
+
+/// v2.0 Wave 4: pick `count` species-anchor points spread across the world via
+/// rejection sampling against a minimum spacing (`ANCHOR_MIN_SPACING_FRAC ×
+/// world_size`). Each candidate is drawn from the dedicated `world_seed`-derived
+/// seeding PRNG (so anchors are deterministic from `world_seed`, not the sim
+/// RNG). If the min-spacing can't be satisfied after a bounded number of tries
+/// (small world / many species), the spacing is relaxed and the candidate
+/// accepted — the loop always terminates and always returns exactly `count`
+/// anchors. `(lo, hi)` is the legal placement band (walled: a body-radius off the
+/// walls; toroidal: the full extent). `wrap` selects toroidal vs euclidean
+/// spacing distance.
+fn pick_anchors(
+    rng: &mut SimRng,
+    count: usize,
+    lo: f32,
+    hi: f32,
+    world_size: f32,
+    wrap: bool,
+) -> Vec<(f32, f32)> {
+    let min_spacing = ANCHOR_MIN_SPACING_FRAC * world_size;
+    let min_sp2 = min_spacing * min_spacing;
+    let half = world_size * 0.5;
+    let mut anchors: Vec<(f32, f32)> = Vec::with_capacity(count);
+    // Bounded attempts per anchor so the loop can't spin forever on a small
+    // world; on exhaustion we accept whatever we last drew (relaxed spacing).
+    const MAX_TRIES: usize = 64;
+    for _ in 0..count {
+        let mut best = (
+            rng.uniform(lo, hi),
+            rng.uniform(lo, hi),
+        );
+        for _ in 0..MAX_TRIES {
+            let cx = rng.uniform(lo, hi);
+            let cy = rng.uniform(lo, hi);
+            let ok = anchors.iter().all(|&(ax, ay)| {
+                let mut dx = (cx - ax).abs();
+                let mut dy = (cy - ay).abs();
+                if wrap {
+                    if dx > half {
+                        dx = world_size - dx;
+                    }
+                    if dy > half {
+                        dy = world_size - dy;
+                    }
+                }
+                dx * dx + dy * dy >= min_sp2
+            });
+            best = (cx, cy);
+            if ok {
+                break;
+            }
+        }
+        anchors.push(best);
+    }
+    anchors
 }
 
 pub struct World {
@@ -437,31 +500,85 @@ impl World {
         let mut species = species::SpeciesRegistry::new();
         let mut next_id: u64 = 0;
         if species_mode {
-            // PLACEHOLDER seeding (Wave 4 does biome-appropriate founders +
-            // `_member_variance` spread). Seed `starting_species_count` species,
-            // each clustering `starting_species_member_count` founders near a
-            // random spread-out anchor. Founder genomes are BASIC uniform-random
-            // (single-pool style) — just enough to exercise mating + gating.
+            // v2.0 Wave 4: REAL N-anchor biome-adapted seeding.
+            //
+            // Determinism: a DEDICATED setup PRNG seeded from `world_seed`
+            // (`world_seed ^ SEEDING_PRNG_SALT`) drives EVERYTHING here — anchors,
+            // canonical genomes, founder-spread, founder brains. It is a distinct
+            // stream from the biome generator (raw `world_seed` SplitMix64) AND
+            // from the sim RNG (`rng`, string-seeded). So the same `world_seed`
+            // reproduces the same tick-0 species layout while the run still varies
+            // per launch (the sim RNG stays independent/random per run). NOTHING
+            // here draws from `rng` (the sim RNG), preserving that decoupling.
+            let mut seed_rng = SimRng::from_u64((world_seed as u64) ^ SEEDING_PRNG_SALT);
+
             let species_count = sliders.starting_species_count.max(1);
             let member_count = sliders.starting_species_member_count.max(1);
             species = species::SpeciesRegistry::seed(species_count);
-            // Cluster spread: founders scatter within this radius of the anchor.
-            // Sized so a cluster is contact-mating-reachable at tick 0 but the
+            let policy = &sliders.mutation_policy;
+            let variance = sliders.starting_species_member_variance;
+            let trait_sigma_mult = sliders.trait_mutation_sigma_multiplier;
+
+            // 1. Anchors spread across the world (rejection-sampled min spacing).
+            let anchors = pick_anchors(
+                &mut seed_rng,
+                species_count as usize,
+                lo,
+                hi,
+                dims.world_size,
+                dims.wrap_world,
+            );
+            // Founder-cluster radius: contact-mating-reachable at tick 0 but the
             // species still occupies a distinct patch of the (large) world.
-            let cluster_radius = (dims.world_size * 0.01).max(MOVE_SPEED_MAX * 2.0);
-            for s in 0..species_count {
+            let cluster_radius =
+                (dims.world_size * FOUNDER_CLUSTER_RADIUS_FRAC).max(MOVE_SPEED_MAX * 2.0);
+
+            for (s, &(ax, ay)) in anchors.iter().enumerate() {
                 let sp_id = s as u16;
-                // Anchor placement via Halton(2,3) so anchors spread out
-                // deterministically across the world (single RNG stream stays
-                // clean; anchors don't consume sim RNG draws).
-                let ax = lo + halton(s + 1, 2) * (hi - lo);
-                let ay = lo + halton(s + 1, 3) * (hi - lo);
-                for _ in 0..member_count {
-                    let brain = Brain::founder(&mut rng, nn_topology.clone());
-                    let genome = Genome::founder(&mut rng);
-                    // Cluster the founder near the anchor (sim RNG; deterministic).
-                    let jx = rng.symm() * cluster_radius;
-                    let jy = rng.symm() * cluster_radius;
+                // 2. Canonical "first member": a random founder brain + a genome
+                //    BIASED to survive the biome under the anchor (water →
+                //    water_affinity, desert → heat_tolerance, plains → moderate
+                //    both); body_size/max_speed/metabolism/diet stay random.
+                let anchor_biome = biome::biome_at_pos(&biome_grid, &dims, ax, ay);
+                let canonical_brain = Brain::founder(&mut seed_rng, nn_topology.clone());
+                let canonical_genome =
+                    Genome::canonical_for_biome(&mut seed_rng, anchor_biome);
+
+                // The canonical member spawns AT the anchor (no jitter) so the
+                // first member is exactly reproducible and centred.
+                creatures.push(
+                    next_id,
+                    ax,
+                    ay,
+                    founder_energy,
+                    0,
+                    canonical_brain.clone(),
+                    canonical_genome,
+                    sp_id,
+                );
+                next_id += 1;
+
+                // 3. `member_count - 1` more founders clustered near the anchor.
+                //    Each = the canonical brain+genome run through ONE normal
+                //    per-birth bucket draw (the same MutationPolicy machinery as a
+                //    real child), with that bucket's RATE AND SIGMA both multiplied
+                //    by `starting_species_member_variance`. Genome spread rides the
+                //    SAME per-founder draw (bucket sigma × variance × trait mult),
+                //    clamped to [0, 1]. Placement jitter is from the SAME seeding
+                //    PRNG (deterministic from `world_seed`).
+                for _ in 1..member_count {
+                    let (member_brain, spread_sigma) = Brain::founder_spread_with_sigma(
+                        &canonical_brain,
+                        &mut seed_rng,
+                        policy,
+                        variance,
+                    );
+                    // Genome founder-spread off the same draw: bucket sigma (already
+                    // × variance) scaled by the trait multiplier, clamped [0,1].
+                    let member_genome =
+                        canonical_genome.mutated(&mut seed_rng, spread_sigma * trait_sigma_mult);
+                    let jx = seed_rng.symm() * cluster_radius;
+                    let jy = seed_rng.symm() * cluster_radius;
                     let (x, y) = if dims.wrap_world {
                         (
                             (ax + jx).rem_euclid(dims.world_size),
@@ -470,7 +587,16 @@ impl World {
                     } else {
                         ((ax + jx).clamp(lo, hi), (ay + jy).clamp(lo, hi))
                     };
-                    creatures.push(next_id, x, y, founder_energy, 0, brain, genome, sp_id);
+                    creatures.push(
+                        next_id,
+                        x,
+                        y,
+                        founder_energy,
+                        0,
+                        member_brain,
+                        member_genome,
+                        sp_id,
+                    );
                     next_id += 1;
                 }
             }

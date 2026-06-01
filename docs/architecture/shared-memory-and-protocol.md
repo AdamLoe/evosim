@@ -103,6 +103,8 @@ length-prefixed payloads).
 | 97 | `CTRL_PROFILE_REPORT_LEN` | Length of profile JSON in bytes. |
 | 104 | `CTRL_NN_STATS_EPOCH` | Bumped by worker after writing NN stats. |
 | 105 | `CTRL_NN_STATS_LEN` | Length of NN stats JSON in bytes. |
+| 112 | `CTRL_SPECIES_TABLE_EPOCH` | Bumped by worker after writing the species table (species mode). |
+| 113 | `CTRL_SPECIES_TABLE_LEN` | Length of species-table JSON in bytes. |
 
 Slots not listed are reserved; do not read or write them.
 
@@ -113,6 +115,19 @@ Slots not listed are reserved; do not read or write them.
 | `INSPECT_RESP_OFFSET` (1024) | `INSPECT_RESP_CAP` (8 KB) | Inspector response JSON, UTF-8. Length in `CTRL_INSPECT_RESP_LEN`. |
 | `PROFILE_REPORT_OFFSET` (9216) | `PROFILE_REPORT_CAP` (16 KB) | Profile-report JSON, UTF-8. |
 | `NN_STATS_OFFSET` (25600) | `NN_STATS_CAP` (4 KB) | NN-worker stats JSON, UTF-8. |
+| `SPECIES_TABLE_OFFSET` (29696) | `SPECIES_TABLE_CAP` (4 KB) | Species-table JSON, UTF-8. Length in `CTRL_SPECIES_TABLE_LEN`. |
+
+**Polled species table (v2.0 Wave 4).** A cadence-written report (mirrors the
+NN-stats producer — no request side) exposing every **live** species as
+`{ id, color_u32, name, count }` plus the current world tick, produced by
+`WorldHandle::species_table_json`. Per-species counts are aggregated sim-side;
+the table is **dynamic** (a species that goes extinct simply drops out, and v2.1
+split/merge needs no protocol change). Single-pool returns an empty `species`
+list. The worker writes it every ~45 ticks **only in species mode**
+(`maybeWriteSpeciesTable`) and bumps `CTRL_SPECIES_TABLE_EPOCH`. This is the
+**producer**; the Monitor per-species pop-graph + canvas color-table consumers
+are Wave 5. Single-sourced with the per-creature `color_u32` via
+`SPECIES_PALETTE` so canvas and chart never drift.
 
 JS-side decoding: `TextDecoder.decode()` rejects views into
 SharedArrayBuffer ("The provided ArrayBufferView value must not be
@@ -202,12 +217,12 @@ derived display color) + a `packed_u32` (ring-flash + reserved species_id).
 0xFF` (A always 255). **Single-pool:** built from the genome via HSV
 (`genome_color_u32` in `src/wasm_api.rs`): hue ← `diet` (`120 * (1 - diet)`°,
 grazer-green 120° → predator-red 0°), saturation ← `body_size` → `[0.4, 1.0]`,
-value ← `max_speed` → `[0.5, 1.0]`. **Species mode (v2.0 Wave 3a):** the sim
-writes the **species color** into this same lane (looked up from
-`World.species`), so the renderer needs **no change** to show species colors this
-wave. The Wave-3 species color is a placeholder evenly-spread saturated hue
-(`placeholder_species_color`, `hue = id/total × 360°`); Wave 4 replaces it with
-the polled species→color table (note that seam — the lane stays the same).
+value ← `max_speed` → `[0.5, 1.0]`. **Species mode:** the sim writes the
+**species color** into this same lane (looked up from `World.species`), so the
+renderer needs no change to show species colors. v2.0 Wave 4 draws that color
+from a **hand-spread 10-hue saturated palette** (`SPECIES_PALETTE` in
+`src/world/species.rs`), single-sourced with the polled species→color table so
+canvas and Monitor never drift.
 
 ### `packed_u32` (lane 6) — bit layout (2b decode contract)
 

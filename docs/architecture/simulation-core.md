@@ -98,16 +98,45 @@ validity gate differ by mode — see `ActionGate` in `src/world/nn.rs`
 
 **Species registry.** `World.species` is a `SpeciesRegistry`
 (`src/world/species.rs`) — a `Vec<Species>` keyed by id (`Species { id: u16,
-color_u32 }`), built **dynamic** (add/remove-capable) so the v2.1 split/merge
-work needs no protocol change even though v3 seeds a fixed set. Each creature
-carries a `species_id: u16` SoA column (0/unused in single-pool). Seeding
-(Wave-3 **placeholder**; Wave 4 does biome-appropriate founders): seed
-`starting_species_count` (default 10) species each with an evenly-spread
-saturated **placeholder hue** (`hue = id/total × 360°`); for each, cluster
-`starting_species_member_count` (default 10) founders near a random Halton
-anchor with **basic uniform-random** founder genomes. `starting_species_member_variance`
-(default 3.0) is **accepted but inert** in Wave 3 — wired + plumbed, applied in
-Wave 4.
+color_u32, name: String }`), built **dynamic** (add/remove/recolor-capable) so
+the v2.1 split/merge work needs no protocol change even though v2.0 seeds a fixed
+set. Each creature carries a `species_id: u16` SoA column (0/unused in
+single-pool). Species colors come from a **hand-spread 10-hue saturated palette**
+(`SPECIES_PALETTE`, single source of truth for both the per-creature `color_u32`
+the sim writes in species mode and the polled species→color table — canvas and
+Monitor can't drift); labels are `Species-A..J`.
+
+**Real N-anchor biome-adapted seeding (v2.0 Wave 4).** All of seeding is
+**deterministic from `world_seed`** via a *dedicated* setup PRNG
+(`SimRng::from_u64(world_seed ^ SEEDING_PRNG_SALT)`) — a distinct stream from
+both the biome generator (raw `world_seed` SplitMix64) and the sim RNG
+(string-seeded xoshiro). So the same `world_seed` reproduces the same tick-0
+species layout while the run still varies per launch (the sim RNG stays
+independent/random). The algorithm:
+
+1. **Anchors** — pick `starting_species_count` (default 10) points spread across
+   the world by rejection-sampling against a minimum spacing
+   (`ANCHOR_MIN_SPACING_FRAC × world_size`, relaxed if too tight to satisfy).
+2. **Canonical "first member"** per anchor — a random founder brain + a genome
+   **biased to survive the biome under the anchor** (`Genome::canonical_for_biome`):
+   Water → `water_affinity ∈ [0.7, 1.0]`; Desert → `heat_tolerance ∈ [0.7, 1.0]`;
+   Plains → both moderate (`[0.4, 0.7]`). The other four traits
+   (`body_size`/`max_speed`/`metabolism`/`diet`) stay random per species so
+   species still differ in grazer/predator lean + body. The canonical member
+   spawns *at* the anchor.
+3. **`starting_species_member_count - 1` more founders** clustered within
+   `FOUNDER_CLUSTER_RADIUS_FRAC × world_size` of the anchor (contact-mating
+   reachable at tick 0). Each is the canonical brain+genome run through **one
+   normal per-birth bucket draw** (the same `MutationPolicy` machinery as a real
+   child), with that bucket's **rate AND sigma both multiplied by
+   `starting_species_member_variance`** (default 3.0, now **active**; the genome
+   spread rides the same draw, scaled further by `trait_mutation_sigma_multiplier`,
+   clamped `[0,1]`). 1.0 = founders drift like a normal child; higher = wider
+   spread for selection to act on at tick 0. Helper:
+   `Brain::founder_spread_with_sigma`.
+
+Defaults: 10 species × 10 founders = 100 starting pop. Species extinct = extinct
+(no respawn in v2.0).
 
 **Mate mechanic** (`World::handle_mating`, runs in the `tick.handle_births` span
 in species mode). Gated ENTIRELY by the **initiator**: it chose `action[2]`, is

@@ -331,7 +331,63 @@ pub const STARTING_SPECIES_MEMBER_COUNT_DEFAULT: u32 = 10;
 pub const STARTING_SPECIES_MEMBER_VARIANCE_DEFAULT: f32 = 3.0;
 
 /// Default initiator-only post-mating cooldown in ticks. Live-tunable.
+///
+/// v2.0 Wave 4 BALANCE: kept at 200 (the plan's default). With the mating
+/// energy cost = `split_gift` (30) and founders booting at 100 energy, a 200-tick
+/// initiator cooldown caps per-initiator birth rate hard enough that the soft
+/// pop cap (8k) does not bind via random cull in a default species run — see the
+/// in-process long-run trajectory in the Wave-4 report. Live-tunable.
 pub const MATING_COOLDOWN_TICKS_DEFAULT: u32 = 200;
+
+// ---- Species seeding (v2.0 Wave 4) ----
+//
+// Real N-anchor biome-adapted seeding (replaces the Wave-3 placeholder). All of
+// seeding — anchors, canonical genomes, founder spread, founder brains — is
+// deterministic from `world_seed` via a DEDICATED setup PRNG
+// (`SimRng::from_u64(world_seed ^ SEEDING_PRNG_SALT)`), a distinct stream from
+// both the biome generator (raw `world_seed` SplitMix64) and the sim RNG
+// (string-seeded xoshiro). So the same `world_seed` reproduces the same tick-0
+// species layout while the run still varies per launch (sim RNG independent).
+
+/// Salt Xored into `world_seed` to seed the species-seeding PRNG. Picked to be a
+/// distinct stream from the biome SplitMix64 (which uses raw `world_seed`) so the
+/// two deterministic-from-`world_seed` systems never share a draw sequence.
+pub const SEEDING_PRNG_SALT: u64 = 0x5EED_0F00_D1CE_A11E;
+
+/// Minimum spacing between species anchors, as a fraction of `world_size`.
+/// Anchors are rejection-sampled to stay at least this far apart so the 10
+/// founder clumps occupy visibly distinct patches of the map. Relaxed
+/// automatically if too many species are requested to fit (see
+/// `pick_anchors`). FEEL KNOB (visual spread of factions).
+pub const ANCHOR_MIN_SPACING_FRAC: f32 = 0.12;
+
+/// Founder-cluster radius as a fraction of `world_size`. Non-canonical founders
+/// scatter within this radius of their anchor so the clump is contact-mating
+/// reachable at tick 0 (a clump wider than mating contact range can't bootstrap).
+/// Floored at a few move-steps so a tiny world still clusters. FEEL/BALANCE KNOB.
+pub const FOUNDER_CLUSTER_RADIUS_FRAC: f32 = 0.01;
+
+// ---- Biome → canonical-founder genome bias (v2.0 Wave 4) ----
+//
+// The canonical "first member" genome for each anchor is rolled BIASED to
+// survive the biome under that anchor (a deliberate reversal of "random founders,
+// let the world filter them" — at gen 0 there's no learned behavior to keep a
+// maladapted clump alive long enough to evolve). The bias touches ONLY the
+// terrain-survival traits; body_size / max_speed / metabolism / diet stay random
+// per species so species still differ in grazer/predator lean + body.
+//
+// Mapping (LOG + FLAG — feel-affecting):
+//   * Water anchor  → high `water_affinity` ∈ [0.7, 1.0], `heat_tolerance` random.
+//   * Desert anchor → high `heat_tolerance` ∈ [0.7, 1.0], `water_affinity` random.
+//   * Plains anchor → moderate both, `water_affinity`/`heat_tolerance` ∈ [0.4, 0.7].
+/// Low end of the "high affinity/tolerance" band for a biome-matched trait.
+pub const BIOME_BIAS_HIGH_LO: f32 = 0.7;
+/// High end of the "high affinity/tolerance" band (inclusive-ish; ≤ 1.0).
+pub const BIOME_BIAS_HIGH_HI: f32 = 1.0;
+/// Low end of the Plains "moderate both" band.
+pub const BIOME_BIAS_MODERATE_LO: f32 = 0.4;
+/// High end of the Plains "moderate both" band.
+pub const BIOME_BIAS_MODERATE_HI: f32 = 0.7;
 
 /// Contact-radius padding for mating. `Mate` finds a same-species partner within
 /// `(r_initiator + r_partner) * MATING_CONTACT_RADIUS_FACTOR` — essentially

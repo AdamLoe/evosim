@@ -1,28 +1,91 @@
-//! Species registry (v2.0 Wave 3a — scaffolding).
+//! Species registry (v2.0 Wave 3a scaffolding → Wave 4 real seeding).
 //!
-//! A `Species` carries an id + a display color. The registry is a `Vec<Species>`
-//! keyed by id (id == index for the seeded set), built to be **dynamic** — species
-//! can be added/removed at runtime — even though Wave 3 seeds a fixed set and
-//! v2.1 splits/merges arrive later. Keeping the API add/remove-capable now means
-//! the later split work needs no protocol change.
+//! A `Species` carries an id + a display color + a label. The registry is a
+//! `Vec<Species>` keyed by id (id == index for the seeded set), built to be
+//! **dynamic** — species can be added/removed/recolored at runtime — even though
+//! v2.0 seeds a fixed set and v2.1 splits/merges arrive later. Keeping the API
+//! add/remove-capable now means the later split work needs no protocol change.
 //!
-//! Wave 3 placeholder color: an evenly-spread saturated hue around the wheel,
-//! derived from the species id, written into the existing `color_u32` snapshot
-//! lane sim-side when `species_mode` is on (so the renderer shows species colors
-//! with no change this wave). Wave 4 replaces this with the polled species→color
-//! table (note that seam).
+//! Wave 4 replaces the Wave-3 placeholder `hue = id/total × 360°` color with a
+//! **hand-spread saturated palette** (`SPECIES_PALETTE` below). The palette is
+//! single-sourced here so both the per-creature `color_u32` the sim writes in
+//! species mode AND the polled species→color table (in `wasm_api.rs`) draw from
+//! the same place — canvas and Monitor can never drift.
 
 use serde::{Deserialize, Serialize};
 
-/// One species: a stable id + a saturated display color (RGBA8 packed u32).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Hand-spread saturated 10-hue palette (RGBA8 packed little-endian, alpha 255).
+///
+/// FEEL KNOB. 10 well-spaced hues around the wheel, with value/saturation nudged
+/// slightly per slot so adjacent species stay readable as distinct (a flat
+/// even-hue ring puts cyan next to teal next to green — too close). Ordered so
+/// neighbours in the seed sequence (`Species-A`, `Species-B`, …) land on
+/// far-apart hues, not a slow gradient. Typical runs end with 1–3 survivors, so
+/// reuse past 10 species (v2.1 splits) is acceptable and handled by wrapping the
+/// index modulo the palette length.
+///
+/// Colors (R, G, B), alpha implied 255:
+///   A red · B azure · C amber · D violet · E green · F magenta · G cyan
+///   H orange · I blue · J chartreuse
+pub const SPECIES_PALETTE: [(u8, u8, u8); 10] = [
+    (230, 50, 50),   // A — red
+    (40, 130, 230),  // B — azure
+    (240, 180, 30),  // C — amber/gold
+    (150, 70, 210),  // D — violet
+    (40, 190, 90),   // E — green
+    (230, 60, 180),  // F — magenta
+    (40, 200, 200),  // G — cyan/teal
+    (240, 120, 30),  // H — orange
+    (60, 70, 220),   // I — deep blue
+    (170, 210, 40),  // J — chartreuse
+];
+
+/// Pack an `(r, g, b)` palette entry into an RGBA8 little-endian `u32`
+/// (R bits 0..8 … A bits 24..32, alpha 255). Matches the snapshot `color_u32`
+/// lane the renderer decodes (`R = u & 0xFF`, etc.).
+#[inline]
+pub const fn pack_rgb(r: u8, g: u8, b: u8) -> u32 {
+    (r as u32) | ((g as u32) << 8) | ((b as u32) << 16) | (0xFFu32 << 24)
+}
+
+/// The hand-spread palette color for the `k`-th seeded species (wraps modulo the
+/// palette length so >10 species — v2.1 splits — still get a color). Single
+/// source of truth for both the per-creature color and the polled table.
+#[inline]
+pub fn palette_color(k: usize) -> u32 {
+    let (r, g, b) = SPECIES_PALETTE[k % SPECIES_PALETTE.len()];
+    pack_rgb(r, g, b)
+}
+
+/// Human label for the `k`-th seeded species: `Species-A`, `Species-B`, …,
+/// `Species-Z`, then `Species-AA` style wrap for >26 (only v2.1 territory). v2.0
+/// seeds ≤ 10 so this is always `Species-A..J`.
+pub fn species_label(k: usize) -> String {
+    // 0 → "A", 25 → "Z", 26 → "AA", … (spreadsheet-column style, 1-indexed).
+    let mut n = k + 1;
+    let mut letters = Vec::new();
+    while n > 0 {
+        let rem = (n - 1) % 26;
+        letters.push((b'A' + rem as u8) as char);
+        n = (n - 1) / 26;
+    }
+    let label: String = letters.iter().rev().collect();
+    format!("Species-{label}")
+}
+
+/// One species: a stable id + a saturated display color (RGBA8 packed u32) + a
+/// human label.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Species {
-    /// Stable species id. For the Wave-3 seeded set, `id == index` in the
-    /// registry, but the registry does not rely on that (so removals are safe).
+    /// Stable species id. For the seeded set, `id == index` in the registry, but
+    /// the registry does not rely on that (so removals are safe).
     pub id: u16,
     /// Display color, RGBA8 packed little-endian (R bits 0..8 … A bits 24..32).
-    /// Wave 3 placeholder: an evenly-spread saturated hue from the id.
+    /// Drawn from the hand-spread `SPECIES_PALETTE`.
     pub color_u32: u32,
+    /// Human label (`Species-A`..). Low-priority identity per the decisions log;
+    /// rides the inspector JSON and the polled species table.
+    pub name: String,
 }
 
 /// Dynamic species registry. `Vec<Species>` keyed by id; lookup is O(N) over a
@@ -43,22 +106,26 @@ impl SpeciesRegistry {
         }
     }
 
-    /// Seed `count` species with evenly-spread saturated placeholder hues.
-    /// Wave 3 helper; Wave 4 replaces the color source with the polled table.
+    /// Seed `count` species with hand-spread palette colors + `Species-A..`
+    /// labels. The k-th species gets `palette_color(k)` and `species_label(k)`,
+    /// single-sourced so the polled table matches the per-creature color exactly.
     pub fn seed(count: u32) -> Self {
         let mut reg = Self::new();
         for k in 0..count {
-            let color = placeholder_species_color(k as u16, count.max(1) as u16);
-            reg.add(color);
+            reg.add(palette_color(k as usize), species_label(k as usize));
         }
         reg
     }
 
-    /// Append a new species with the given color; returns the assigned id.
-    pub fn add(&mut self, color_u32: u32) -> u16 {
+    /// Append a new species with the given color + name; returns the assigned id.
+    pub fn add(&mut self, color_u32: u32, name: String) -> u16 {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
-        self.species.push(Species { id, color_u32 });
+        self.species.push(Species {
+            id,
+            color_u32,
+            name,
+        });
         id
     }
 
@@ -87,6 +154,15 @@ impl SpeciesRegistry {
         self.get(id).map(|s| s.color_u32).unwrap_or(0xFFFF_FFFF)
     }
 
+    /// Human label for a species id; falls back to a generic stringified id if
+    /// the id is unknown (so a stale `species_id` never renders an empty name).
+    #[inline]
+    pub fn name_of(&self, id: u16) -> String {
+        self.get(id)
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| format!("Species-#{id}"))
+    }
+
     /// Number of registered species.
     #[inline]
     #[cfg_attr(not(test), allow(dead_code))]
@@ -101,44 +177,9 @@ impl SpeciesRegistry {
     }
 
     /// Read-only view of the registered species (for the snapshot color writer /
-    /// the future polled species→color table). Dynamic-registry surface for v2.1.
+    /// the polled species→color table). Dynamic-registry surface for v2.1.
     #[inline]
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn all(&self) -> &[Species] {
         &self.species
     }
-}
-
-/// Wave 3 placeholder species color: an evenly-spread saturated hue around the
-/// wheel from the species id, fully saturated and bright. RGBA8 packed
-/// little-endian (alpha 255). `total` spreads the hues evenly; a `total` of 0/1
-/// maps everything to red.
-///
-/// FEEL KNOB (placeholder). Wave 4 replaces this with the hand-spread palette +
-/// the polled species→color table.
-pub fn placeholder_species_color(id: u16, total: u16) -> u32 {
-    let total = total.max(1) as f32;
-    let hue = (id as f32 / total) * 360.0;
-    let (r, g, b) = hsv_to_rgb8(hue, 0.85, 0.95);
-    (r as u32) | ((g as u32) << 8) | ((b as u32) << 16) | (0xFFu32 << 24)
-}
-
-/// HSV (hue degrees, sat/val in [0,1]) → 8-bit RGB. Local copy of the
-/// `wasm_api` helper so species coloring doesn't depend on that module.
-#[inline]
-fn hsv_to_rgb8(h_deg: f32, s: f32, v: f32) -> (u8, u8, u8) {
-    let h = (h_deg.rem_euclid(360.0)) / 60.0;
-    let c = v * s;
-    let x = c * (1.0 - (h % 2.0 - 1.0).abs());
-    let m = v - c;
-    let (r, g, b) = match h as u32 {
-        0 => (c, x, 0.0),
-        1 => (x, c, 0.0),
-        2 => (0.0, c, x),
-        3 => (0.0, x, c),
-        4 => (x, 0.0, c),
-        _ => (c, 0.0, x),
-    };
-    let to8 = |f: f32| ((f + m).clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-    (to8(r), to8(g), to8(b))
 }

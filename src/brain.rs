@@ -702,6 +702,69 @@ impl Brain {
         }
         (child, sigma)
     }
+
+    /// v2.0 Wave 4: founder-spread variant of `child_from_with_sigma`. Used ONLY
+    /// at species seeding to splay the non-canonical founders off the canonical
+    /// first member: it runs one normal per-birth bucket draw (same
+    /// `MutationPolicy` machinery as a real child), but the chosen bucket's
+    /// **rate AND sigma are both multiplied by `variance`** (the
+    /// `starting_species_member_variance` setting — default 3.0) so the founder
+    /// clump has measurable internal spread for selection to act on at tick 0.
+    ///
+    /// `variance == 1.0` reproduces a normal child of the canonical member;
+    /// higher = wider spread. Returns the (possibly empty) chosen-bucket sigma —
+    /// already scaled by `variance` — so the caller can drive the canonical
+    /// genome's founder-spread step off the SAME per-founder draw. Returns
+    /// `0.0` (verbatim copy) for the frozen-evolution case (all-zero weights) or
+    /// `variance <= 0`.
+    ///
+    /// RNG draw order (deterministic): bucket pick, then the geometric-skip
+    /// Gaussian walk. The genome founder-spread draws happen AFTER this returns,
+    /// off the same `rng`, exactly like the child path.
+    pub fn founder_spread_with_sigma(
+        canonical: &Brain,
+        rng: &mut SimRng,
+        policy: &MutationPolicy,
+        variance: f32,
+    ) -> (Self, f32) {
+        let mut member = canonical.clone();
+        // NaN-safe positivity check (a NaN / ≤0 variance ⇒ verbatim copy), written
+        // without a negated partial-ord comparison to stay clippy-clean.
+        if variance.is_nan() || variance <= 0.0 {
+            return (member, 0.0);
+        }
+        let total: f32 = policy.buckets.iter().map(|b| b.weight.max(0.0)).sum();
+        // `total` is a sum of non-negative finite weights, so `<= 0.0` is the
+        // exact equivalent of `!(total > 0.0)` here (no NaN risk) — and avoids
+        // the negated-partial-ord clippy lint.
+        if total <= 0.0 {
+            return (member, 0.0);
+        }
+        let mut u = rng.unit() * total;
+        let mut chosen = &policy.buckets[0];
+        for b in policy.buckets.iter() {
+            let w = b.weight.max(0.0);
+            if u < w {
+                chosen = b;
+                break;
+            }
+            u -= w;
+        }
+        // Founder spread scales BOTH rate and sigma by `variance` (per the plan),
+        // unlike `child_from_with_sigma` which scales only the rate.
+        let p = (chosen.rate * variance).clamp(0.0, 1.0);
+        let sigma = chosen.sigma * variance;
+        if p > 0.0 && sigma > 0.0 {
+            let m = member.weights.len();
+            let mut i = rng.geom_skip(p);
+            while i < m {
+                member.weights[i] += rng.normal() * sigma;
+                let step = rng.geom_skip(p);
+                i = i.saturating_add(step).saturating_add(1);
+            }
+        }
+        (member, sigma)
+    }
 }
 
 #[cfg(test)]

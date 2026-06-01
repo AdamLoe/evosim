@@ -27,6 +27,8 @@ export const CTRL_PROFILE_REPORT_EPOCH = 96 as const;
 export const CTRL_PROFILE_REPORT_LEN = 97 as const;
 export const CTRL_NN_STATS_EPOCH = 104 as const;
 export const CTRL_NN_STATS_LEN = 105 as const;
+export const CTRL_SPECIES_TABLE_EPOCH = 112 as const;
+export const CTRL_SPECIES_TABLE_LEN = 113 as const;
 export const CTRL_I32_REGION_LEN = 256 as const;
 
 export const INSPECT_RESP_OFFSET = 1024 as const;
@@ -35,4 +37,6 @@ export const PROFILE_REPORT_OFFSET = 9216 as const;
 export const PROFILE_REPORT_CAP = 16384 as const;
 export const NN_STATS_OFFSET = 25600 as const;
 export const NN_STATS_CAP = 4096 as const;
-export const CONTROL_SAB_BYTES = 30720 as const;
+export const SPECIES_TABLE_OFFSET = 29696 as const;
+export const SPECIES_TABLE_CAP = 4096 as const;
+export const CONTROL_SAB_BYTES = 34816 as const;
