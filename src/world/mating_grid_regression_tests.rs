@@ -76,8 +76,16 @@ fn dense_species_world(seed: &str) -> World {
 /// Here we cross-check that births + removals keep every SoA column aligned.)
 fn assert_soa_consistent(w: &World, tick: u32) {
     let pop = w.creatures.len();
-    assert_eq!(w.creatures.x.len(), pop, "x column len drift at tick {tick}");
-    assert_eq!(w.creatures.y.len(), pop, "y column len drift at tick {tick}");
+    assert_eq!(
+        w.creatures.x.len(),
+        pop,
+        "x column len drift at tick {tick}"
+    );
+    assert_eq!(
+        w.creatures.y.len(),
+        pop,
+        "y column len drift at tick {tick}"
+    );
     assert_eq!(
         w.creatures.species_id.len(),
         pop,

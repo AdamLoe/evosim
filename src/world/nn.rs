@@ -53,7 +53,13 @@ impl<'a> BiomeSampler<'a> {
     /// creature READS the same lower penalty it PAYS in the tick effects. The
     /// penalty is clamped to [0, 1].
     #[inline]
-    pub(crate) fn penalty_at(&self, x: f32, y: f32, water_affinity: f32, heat_tolerance: f32) -> f32 {
+    pub(crate) fn penalty_at(
+        &self,
+        x: f32,
+        y: f32,
+        water_affinity: f32,
+        heat_tolerance: f32,
+    ) -> f32 {
         let dim = self.grass_dim;
         let ws = self.world_size;
         let (px, py) = if self.wrap {
@@ -527,9 +533,7 @@ impl NnInputGroup {
 /// True iff `active`'s groups are strictly increasing in canonical rank (i.e.
 /// a subsequence of `NnInputGroup::ORDER`, no repeats, in order).
 fn is_canonical_subsequence(active: &[(NnInputGroup, usize)]) -> bool {
-    active
-        .windows(2)
-        .all(|w| w[0].0.rank() < w[1].0.rank())
+    active.windows(2).all(|w| w[0].0.rank() < w[1].0.rank())
 }
 
 /// Resolved layout: per-active-group `(group, offset)` in canonical order plus
@@ -644,10 +648,7 @@ impl NnInputLayout {
             (NnInputGroup::Bias, 1),
         ]);
         debug_assert_eq!(layout.width(), NN_INPUTS, "legacy layout width must be 32");
-        debug_assert_eq!(
-            layout.offset_of(NnInputGroup::SelfMemory),
-            Some(0)
-        );
+        debug_assert_eq!(layout.offset_of(NnInputGroup::SelfMemory), Some(0));
         debug_assert_eq!(
             layout.offset_of(NnInputGroup::WallProximity),
             Some(NN_WALL_OFFSET)
@@ -741,9 +742,17 @@ pub(crate) fn build_nn_input(
         buf[o + 2] = prev_vx / MOVE_SPEED_MAX;
         buf[o + 3] = prev_vy / MOVE_SPEED_MAX;
         let la = creatures.last_action[i];
-        buf[o + 4] = if matches!(la, Action::Graze) { 1.0 } else { 0.0 };
+        buf[o + 4] = if matches!(la, Action::Graze) {
+            1.0
+        } else {
+            0.0
+        };
         // slot 5: is_last_attack (was is_last_eat before the Wave 2a rename).
-        buf[o + 5] = if matches!(la, Action::Attack) { 1.0 } else { 0.0 };
+        buf[o + 5] = if matches!(la, Action::Attack) {
+            1.0
+        } else {
+            0.0
+        };
         buf[o + 6] = (creatures.ticks_since_split[i] as f32 / max_age_f).clamp(0.0, 1.0);
         buf[o + 7] = if cooldown == 0 { 1.0 } else { 0.0 };
     }
@@ -919,7 +928,12 @@ pub(crate) fn is_valid_action(act: Action, energy: f32, cooldown: u32, gate: &Ac
 /// Decode action logits to an Action via argmax with first-index tiebreak
 /// and valid-fallthrough (v6 §1 + §E). An invalid action[2] (Split/Mate) falls
 /// through to Graze exactly as today.
-pub(crate) fn decode_action(logits: &[f32; 3], energy: f32, cooldown: u32, gate: &ActionGate) -> Action {
+pub(crate) fn decode_action(
+    logits: &[f32; 3],
+    energy: f32,
+    cooldown: u32,
+    gate: &ActionGate,
+) -> Action {
     if logits.iter().any(|v| !v.is_finite()) {
         return Action::Graze;
     }
@@ -1212,15 +1226,29 @@ mod tests {
     #[test]
     fn decode_action_valid_fallthrough_split_invalid() {
         let logits = [0.0f32, 0.0, 10.0];
-        let act = decode_action(&logits, 10.0, 0, &ActionGate::single_pool(SPLIT_THRESHOLD_DEFAULT));
+        let act = decode_action(
+            &logits,
+            10.0,
+            0,
+            &ActionGate::single_pool(SPLIT_THRESHOLD_DEFAULT),
+        );
         assert_ne!(act, Action::Split, "Split must be invalid when energy < 50");
-        assert!(matches!(act, Action::Graze | Action::Attack), "got {:?}", act);
+        assert!(
+            matches!(act, Action::Graze | Action::Attack),
+            "got {:?}",
+            act
+        );
     }
 
     #[test]
     fn decode_action_first_index_tiebreak() {
         let logits = [5.0f32; 3];
-        let act = decode_action(&logits, 100.0, 0, &ActionGate::single_pool(SPLIT_THRESHOLD_DEFAULT));
+        let act = decode_action(
+            &logits,
+            100.0,
+            0,
+            &ActionGate::single_pool(SPLIT_THRESHOLD_DEFAULT),
+        );
         assert_eq!(act, Action::ALL[0], "lower index must win on ties");
         assert_eq!(act, Action::Graze, "Graze is index 0 after D9");
     }
@@ -1228,15 +1256,29 @@ mod tests {
     #[test]
     fn decode_action_attack_invalid_in_cooldown() {
         let logits = [0.0f32, 10.0, 0.0];
-        let act = decode_action(&logits, 100.0, 5, &ActionGate::single_pool(SPLIT_THRESHOLD_DEFAULT));
-        assert_ne!(act, Action::Attack, "Attack must be invalid when cooldown > 0");
+        let act = decode_action(
+            &logits,
+            100.0,
+            5,
+            &ActionGate::single_pool(SPLIT_THRESHOLD_DEFAULT),
+        );
+        assert_ne!(
+            act,
+            Action::Attack,
+            "Attack must be invalid when cooldown > 0"
+        );
         assert_eq!(act, Action::Graze, "should fall through to Graze");
     }
 
     #[test]
     fn decode_action_split_invalid_when_low_energy() {
         let logits = [0.0f32, 0.0, 10.0];
-        let act = decode_action(&logits, 0.0, 0, &ActionGate::single_pool(SPLIT_THRESHOLD_DEFAULT));
+        let act = decode_action(
+            &logits,
+            0.0,
+            0,
+            &ActionGate::single_pool(SPLIT_THRESHOLD_DEFAULT),
+        );
         assert_ne!(
             act,
             Action::Split,
@@ -1247,7 +1289,12 @@ mod tests {
     #[test]
     fn decode_action_graze_always_valid_as_fallback() {
         let logits = [-5.0f32, 2.0, 10.0];
-        let act = decode_action(&logits, 0.0, 1, &ActionGate::single_pool(SPLIT_THRESHOLD_DEFAULT));
+        let act = decode_action(
+            &logits,
+            0.0,
+            1,
+            &ActionGate::single_pool(SPLIT_THRESHOLD_DEFAULT),
+        );
         assert!(
             matches!(act, Action::Graze),
             "Expected Graze fallback, got {:?}",
@@ -1258,11 +1305,21 @@ mod tests {
     #[test]
     fn nan_logits_return_graze_via_decode() {
         let nan_logits = [f32::NAN, 0.0, 0.0];
-        let act = decode_action(&nan_logits, 100.0, 0, &ActionGate::single_pool(SPLIT_THRESHOLD_DEFAULT));
+        let act = decode_action(
+            &nan_logits,
+            100.0,
+            0,
+            &ActionGate::single_pool(SPLIT_THRESHOLD_DEFAULT),
+        );
         assert_eq!(act, Action::Graze, "NaN logit must produce Graze");
 
         let inf_logits = [f32::INFINITY, 0.0, 0.0];
-        let act2 = decode_action(&inf_logits, 100.0, 0, &ActionGate::single_pool(SPLIT_THRESHOLD_DEFAULT));
+        let act2 = decode_action(
+            &inf_logits,
+            100.0,
+            0,
+            &ActionGate::single_pool(SPLIT_THRESHOLD_DEFAULT),
+        );
         assert_eq!(act2, Action::Graze, "+Inf logit must produce Graze");
     }
 

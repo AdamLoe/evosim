@@ -183,8 +183,14 @@ fn water_affinity_reduces_water_penalty() {
     let p_high = w.movement_penalty_for(i);
 
     assert!(p_low > p_high, "p_low={p_low} must exceed p_high={p_high}");
-    assert!((p_low - 0.8).abs() < 1e-5, "affinity 0 → full 0.8; got {p_low}");
-    assert!((p_high - 0.2).abs() < 1e-5, "affinity 0.75 → 0.8*0.25=0.2; got {p_high}");
+    assert!(
+        (p_low - 0.8).abs() < 1e-5,
+        "affinity 0 → full 0.8; got {p_low}"
+    );
+    assert!(
+        (p_high - 0.2).abs() < 1e-5,
+        "affinity 0.75 → 0.8*0.25=0.2; got {p_high}"
+    );
 }
 
 /// A split fires a blue "CreatedChild" flash on the parent and a teal "Born"

@@ -259,10 +259,7 @@ fn pick_anchors(
     // world; on exhaustion we accept whatever we last drew (relaxed spacing).
     const MAX_TRIES: usize = 64;
     for _ in 0..count {
-        let mut best = (
-            rng.uniform(lo, hi),
-            rng.uniform(lo, hi),
-        );
+        let mut best = (rng.uniform(lo, hi), rng.uniform(lo, hi));
         for _ in 0..MAX_TRIES {
             let cx = rng.uniform(lo, hi);
             let cy = rng.uniform(lo, hi);
@@ -467,8 +464,7 @@ impl World {
         // drawn for, so reconcile the topology to the layout width BEFORE
         // founder draws.
         let species_mode = sliders.species_mode;
-        let nn_input_layout =
-            self::nn::NnInputLayout::for_settings(dims.wrap_world, species_mode);
+        let nn_input_layout = self::nn::NnInputLayout::for_settings(dims.wrap_world, species_mode);
         let nn_topology = if nn_topology.input_width() == nn_input_layout.width() {
             nn_topology
         } else {
@@ -541,8 +537,7 @@ impl World {
                 //    both); body_size/max_speed/metabolism/diet stay random.
                 let anchor_biome = biome::biome_at_pos(&biome_grid, &dims, ax, ay);
                 let canonical_brain = Brain::founder(&mut seed_rng, nn_topology.clone());
-                let canonical_genome =
-                    Genome::canonical_for_biome(&mut seed_rng, anchor_biome);
+                let canonical_genome = Genome::canonical_for_biome(&mut seed_rng, anchor_biome);
 
                 // The canonical member spawns AT the anchor (no jitter) so the
                 // first member is exactly reproducible and centred.
@@ -1442,8 +1437,16 @@ impl World {
                 let gift = mating_cost.max(0.0);
                 let new_id = self.next_creature_id;
                 self.next_creature_id += 1;
-                self.creatures
-                    .push(new_id, cx, cy, gift, self.tick, child_brain, child_genome, species_id);
+                self.creatures.push(
+                    new_id,
+                    cx,
+                    cy,
+                    gift,
+                    self.tick,
+                    child_brain,
+                    child_genome,
+                    species_id,
+                );
                 // Initiator flashes blue ("created a child"); newborn teal via push.
                 self.creatures.set_flash(init_i, FlashTag::CreatedChild);
             }
@@ -1672,7 +1675,8 @@ mod tests {
             let g = Genome::founder(&mut seeder);
             let x = seeder.uniform(10.0, ws - 10.0);
             let y = seeder.uniform(10.0, ws - 10.0);
-            w.creatures.push(k + 1, x, y, START_ENERGY_DEFAULT, 0, b, g, 0);
+            w.creatures
+                .push(k + 1, x, y, START_ENERGY_DEFAULT, 0, b, g, 0);
         }
 
         let energy_start: f32 = w.creatures.energy.iter().sum();
@@ -1728,5 +1732,4 @@ mod tests {
             );
         }
     }
-
 }

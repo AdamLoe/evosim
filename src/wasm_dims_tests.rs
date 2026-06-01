@@ -5,8 +5,8 @@
 //! boot from the runtime `world_size`. Lives in its OWN file/module (wired from
 //! `wasm_api.rs` via `#[path]`) to avoid the shared-`mod tests` merge hazard.
 
-use crate::constants::{WorldDims, WORLD_SIZE_DEFAULT};
 use super::WorldHandle;
+use crate::constants::{WorldDims, WORLD_SIZE_DEFAULT};
 
 /// world_size=9600 → grass_dim=1920 → grass_cell_count=3_686_400.
 #[test]
@@ -31,7 +31,20 @@ fn dims_1200() {
 fn snapshot_and_biome_sizes_derive_from_grass_cell_count() {
     // Small 1200u walled world → 240² = 57_600 grass cells.
     let h = WorldHandle::new_with_founder_count(
-        "dims-seam", 0, 100.0, 1, false, "", 1200.0, false, 1, false, 1.0, 10, 10, 3.0,
+        "dims-seam",
+        0,
+        100.0,
+        1,
+        false,
+        "",
+        1200.0,
+        false,
+        1,
+        false,
+        1.0,
+        10,
+        10,
+        3.0,
     )
     .unwrap();
     let cells = 240usize * 240;

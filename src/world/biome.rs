@@ -98,11 +98,7 @@ fn scatter_blobs(rng: &mut SplitMix64, count: u32, world_size: f32) -> Vec<Blob>
             BLOB_RADIUS_FRAC_LO * world_size,
             BLOB_RADIUS_FRAC_HI * world_size,
         );
-        blobs.push(Blob {
-            cx,
-            cy,
-            r2: r * r,
-        });
+        blobs.push(Blob { cx, cy, r2: r * r });
     }
     blobs
 }

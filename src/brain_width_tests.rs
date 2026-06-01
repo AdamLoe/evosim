@@ -40,7 +40,11 @@ fn weight_count_scales_with_input_width() {
     for &w in &[32usize, 40, 48] {
         let t = NnTopology::with_input_width(w, hidden.clone(), acts.clone()).unwrap();
         let expected = w * 48 + 48 * 24 + 24 * NN_OUTPUTS;
-        assert_eq!(t.weight_count(), expected, "weight_count for input_width={w}");
+        assert_eq!(
+            t.weight_count(),
+            expected,
+            "weight_count for input_width={w}"
+        );
         assert_eq!(t.input_width(), w);
     }
 }
@@ -72,7 +76,11 @@ fn founder_and_forward_at_widths_40_and_48() {
         let mut output = [0.0f32; NN_OUTPUTS];
         brain.forward(&input, &mut output, &mut sa, &mut sb, None);
 
-        assert_eq!(output.len(), NN_OUTPUTS, "output length must equal NN_OUTPUTS");
+        assert_eq!(
+            output.len(),
+            NN_OUTPUTS,
+            "output length must equal NN_OUTPUTS"
+        );
         assert!(
             output.iter().all(|v| v.is_finite()),
             "width {width}: forward output must be finite, got {output:?}"
@@ -85,18 +93,12 @@ fn founder_and_forward_at_widths_40_and_48() {
 /// silently-32 path).
 #[test]
 fn wider_width_grows_first_matmul() {
-    let legacy = NnTopology::with_input_width(
-        32,
-        vec![48, 24],
-        vec![Activation::LReLU, Activation::LReLU],
-    )
-    .unwrap();
-    let wide = NnTopology::with_input_width(
-        48,
-        vec![48, 24],
-        vec![Activation::LReLU, Activation::LReLU],
-    )
-    .unwrap();
+    let legacy =
+        NnTopology::with_input_width(32, vec![48, 24], vec![Activation::LReLU, Activation::LReLU])
+            .unwrap();
+    let wide =
+        NnTopology::with_input_width(48, vec![48, 24], vec![Activation::LReLU, Activation::LReLU])
+            .unwrap();
     // Only the first matmul differs: (48-32) * 48 extra weights.
     assert_eq!(wide.weight_count() - legacy.weight_count(), (48 - 32) * 48);
 }

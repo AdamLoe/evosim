@@ -167,7 +167,9 @@ impl GrassGrid {
         }
         for iy in 0..dim {
             let row_off = iy * dim;
-            let any = self.density[row_off..row_off + dim].iter().any(|&d| d > 0.0);
+            let any = self.density[row_off..row_off + dim]
+                .iter()
+                .any(|&d| d > 0.0);
             if any {
                 self.row_has_density[iy / 64] |= 1u64 << (iy % 64);
             }
@@ -245,24 +247,40 @@ impl GrassGrid {
             let body_self_start = clock_now_us_threadsafe();
             let row_self = iy * dim;
             let row_n = if iy == 0 {
-                if wrap { Some((dim - 1) * dim) } else { None }
+                if wrap {
+                    Some((dim - 1) * dim)
+                } else {
+                    None
+                }
             } else {
                 Some((iy - 1) * dim)
             };
             let row_s = if iy + 1 == dim {
-                if wrap { Some(0) } else { None }
+                if wrap {
+                    Some(0)
+                } else {
+                    None
+                }
             } else {
                 Some((iy + 1) * dim)
             };
             for ix in 0..dim {
                 let c = row_self + ix;
                 let ce = if ix + 1 == dim {
-                    if wrap { Some(row_self) } else { None }
+                    if wrap {
+                        Some(row_self)
+                    } else {
+                        None
+                    }
                 } else {
                     Some(row_self + ix + 1)
                 };
                 let cw = if ix == 0 {
-                    if wrap { Some(row_self + dim - 1) } else { None }
+                    if wrap {
+                        Some(row_self + dim - 1)
+                    } else {
+                        None
+                    }
                 } else {
                     Some(row_self + ix - 1)
                 };

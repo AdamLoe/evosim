@@ -97,7 +97,10 @@ impl Genome {
     /// diet, then water_affinity, then heat_tolerance (each one draw), so the
     /// stream is well-defined regardless of biome. `rng` is the dedicated
     /// `world_seed`-derived seeding PRNG (NOT the sim RNG).
-    pub fn canonical_for_biome(rng: &mut crate::rng::SimRng, biome: crate::constants::Biome) -> Self {
+    pub fn canonical_for_biome(
+        rng: &mut crate::rng::SimRng,
+        biome: crate::constants::Biome,
+    ) -> Self {
         use crate::constants::{
             Biome, BIOME_BIAS_HIGH_HI, BIOME_BIAS_HIGH_LO, BIOME_BIAS_MODERATE_HI,
             BIOME_BIAS_MODERATE_LO,
@@ -120,8 +123,10 @@ impl Genome {
                 BIOME_BIAS_HIGH_LO + heat_rand * (BIOME_BIAS_HIGH_HI - BIOME_BIAS_HIGH_LO),
             ),
             Biome::Plains => (
-                BIOME_BIAS_MODERATE_LO + water_rand * (BIOME_BIAS_MODERATE_HI - BIOME_BIAS_MODERATE_LO),
-                BIOME_BIAS_MODERATE_LO + heat_rand * (BIOME_BIAS_MODERATE_HI - BIOME_BIAS_MODERATE_LO),
+                BIOME_BIAS_MODERATE_LO
+                    + water_rand * (BIOME_BIAS_MODERATE_HI - BIOME_BIAS_MODERATE_LO),
+                BIOME_BIAS_MODERATE_LO
+                    + heat_rand * (BIOME_BIAS_MODERATE_HI - BIOME_BIAS_MODERATE_LO),
             ),
         };
         Self {
@@ -225,11 +230,11 @@ impl Genome {
 #[repr(u8)]
 pub enum FlashTag {
     None = 0,
-    Born = 1,        // teal — just born
-    Grazed = 2,      // green — grazed
-    Attacked = 3,    // yellow — attacked
+    Born = 1,         // teal — just born
+    Grazed = 2,       // green — grazed
+    Attacked = 3,     // yellow — attacked
     CreatedChild = 4, // blue — created a child (split initiator)
-    Killed = 5,      // red — killed another creature
+    Killed = 5,       // red — killed another creature
 }
 
 impl FlashTag {
@@ -467,8 +472,15 @@ mod tests {
             soa.push(k, k as f32, 0.0, 100.0, 0, b, Genome::median(), 0);
         }
         for i in 0..soa.len() {
-            assert_eq!(soa.flash_tag[i], FlashTag::Born, "flash_tag[{i}] must be Born");
-            assert_eq!(soa.flash_ticks[i], FLASH_TICKS, "flash_ticks[{i}] must be FLASH_TICKS");
+            assert_eq!(
+                soa.flash_tag[i],
+                FlashTag::Born,
+                "flash_tag[{i}] must be Born"
+            );
+            assert_eq!(
+                soa.flash_ticks[i], FLASH_TICKS,
+                "flash_ticks[{i}] must be FLASH_TICKS"
+            );
         }
     }
 

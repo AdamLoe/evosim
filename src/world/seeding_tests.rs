@@ -32,7 +32,10 @@ fn species_sliders(world_size: f32, world_seed: u32) -> DevSliders {
 /// Build a species-mode world. The string seed (sim RNG) is held constant so the
 /// ONLY thing varying between determinism cases is `world_seed`.
 fn species_world(world_size: f32, world_seed: u32) -> World {
-    World::new_with_sliders(format!("seed-string-{world_seed}"), species_sliders(world_size, world_seed))
+    World::new_with_sliders(
+        format!("seed-string-{world_seed}"),
+        species_sliders(world_size, world_seed),
+    )
 }
 
 // ─── Seeding determinism ────────────────────────────────────────────────────
@@ -52,7 +55,10 @@ fn same_world_seed_reproduces_identical_seeding() {
         b.creatures.len(),
         "same world_seed must seed the same population"
     );
-    assert!(a.creatures.len() > 0, "species seeding must produce founders");
+    assert!(
+        a.creatures.len() > 0,
+        "species seeding must produce founders"
+    );
 
     for i in 0..a.creatures.len() {
         assert_eq!(a.creatures.x[i], b.creatures.x[i], "x mismatch at {i}");
@@ -126,8 +132,7 @@ fn founders_cluster_near_their_anchor() {
     let species_count = w.sliders.starting_species_count as usize;
     assert_eq!(w.creatures.len(), member_count * species_count);
 
-    let cluster_radius =
-        (world_size * FOUNDER_CLUSTER_RADIUS_FRAC).max(MOVE_SPEED_MAX * 2.0);
+    let cluster_radius = (world_size * FOUNDER_CLUSTER_RADIUS_FRAC).max(MOVE_SPEED_MAX * 2.0);
     let half = world_size * 0.5;
 
     // The canonical member is the first creature pushed per species (index s *
@@ -360,7 +365,10 @@ fn balance_smoke_pop_stays_under_cap_and_a_species_persists() {
     // 2400u world → 480² grass; full real seeding (10 × 10 = 100 founders).
     let mut w = species_world(2400.0, 20260601);
     let boot_pop = w.creatures.len();
-    assert_eq!(boot_pop, 100, "default species seeding = 10 × 10 = 100 founders");
+    assert_eq!(
+        boot_pop, 100,
+        "default species seeding = 10 × 10 = 100 founders"
+    );
 
     let soft_cap = w.sliders.max_population as usize;
     assert!(soft_cap <= MAX_POP_FOR_SIM);

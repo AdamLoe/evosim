@@ -40,7 +40,10 @@ fn biome_grid_differs_across_seeds() {
     let dims = WorldDims::from_world_size(WORLD_SIZE_DEFAULT, true);
     let a = generate_biome_grid(1, &dims);
     let b = generate_biome_grid(2, &dims);
-    assert_ne!(a, b, "different world_seed must yield a different biome grid");
+    assert_ne!(
+        a, b,
+        "different world_seed must yield a different biome grid"
+    );
 }
 
 /// Proportions: plains is the plurality; water and desert are each non-trivial.

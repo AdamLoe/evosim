@@ -51,51 +51,67 @@ const TPS_WINDOW: usize = 10;
 /// modifying this list: `cargo run --bin gen-bindings`. A drift unit test
 /// catches mismatches at `cargo test --lib`.
 pub const SLIDER_NAMES: &[&str] = &[
-    "mutation_rate_multiplier",            // 0  f32
-    "_reserved_legacy_nn_mutation_sigma",  // 1  f32 — v1.12 reserved no-op; was nn_mutation_sigma
-    "eat_bite_fraction",                   // 2  f32
-    "grass_propagation_rate_k",            // 3  f32
-    "grass_in_cell_growth_r",              // 4  f32
-    "upkeep_multiplier",                   // 5  f32
-    "move_cost_multiplier",                // 6  f32
-    "energy_max",                          // 7  f32
-    "grass_energy_per_bite",               // 8  f32
-    "grass_bites_per_block",               // 9  u32 (carried as f32)
-    "digestion_cooldown",                  // 10 u32 (carried as f32)
-    "repulsion_max",                       // 11 f32
-    "max_age",                             // 12 u32 (carried as f32)
-    "split_threshold",                     // 13 f32
-    "split_gift",                          // 14 f32
-    "split_jitter",                        // 15 f32
-    "founder_count",                       // 16 u32 (carried as f32)
-    "max_population",                      // 17 u32 (carried as f32) — user-tunable cap
+    "mutation_rate_multiplier",           // 0  f32
+    "_reserved_legacy_nn_mutation_sigma", // 1  f32 — v1.12 reserved no-op; was nn_mutation_sigma
+    "eat_bite_fraction",                  // 2  f32
+    "grass_propagation_rate_k",           // 3  f32
+    "grass_in_cell_growth_r",             // 4  f32
+    "upkeep_multiplier",                  // 5  f32
+    "move_cost_multiplier",               // 6  f32
+    "energy_max",                         // 7  f32
+    "grass_energy_per_bite",              // 8  f32
+    "grass_bites_per_block",              // 9  u32 (carried as f32)
+    "digestion_cooldown",                 // 10 u32 (carried as f32)
+    "repulsion_max",                      // 11 f32
+    "max_age",                            // 12 u32 (carried as f32)
+    "split_threshold",                    // 13 f32
+    "split_gift",                         // 14 f32
+    "split_jitter",                       // 15 f32
+    "founder_count",                      // 16 u32 (carried as f32)
+    "max_population",                     // 17 u32 (carried as f32) — user-tunable cap
     // v2.0 Wave 1a construction settings (shape the next world only). DROPPED
     // here vs v1.x: the four `_reserved_curriculum_*` slots and `full_grass_on_init`.
-    "world_size",                          // 18 f32 (construction) — world extent
-    "world_seed",                          // 19 u32 (carried as f32) — biome seed (Wave 1b)
-    "wrap_world",                          // 20 bool (0.0 / non-zero) — torus vs walled
+    "world_size", // 18 f32 (construction) — world extent
+    "world_seed", // 19 u32 (carried as f32) — biome seed (Wave 1b)
+    "wrap_world", // 20 bool (0.0 / non-zero) — torus vs walled
     // v2.0 Wave 1b: live-tunable biome movement-penalty base severities [0,1].
-    "water_movement_penalty",              // 21 f32 — Water biome base severity
-    "desert_movement_penalty",             // 22 f32 — Desert biome base severity
+    "water_movement_penalty",  // 21 f32 — Water biome base severity
+    "desert_movement_penalty", // 22 f32 — Desert biome base severity
     // v2.0 Wave 2a: live multiplier on the per-birth body-genome mutation step.
-    "trait_mutation_sigma_multiplier",     // 23 f32 — genome trait-sigma multiplier
+    "trait_mutation_sigma_multiplier", // 23 f32 — genome trait-sigma multiplier
     // v2.0 Wave 3a: species + sexual-mating construction/live settings.
-    "species_mode",                        // 24 bool (0/non-zero) construction — species + mating
-    "crossover_mode",                      // 25 enum (0=average, non-zero=fifty_fifty) construction
-    "starting_species_count",              // 26 u32 (carried as f32) construction
-    "starting_species_member_count",       // 27 u32 (carried as f32) construction
-    "starting_species_member_variance",    // 28 f32 construction (INERT in W3; W4 applies it)
-    "mating_cooldown_ticks",               // 29 u32 (carried as f32) live — initiator-only cooldown
+    "species_mode",           // 24 bool (0/non-zero) construction — species + mating
+    "crossover_mode",         // 25 enum (0=average, non-zero=fifty_fifty) construction
+    "starting_species_count", // 26 u32 (carried as f32) construction
+    "starting_species_member_count", // 27 u32 (carried as f32) construction
+    "starting_species_member_variance", // 28 f32 construction (INERT in W3; W4 applies it)
+    "mating_cooldown_ticks",  // 29 u32 (carried as f32) live — initiator-only cooldown
     // v1.12: 8 mutation buckets × 3 floats. Index = SLIDER_BUCKET_BASE + bucket*3 + field.
     // field 0 = weight, 1 = rate, 2 = sigma. See MUTATION_BUCKET_COUNT.
-    "bucket_0_weight", "bucket_0_rate", "bucket_0_sigma", // 30..33
-    "bucket_1_weight", "bucket_1_rate", "bucket_1_sigma", // 33..36
-    "bucket_2_weight", "bucket_2_rate", "bucket_2_sigma", // 36..39
-    "bucket_3_weight", "bucket_3_rate", "bucket_3_sigma", // 39..42
-    "bucket_4_weight", "bucket_4_rate", "bucket_4_sigma", // 42..45
-    "bucket_5_weight", "bucket_5_rate", "bucket_5_sigma", // 45..48
-    "bucket_6_weight", "bucket_6_rate", "bucket_6_sigma", // 48..51
-    "bucket_7_weight", "bucket_7_rate", "bucket_7_sigma", // 51..54
+    "bucket_0_weight",
+    "bucket_0_rate",
+    "bucket_0_sigma", // 30..33
+    "bucket_1_weight",
+    "bucket_1_rate",
+    "bucket_1_sigma", // 33..36
+    "bucket_2_weight",
+    "bucket_2_rate",
+    "bucket_2_sigma", // 36..39
+    "bucket_3_weight",
+    "bucket_3_rate",
+    "bucket_3_sigma", // 39..42
+    "bucket_4_weight",
+    "bucket_4_rate",
+    "bucket_4_sigma", // 42..45
+    "bucket_5_weight",
+    "bucket_5_rate",
+    "bucket_5_sigma", // 45..48
+    "bucket_6_weight",
+    "bucket_6_rate",
+    "bucket_6_sigma", // 48..51
+    "bucket_7_weight",
+    "bucket_7_rate",
+    "bucket_7_sigma", // 51..54
 ];
 
 /// First mutation-bucket slider slot. v2.0 Wave 3a (shifted from 24 to 30 after
@@ -829,9 +845,7 @@ impl WorldHandle {
             28 => self.apply_starting_species_member_variance(value),
             29 => self.apply_mating_cooldown_ticks(value.max(0.0) as u32),
             // v1.12: 8 mutation buckets × 3 fields.
-            n if n >= SLIDER_BUCKET_BASE
-                && n < SLIDER_BUCKET_BASE + MUTATION_BUCKET_COUNT * 3 =>
-            {
+            n if n >= SLIDER_BUCKET_BASE && n < SLIDER_BUCKET_BASE + MUTATION_BUCKET_COUNT * 3 => {
                 let rel = n - SLIDER_BUCKET_BASE;
                 self.apply_mutation_bucket(rel / 3, rel % 3, value);
             }
@@ -1414,7 +1428,20 @@ mod tests {
     #[test]
     fn write_snapshot_to_layout_matches_stride() {
         let mut handle = WorldHandle::new_with_founder_count(
-            "a1-snapshot", 0, 100.0, 3, false, "", 1200.0, false, 1, false, 1.0, 10, 10, 3.0,
+            "a1-snapshot",
+            0,
+            100.0,
+            3,
+            false,
+            "",
+            1200.0,
+            false,
+            1,
+            false,
+            1.0,
+            10,
+            10,
+            3.0,
         )
         .unwrap();
         let mut creatures = Vec::new();
@@ -1461,7 +1488,10 @@ mod tests {
             // packed_u32 lane (6): low 3 bits = flash_tag, next 4 = flash_ticks.
             let packed = u32::from_le_bytes(creatures[base + 24..base + 28].try_into().unwrap());
             assert_eq!(packed & 0x7, handle.inner.creatures.flash_tag[i] as u32);
-            assert_eq!((packed >> 3) & 0xF, handle.inner.creatures.flash_ticks[i] as u32);
+            assert_eq!(
+                (packed >> 3) & 0xF,
+                handle.inner.creatures.flash_ticks[i] as u32
+            );
             // species_id bits reserved 0 in single-pool.
             assert_eq!((packed >> 7) & 0xFFFF, 0, "species_id reserved must be 0");
             // pad lane (7) is zero.
@@ -1505,7 +1535,20 @@ mod tests {
     #[test]
     fn creature_at_returns_stable_id() {
         let handle = WorldHandle::new_with_founder_count(
-            "e21-creature-at", 0, 100.0, 1, false, "", 1200.0, false, 1, false, 1.0, 10, 10, 3.0,
+            "e21-creature-at",
+            0,
+            100.0,
+            1,
+            false,
+            "",
+            1200.0,
+            false,
+            1,
+            false,
+            1.0,
+            10,
+            10,
+            3.0,
         )
         .unwrap();
         let founder_id = handle.inner.creatures.id[0] as f64;

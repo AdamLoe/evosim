@@ -59,7 +59,10 @@ fn full_grass_on_init_respects_biome_capacity() {
             }
         }
     }
-    assert!(saw_plains && saw_water && saw_desert, "need all three biomes");
+    assert!(
+        saw_plains && saw_water && saw_desert,
+        "need all three biomes"
+    );
 }
 
 /// A seeded cell is filled to its OWN capacity at init (water near 0.04, desert
@@ -148,7 +151,10 @@ fn biome_grass_propagation_is_deterministic() {
     let mut a = GrassGrid::new_with_capacity(&mut rng_a, 5_000, dims, Some(&biome));
     let mut rng_b = SimRng::from_u64(99);
     let mut b = GrassGrid::new_with_capacity(&mut rng_b, 5_000, dims, Some(&biome));
-    assert_eq!(a.density, b.density, "seed must produce identical init density");
+    assert_eq!(
+        a.density, b.density,
+        "seed must produce identical init density"
+    );
     assert_eq!(a.capacity, b.capacity, "capacity must be identical");
 
     for _ in 0..50 {

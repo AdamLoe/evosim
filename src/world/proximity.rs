@@ -93,8 +93,7 @@ pub(crate) const LUT_RADIUS: i32 = 4;
 // Keep the literal in lockstep with the proximity range / cell size it derives
 // from (ceil division, integer-arithmetic form).
 const _: () = assert!(
-    LUT_RADIUS as usize
-        == (GRASS_PROXIMITY_RANGE as usize).div_ceil(GRASS_CELL_SIZE as usize),
+    LUT_RADIUS as usize == (GRASS_PROXIMITY_RANGE as usize).div_ceil(GRASS_CELL_SIZE as usize),
     "LUT_RADIUS must equal ceil(GRASS_PROXIMITY_RANGE / GRASS_CELL_SIZE)"
 );
 /// LUT side length (`2*LUT_RADIUS + 1 = 33`).

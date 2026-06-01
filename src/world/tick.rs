@@ -57,8 +57,8 @@ impl World {
             let xi = self.creatures.x[i];
             let yi = self.creatures.y[i];
             // v2.0 Wave 2a: body radius is genome-scaled.
-            let ri = CREATURE_SIZE * BODY_RADIUS_PER_SIZE
-                * self.creatures.genome[i].body_size_factor();
+            let ri =
+                CREATURE_SIZE * BODY_RADIUS_PER_SIZE * self.creatures.genome[i].body_size_factor();
             // v2.0 Wave 2a: graze yield favors grazers — a pure predator
             // (diet=1) grazes at half yield; a pure grazer (diet=0) at full.
             let diet = self.creatures.genome[i].diet;
@@ -166,7 +166,8 @@ impl World {
                     }
                 });
                 // v2.0 Wave 2a: per-creature genome-scaled body radius.
-                let ri = CREATURE_SIZE * BODY_RADIUS_PER_SIZE
+                let ri = CREATURE_SIZE
+                    * BODY_RADIUS_PER_SIZE
                     * self.creatures.genome[i].body_size_factor();
                 for &j in &neighbors {
                     let xj = self.creatures.x[j];
@@ -189,7 +190,8 @@ impl World {
                     }
                     let d2 = dx * dx + dy * dy;
                     // v2.0 Wave 2a: pair sum of genome-scaled radii.
-                    let rj = CREATURE_SIZE * BODY_RADIUS_PER_SIZE
+                    let rj = CREATURE_SIZE
+                        * BODY_RADIUS_PER_SIZE
                         * self.creatures.genome[j].body_size_factor();
                     let rsum = ri + rj;
                     if d2 < rsum * rsum {
@@ -229,8 +231,8 @@ impl World {
             if self.scratch_fx[i] != 0.0 || self.scratch_fy[i] != 0.0 {
                 any_moved = true;
             }
-            let ri = CREATURE_SIZE * BODY_RADIUS_PER_SIZE
-                * self.creatures.genome[i].body_size_factor();
+            let ri =
+                CREATURE_SIZE * BODY_RADIUS_PER_SIZE * self.creatures.genome[i].body_size_factor();
             let lo = ri;
             let hi = world_size - ri;
             let px = self.creatures.x[i] + self.scratch_fx[i];
@@ -713,8 +715,16 @@ mod tests {
         let mut rng = SimRng::from_u64(123);
         let b2 = Brain::founder(&mut rng, NnTopology::legacy());
         let n_before = w.creatures.len();
-        w.creatures
-            .push(1, 598.0, WORLD_SIZE * 0.5, START_ENERGY_DEFAULT, 0, b2, crate::creature::Genome::median(), 0);
+        w.creatures.push(
+            1,
+            598.0,
+            WORLD_SIZE * 0.5,
+            START_ENERGY_DEFAULT,
+            0,
+            b2,
+            crate::creature::Genome::median(),
+            0,
+        );
         w.creatures.vx[n_before] = 0.0;
         w.creatures.vy[n_before] = 0.0;
 
@@ -1002,8 +1012,16 @@ mod tests {
         let pred_x = w.creatures.x[0];
         let pred_y = w.creatures.y[0];
         // Place prey within bite reach (0.0 since bite_reach = 0).
-        w.creatures
-            .push(1, pred_x + 1.5, pred_y, 100.0, 0, prey_brain, crate::creature::Genome::median(), 0);
+        w.creatures.push(
+            1,
+            pred_x + 1.5,
+            pred_y,
+            100.0,
+            0,
+            prey_brain,
+            crate::creature::Genome::median(),
+            0,
+        );
 
         w.grid.rebuild(&w.creatures.x, &w.creatures.y);
 
@@ -1046,8 +1064,16 @@ mod tests {
         let prey_brain = Brain::founder(&mut rng, NnTopology::legacy());
         let pred_x = w.creatures.x[0];
         let pred_y = w.creatures.y[0];
-        w.creatures
-            .push(1, pred_x + 1.5, pred_y, 100.0, 0, prey_brain, crate::creature::Genome::median(), 0);
+        w.creatures.push(
+            1,
+            pred_x + 1.5,
+            pred_y,
+            100.0,
+            0,
+            prey_brain,
+            crate::creature::Genome::median(),
+            0,
+        );
 
         w.grid.rebuild(&w.creatures.x, &w.creatures.y);
 
@@ -1089,7 +1115,11 @@ mod tests {
             if remaining == 0 {
                 assert_eq!(w.creatures.flash_tag[0], FlashTag::None, "tag clears at 0");
             } else {
-                assert_eq!(w.creatures.flash_tag[0], FlashTag::Born, "tag persists while lit");
+                assert_eq!(
+                    w.creatures.flash_tag[0],
+                    FlashTag::Born,
+                    "tag persists while lit"
+                );
             }
         }
         // Idempotent at 0.

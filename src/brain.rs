@@ -154,7 +154,9 @@ impl NnTopology {
         activations: Vec<Activation>,
     ) -> Result<Self, String> {
         if !(8..=MAX_NN_INPUTS).contains(&input_width) {
-            return Err(format!("input_width={input_width} out of [8, {MAX_NN_INPUTS}]"));
+            return Err(format!(
+                "input_width={input_width} out of [8, {MAX_NN_INPUTS}]"
+            ));
         }
         if !input_width.is_multiple_of(8) {
             return Err(format!(
@@ -342,9 +344,21 @@ pub struct MutationPolicy {
 impl Default for MutationPolicy {
     fn default() -> Self {
         let mut buckets = [Bucket::zero(); MUTATION_BUCKET_COUNT];
-        buckets[0] = Bucket { weight: 1.0, rate: 0.0, sigma: 0.0 };
-        buckets[1] = Bucket { weight: 1.0, rate: 0.05, sigma: 0.05 };
-        buckets[2] = Bucket { weight: 1.0, rate: 0.30, sigma: 0.20 };
+        buckets[0] = Bucket {
+            weight: 1.0,
+            rate: 0.0,
+            sigma: 0.0,
+        };
+        buckets[1] = Bucket {
+            weight: 1.0,
+            rate: 0.05,
+            sigma: 0.05,
+        };
+        buckets[2] = Bucket {
+            weight: 1.0,
+            rate: 0.30,
+            sigma: 0.20,
+        };
         Self { buckets }
     }
 }
@@ -902,8 +916,8 @@ mod tests {
     #[test]
     fn forward_pass_output_shape() {
         for topology in [
-            NnTopology::legacy(),                                                // 2 hidden, even
-            NnTopology::new(vec![32], vec![Activation::LReLU]).unwrap(),         // 1 hidden, odd
+            NnTopology::legacy(),                                        // 2 hidden, even
+            NnTopology::new(vec![32], vec![Activation::LReLU]).unwrap(), // 1 hidden, odd
             NnTopology::new(
                 vec![64, 32, 16, 8],
                 vec![
@@ -920,7 +934,10 @@ mod tests {
             let input = [0.0f32; MAX_NN_INPUTS];
             let mut output = [0.0f32; NN_OUTPUTS];
             brain.forward(&input, &mut output, &mut sa, &mut sb, None);
-            assert!(output.iter().all(|&v| v == 0.0), "zero weights → zero output");
+            assert!(
+                output.iter().all(|&v| v == 0.0),
+                "zero weights → zero output"
+            );
         }
 
         let mut rng = SimRng::from_u64(99);
@@ -953,8 +970,12 @@ mod tests {
             .unwrap(),
             NnTopology::new(vec![8], vec![Activation::LReLU]).unwrap(),
             // width-40 (wrap-off/species-off OR wrap-on/species-on) — wider first matmul.
-            NnTopology::with_input_width(40, vec![48, 24], vec![Activation::LReLU, Activation::LReLU])
-                .unwrap(),
+            NnTopology::with_input_width(
+                40,
+                vec![48, 24],
+                vec![Activation::LReLU, Activation::LReLU],
+            )
+            .unwrap(),
             NnTopology::with_input_width(
                 40,
                 vec![64, 32, 16],
@@ -963,8 +984,12 @@ mod tests {
             .unwrap(),
             NnTopology::with_input_width(40, vec![8], vec![Activation::LReLU]).unwrap(),
             // width-48 (wrap-off, species-on) — the MAX_NN_INPUTS ceiling.
-            NnTopology::with_input_width(48, vec![48, 24], vec![Activation::LReLU, Activation::LReLU])
-                .unwrap(),
+            NnTopology::with_input_width(
+                48,
+                vec![48, 24],
+                vec![Activation::LReLU, Activation::LReLU],
+            )
+            .unwrap(),
             NnTopology::with_input_width(
                 48,
                 vec![64, 32, 16],

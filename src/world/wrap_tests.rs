@@ -74,7 +74,7 @@ fn toroidal_distance_takes_short_way_around() {
     let ws = 1000.0_f32;
     let a = 2.0_f32; // near left edge
     let b = ws - 3.0; // near right edge
-    // Raw Euclidean (walled) distance is large (~995).
+                      // Raw Euclidean (walled) distance is large (~995).
     let raw = (b - a).abs();
     assert!(raw > ws * 0.5, "raw distance should be the long way: {raw}");
 
@@ -110,8 +110,16 @@ fn spatial_grid_seam_neighbor_only_when_wrap_on() {
         // Add a creature at the right edge.
         let mut rng = SimRng::from_u64(7);
         let b = Brain::founder(&mut rng, NnTopology::legacy());
-        w.creatures
-            .push(1, ws - 2.0, ws * 0.5, 100.0, 0, b, crate::creature::Genome::median(), 0);
+        w.creatures.push(
+            1,
+            ws - 2.0,
+            ws * 0.5,
+            100.0,
+            0,
+            b,
+            crate::creature::Genome::median(),
+            0,
+        );
         w.grid.rebuild(&w.creatures.x, &w.creatures.y);
 
         let mut found_far = false;
@@ -122,7 +130,10 @@ fn spatial_grid_seam_neighbor_only_when_wrap_on() {
             }
         });
         if wrap {
-            assert!(found_far, "wrap on: right-edge creature must be a seam neighbor");
+            assert!(
+                found_far,
+                "wrap on: right-edge creature must be a seam neighbor"
+            );
         } else {
             assert!(!found_far, "wrap off: must NOT find the far-edge creature");
         }

@@ -91,10 +91,10 @@ pub const MAX_NN_INPUTS: usize = 48;
 const _: () = assert!(MAX_NN_INPUTS >= NN_INPUTS);
 const _: () = assert!(MAX_NN_INPUTS.is_multiple_of(8));
 pub const NN_OUTPUTS: usize = 5; // out[0]=vx, out[1]=vy, out[2..5]=action logits (Graze/Eat/Split)
-// v1.12: NN_HIDDEN_1/2 + NN_WEIGHT_COUNT were compile-time constants in
-// the legacy 32→48→24→5 topology. They're now derived from the
-// runtime `Brain.layer_sizes` (`src/brain.rs`). Legacy default lives in
-// `LEGACY_NN_TOPOLOGY` below.
+                                 // v1.12: NN_HIDDEN_1/2 + NN_WEIGHT_COUNT were compile-time constants in
+                                 // the legacy 32→48→24→5 topology. They're now derived from the
+                                 // runtime `Brain.layer_sizes` (`src/brain.rs`). Legacy default lives in
+                                 // `LEGACY_NN_TOPOLOGY` below.
 /// Hard upper bound on a single hidden-layer width. Drives the size of the
 /// per-chunk stack scratch buffers in the forward pass; the UI clamps width
 /// to this value too.

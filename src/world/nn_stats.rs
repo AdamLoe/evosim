@@ -374,10 +374,7 @@ mod tests {
         assert_eq!(s.tick_forward_layer_us[0].load(Ordering::Relaxed), 25);
         assert_eq!(s.tick_forward_layer_us[1].load(Ordering::Relaxed), 35);
         assert_eq!(s.tick_forward_layer_us[2].load(Ordering::Relaxed), 15);
-        assert_eq!(
-            s.tick_forward_layer_calls[0].load(Ordering::Relaxed),
-            160
-        );
+        assert_eq!(s.tick_forward_layer_calls[0].load(Ordering::Relaxed), 160);
     }
 
     #[test]

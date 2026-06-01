@@ -238,7 +238,11 @@ mod tests {
         let g = grid();
         // x = WORLD_SIZE = 1200.0 → floor(120) = 120 → clamp(119) → last column.
         let c = g.cell_of(WORLD_SIZE, 0.0);
-        assert_eq!(c, HASH_DIM - 1, "x == WORLD_SIZE should clamp to last column");
+        assert_eq!(
+            c,
+            HASH_DIM - 1,
+            "x == WORLD_SIZE should clamp to last column"
+        );
         let c2 = g.cell_of(0.0, WORLD_SIZE);
         assert_eq!(
             c2,

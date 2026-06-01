@@ -28,16 +28,16 @@ use serde::{Deserialize, Serialize};
 ///   A red · B azure · C amber · D violet · E green · F magenta · G cyan
 ///   H orange · I blue · J chartreuse
 pub const SPECIES_PALETTE: [(u8, u8, u8); 10] = [
-    (230, 50, 50),   // A — red
-    (40, 130, 230),  // B — azure
-    (240, 180, 30),  // C — amber/gold
-    (150, 70, 210),  // D — violet
-    (40, 190, 90),   // E — green
-    (230, 60, 180),  // F — magenta
-    (40, 200, 200),  // G — cyan/teal
-    (240, 120, 30),  // H — orange
-    (60, 70, 220),   // I — deep blue
-    (170, 210, 40),  // J — chartreuse
+    (230, 50, 50),  // A — red
+    (40, 130, 230), // B — azure
+    (240, 180, 30), // C — amber/gold
+    (150, 70, 210), // D — violet
+    (40, 190, 90),  // E — green
+    (230, 60, 180), // F — magenta
+    (40, 200, 200), // G — cyan/teal
+    (240, 120, 30), // H — orange
+    (60, 70, 220),  // I — deep blue
+    (170, 210, 40), // J — chartreuse
 ];
 
 /// Pack an `(r, g, b)` palette entry into an RGBA8 little-endian `u32`

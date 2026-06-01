@@ -41,7 +41,8 @@ fn push_creature(w: &mut World, id: u64, x: f32, y: f32, energy: f32, species_id
     let mut rng = SimRng::from_u64(id.wrapping_mul(2654435761));
     let brain = Brain::founder(&mut rng, w.nn_topology.clone());
     let genome = Genome::median();
-    w.creatures.push(id, x, y, energy, 0, brain, genome, species_id)
+    w.creatures
+        .push(id, x, y, energy, 0, brain, genome, species_id)
 }
 
 // ─── Mating: same-species within contact radius ────────────────────────────
@@ -122,7 +123,10 @@ fn mate_refuses_same_species_beyond_contact() {
     );
     // Sanity: the contact radius really is far below 15u.
     let contact = (1.0 + 1.0) * MATING_CONTACT_RADIUS_FACTOR;
-    assert!(contact < 15.0, "contact radius {contact} must be well below 15u");
+    assert!(
+        contact < 15.0,
+        "contact radius {contact} must be well below 15u"
+    );
 }
 
 // ─── Initiator-only cost + cooldown ────────────────────────────────────────
@@ -136,7 +140,7 @@ fn mating_cost_and_cooldown_hit_initiator_only() {
     w.next_creature_id = 0;
     let i = push_creature(&mut w, 0, 100.0, 100.0, 200.0, 0);
     let j = push_creature(&mut w, 1, 101.0, 100.0, 50.0, 0); // partner low energy
-    // Partner is even ON cooldown — must not matter (it's just a target).
+                                                             // Partner is even ON cooldown — must not matter (it's just a target).
     w.creatures.mating_cooldown[j] = 99;
     let partner_energy_before = w.creatures.energy[j];
     let partner_cd_before = w.creatures.mating_cooldown[j];
@@ -296,7 +300,11 @@ fn crossover_average_is_midpoint_brain_and_genome() {
     let policy = MutationPolicy {
         buckets: {
             let mut b = [Bucket::zero(); crate::constants::MUTATION_BUCKET_COUNT];
-            b[0] = Bucket { weight: 1.0, rate: 0.0, sigma: 0.0 };
+            b[0] = Bucket {
+                weight: 1.0,
+                rate: 0.0,
+                sigma: 0.0,
+            };
             b
         },
     };
@@ -320,7 +328,14 @@ fn crossover_average_is_midpoint_brain_and_genome() {
     // Genome midpoint (average consumes no RNG).
     let mut rng2 = SimRng::from_u64(9);
     let cg = ga.crossed(&gb, &mut rng2, CrossoverMode::Average);
-    for t in [cg.body_size, cg.max_speed, cg.metabolism, cg.diet, cg.water_affinity, cg.heat_tolerance] {
+    for t in [
+        cg.body_size,
+        cg.max_speed,
+        cg.metabolism,
+        cg.diet,
+        cg.water_affinity,
+        cg.heat_tolerance,
+    ] {
         assert!((t - 0.5).abs() < 1e-6, "average trait must be 0.5; got {t}");
     }
 }
@@ -334,7 +349,11 @@ fn crossover_fifty_fifty_picks_one_parent_per_slot() {
     let policy = MutationPolicy {
         buckets: {
             let mut b = [Bucket::zero(); crate::constants::MUTATION_BUCKET_COUNT];
-            b[0] = Bucket { weight: 1.0, rate: 0.0, sigma: 0.0 };
+            b[0] = Bucket {
+                weight: 1.0,
+                rate: 0.0,
+                sigma: 0.0,
+            };
             b
         },
     };
@@ -355,7 +374,9 @@ fn crossover_fifty_fifty_picks_one_parent_per_slot() {
         assert!(
             is_a || is_b,
             "fifty_fifty weight {k}={} must equal a parent (A={} B={})",
-            child.weights[k], pa.weights[k], pb.weights[k]
+            child.weights[k],
+            pa.weights[k],
+            pb.weights[k]
         );
         if is_a {
             from_a += 1;

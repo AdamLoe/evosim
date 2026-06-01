@@ -10,7 +10,10 @@ use crate::creature::{FlashTag, Genome, FLASH_TICKS};
 /// the *meaning* of the lanes shifted).
 #[test]
 fn creature_region_size_unchanged() {
-    assert_eq!(SNAPSHOT_CREATURE_STRIDE, 32, "stride must stay 32 B / 8 lanes");
+    assert_eq!(
+        SNAPSHOT_CREATURE_STRIDE, 32,
+        "stride must stay 32 B / 8 lanes"
+    );
     assert_eq!(
         SNAPSHOT_CREATURE_BYTES,
         MAX_POP_FOR_SIM * 32,
@@ -23,11 +26,23 @@ fn creature_region_size_unchanged() {
 /// packed_u32@24, pad@28. We read them out of a freshly written native snapshot.
 #[test]
 fn snapshot_lane_offsets_match_repack() {
-    let mut handle =
-        WorldHandle::new_with_founder_count(
-            "wave2a-lanes", 0, 100.0, 4, false, "", 1200.0, false, 1, false, 1.0, 10, 10, 3.0,
-        )
-        .unwrap();
+    let mut handle = WorldHandle::new_with_founder_count(
+        "wave2a-lanes",
+        0,
+        100.0,
+        4,
+        false,
+        "",
+        1200.0,
+        false,
+        1,
+        false,
+        1.0,
+        10,
+        10,
+        3.0,
+    )
+    .unwrap();
     let mut creatures = Vec::new();
     let mut grass = Vec::new();
     let mut stats = Vec::new();
@@ -59,7 +74,10 @@ fn snapshot_lane_offsets_match_repack() {
         // packed_u32@24.
         let packed = u32::from_le_bytes(creatures[base + 24..base + 28].try_into().unwrap());
         assert_eq!(packed & 0x7, handle.inner.creatures.flash_tag[i] as u32);
-        assert_eq!((packed >> 3) & 0xF, handle.inner.creatures.flash_ticks[i] as u32);
+        assert_eq!(
+            (packed >> 3) & 0xF,
+            handle.inner.creatures.flash_ticks[i] as u32
+        );
         assert_eq!((packed >> 7) & 0xFFFF, 0, "species_id reserved");
         // pad@28 is zero.
         let pad = u32::from_le_bytes(creatures[base + 28..base + 32].try_into().unwrap());
