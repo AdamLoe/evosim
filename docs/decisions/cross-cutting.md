@@ -192,6 +192,98 @@ Decisions that bind more than one architecture doc.
 - **Applies to**: `architecture/worker-runtime.md`.
 - **Code anchors**: `web/src/main.ts → restart`.
 
+### Runtime `world_size` ⇒ computed-dims-equality SAB safety model (v2.0)
+
+- **Decision**: `world_size` (default 9600u) is a **runtime** construction
+  setting, not a compile-time constant. Consequently grass-grid dims
+  (`grass_dim = round(world_size / GRASS_CELL_SIZE)`), the snapshot grass
+  region, and the biome region are all **derived from settings at boot**. The
+  cross-language SAB-safety model shifts from "assert equal *constant*"
+  (`GRASS_CELL_COUNT` Rust ↔ TS) to "size every view off the **boot-reported**
+  `grass_dim`": `boot_ready` carries the runtime `grass_dim`, the snapshot grass
+  region and biome region are both `grass_dim²` bytes (a Rust `debug_assert`
+  checks they're byte-equal), and the TS side sizes both views off the reported
+  `grass_dim`, never a hardcoded constant. `MAX_POP_FOR_SIM` / `CREATURE_STRIDE`
+  stay constant-asserted (the creature region is world-size-independent).
+- **Why**: The user explicitly wants worlds **editable across a wide range**
+  from one binary (a tiny fast asexual screensaver up to a grand toroidal
+  multi-species map), which forces runtime SAB sizing. Sizing both grass and
+  biome from the same `grass_dim` makes them provably equal without a second
+  constant to drift. Getting a view length wrong silently over/under-runs the
+  SAB slot, so the boot-time `grass_dim` is the single source of truth (one
+  layout object, rebuilt per boot).
+- **Applies to**: `architecture/shared-memory-and-protocol.md`
+  (computed-dims-equality), `architecture/simulation-core.md` (`WorldDims`),
+  `architecture/app-shell.md` (runtime-dims SAB view binding).
+- **Code anchors**: `src/constants.rs → WorldDims::from_world_size`,
+  `src/wasm_api.rs → SnapshotLayout::from_grass_cell_count` (the
+  `grass_bytes == biome_bytes` assert), `boot_ready.grass_dim`,
+  `web/src/main.ts → makeSlotLayout`.
+- **Revisit when**: a feature needs the world to resize *after* boot (today
+  nothing resizes after boot — restart rebuilds the world).
+
+### Two seeds, deliberately: `world_seed` (map) is separate from the sim RNG (run) (v2.0)
+
+- **Decision**: `world_seed` (a u32 construction slider, random default,
+  pinnable) drives **biome generation + species seeding only**, via two
+  *dedicated* PRNG streams (a SplitMix64 for the biome grid; a
+  `SimRng::from_u64(world_seed ^ SEEDING_PRNG_SALT)` for species anchors /
+  founders) that are **independent of the string-seeded sim RNG**. The sim RNG
+  stays independent and random per run.
+- **Why**: The sim is fully deterministic, so a single master seed would make
+  an entire run replay identically every time — which we do *not* want. Keeping
+  the seeds separate means a pinned `world_seed` fixes the *map* (and the tick-0
+  species layout) byte-for-byte across restarts of the same build, while the run
+  still plays out differently each launch. Without map reproducibility no two
+  maps could be compared and no test could pin biome layout; the Wave-1 repro
+  test therefore pins only the biome SAB, never the whole run. Same-machine
+  determinism only — no cross-platform byte-identity is promised or tested.
+- **Applies to**: `architecture/simulation-core.md` (biome gen + species
+  seeding), `architecture/app-shell.md` (the status-strip seed + reroll),
+  `decisions/sim.md` (biome / seeding entries).
+- **Code anchors**: `DevSliders.world_seed`, `src/world/biome.rs`
+  (SplitMix64), `src/constants.rs → SEEDING_PRNG_SALT`.
+
+### Settings schema is `major.minor`; major resets, minor merges (v2.0)
+
+- **Decision**: The persisted settings blob (key `evosim.settings.v2`) carries
+  a `major.minor` version. On load: a **major** mismatch (or any legacy v1
+  blob) is **discarded** and defaults are used; a **minor** mismatch
+  (additive-only — new keys shipped) keeps the user's values and merges missing
+  keys from `DEFAULTS` (`{...DEFAULTS, ...stored}`). v2.0 bumps the major
+  version (it removes / renames sliders and re-lays-out the control SAB); every
+  ordinary settings change thereafter bumps minor.
+- **Why**: v2.0 renames/removes sliders and changes the control-SAB layout, so
+  old localStorage can't be trusted — a version stamp makes the reset
+  deterministic. And every future settings change gets a cheap non-destructive
+  migration (minor bump) instead of silently carrying stale or missing keys.
+- **Applies to**: `architecture/app-shell.md` (settings schema migration).
+- **Code anchors**: `web/src/settings.ts → SCHEMA_MAJOR` / `SCHEMA_MINOR`, the
+  load merge + unknown-key filter.
+
+### NN input layout is derived from construction settings → SAB/topology implications (v2.0)
+
+- **Decision**: The NN input width is **runtime/settings-derived**, not a
+  compile-time constant. `NnInputLayout::for_settings(wrap_world, species_mode)`
+  composes the active input groups and computes the total width (a multiple of
+  8 in `[8, MAX_NN_INPUTS = 48]`); it feeds the first matmul's `fan_in`. The
+  four (wrap × species) compositions pad to widths **32 / 40 / 40 / 48**. The
+  old compile-time `NN_INPUTS == 32` hard assert is replaced by runtime checks
+  in `NnTopology::with_input_width`. Old brains are discarded on any settings
+  change (no save/load to migrate).
+- **Why**: Inputs constant for a brain's whole run waste weights and train
+  against a dishonest surface; a settings-derived layout always trains against
+  the honest input surface for the current world (see the fuller rationale in
+  `decisions/sim.md`). This is cross-cutting because the width flows into the
+  brain topology (`fan_in`), the boot `nn_topology` payload, and the brain/nn
+  drift-guard tests, which exercise all four compositions.
+- **Applies to**: `architecture/simulation-core.md` (the width table + topology),
+  `architecture/shared-memory-and-protocol.md` (the `nn_topology` boot payload),
+  `decisions/sim.md` (the settings-derived-layout decision).
+- **Code anchors**: `src/world/nn.rs → NnInputLayout`,
+  `src/brain.rs → NnTopology::with_input_width`,
+  `src/constants.rs → MAX_NN_INPUTS = 48`, `src/brain_width_tests.rs`.
+
 ## See also
 
 - [`sim.md`](sim.md)

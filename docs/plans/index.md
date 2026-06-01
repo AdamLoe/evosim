@@ -62,10 +62,12 @@ the plan itself.
 - [`v2.0.0-mission.md`](v2.0.0-mission.md) — World, body, species:
   editable runtime `world_size` (default 8× linear / 64× area),
   optional toroidal wrap, 3 biomes, evolving body genome, opt-in
-  species + sexual mating mode.
+  species + sexual mating mode. **Shipped** on `feat/v2.0.0`; durable
+  facts migrated to `architecture/` + `decisions/`.
 - [`v2.0.0-decisions.md`](v2.0.0-decisions.md) — Companion rationale
   for v2.0.0: every choice settled in plan drafting, with the
-  alternatives that were rejected.
+  alternatives that were rejected. **Shipped**: rationale folded into
+  `decisions/{sim,render,cross-cutting}.md`; `okay_to_delete: true`.
 - [`v2-possible-next-steps.md`](v2-possible-next-steps.md) —
   **long-lived** backlog for the v2 family: deferred ideas, expected
   problems, and design directions discussed but not committed (brain

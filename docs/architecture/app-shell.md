@@ -10,14 +10,15 @@ A two-column shell that wraps the canvas and every non-canvas UI element.
 
 ```
 ┌──────────────────────────────────┬──────────────────────┐
-│ top-bar (status + pacing + ⚙)    │ ┌────┬─────┬───────┐ │
-│                                  │ │Insp│Monit│Settngs│ │
-├──────────────────────────────────┤ ├────┴─────┴───────┤ │
+│ top-bar (status + pacing + ⚙)    │ ┌────┬────┬────────┐ │
+│                                  │ │Setn│ NN │ Inspct │ │
+├──────────────────────────────────┤ ├────┴────┴────────┤ │
 │                                  │ │                  │ │
 │ canvas                           │ │ active tab body  │ │
 │                                  │ │                  │ │
 ├──────────────────────────────────┤ │                  │ │
-│ profiler (optional, ✕)           │ │                  │ │
+│ perf-box (pop graph + profiler,  │ │                  │ │
+│   optional, ✕)                   │ │                  │ │
 └──────────────────────────────────┴──┴──────────────────┘
          left column (flex)              right rail
                                          (fixed 420 px)
@@ -38,8 +39,8 @@ left column uses a row grid for top-bar / canvas / profiler.
 - Right-rail tab routing: tab switching, default tab on boot, the
   switch-on-creature-click rule.
 - Which TS module installs into which DOM element. Installers run from
-  `main.ts` in the order: profiler panel → dev panel (= Settings tab)
-  → Monitor tab → Settings button. Installation order matters because
+  `main.ts` in the order: dev panel (= Settings tab) → profiler panel
+  → NN tab → Settings button. Installation order matters because
   the dev panel's "Show profiler" toggle calls into the profiler panel
   installer's exported visibility setter.
 - The stage-then-apply pattern in the Settings tab: per-row dirty
@@ -90,15 +91,15 @@ left column uses a row grid for top-bar / canvas / profiler.
 | `#perf-box` | Profiler bottom panel (collapsed by default): status line, FPS/TPS chart, **population chart** (`#chart-pop`), TPS/max-pop selectors, CPU monitor, profile trees. | `widgets/perf-panel.ts → installProfilerPanel`. Visibility driven by `Settings.showProfiler`. v2.0 Wave 5: in **species mode** the pop chart draws **one line per live species** (colored by each species' `color_u32`, matching the canvas) instead of the single pop line. It is fed by the polled `species_table_json` report — the painted-frame sampler reads the bridge's synchronous `latestSpeciesTable()` mirror (epoch-gated, written every 45 ticks; single-pool never writes it so the single line stays). Each report tick pushes one sparse `id → count` sample into a 500-deep ring; the draw loop unions all ids seen in-window and breaks each species' polyline across ticks where it is absent, so species appearing/disappearing leave gaps rather than false zeros. `restart()` calls `setPanelBridge(newBridge)` + `resetPanelSamples()` (which drops species state back to single-pool until the new world's first report). |
 | `#perf-close` | ✕ button that hides the profiler. | Flips `showProfiler` to false; perf-panel reacts. |
 | `#right-rail` | Persistent right column, 420 px. | `rail/index.ts → installRail`. |
-| `#rail-tabs` | Three tab buttons: Inspector / Monitor / Settings. | `rail/index.ts`. |
+| `#rail-tabs` | Three tab buttons: Settings / NN / Inspector (in DOM order; Settings is the default active tab). | `rail/index.ts`. |
+| `#rail-settings` | Dev-panel content (`#devpanel-box`) + Apply / Cancel / Reset footer. | `widgets/devpanel.ts → installDevPanel`. |
+| `#rail-nn` | NN topology + mutation-bucket editors + per-layer perf log (`#nn-tab-host`). | `rail/nn-tab.ts → installNnTab`. |
 | `#rail-inspector` | Inspector body or empty-state. | `rail/inspector.ts` reads / writes `#inspector-empty` and the `#ins-*` rows inside `#inspector-body`. v2.0 Wave 2b: dropped the EMA color readout; shows a packed-color swatch, the genome-modulated `movement_penalty`, and the 6 genome traits (`#ins-trait-*` bars from `creature_inspect_json`'s `genome` object). v2.0 Wave 3b/5: a `#ins-species-block` (hidden by default) shows the human species **name** (`#ins-species-name`, e.g. `Species-I`, from `creature_inspect_json`'s `species_name`) with the numeric `species_id` as a dim trailing tag, a color swatch of `species_color` (RGBA8 LE u32, same decode as the body color), and a `#ins-species-history` breadcrumb — **always `—` in v2.0** (no splits yet; the area is plumbed for v2.1 to render `species_history`). The block is present **only when the inspect JSON carries species fields** (species mode); single-pool inspects keep it hidden. |
-| `#rail-monitor` | Population graph + worker-stats host. | `rail/monitor.ts → installMonitorTab`; pop-graph paint via `rail/stats.ts → maybeSampleStats`. |
-| `#rail-settings` | Dev-panel content + Apply / Cancel / Reset footer. | `widgets/devpanel.ts → installDevPanel`. |
 | `#toast-host` | Bottom-center transient notice slot. | `toast.ts → showToast`. |
 
 ## Tab routing rules
 
-- **Default tab on boot:** Inspector (`activeTab = "inspector"` inside
+- **Default tab on boot:** Settings (`activeTab = "settings"` inside
   `installTabs`). The rail also defaults to *closed* (see `railOpen`
   below), so a fresh user sees the canvas full-bleed and has to open
   the rail (⚙ / `~`) before any tab is visible.
@@ -350,16 +351,18 @@ non-zero `world_seed` pinned in Settings overrides it.
   `switchTab` (the implementation that flips `.is-active` classes).
 - `web/src/rail/inspector.ts` → click→tab switch, empty-state toggle,
   SoA fast-path, `inspect_id` throttle.
-- `web/src/rail/monitor.ts` → `installMonitorTab` (wires the worker-
-  stats panel into `#worker-stats-host`).
-- `web/src/rail/stats.ts` → pop-graph sampler + paint to `#chart-pop`.
+- `web/src/rail/nn-tab.ts` → `installNnTab` (topology editor + mutation
+  buckets + per-layer perf log under `#nn-tab-host`).
+- `web/src/widgets/perf-panel.ts` → the pop-graph sampler + paint to
+  `#chart-pop` (per-species in species mode) lives here now (v1.13 Wave 2),
+  fed by the polled `species_table_json` report.
 - `web/src/widgets/devpanel.ts` → Settings tab installer, staged /
   live tier helpers, dirty tracking, Apply / Cancel / Reset wiring,
   construction-only toast.
 - `web/src/widgets/perf-panel.ts` → `installProfilerPanel`,
   `setProfilerVisible` (single source of truth for show/hide).
-- `web/src/widgets/worker-stats.ts` → polled NN thread health panel
-  rendered inside the Monitor tab.
+- `web/src/widgets/worker-stats.ts` → polled NN thread health table,
+  installed by `perf-panel.ts` into the perf-box CPU-monitor section.
 - `web/src/toast.ts` → `showToast(message, durationMs)`.
 - `web/src/settings.ts` → `Settings` interface, `DEFAULTS`,
   `getSettings` / `setSetting` / `resetSettings`, the major/minor schema

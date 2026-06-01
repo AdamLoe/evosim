@@ -224,14 +224,23 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   extinct-ends before generation 1; that signals the founder pool
   needs the prior back, or wider He ranges.
 
-### World is walled (not toroidal)
+### World wrap is a construction toggle (v2.0; default toroidal)
 
-- **Decision**: Movement clamps to `[0, WORLD_SIZE]`. Vision and
-  neighbour queries do not wrap.
-- **Why**: Walls give creatures a usable feature (the wall_proximity NN
-  inputs) and a population shape that doesn't smear evenly across the
-  field.
-- **Applies to**: `architecture/simulation-core.md`.
+- **Decision**: `wrap_world` is a runtime construction setting (default **on**
+  = toroidal). ON ⇒ positions/vision/neighbour queries wrap across the seam
+  (`rem_euclid`, toroidal minimum-image), and the 4 wall-proximity NN inputs
+  are dropped. OFF ⇒ the legacy walled world: movement clamps to
+  `[ri, world_size-ri]`, queries don't wrap, and the 4 wall inputs reappear.
+  (Pre-v2.0 the world was walled-only.)
+- **Why**: Both are interesting evolutionary regimes worth A/B-ing. A torus
+  removes the wall-camping pathology and smears population evenly; walls give
+  creatures a usable "shore" feature (the wall_proximity inputs) and a
+  population shape that hugs edges. Making it a toggle lets the user pick per
+  world instead of baking one in.
+- **Applies to**: `architecture/simulation-core.md`,
+  `decisions/cross-cutting.md` (runtime-`world_size` model).
+- **Code anchors**: `DevSliders.wrap_world`, `WorldDims.wrap_world`,
+  `SpatialGrid::cell_of` / `for_each_in_radius` (wrap fold).
 
 ### Action enum is collapsed to `{Graze, Attack, Split}`
 
@@ -332,19 +341,25 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   achievable intensity (`1 - min_dist/range`) can no longer beat the
   worst-lit sector.
 - **Why**: The naive bbox walk visits every cell in
-  `(2·PROXIMITY_RANGE)²`, which at `PROXIMITY_RANGE=20` and
-  `HASH_CELL=2.5` is ~256 cells per predator, dominated by candidates
-  in dense clumps. The aggregation is `max` per sector, so once each
+  `(2·PROXIMITY_RANGE)²`. The aggregation is `max` per sector, so once each
   sector has any hit, further cells whose closeness ceiling is below
   the worst lit sector cannot improve the result. The starburst order
   guarantees we hit the closest cells first, so the early-bail fires
-  quickly in clumps.
+  quickly in clumps. (v2.0 Wave 1a retuned `HASH_CELL` 2.5u → **10u** and the
+  world to 64× area at the same pop, so creature density is ~64× sparser and a
+  full-range walk is cheap either way; the early-bail still pays off in
+  clumps. v2.0 Wave 3a: in species mode the scan lights **16** sectors — 8
+  same-species + 8 other-species — so a mono-species clump never lights the
+  other block; judged acceptable at the sparse coarse-cell density, with the
+  fallback being to bail the two blocks independently.)
 - **Applies to**: `architecture/simulation-core.md`,
   `src/world/proximity.rs → proximity_starburst`,
-  `src/world/proximity.rs → compute_creature_proximity_sectors`.
+  `src/world/proximity.rs → compute_creature_proximity_sectors`,
+  `compute_creature_proximity_sectors_species` (the 16-sector species variant).
 - **Tradeoffs**: Output is bit-identical to the prior bbox walk (same
-  max-aggregation semantics, same sector LUT, same bilinear split).
-  The starburst list is built once via `OnceLock` and reused.
+  max-aggregation semantics, same sector LUT, same bilinear split) per mode.
+  The starburst list is built once via `OnceLock` and reused; in wrap mode
+  the displacement is the toroidal minimum-image.
 - **Revisit when**: `PROXIMITY_RANGE` or `HASH_CELL` changes by enough
   that the precomputed list needs a different cap, or a future sense
   uses sum-aggregation (where the early-bail invariant doesn't hold).
@@ -592,6 +607,113 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 - **Revisit when**: playtest wants growth at the default world — first lever is
   cranking `starting_species_member_count` (denser clumps); next is the 8-dir
   mate-proximity NN inputs (`v2-possible-next-steps.md`).
+
+### Why one binary mode toggle, and why species ⇒ mating (v2.0)
+
+- **Decision**: `species_mode` is a *single* construction switch with **no
+  finer parameterization** — there is no "sexual without species" or "species
+  without asexual-mating" combination. (What each mode *contains* is covered by
+  the Wave-3a "opt-in mode" entry above; this entry records only why the axis
+  is a single binary.)
+- **Why**: Most v2.0 ideas reduce to "another setting," but the emergent
+  single-pool drift (v1) and the faction storytelling (v2) are each worth
+  preserving whole. One hard switch keeps both readable and A/B-able; the
+  intermediate combinations were rejected as too many to balance. Species
+  *without* mating in particular has no mechanism for species to evolve
+  independently — asexual lineages would each just be their own drift line,
+  which the v1 sim already does without the species label.
+- **Applies to**: `architecture/simulation-core.md`, boot payload, NN input
+  layout composition.
+- **Alternatives**: parameterize finer (asexual+species, sexual+no-species, …)
+  — rejected as too many combinations to balance.
+
+### Child spawns at parent midpoint, no habitable-cell check (v2.0)
+
+- **Decision**: A mated child spawns at the wrap-aware midpoint of the two
+  parents' positions, even if that cell is hostile (deep water / desert). No
+  retry, no nearest-habitable search.
+- **Why**: Simple, and honest selection — most cross-biome mating attempts
+  produce children that die quickly, which is the point, not a bug. A
+  habitable-cell search would add a scan and quietly mask cross-biome mating
+  as a failure mode.
+- **Applies to**: `World::handle_mating` (`src/world/mod.rs`).
+
+### Species extinct = extinct; `Species-A..J` names; species-only history (v2.0)
+
+- **Decision**: When a species hits population 0 it stays gone — no respawn
+  pod, no founder injection. Names are the fixed `Species-A..J` (random-name
+  generator deferred). The inspector shows species id / color / **species**
+  history (parent-species breadcrumb), never a per-creature ancestor chain.
+- **Why**: New species arise from splits in v2.1+, so in v2.0 "how do new
+  species appear" has the simplest answer: they don't. Species color does the
+  visual-identity work, so names aren't load-bearing yet. A 10-generation
+  individual-ancestor chain is unreadable; species history is the storytelling
+  primitive that matters once splits ship (plumbed-but-empty in v2.0).
+- **Applies to**: `World.species` (`src/world/species.rs`), the inspector
+  species block (`#ins-species-*`), `creature_inspect_json`.
+- **Revisit when**: v2.1 splits/merges land (then extinction, naming, and the
+  history breadcrumb all gain real behavior).
+
+### Action set is `{Graze, Attack, Split | Mate}`; `Eat`→`Attack`; velocity stays continuous (v2.0)
+
+- **Decision**: Three actions, NN output shape unchanged at 5 (`vx, vy` + 3
+  logits). `action[2]` is `Split` (single-pool) or `Mate` (species), chosen at
+  construction. `Eat` is renamed `Attack` in both modes (same repr/logit
+  order). A discrete N/S/E/W movement-output option was floated and **cut** —
+  velocity stays continuous `(vx, vy)`.
+- **Why**: Reusing `action[2]`'s logit for Mate keeps the SAB + brain output
+  shape stable across modes (mode-dependent validity gate, not a new slot).
+  "Attack" reads correctly once the species gate exists. Discrete movement
+  didn't justify a new setting + decode path + balance surface for the thin
+  "they all migrate east" readability win.
+- **Applies to**: `src/creature.rs → Action`, `src/world/nn.rs → decode_action`.
+
+### NN input layout is settings-derived; no vestigial slots; one bias slot (v2.0)
+
+- **Decision**: The input vector composition is computed at world init from the
+  active construction settings (`NnInputLayout::for_settings`) and SIMD-padded
+  to a multiple of 8. No slot is preserved for compatibility — inputs constant
+  for a brain's whole run (the dropped "action-set / mode indicator" slot, the
+  always-zero wall inputs in wrap mode) collapse to a per-output bias and are
+  removed. One slot stays pinned to `1.0` as the classical bias-learning
+  constant (distinct from the dropped mode flag). Old brains are discarded on
+  any settings change (no save/load to migrate).
+- **Why**: A constant input wastes weights and trains against a dishonest
+  surface. Mode information that matters (8 vs 16 creature sectors, present vs
+  absent wall inputs) is carried *implicitly* by the layout, so a separate
+  "are we in species mode" input buys nothing. The bias-learning constant earns
+  its slot (every hidden unit gets a learnable threshold) and is standard
+  practice. (The full per-mode width table — 32/40/40/48 across wrap×species —
+  lives in `architecture/simulation-core.md`; the cross-language safety
+  implication is in `decisions/cross-cutting.md`.)
+- **Applies to**: `architecture/simulation-core.md`,
+  `src/world/nn.rs → NnInputLayout / NnInputGroup`, `src/brain.rs → NnTopology`.
+- **Alternatives**: keep a constant action-set-indicator input for
+  "portability" (rejected — a brain selected against one `action[2]` semantic
+  doesn't transfer just because one constant signal says which mode it's in);
+  8-direction biome sectors instead of 4 cardinal (rejected — doubles inputs
+  for marginal signal).
+
+### Body genome: 6 floats, not buckets; dropped trait set; sprite/repulsion not collision (v2.0)
+
+- **Decision**: The genome is exactly six **continuous** `f32 ∈ [0,1]` traits
+  (`body_size, max_speed, metabolism, diet, water_affinity, heat_tolerance`),
+  not quantized `u8` buckets. The larger ChatGPT-era trait set (social, fear,
+  aggression, cold, humidity, fertility, photosynthesis) is **not** in v2.0.
+  `body_size` scales sprite + repulsion strength, **not** collision (there is
+  no collision).
+- **Why**: These six are the minimum that distinguish the Grazer / Hunter /
+  Swimmer / Desert archetypes against the 3-biome world, and each does real
+  work in at least one mechanic. The dropped traits either have no biome to
+  express them, duplicate `diet`+`metabolism`, or open a new energy channel
+  (photosynthesis) that destabilizes balance. Floats are honest about drift —
+  buckets read cleaner but hide the small differences accumulating over
+  generations, the very thing the sim exists to expose. Collision means physics
+  + pathfinding (out of scope); repulsion approximates "big creatures own more
+  space."
+- **Applies to**: `src/creature.rs → Genome`, `src/world/tick.rs` (use sites).
+- **Revisit when**: new biomes ship and need new trait axes (forest →
+  social/fear, tundra → cold-tolerance).
 
 ## See also
 
