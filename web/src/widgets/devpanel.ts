@@ -30,6 +30,10 @@ import { THEMES, applyTheme } from "../themes";
 // whatever it spawned with until restart.
 // v2.0 Wave 1c: dropped `full_grass_on_init`; added the world-shape knobs
 // (`world_size`, `world_seed`, `wrap_world`).
+// v2.0 Wave 3b: the species/mating construction settings join the set
+// (`species_mode`, `crossover_mode`, `starting_species_count`,
+// `starting_species_member_count`, `starting_species_member_variance`). Note
+// `mating_cooldown_ticks` is LIVE — it is deliberately NOT listed here.
 const CONSTRUCTION_ONLY_SLIDERS = new Set<string>([
   "founder_count",
   "energy_max",
@@ -37,6 +41,11 @@ const CONSTRUCTION_ONLY_SLIDERS = new Set<string>([
   "world_size",
   "world_seed",
   "wrap_world",
+  "species_mode",
+  "crossover_mode",
+  "starting_species_count",
+  "starting_species_member_count",
+  "starting_species_member_variance",
 ]);
 
 const TOAST_CONSTRUCTION =
@@ -71,6 +80,36 @@ export function getWrapWorld(): boolean {
 export function getWorldSeed(): number {
   const v = widgetReaders.get("world_seed")?.();
   return Math.max(0, Math.round(v ?? getSettings().worldSeed)) >>> 0;
+}
+// v2.0 Wave 3b: species + sexual-mating construction accessors for the boot
+// payload. These ride `newWithFounderCount`'s 5 trailing args (not the live
+// slider SAB). Each falls back to the persisted setting if its widget is not
+// installed (e.g. when species_mode is staged off, the species rows are hidden
+// but the readers stay registered, so this mostly reads the live widget value).
+export function getSpeciesMode(): boolean {
+  const v = widgetReaders.get("species_mode")?.();
+  if (v !== undefined) return v !== 0;
+  return getSettings().speciesMode;
+}
+export function getCrossoverMode(): number {
+  // Rust f32 encoding: 0 = average, non-zero = fifty_fifty.
+  const v = widgetReaders.get("crossover_mode")?.();
+  return v !== undefined ? v : getSettings().crossoverMode;
+}
+export function getStartingSpeciesCount(): number {
+  return widgetReaders.get("starting_species_count")?.() ?? getSettings().startingSpeciesCount;
+}
+export function getStartingSpeciesMemberCount(): number {
+  return (
+    widgetReaders.get("starting_species_member_count")?.() ??
+    getSettings().startingSpeciesMemberCount
+  );
+}
+export function getStartingSpeciesMemberVariance(): number {
+  return (
+    widgetReaders.get("starting_species_member_variance")?.() ??
+    getSettings().startingSpeciesMemberVariance
+  );
 }
 
 // ─── Live widget state (drives currentSliderState) ────────────────────────
@@ -123,6 +162,10 @@ interface StagedHandle {
 const stagedHandles: StagedHandle[] = [];
 let footerApply: HTMLButtonElement | null = null;
 let footerCancel: HTMLButtonElement | null = null;
+// v2.0 Wave 3b: re-runs species-mode row gating. Set in installDevPanel; called
+// after Cancel/Reset (which rewrite the species_mode widget without firing its
+// `change` event) so hidden/shown rows track the restored staged value.
+let speciesGatingSync: () => void = () => {};
 
 function settingToNumber(key: keyof Settings): number {
   const v = getSettings()[key] as unknown;
@@ -170,6 +213,7 @@ function cancelAll(): void {
     if (!isDirty(h)) continue;
     h.writeWidget(h.snapshot);
   }
+  speciesGatingSync();
   refreshDirtyState();
 }
 
@@ -189,6 +233,7 @@ function resetAll(getBridge: () => SimBridge): void {
   // Live-apply widgets (run + display) also reset via the resetSettings() call
   // above; their UI sync happens through liveSyncers registered below.
   for (const sync of liveSyncers) sync();
+  speciesGatingSync();
   if (anyConstructionOnly) showToast(TOAST_CONSTRUCTION);
   refreshDirtyState();
 }
@@ -332,6 +377,58 @@ function makeStagedToggle(spec: ToggleSpec): HTMLDivElement {
   }
 
   row.append(labelEl, spacer1, spacer2, input);
+  return row;
+}
+
+// v2.0 Wave 3b: a staged enum dropdown. The widget value is the numeric option
+// the Rust slider expects (e.g. crossover_mode: 0 = average, 1 = fifty_fifty).
+// Participates in dirty tracking exactly like a staged slider/toggle.
+interface DropdownSpec {
+  label: string;
+  simName: string | null;
+  settingKey: keyof Settings;
+  /** Ordered {numeric value → display label} options. */
+  options: ReadonlyArray<{ value: number; label: string }>;
+  nextWorld?: boolean;
+}
+
+function makeStagedDropdown(spec: DropdownSpec): HTMLDivElement {
+  const initial = settingToNumber(spec.settingKey);
+  const row = document.createElement("div");
+  row.className = "devpanel-row devpanel-row-wide";
+
+  const labelEl = document.createElement("label");
+  labelEl.textContent = spec.label;
+  if (spec.nextWorld) labelEl.classList.add("next-world");
+
+  const select = document.createElement("select");
+  for (const o of spec.options) {
+    const opt = document.createElement("option");
+    opt.value = String(o.value);
+    opt.textContent = o.label;
+    select.appendChild(opt);
+  }
+  select.value = String(initial);
+
+  const writeWidget = (v: number): void => {
+    select.value = String(v);
+  };
+
+  select.addEventListener("change", () => refreshDirtyState());
+
+  if (spec.simName) {
+    registerWidget(spec.simName, () => Number(select.value));
+    stagedHandles.push({
+      simName: spec.simName,
+      settingKey: spec.settingKey,
+      readWidget: () => Number(select.value),
+      writeWidget,
+      snapshot: initial,
+      rowEl: row,
+    });
+  }
+
+  row.append(labelEl, select);
   return row;
 }
 
@@ -632,6 +729,79 @@ export function installDevPanel(getBridge: () => SimBridge): void {
   }));
   box.appendChild(worldSec);
 
+  // ── Species & mating (v2.0 Wave 3b) ──
+  // `species_mode` is a construction toggle that gates the rest of the section:
+  // when staged ON the species-seeding sliders + crossover dropdown + the live
+  // mating-cooldown slider are shown (and the Lifecycle "Founder count" row is
+  // hidden); when staged OFF those rows are hidden and Founder count returns.
+  // Gating keys off the STAGED widget value (the next-world choice), not the
+  // running sim's mode — per the mission's UI-gating note.
+  const speciesSec = section("Species & mating");
+
+  const speciesModeRow = makeStagedToggle({
+    label: "Species mode",
+    simName: "species_mode",
+    settingKey: "speciesMode",
+    nextWorld: true,
+  });
+  speciesSec.appendChild(speciesModeRow);
+
+  // crossover_mode: construction enum {0 = average, 1 = fifty_fifty}.
+  const crossoverRow = makeStagedDropdown({
+    label: "Crossover mode",
+    simName: "crossover_mode",
+    settingKey: "crossoverMode",
+    options: [
+      { value: 1, label: "fifty_fifty" },
+      { value: 0, label: "average" },
+    ],
+    nextWorld: true,
+  });
+  speciesSec.appendChild(crossoverRow);
+
+  const speciesCountRow = makeStagedSlider({
+    label: "Species count",
+    simName: "starting_species_count",
+    settingKey: "startingSpeciesCount",
+    min: 1, max: 64, step: 1,
+    formatValue: (v) => String(Math.round(v)),
+    nextWorld: true,
+  });
+  speciesSec.appendChild(speciesCountRow);
+
+  const memberCountRow = makeStagedSlider({
+    label: "Members / species",
+    simName: "starting_species_member_count",
+    settingKey: "startingSpeciesMemberCount",
+    min: 1, max: 200, step: 1,
+    formatValue: (v) => String(Math.round(v)),
+    nextWorld: true,
+  });
+  speciesSec.appendChild(memberCountRow);
+
+  const memberVarianceRow = makeStagedSlider({
+    label: "Member variance",
+    simName: "starting_species_member_variance",
+    settingKey: "startingSpeciesMemberVariance",
+    min: 0, max: 10, step: 0.1,
+    formatValue: (v) => v.toFixed(1),
+    nextWorld: true,
+  });
+  speciesSec.appendChild(memberVarianceRow);
+
+  // mating_cooldown_ticks is LIVE (applies to the running world) — staged like
+  // the other sim sliders but NOT in CONSTRUCTION_ONLY_SLIDERS, so it does not
+  // fire the restart toast. Still gated visible only when species mode is on.
+  const matingCooldownRow = makeStagedSlider({
+    label: "Mating cooldown",
+    simName: "mating_cooldown_ticks",
+    settingKey: "matingCooldownTicks",
+    min: 0, max: 2000, step: 1,
+    formatValue: (v) => `${Math.round(v)} ticks`,
+  });
+  speciesSec.appendChild(matingCooldownRow);
+  box.appendChild(speciesSec);
+
   // ── Eat ──
   const eatSec = section("Eat");
   eatSec.appendChild(makeStagedSlider({
@@ -681,14 +851,18 @@ export function installDevPanel(getBridge: () => SimBridge): void {
     min: 0, max: 200, step: 1,
     formatValue: (v) => String(Math.round(v)),
   }));
-  lifeSec.appendChild(makeStagedSlider({
+  // v2.0 Wave 3b: the Founder count row is gated by the staged `species_mode`
+  // widget — hidden when species mode is staged ON (the species-seeding sliders
+  // take its place). Captured here so `refreshSpeciesGating()` can toggle it.
+  const founderCountRow = makeStagedSlider({
     label: "Founder count",
     simName: "founder_count",
     settingKey: "founderCount",
     min: 1, max: 32, step: 1,
     formatValue: (v) => String(Math.round(v)),
     nextWorld: true,
-  }));
+  });
+  lifeSec.appendChild(founderCountRow);
   lifeSec.appendChild(makeStagedSlider({
     label: "Mutation rate ×",
     simName: "mutation_rate_multiplier",
@@ -738,6 +912,33 @@ export function installDevPanel(getBridge: () => SimBridge): void {
     }
   }
   updateSplitThresholdCap();
+
+  // ── Species-mode gating (v2.0 Wave 3b) ──
+  // Show/hide rows based on the STAGED species_mode widget value. ON ⇒ show the
+  // species-seeding sliders + crossover + mating-cooldown, hide Founder count.
+  // OFF ⇒ the reverse. Keys off the live checkbox state, not the running sim.
+  const speciesGatedRows = [
+    crossoverRow,
+    speciesCountRow,
+    memberCountRow,
+    memberVarianceRow,
+    matingCooldownRow,
+  ];
+  function refreshSpeciesGating(): void {
+    const on = (widgetReaders.get("species_mode")?.() ?? 0) !== 0;
+    for (const r of speciesGatedRows) r.style.display = on ? "" : "none";
+    founderCountRow.style.display = on ? "none" : "";
+  }
+  // Re-gate whenever the species_mode checkbox flips (in addition to the
+  // dirty-state refresh makeStagedToggle already wires).
+  const speciesModeCheckbox = speciesModeRow.querySelector(
+    "input[type=checkbox]",
+  ) as HTMLInputElement | null;
+  speciesModeCheckbox?.addEventListener("change", refreshSpeciesGating);
+  // Expose for Cancel/Reset (which rewrite the checkbox without a change event)
+  // and apply the initial gating from the persisted species_mode value.
+  speciesGatingSync = refreshSpeciesGating;
+  refreshSpeciesGating();
 
   // ── Footer wiring ──
   footerApply = document.getElementById("settings-apply") as HTMLButtonElement | null;

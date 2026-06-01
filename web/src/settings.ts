@@ -22,7 +22,12 @@ const SCHEMA_MAJOR = 2;
 // v2.0 Wave 2b: added `traitMutationSigmaMultiplier` (a new additive key with a
 // default) → MINOR bump 0 → 1. Existing v2 blobs keep their values and pick up
 // the new key from DEFAULTS via the `{...DEFAULTS, ...stored}` merge.
-const SCHEMA_MINOR = 1;
+// v2.0 Wave 3b: added the species/mating construction keys (`speciesMode`,
+// `crossoverMode`, `startingSpeciesCount`, `startingSpeciesMemberCount`,
+// `startingSpeciesMemberVariance`) + the live `matingCooldownTicks` — all new
+// additive keys with defaults → MINOR bump 1 → 2. Existing v2 blobs keep their
+// values and merge the new keys from DEFAULTS.
+const SCHEMA_MINOR = 2;
 
 /** v1.12: one row of the 8-row mutation policy table. Mirrors the Rust
  * `Bucket` struct (`src/brain.rs`). `weight` is any non-negative float;
@@ -133,6 +138,27 @@ export interface Settings {
   worldSize: number;
   worldSeed: number;
   wrapWorld: boolean;
+  // v2.0 Wave 3b: species + sexual-mating construction settings. All four are
+  // CONSTRUCTION-ONLY (restart-required, toast on apply) and ride the boot call
+  // (`newWithFounderCount`'s 5 trailing args), not the live slider SAB.
+  //   * `speciesMode` — hard mode switch (off ⇒ single-pool Split; on ⇒ seeded
+  //     species + sexual Mate). Default off.
+  //   * `crossoverMode` — per-trait/per-weight crossover policy (mating mode).
+  //     Carried as the Rust f32 slider encoding: 0 = average, 1 = fifty_fifty.
+  //     Default fifty_fifty (1).
+  //   * `startingSpeciesCount` / `startingSpeciesMemberCount` — species and
+  //     founders-per-species (mating mode). Defaults 10 / 10.
+  //   * `startingSpeciesMemberVariance` — multiplies the per-founder bucket draw
+  //     spread (mating mode). Default 3.0.
+  speciesMode: boolean;
+  crossoverMode: number;
+  startingSpeciesCount: number;
+  startingSpeciesMemberCount: number;
+  startingSpeciesMemberVariance: number;
+  // v2.0 Wave 3b: live-tunable initiator-only post-mating cooldown (mating
+  // mode). Apply to the running world. Must match Rust
+  // MATING_COOLDOWN_TICKS_DEFAULT.
+  matingCooldownTicks: number;
 }
 
 export const DEFAULTS: Settings = {
@@ -181,6 +207,19 @@ export const DEFAULTS: Settings = {
   worldSize: 9600,
   worldSeed: 0,
   wrapWorld: true,
+  // v2.0 Wave 3b: species + sexual-mating construction settings. Must match the
+  // Rust DevSliders defaults: SPECIES_MODE_DEFAULT (false), CROSSOVER_MODE_DEFAULT
+  // (FiftyFifty ⇒ slider 1), STARTING_SPECIES_COUNT_DEFAULT (10),
+  // STARTING_SPECIES_MEMBER_COUNT_DEFAULT (10),
+  // STARTING_SPECIES_MEMBER_VARIANCE_DEFAULT (3.0).
+  speciesMode: false,
+  crossoverMode: 1,
+  startingSpeciesCount: 10,
+  startingSpeciesMemberCount: 10,
+  startingSpeciesMemberVariance: 3.0,
+  // v2.0 Wave 3b: live mating cooldown. Must match Rust
+  // MATING_COOLDOWN_TICKS_DEFAULT (200).
+  matingCooldownTicks: 200,
 };
 
 const KNOWN_KEYS = new Set<string>(Object.keys(DEFAULTS));

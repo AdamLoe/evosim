@@ -180,6 +180,13 @@ async function handleBoot(boot: SimMessageBoot): Promise<void> {
     boot.world_size,
     boot.wrap_world,
     boot.world_seed,
+    // v2.0 Wave 3b: species + sexual-mating construction settings. `crossover_mode`
+    // is the Rust f32 encoding (0 = average, 1 = fifty_fifty).
+    boot.species_mode,
+    boot.crossover_mode,
+    boot.starting_species_count,
+    boot.starting_species_member_count,
+    boot.starting_species_member_variance,
   );
   world.profile_enable(true);
 

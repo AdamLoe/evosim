@@ -222,6 +222,16 @@ export interface SimMessageBoot {
   world_size: number;
   wrap_world: boolean;
   world_seed: number;
+  /** v2.0 Wave 3b: species + sexual-mating construction settings. These shape
+   * world seeding at construction, so — like the world-shape args above — they
+   * ride `newWithFounderCount`'s 5 trailing args (not the live slider SAB).
+   * `crossover_mode` is the Rust f32 encoding (0 = average, 1 = fifty_fifty).
+   * (`mating_cooldown_ticks` is live and flows through `initial_sliders`.) */
+  species_mode: boolean;
+  crossover_mode: number;
+  starting_species_count: number;
+  starting_species_member_count: number;
+  starting_species_member_variance: number;
 }
 
 /** Discriminated union of every main → worker message shape. v1.10: just boot. */

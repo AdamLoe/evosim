@@ -22,6 +22,11 @@ import {
   getWorldSize,
   getWrapWorld,
   getWorldSeed,
+  getSpeciesMode,
+  getCrossoverMode,
+  getStartingSpeciesCount,
+  getStartingSpeciesMemberCount,
+  getStartingSpeciesMemberVariance,
   currentSliderState,
 } from "./widgets/devpanel";
 import { installCanvasClickHandler, resetInspectorSelection } from "./rail/inspector";
@@ -430,6 +435,14 @@ async function spawnSimWorker(seed: string): Promise<SimBridge> {
     world_size: getWorldSize(),
     wrap_world: getWrapWorld(),
     world_seed: getWorldSeed() !== 0 ? getWorldSeed() : pendingWorldSeed,
+    // v2.0 Wave 3b: species + sexual-mating construction settings (the 5 new
+    // trailing `newWithFounderCount` args). `mating_cooldown_ticks` is a live
+    // slider and rides `initial_sliders`, not this construction path.
+    species_mode: getSpeciesMode(),
+    crossover_mode: getCrossoverMode(),
+    starting_species_count: getStartingSpeciesCount(),
+    starting_species_member_count: getStartingSpeciesMemberCount(),
+    starting_species_member_variance: getStartingSpeciesMemberVariance(),
   });
 
   const ready = await bootReady;

@@ -91,7 +91,7 @@ left column uses a row grid for top-bar / canvas / profiler.
 | `#perf-close` | ✕ button that hides the profiler. | Flips `showProfiler` to false; perf-panel reacts. |
 | `#right-rail` | Persistent right column, 420 px. | `rail/index.ts → installRail`. |
 | `#rail-tabs` | Three tab buttons: Inspector / Monitor / Settings. | `rail/index.ts`. |
-| `#rail-inspector` | Inspector body or empty-state. | `rail/inspector.ts` reads / writes `#inspector-empty` and the `#ins-*` rows inside `#inspector-body`. v2.0 Wave 2b: dropped the EMA color readout; shows a packed-color swatch, the genome-modulated `movement_penalty`, and the 6 genome traits (`#ins-trait-*` bars from `creature_inspect_json`'s `genome` object). |
+| `#rail-inspector` | Inspector body or empty-state. | `rail/inspector.ts` reads / writes `#inspector-empty` and the `#ins-*` rows inside `#inspector-body`. v2.0 Wave 2b: dropped the EMA color readout; shows a packed-color swatch, the genome-modulated `movement_penalty`, and the 6 genome traits (`#ins-trait-*` bars from `creature_inspect_json`'s `genome` object). v2.0 Wave 3b: a `#ins-species-block` (hidden by default) shows the `species_id` + a color swatch of `species_color` (RGBA8 LE u32, same decode as the body color) + an empty `#ins-species-history` breadcrumb — present **only when the inspect JSON carries species fields** (species mode); single-pool inspects keep the block hidden. |
 | `#rail-monitor` | Population graph + worker-stats host. | `rail/monitor.ts → installMonitorTab`; pop-graph paint via `rail/stats.ts → maybeSampleStats`. |
 | `#rail-settings` | Dev-panel content + Apply / Cancel / Reset footer. | `widgets/devpanel.ts → installDevPanel`. |
 | `#toast-host` | Bottom-center transient notice slot. | `toast.ts → showToast`. |
@@ -155,8 +155,11 @@ edits — re-opening Settings shows them still dirty.
 
 **Construction-only set** — these knobs ride
 `set_slider` and persist, but only shape the *next* world:
-`founder_count`, `energy_max`, `grass_initial_seed_count`, and (v2.0
-Wave 1a) the world-shape knobs `world_size`, `world_seed`, `wrap_world`.
+`founder_count`, `energy_max`, `grass_initial_seed_count`, (v2.0
+Wave 1a) the world-shape knobs `world_size`, `world_seed`, `wrap_world`,
+and (v2.0 Wave 3b) the species-construction knobs `species_mode`,
+`crossover_mode`, `starting_species_count`,
+`starting_species_member_count`, `starting_species_member_variance`.
 Labelled `(next world)` via the CSS rule
 `.devpanel-row label.next-world::after`. Apply/Restart fires the
 construction-only toast. **`full_grass_on_init` was removed** from the UI
@@ -165,6 +168,27 @@ construction-only toast. **`full_grass_on_init` was removed** from the UI
 The new **World** Settings section also hosts two *live* (apply-to-running-
 world) sliders: `water_movement_penalty` / `desert_movement_penalty`
 (biome base severities, Wave 1b).
+
+**Species & mating section + gating (v2.0 Wave 3b).** A `Species & mating`
+section hosts the `species_mode` construction toggle (default off), the
+`crossover_mode` construction dropdown (`makeStagedDropdown`; options
+`fifty_fifty=1` / `average=0`, the Rust f32 slider encoding), the three
+construction-only species-seeding sliders (`starting_species_count`,
+`starting_species_member_count`, `starting_species_member_variance`), and
+the **live** `mating_cooldown_ticks` slider (NOT in the construction-only
+set — it applies to the running world). The five construction-only species
+knobs ride `newWithFounderCount`'s 5 trailing args, not the live SAB
+(see [Boot-payload accessors](#boot-payload-accessors)); `mating_cooldown_ticks`
+flows through `currentSliderState()` like any live slider.
+
+`refreshSpeciesGating()` shows/hides rows based on the **staged**
+`species_mode` widget value (the next-world choice, NOT the running sim's
+mode): staged **ON** → show `crossover_mode` + the three species-seeding
+sliders + `mating_cooldown_ticks`, hide the Lifecycle `Founder count` row;
+staged **OFF** → the reverse. It is wired to the `species_mode` checkbox's
+`change` event and re-invoked from `cancelAll`/`resetAll` (those rewrite the
+checkbox programmatically without firing `change`) and once at install for
+the persisted initial state.
 
 The **Lifecycle** section gained a *live* `trait_mutation_sigma_multiplier`
 slider (v2.0 Wave 2b, default 0.3, mirrored by the
@@ -223,20 +247,41 @@ consumes to build the boot payload (so a mid-drag restart carries the
 dragged values, not the last-persisted ones):
 
 ```text
-getInitialGrassSeedCount() → number
-getEnergyMax()             → number
-getFounderCount()          → number
-getFullGrassOnInit()       → boolean   // always false in v2.0 (knob removed)
-getWorldSize()             → number    // v2.0 Wave 1a
-getWrapWorld()             → boolean    // v2.0 Wave 1a
-getWorldSeed()            → number     // v2.0 Wave 1a (0 ⇒ "auto")
-currentSliderState()       → Record<string, number>
+getInitialGrassSeedCount()         → number
+getEnergyMax()                     → number
+getFounderCount()                  → number
+getFullGrassOnInit()               → boolean   // always false in v2.0 (knob removed)
+getWorldSize()                     → number    // v2.0 Wave 1a
+getWrapWorld()                     → boolean    // v2.0 Wave 1a
+getWorldSeed()                     → number     // v2.0 Wave 1a (0 ⇒ "auto")
+getSpeciesMode()                   → boolean   // v2.0 Wave 3b
+getCrossoverMode()                 → number    // v2.0 Wave 3b (0=average, 1=fifty_fifty)
+getStartingSpeciesCount()          → number    // v2.0 Wave 3b
+getStartingSpeciesMemberCount()    → number    // v2.0 Wave 3b
+getStartingSpeciesMemberVariance() → number    // v2.0 Wave 3b
+currentSliderState()               → Record<string, number>
 ```
 
 `currentSliderState()` snapshots the in-memory widget value for every
 registered staged widget; the worker applies it via `set_slider` after
-construction. The world-shape getters feed `newWithFounderCount`'s new
-trailing args (`world_size, wrap_world, world_seed`) — see below.
+construction (this is the path the live `mating_cooldown_ticks` slider takes).
+
+**`newWithFounderCount` construction args (the boot call).** `main.ts`
+builds the `boot` payload; `sim-worker.ts → handleBoot` passes them to
+`WorldHandle.newWithFounderCount` in this exact order (mirrors the
+generated `web/wasm/evosim.d.ts`):
+
+```text
+seed, initial_grass_seed_count, energy_max, founder_count,
+full_grass_on_init, nn_topology_json, world_size, wrap_world, world_seed,
+species_mode, crossover_mode, starting_species_count,
+starting_species_member_count, starting_species_member_variance
+```
+
+The 5 trailing args (v2.0 Wave 3b) come from the `get*` species accessors
+above; `crossover_mode` is the Rust f32 encoding (`0`=average,
+non-zero=fifty_fifty). The earlier `world_size, wrap_world, world_seed`
+args (v2.0 Wave 1a) come from the world-shape getters.
 
 ## Runtime-dims SAB view binding (v2.0 Wave 1a)
 
@@ -275,7 +320,11 @@ rebuilt per boot.
   `{...DEFAULTS, ...stored}` merge fills any keys the older blob lacked.
   No reset. **v2.0 Wave 2b** added `traitMutationSigmaMultiplier` (default
   0.3) as exactly such an additive key — a MINOR bump (0 → 1), so existing
-  v2 blobs pick it up from `DEFAULTS` without a reset.
+  v2 blobs pick it up from `DEFAULTS` without a reset. **v2.0 Wave 3b**
+  added the species keys (`speciesMode`, `crossoverMode`,
+  `startingSpeciesCount`, `startingSpeciesMemberCount`,
+  `startingSpeciesMemberVariance`, `matingCooldownTicks`) the same way —
+  a MINOR bump (1 → 2).
 
 On persist the live copy always restamps `vMajor`/`vMinor` to the current
 values.

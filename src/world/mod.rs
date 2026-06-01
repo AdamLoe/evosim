@@ -43,6 +43,15 @@ mod genome_tests;
 #[path = "mating_tests.rs"]
 mod mating_tests;
 
+// v2.0 Wave 3a: full-tick regression for the stale-grid mating panic. The
+// death-removal pass swap_removes creatures (relocating the SoA tail), which
+// invalidated the spatial grid the mating path queried. This drives the FULL
+// `step` loop at a density where deaths and matings coincide; it panicked on
+// the pre-fix tick order. Own file/module (same merge-hazard rule).
+#[cfg(test)]
+#[path = "mating_grid_regression_tests.rs"]
+mod mating_grid_regression_tests;
+
 use self::nn::{chunk_ranges, dynamic_chunks};
 use self::tick::AttackPick;
 use crate::brain::{Brain, MutationPolicy, NnTopology};
@@ -774,7 +783,25 @@ impl World {
             self.energy_bookkeeping();
         }
 
-        // 9. Deaths. Span widened (R9) to cover the dead-removal
+        // 9a. Mating (species_mode only) — runs BEFORE the death-removal pass.
+        //     `handle_mating` reads the spatial grid (`find_first_in_radius`) to
+        //     pair in-contact partners. That grid was last rebuilt inside
+        //     `apply_movement_and_repulsion` (step 4) and is still valid here:
+        //     graze / attack / energy_bookkeeping never relocate creatures.
+        //     The death pass below applies `swap_remove` (relocating the tail
+        //     creature into each freed slot), which would leave stale grid
+        //     entries — querying it afterward returned out-of-bounds / wrong
+        //     indices and panicked at `species_id[j]`. Mating before the removal
+        //     uses the same valid grid the attack pass used (consistent basis),
+        //     and the eligibility gates (energy / mating_cooldown) were already
+        //     updated by `energy_bookkeeping` above. Single-pool is unaffected:
+        //     its asexual `handle_births` (no grid query) stays in step 10.
+        if self.sliders.species_mode {
+            crate::profile_span!(&self.profile, "tick.handle_births");
+            self.handle_mating();
+        }
+
+        // 9b. Deaths. Span widened (R9) to cover the dead-removal
         //    swap_remove loop and creatures.remove_indices (step 11, scales with die-off).
         {
             crate::profile_span!(&self.profile, "tick.collect_deaths");
@@ -804,15 +831,12 @@ impl World {
             }
         }
 
-        // 10. Births. Single-pool: asexual Split. species_mode: sexual Mate
-        //     (same-species, contact-radius, initiator-gated; v2.0 Wave 3a).
-        {
+        // 10. Births (single-pool asexual Split). species_mode handled its
+        //     sexual Mate path in step 9a (before the death pass) so the grid
+        //     query never sees a swap_remove-invalidated grid.
+        if !self.sliders.species_mode {
             crate::profile_span!(&self.profile, "tick.handle_births");
-            if self.sliders.species_mode {
-                self.handle_mating();
-            } else {
-                self.handle_births();
-            }
+            self.handle_births();
         }
 
         // 12. Step-12 tail: last_action promotion, tick bump, world-end check.

@@ -150,6 +150,26 @@ function renderInspector(data: CreatureInspectJson): void {
       set(`ins-trait-${key}-v`, v.toFixed(2));
     }
   }
+  // v2.0 Wave 3b: species panel — shown only when the JSON carries species
+  // data (i.e. species mode; single-pool inspect omits these fields). The
+  // history breadcrumb is Wave 5 — render the (empty) list area, no logic.
+  const speciesBlock = document.getElementById("ins-species-block");
+  if (data.species_id !== undefined && data.species_color !== undefined) {
+    if (speciesBlock) speciesBlock.style.display = "";
+    set("ins-species-id", `#${data.species_id}`);
+    // species_color is an RGBA8-packed u32 (LE: R bits 0..8, G 8..16, B 16..24)
+    // — the same lane/decode the renderer uses for the body color.
+    const packed = data.species_color >>> 0;
+    const r255 = packed & 0xff;
+    const g255 = (packed >>> 8) & 0xff;
+    const b255 = (packed >>> 16) & 0xff;
+    const swatch = document.getElementById("ins-species-swatch");
+    if (swatch) swatch.style.backgroundColor = `rgb(${r255}, ${g255}, ${b255})`;
+    const history = data.species_history ?? [];
+    set("ins-species-history", history.length === 0 ? "—" : history.join(" → "));
+  } else if (speciesBlock) {
+    speciesBlock.style.display = "none";
+  }
   const [wn, ws, we, ww] = data.wall_proximity;
   set("ins-walls", `${wn.toFixed(2)} / ${ws.toFixed(2)} / ${we.toFixed(2)} / ${ww.toFixed(2)}`);
   pushHistory(data.id, data.current_action);
@@ -187,6 +207,13 @@ export interface CreatureInspectJson {
   movement_penalty: number;
   wall_proximity: [number, number, number, number];
   nn_weight_count: number;
+  // v2.0 Wave 3b: species fields — present only in species mode (the Rust
+  // creature_inspect_json omits them in single-pool mode). `species_color` is
+  // the RGBA8-packed u32 the renderer paints into color_u32 (r | g<<8 | b<<16 |
+  // a<<24). `species_history` is the Wave-5 breadcrumb — always empty in v2.0.
+  species_id?: number;
+  species_color?: number;
+  species_history?: number[];
 }
 
 // Trait display order + labels (label only used in HTML; ids derive from key).
