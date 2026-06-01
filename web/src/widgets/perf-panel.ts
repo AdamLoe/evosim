@@ -449,6 +449,9 @@ function buildTpsSelector(simBridge: SimBridge): HTMLDivElement {
   tpsNumInput.min = "1";
   tpsNumInput.step = "1";
   tpsNumInput.className = "perf-num-input";
+  // Stable e2e hook. v1.13 moved the TPS control from a top-bar <select> to this
+  // perf-panel numeric input; the suite drives it by id + a "change" event.
+  tpsNumInput.id = "target-tps-input";
   tpsNumInput.value = String(getTargetTPS());
   tpsNumInput.addEventListener("change", () => {
     const v = Number(tpsNumInput!.value);

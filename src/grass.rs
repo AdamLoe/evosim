@@ -25,6 +25,12 @@ pub struct GrassGrid {
     pub dims: WorldDims,
     /// Row-major density, length `dims.grass_cell_count`.
     pub density: Vec<f32>,
+    /// Per-cell grass *carrying capacity* (`biome_factor * GRASS_MAX`), row-major,
+    /// length `dims.grass_cell_count`. v2.0 Wave 1: biome drives grass richness —
+    /// a cell's density saturates at `capacity[c]` (Plains→GRASS_MAX, Desert→0.30,
+    /// Water→0.04) for BOTH the logistic carrying capacity and the post-step
+    /// clamp. Built once at construction; never mutated per tick (static map).
+    pub capacity: Vec<f32>,
     /// Double-buffer scratch. Same length as `density`. Recomputed every
     /// `step` call; never read between ticks.
     pub scratch: Vec<f32>,
@@ -65,6 +71,7 @@ impl Clone for GrassGrid {
         Self {
             dims: self.dims,
             density: self.density.clone(),
+            capacity: self.capacity.clone(),
             scratch: self.scratch.clone(),
             row_has_density: self.row_has_density.clone(),
             par_chunks_us: AtomicU64::new(0),
@@ -81,17 +88,59 @@ impl GrassGrid {
     /// World-init constructor. Seeds `initial_seed_count` random cells
     /// with `GRASS_MAX`; all others zero. Draws from `rng` via the same
     /// world RNG used everywhere else (deterministic given fixed seed).
+    ///
+    /// Capacity is uniform `GRASS_MAX` (all-Plains). Production callers use
+    /// [`GrassGrid::new_with_capacity`] to apply per-biome carrying capacity;
+    /// this plain ctor preserves today's all-plains behavior for the grass-only
+    /// unit tests.
+    ///
+    /// Test/back-compat ctor: production routes through `new_with_capacity`.
+    #[allow(dead_code)]
     pub fn new(rng: &mut SimRng, initial_seed_count: u32, dims: WorldDims) -> Self {
+        Self::new_with_capacity(rng, initial_seed_count, dims, None)
+    }
+
+    /// World-init constructor with optional per-cell biome carrying capacity.
+    ///
+    /// v2.0 Wave 1: when `biome_grid` is `Some`, each cell's carrying capacity is
+    /// `capacity_factor_from_u8(biome) * GRASS_MAX` (Plains ×1.0, Desert ×0.30,
+    /// Water ×0.04). A seeded cell is filled to **its own** capacity (so a water
+    /// cell seeds near 0.04, a desert cell near 0.30), and the same per-cell cap
+    /// bounds logistic regrowth in [`compute_propagation`]. When `None`, capacity
+    /// is uniform `GRASS_MAX` (== legacy all-plains behavior).
+    ///
+    /// Deterministic: the RNG draw order is identical to the legacy ctor (one
+    /// `rng.index` per seed), so grass seeding stays pinned to the seed; biome
+    /// only changes the *value* written, never the cell selection.
+    pub fn new_with_capacity(
+        rng: &mut SimRng,
+        initial_seed_count: u32,
+        dims: WorldDims,
+        biome_grid: Option<&[u8]>,
+    ) -> Self {
         let cell_count = dims.grass_cell_count;
+        let capacity = match biome_grid {
+            Some(bg) => {
+                debug_assert_eq!(bg.len(), cell_count);
+                bg.iter()
+                    .map(|&b| crate::world::biome::capacity_factor_from_u8(b) * GRASS_MAX)
+                    .collect::<Vec<f32>>()
+            }
+            None => vec![GRASS_MAX; cell_count],
+        };
         let mut density = vec![0.0f32; cell_count];
         let scratch = vec![0.0f32; cell_count];
         for _ in 0..initial_seed_count {
             let idx = rng.index(cell_count);
-            density[idx] = GRASS_MAX;
+            // Seed to the cell's own carrying capacity (Plains→GRASS_MAX,
+            // Desert→0.30, Water→0.04) so a freshly seeded cell already sits at
+            // its biome's ceiling rather than over-filling.
+            density[idx] = capacity[idx];
         }
         let mut g = Self {
             dims,
             density,
+            capacity,
             scratch,
             row_has_density: vec![0u64; dims.grass_dim.div_ceil(64)],
             par_chunks_us: AtomicU64::new(0),
@@ -180,8 +229,11 @@ impl GrassGrid {
 
         let dim = self.dims.grass_dim;
         let wrap = self.dims.wrap_world;
-        let inv_max = 1.0 / GRASS_MAX;
         let d = &self.density;
+        // v2.0 Wave 1: per-cell biome carrying capacity bounds both the logistic
+        // term and the post-step clamp, so each cell saturates near its biome's
+        // ceiling (Plains→GRASS_MAX, Desert→0.30, Water→0.04).
+        let cap = &self.capacity;
         let row_body_self_us = &self.row_body_self_us;
         let row_body_calls = &self.row_body_calls;
 
@@ -217,7 +269,13 @@ impl GrassGrid {
                 let cn = row_n.map(|r| r + ix);
                 let cs = row_s.map(|r| r + ix);
                 let v = d[c];
-                let logistic = r_in_cell * v * (1.0 - v * inv_max);
+                // Per-cell carrying capacity K (biome-scaled). Logistic growth
+                // stops at v == K, and the final value clamps to [0, K], so a
+                // desert cell tops out near 0.30 and a water cell near 0.04. A
+                // zero-capacity cell can hold no grass (guard the reciprocal).
+                let k_cap = cap[c];
+                let inv_cap = if k_cap > 0.0 { 1.0 / k_cap } else { 0.0 };
+                let logistic = r_in_cell * v * (1.0 - v * inv_cap);
                 // Max-of-neighbors spill: 1 ripe neighbor already grants the max
                 // propagation boost; additional neighbors don't stack. Avoids the
                 // "every cell next to a saturated patch quickly fills" cascade.
@@ -227,7 +285,7 @@ impl GrassGrid {
                     .max(ce.map_or(0.0, |i| d[i]))
                     .max(cw.map_or(0.0, |i| d[i]));
                 let prop = k_propagate * max_neighbor;
-                s_row[ix] = (v + logistic + prop).clamp(0.0, GRASS_MAX);
+                s_row[ix] = (v + logistic + prop).clamp(0.0, k_cap);
             }
             row_body_self_us.fetch_add(
                 clock_now_us_threadsafe().saturating_sub(body_self_start),
@@ -442,6 +500,7 @@ mod tests {
         GrassGrid {
             dims: TEST_DIMS,
             density: vec![0.0f32; GRASS_CELL_COUNT],
+            capacity: vec![GRASS_MAX; GRASS_CELL_COUNT],
             scratch: vec![0.0f32; GRASS_CELL_COUNT],
             row_has_density: vec![0u64; GRASS_GRID_DIM.div_ceil(64)],
             par_chunks_us: AtomicU64::new(0),
@@ -510,6 +569,7 @@ mod tests {
         let mut g = GrassGrid {
             dims: TEST_DIMS,
             density: vec![GRASS_MAX; GRASS_CELL_COUNT],
+            capacity: vec![GRASS_MAX; GRASS_CELL_COUNT],
             scratch: vec![0.0f32; GRASS_CELL_COUNT],
             row_has_density: vec![0u64; GRASS_GRID_DIM.div_ceil(64)],
             par_chunks_us: AtomicU64::new(0),

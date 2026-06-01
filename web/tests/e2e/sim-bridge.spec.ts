@@ -46,6 +46,53 @@ async function waitForBoot(page: Page): Promise<void> {
     .toBe(true);
 }
 
+// v1.13 moved the TPS control from a top-bar `<select id="target-tps-input">`
+// to the perf-panel numeric `<input id="target-tps-input">` (perf-panel.ts).
+// `selectOption` is wrong for an <input>; set the value and dispatch the
+// "change" event the widget listens for so the TPS actually applies.
+async function setTargetTps(page: Page, tps: number): Promise<void> {
+  await page.evaluate((v) => {
+    const el = document.getElementById("target-tps-input") as
+      | HTMLInputElement
+      | null;
+    if (!el) throw new Error("#target-tps-input not found");
+    el.value = String(v);
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  }, tps);
+}
+
+// v1.13/v2.0 moved the profiler-visibility toggle out of a `.devpanel-row`
+// "Show profiler" checkbox into the top-bar icon button `#perf-btn` (main.ts →
+// setProfilerVisible, which sets `#perf-box` display). Idempotently ensure the
+// panel is shown: `#perf-btn` is a toggle, so only click it while hidden.
+async function ensureProfilerVisible(page: Page): Promise<void> {
+  const hidden = await page.evaluate(() => {
+    const box = document.getElementById("perf-box");
+    return !box || getComputedStyle(box).display === "none";
+  });
+  if (hidden) await page.click("#perf-btn");
+  await expect(page.locator("#perf-box")).toBeVisible();
+}
+
+// v1.9/v1.13: the Settings rail (which holds the staged sliders + the
+// `#settings-apply` footer) lives in `#right-rail`, collapsed by default
+// (`#app-shell.rail-collapsed` → `#right-rail { display:none }`). The `~`
+// hotkey toggles it open; Settings is the default-active tab so opening the
+// rail reveals it. Idempotently ensure it's open so #settings-apply is
+// clickable.
+async function ensureSettingsRailOpen(page: Page): Promise<void> {
+  const collapsed = await page.evaluate(
+    () =>
+      document.getElementById("app-shell")?.classList.contains("rail-collapsed") ??
+      true,
+  );
+  if (collapsed) {
+    await page.locator("body").focus();
+    await page.keyboard.press("~");
+  }
+  await expect(page.locator("#settings-apply")).toBeVisible();
+}
+
 test.beforeEach(async ({ page }) => {
   const consoleErrors: string[] = [];
   page.on("pageerror", (e) => consoleErrors.push(`pageerror: ${e.message}`));
@@ -74,7 +121,7 @@ test("pause + resume — stops and starts the tick counter at high TPS", async (
   // Push target-TPS up so the sim under-runs its per-tick budget and the loop
   // hits the timeoutMs<=0 path. This is the bug regime; a test at default 60
   // would have passed on the buggy commit.
-  await page.selectOption("#target-tps-input", "1000");
+  await setTargetTps(page, 1000);
   // Let the worker pick up the new TPS.
   await page.waitForTimeout(500);
 
@@ -113,10 +160,10 @@ test("target TPS dropdown — observed throughput tracks the selected value", as
   // Start at the broken regime, then drop to 10 — if onmessage stops firing,
   // the worker stays at TPS=1000 and we'd see ~2000 ticks in 2 s instead of
   // ~20.
-  await page.selectOption("#target-tps-input", "1000");
+  await setTargetTps(page, 1000);
   await page.waitForTimeout(1000);
 
-  await page.selectOption("#target-tps-input", "10");
+  await setTargetTps(page, 10);
   // Allow up to 1 s for the message to apply.
   await page.waitForTimeout(1000);
 
@@ -137,10 +184,12 @@ test("target TPS dropdown — observed throughput tracks the selected value", as
 test("slider change — devpanel slider input fires without rejection at high TPS", async ({
   page,
 }) => {
-  // Settings tab is always visible in the right rail since v1.9.
+  // v2.0: the Settings rail is collapsed by default — open it so the staged
+  // slider + #settings-apply footer are visible/clickable.
   // Same as above: stress-regime so a failing yield manifests.
-  await page.selectOption("#target-tps-input", "1000");
+  await setTargetTps(page, 1000);
   await page.waitForTimeout(500);
+  await ensureSettingsRailOpen(page);
 
   // Edit the "Basic upkeep" row (Rust name: upkeep_multiplier). Sliders now
   // stage; Apply fires the debounced set_slider postMessage.
@@ -188,24 +237,14 @@ test("slider change — devpanel slider input fires without rejection at high TP
 });
 
 test("profile toggle — all 4 trees populate within 4 s", async ({ page }) => {
-  await page.selectOption("#target-tps-input", "1000");
+  await setTargetTps(page, 1000);
   await page.waitForTimeout(500);
 
-  // v1.9.1: the Rust profiler is always-on (the worker enables it at boot),
-  // and the panel defaults to visible (showProfiler default flipped to true).
-  // The "Show profiler" toggle in Settings is visibility-only. Make sure it
-  // ends up checked-on so #perf-box is visible for the subsequent assertions.
-  await page.evaluate(() => {
-    const rows = Array.from(document.querySelectorAll(".devpanel-row"));
-    const row = rows.find(
-      (r) => r.querySelector("label")?.textContent === "Show profiler",
-    );
-    const cb = row?.querySelector('input[type="checkbox"]') as
-      | HTMLInputElement
-      | null;
-    if (cb && !cb.checked) cb.click();
-  });
-  await expect(page.locator("#perf-box")).toBeVisible();
+  // v1.9.1: the Rust profiler is always-on (the worker enables it at boot).
+  // v2.0: profiler visibility is the top-bar `#perf-btn` toggle (the old
+  // Settings "Show profiler" checkbox is gone). Make sure #perf-box ends up
+  // visible for the subsequent assertions.
+  await ensureProfilerVisible(page);
 
   // Profiler polls at 1 Hz and needs a few samples to populate. 4 s gives
   // enough cushion even on a slow CI box.
@@ -234,7 +273,7 @@ test("profile toggle — all 4 trees populate within 4 s", async ({ page }) => {
 test("restart 'r' key — tick counter resets, no console errors", async ({
   page,
 }) => {
-  await page.selectOption("#target-tps-input", "1000");
+  await setTargetTps(page, 1000);
   await page.waitForTimeout(1000);
 
   const beforeRestart = await readTick(page);

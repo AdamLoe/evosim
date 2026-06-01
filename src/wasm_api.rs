@@ -474,7 +474,8 @@ impl WorldHandle {
 
     /// Byte offset of the biome buffer (one u8 `Biome` per grass cell) inside
     /// wasm linear memory. Main thread builds a view at this offset of length
-    /// `biome_buf_byte_len()`. Wave 1a: all Plains (0) placeholder.
+    /// `biome_buf_byte_len()`. Wave 1b: filled from `world_seed` via
+    /// `biome::generate_biome_grid` (Plains/Water/Desert blobs).
     #[wasm_bindgen(getter)]
     pub fn biome_buf_byte_offset(&self) -> u32 {
         self.biome_buf.as_ptr() as u32

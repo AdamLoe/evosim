@@ -19,7 +19,10 @@
 //! The generated grid is stored sim-side on [`super::World`] for O(1) per-tick
 //! `biome_at` lookups AND copied byte-for-byte into the boot `biome_buf` SAB.
 
-use crate::constants::{Biome, WorldDims, GRASS_CELL_SIZE};
+use crate::constants::{
+    Biome, WorldDims, GRASS_CAPACITY_DESERT, GRASS_CAPACITY_PLAINS, GRASS_CAPACITY_WATER,
+    GRASS_CELL_SIZE,
+};
 
 /// Independent SplitMix64 PRNG, seeded from `world_seed`. Deliberately NOT the
 /// sim `SimRng` (xoshiro/XxHash) — biome generation must be reproducible from
@@ -170,5 +173,17 @@ pub(crate) fn biome_from_u8(b: u8) -> Biome {
         1 => Biome::Water,
         2 => Biome::Desert,
         _ => Biome::Plains,
+    }
+}
+
+/// Grass carrying-capacity factor (× `GRASS_MAX`) for a stored biome byte.
+/// v2.0 Wave 1: drives per-cell grass richness so biome is a selection pressure
+/// (Plains ×1.0, Desert ×0.30, Water ×0.04). Unknown bytes fall back to Plains.
+#[inline]
+pub(crate) fn capacity_factor_from_u8(b: u8) -> f32 {
+    match b {
+        1 => GRASS_CAPACITY_WATER,
+        2 => GRASS_CAPACITY_DESERT,
+        _ => GRASS_CAPACITY_PLAINS,
     }
 }

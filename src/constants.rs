@@ -183,6 +183,22 @@ pub const MAX_CHUNKS: usize = 16;
 pub const GRASS_CELL_SIZE: f32 = 5.0;
 /// Maximum density per cell (clamped post-step).
 pub const GRASS_MAX: f32 = 1.0;
+// ---- Biome grass carrying capacity (v2.0 Wave 1) ----
+// Per-biome multiplier on `GRASS_MAX` for a cell's grass *carrying capacity*.
+// Applied to BOTH the initial seed value and the per-cell logistic/clamp ceiling
+// so a cell saturates near `factor * GRASS_MAX` instead of always GRASS_MAX. This
+// makes biome the grass-richness selection pressure (a desert looks sparse, a
+// water cell is near-barren) without touching the deterministic propagation
+// kernel structure. FEEL KNOBS — tune for the desert-as-pressure premise.
+//   Plains ×1.0  (== today's behavior; preserves all plains determinism tests)
+//   Desert ×0.30 (sparse but grazeable)
+//   Water  ×0.04 (near-barren)
+/// Grass carrying-capacity factor for Plains cells (× GRASS_MAX). Feel knob.
+pub const GRASS_CAPACITY_PLAINS: f32 = 1.0;
+/// Grass carrying-capacity factor for Desert cells (× GRASS_MAX). Feel knob.
+pub const GRASS_CAPACITY_DESERT: f32 = 0.30;
+/// Grass carrying-capacity factor for Water cells (× GRASS_MAX). Feel knob.
+pub const GRASS_CAPACITY_WATER: f32 = 0.04;
 /// Default in-cell logistic growth rate slider.
 pub const GRASS_IN_CELL_GROWTH_R_DEFAULT: f32 = 0.01;
 /// Default cross-kernel propagation rate slider.

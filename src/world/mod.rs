@@ -21,6 +21,12 @@ mod wrap_tests;
 #[path = "biome_tests.rs"]
 mod biome_tests;
 
+// v2.0 Wave 1: biome-driven grass carrying-capacity tests, in their own
+// file/module (same merge-hazard rule).
+#[cfg(test)]
+#[path = "grass_biome_tests.rs"]
+mod grass_biome_tests;
+
 use self::nn::{chunk_ranges, dynamic_chunks};
 use self::tick::EatPick;
 use crate::brain::{Brain, MutationPolicy, NnTopology};
@@ -299,10 +305,20 @@ impl World {
         // v2.0 Wave 1b: static biome map from `world_seed` (independent of the
         // sim RNG above). Built once; read O(1) per tick via `biome_at`.
         let biome_grid = biome::generate_biome_grid(world_seed, &dims);
-        let mut grass = GrassGrid::new(&mut rng, sliders.grass_initial_seed_count, dims);
+        // v2.0 Wave 1: thread the biome grid into grass so per-cell carrying
+        // capacity (Plains ×1.0, Desert ×0.30, Water ×0.04) scales BOTH the
+        // initial seeding and the logistic regrowth cap.
+        let mut grass = GrassGrid::new_with_capacity(
+            &mut rng,
+            sliders.grass_initial_seed_count,
+            dims,
+            Some(&biome_grid),
+        );
         if sliders.full_grass_on_init {
-            for d in grass.density.iter_mut() {
-                *d = GRASS_MAX;
+            // Fill every cell to its biome carrying capacity (not a flat
+            // GRASS_MAX) so "full grass" still respects biome richness.
+            for (d, &k) in grass.density.iter_mut().zip(grass.capacity.iter()) {
+                *d = k;
             }
             grass.rebuild_row_bitset();
         }

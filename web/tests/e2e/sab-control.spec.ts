@@ -37,6 +37,34 @@ async function waitForBoot(page: Page): Promise<void> {
     .toBe(true);
 }
 
+// v1.13 moved the TPS control from a top-bar `<select id="target-tps-input">`
+// to the perf-panel numeric `<input id="target-tps-input">` (perf-panel.ts).
+// `selectOption` is wrong for an <input>; set the value and dispatch the
+// "change" event the widget listens for so the TPS actually applies.
+async function setTargetTps(page: Page, tps: number): Promise<void> {
+  await page.evaluate((v) => {
+    const el = document.getElementById("target-tps-input") as
+      | HTMLInputElement
+      | null;
+    if (!el) throw new Error("#target-tps-input not found");
+    el.value = String(v);
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  }, tps);
+}
+
+// v1.13/v2.0 moved the profiler-visibility toggle out of a `.devpanel-row`
+// "Show profiler" checkbox into the top-bar icon button `#perf-btn` (main.ts →
+// setProfilerVisible, which sets `#perf-box` display). Idempotently ensure the
+// panel is shown: `#perf-btn` is a toggle, so only click it while hidden.
+async function ensureProfilerVisible(page: Page): Promise<void> {
+  const hidden = await page.evaluate(() => {
+    const box = document.getElementById("perf-box");
+    return !box || getComputedStyle(box).display === "none";
+  });
+  if (hidden) await page.click("#perf-btn");
+  await expect(page.locator("#perf-box")).toBeVisible();
+}
+
 test.beforeEach(async ({ page }) => {
   const consoleErrors: string[] = [];
   page.on("pageerror", (e) => consoleErrors.push(`pageerror: ${e.message}`));
@@ -62,20 +90,10 @@ test("sim_worker tree populates in the profile report (SAB profile-buffer path)"
   page,
 }) => {
   // Make sure the perf panel is visible.
-  await page.evaluate(() => {
-    const rows = Array.from(document.querySelectorAll(".devpanel-row"));
-    const row = rows.find(
-      (r) => r.querySelector("label")?.textContent === "Show profiler",
-    );
-    const cb = row?.querySelector('input[type="checkbox"]') as
-      | HTMLInputElement
-      | null;
-    if (cb && !cb.checked) cb.click();
-  });
-  await expect(page.locator("#perf-box")).toBeVisible();
+  await ensureProfilerVisible(page);
 
   // Push target TPS up so PROFILE_REPORT_EVERY_N_TICKS lands quickly.
-  await page.selectOption("#target-tps-input", "1000");
+  await setTargetTps(page, 1000);
 
   // The worker emits a profile report every 60 ticks (~60ms at 1000 TPS).
   // Allow up to 6 s for the bridge poller (60 Hz) to pick it up.
@@ -106,18 +124,8 @@ test("sim_worker tree populates in the profile report (SAB profile-buffer path)"
 test("snapshot tree from Rust profiler renders in the perf panel", async ({
   page,
 }) => {
-  await page.evaluate(() => {
-    const rows = Array.from(document.querySelectorAll(".devpanel-row"));
-    const row = rows.find(
-      (r) => r.querySelector("label")?.textContent === "Show profiler",
-    );
-    const cb = row?.querySelector('input[type="checkbox"]') as
-      | HTMLInputElement
-      | null;
-    if (cb && !cb.checked) cb.click();
-  });
-  await expect(page.locator("#perf-box")).toBeVisible();
-  await page.selectOption("#target-tps-input", "1000");
+  await ensureProfilerVisible(page);
+  await setTargetTps(page, 1000);
 
   await expect
     .poll(
@@ -134,17 +142,8 @@ test("snapshot tree from Rust profiler renders in the perf panel", async ({
 test("nn.build_input.proximity tree node is nested under build_input", async ({
   page,
 }) => {
-  await page.evaluate(() => {
-    const rows = Array.from(document.querySelectorAll(".devpanel-row"));
-    const row = rows.find(
-      (r) => r.querySelector("label")?.textContent === "Show profiler",
-    );
-    const cb = row?.querySelector('input[type="checkbox"]') as
-      | HTMLInputElement
-      | null;
-    if (cb && !cb.checked) cb.click();
-  });
-  await page.selectOption("#target-tps-input", "1000");
+  await ensureProfilerVisible(page);
+  await setTargetTps(page, 1000);
 
   // Wait for the profile report to populate.
   await expect
@@ -175,7 +174,7 @@ test("inspector click round-trip works through SAB request/response", async ({
   // Inspector requests are SAB-only post-v1.10; this proves the round-trip
   // (write CTRL_INSPECT_REQ_*, bump epoch → worker serves, writes payload,
   // bumps CTRL_INSPECT_RESP_EPOCH → main poller resolves the Promise).
-  await page.selectOption("#target-tps-input", "60");
+  await setTargetTps(page, 60);
 
   // Click roughly at the center of the canvas; whether or not we hit a
   // creature, the request must complete without erroring.
