@@ -32,7 +32,14 @@ const RUST_TO_SETTINGS: Record<string, keyof typeof DEFAULTS> = {
   split_jitter: "splitJitter",
   founder_count: "founderCount",
   grass_initial_seed_count: "initialGrassSeedCount",
-  full_grass_on_init: "fullGrassOnInit",
+  // v2.0 Wave 1c: `full_grass_on_init` was removed from both the Rust
+  // sliders_defaults_json map and the settings.ts blob. Added world-shape +
+  // biome-penalty sliders below mirror the new Rust DevSliders defaults.
+  world_size: "worldSize",
+  world_seed: "worldSeed",
+  wrap_world: "wrapWorld",
+  water_movement_penalty: "waterMovementPenalty",
+  desert_movement_penalty: "desertMovementPenalty",
 };
 
 function settingsValueAsNumber(key: keyof typeof DEFAULTS): number {

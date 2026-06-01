@@ -31,6 +31,14 @@
 
         <div id="canvas-wrap">
           <canvas id="aquarium"></canvas>
+          <!-- v2.0 Wave 1a: top-left status strip. Always visible (no dev
+               panel needed): shows the numeric world_seed for the running
+               world + a reroll button. Reroll picks a fresh seed and restarts;
+               a plain restart reuses the displayed seed (same biome). -->
+          <div id="status-strip" aria-live="polite">
+            <span id="status-seed" title="Biome world seed">seed —</span>
+            <button id="seed-reroll-btn" type="button" title="Reroll biome seed (new world)">⟳</button>
+          </div>
           <!-- v1.13 Wave 3: drag handle for the bottom profiler panel.
                Lives on the bottom edge of #canvas-wrap (which IS the top
                edge of #perf-box when the panel is shown). z-indexed above

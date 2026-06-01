@@ -72,9 +72,17 @@ uniform float u_ring_outer;
 // v1.9.2: annulus branch (trait rings + highlight pass) keeps its original
 // flat-fill behavior so UI elements stay crisp. Body branch (inner_px == 0)
 // gets AA edge + radial shading + soft outline ring.
+// v2.0 Wave 1c: a NEGATIVE inner_px is the "flat point" sentinel — a
+// sub-pixel creature at survey zoom draws as a solid 1px-ish dot in its
+// display color with no disc shading or AA, so faction territories stay
+// visible when zoomed all the way out.
 void main() {
   float r = length(v_local);
   if (r > 1.0) discard;
+  if (v_radii_px.y < 0.0) {
+    out_color = v_color;
+    return;
+  }
   if (v_radii_px.y > 0.0) {
     if (r * v_radii_px.x < v_radii_px.y) discard;
     out_color = v_color;
@@ -166,10 +174,54 @@ void main() {
   out_color = vec4(glow, a);
 }`;
 
-// Grass: one quad spanning the world, samples an R8 density texture
-// (v1.5 S6 — was R32F) and fades green by density. Quantization to u8 happens
-// Rust-side in the sim worker's `write_snapshot_to`; the shader treats `.r`
-// as a normalized f32 in [0, 1] either way.
+// Biome layer (v2.0 Wave 1b): a fullscreen world-quad drawn UNDER the grass.
+// Samples an R8 biome-id texture (one u8 `Biome` tag per grass cell: 0=Plains,
+// 1=Water, 2=Desert) with NEAREST filtering so cells stay flat-colored, and
+// maps each id to a flat biome color. The grass density layer brightens on
+// top. The texture is static for the world's lifetime — uploaded once on a
+// worker swap, not per frame.
+const BIOME_VS = `#version 300 es
+precision highp float;
+layout(location = 0) in vec2 a_corner;   // unit quad [0, 1]
+
+uniform vec2 u_viewport;
+uniform vec2 u_cam_pos;
+uniform float u_zoom;
+uniform float u_world_size;
+
+out vec2 v_uv;
+
+void main() {
+  v_uv = a_corner;
+  vec2 world_pos = a_corner * u_world_size;
+  vec2 px_pos = (world_pos - u_cam_pos) * u_zoom + u_viewport * 0.5;
+  vec2 ndc = (px_pos / u_viewport) * 2.0 - 1.0;
+  ndc.y = -ndc.y;
+  gl_Position = vec4(ndc, 0.0, 1.0);
+}`;
+
+const BIOME_FS = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_biome;   // R8 biome id, sampled NEAREST
+uniform vec3 u_plains;
+uniform vec3 u_water;
+uniform vec3 u_desert;
+out vec4 out_color;
+
+void main() {
+  // R8 unorm: id stored as (biome/255). Recover the integer tag.
+  float id = floor(texture(u_biome, v_uv).r * 255.0 + 0.5);
+  vec3 col = u_plains;
+  if (id > 1.5) col = u_desert;       // 2 = Desert
+  else if (id > 0.5) col = u_water;   // 1 = Water
+  out_color = vec4(col, 1.0);
+}`;
+
+// Grass: one quad spanning the world, samples an R8 density texture and
+// brightens green by density. Quantization to u8 (0..255) happens Rust-side
+// in `quantize_grass_into`; R8 unorm sampling returns `.r` already normalized
+// to [0, 1], so the shader needs no extra scaling.
 const GRASS_VS = `#version 300 es
 precision highp float;
 layout(location = 0) in vec2 a_corner;   // unit quad [0, 1]
@@ -327,6 +379,19 @@ interface GLState {
   trailInstanceBuf: WebGLBuffer;
   // Per-trail instance: [startX, startY, endX, endY, r, g, b, a, thickness] (9 f32).
   trailScratch: Float32Array;
+  biomeProgram: WebGLProgram;
+  biomeU: {
+    viewport: WebGLUniformLocation;
+    camPos: WebGLUniformLocation;
+    zoom: WebGLUniformLocation;
+    worldSize: WebGLUniformLocation;
+    plains: WebGLUniformLocation;
+    water: WebGLUniformLocation;
+    desert: WebGLUniformLocation;
+  };
+  biomeVao: WebGLVertexArrayObject;
+  biomeTex: WebGLTexture;
+  biomeTexDim: number;
   grassProgram: WebGLProgram;
   grassU: {
     viewport: WebGLUniformLocation;
@@ -518,6 +583,44 @@ function initRenderer(gl: WebGL2RenderingContext): GLState {
     zoom: mustGet(gl.getUniformLocation(trailProgram, "u_zoom"), "u_zoom"),
   };
 
+  // ─── Biome program (v2.0 Wave 1b) ───
+  // Fullscreen world-quad drawn under the grass. Reuses the same [0,1] quad as
+  // grass; samples an R8 biome-id texture with NEAREST so cells stay flat.
+  const biomeProgram = link(
+    gl,
+    compile(gl, gl.VERTEX_SHADER, BIOME_VS),
+    compile(gl, gl.FRAGMENT_SHADER, BIOME_FS),
+  );
+  const biomeVao = mustGet(gl.createVertexArray(), "createVertexArray");
+  gl.bindVertexArray(biomeVao);
+  const biomeQuadBuf = mustGet(gl.createBuffer(), "createBuffer");
+  gl.bindBuffer(gl.ARRAY_BUFFER, biomeQuadBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+    0, 0,
+    1, 0,
+    0, 1,
+    1, 1,
+  ]), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  gl.bindVertexArray(null);
+  const biomeU = {
+    viewport: mustGet(gl.getUniformLocation(biomeProgram, "u_viewport"), "u_viewport"),
+    camPos: mustGet(gl.getUniformLocation(biomeProgram, "u_cam_pos"), "u_cam_pos"),
+    zoom: mustGet(gl.getUniformLocation(biomeProgram, "u_zoom"), "u_zoom"),
+    worldSize: mustGet(gl.getUniformLocation(biomeProgram, "u_world_size"), "u_world_size"),
+    plains: mustGet(gl.getUniformLocation(biomeProgram, "u_plains"), "u_plains"),
+    water: mustGet(gl.getUniformLocation(biomeProgram, "u_water"), "u_water"),
+    desert: mustGet(gl.getUniformLocation(biomeProgram, "u_desert"), "u_desert"),
+  };
+  // Biome id texture (R8). NEAREST so each cell is one flat color; CLAMP edges.
+  const biomeTex = mustGet(gl.createTexture(), "createTexture");
+  gl.bindTexture(gl.TEXTURE_2D, biomeTex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
   // ─── Grass program ───
   const grassProgram = link(
     gl,
@@ -551,22 +654,17 @@ function initRenderer(gl: WebGL2RenderingContext): GLState {
     tint: mustGet(gl.getUniformLocation(grassProgram, "u_grass_tint"), "u_grass_tint"),
   };
 
-  // v1.11 (D): grass texture is R32F (raw f32 density per cell, no quantize).
-  // Linear filtering on f32 textures requires OES_texture_float_linear; mips
-  // would additionally require EXT_color_buffer_float for renderability, so
-  // we skip mipmapping and use plain LINEAR. NEAREST is the fallback if the
-  // float-linear extension is missing.
-  const floatLinearOk = gl.getExtension("OES_texture_float_linear") !== null;
+  // v2.0 Wave 1a: grass texture is R8 (u8 density per cell, quantized
+  // Rust-side in `quantize_grass_into`). R8 is a normalized unorm format, so
+  // it filters with plain LINEAR natively — no OES_texture_float_linear dance.
+  // R8 requires `UNPACK_ALIGNMENT = 1` since each row is `dim` bytes (not a
+  // multiple of 4 in general); set it once here (it's global GL state, but
+  // the only single-byte textures we upload are grass + biome).
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
   const grassTex = mustGet(gl.createTexture(), "createTexture");
   gl.bindTexture(gl.TEXTURE_2D, grassTex);
-  if (floatLinearOk) {
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-  } else {
-    console.warn("[render] OES_texture_float_linear unavailable; grass will use nearest filter");
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-  }
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
 
@@ -601,6 +699,7 @@ function initRenderer(gl: WebGL2RenderingContext): GLState {
     haloProgram, haloU, haloVao,
     trailProgram, trailU, trailVao, trailInstanceBuf,
     trailScratch: new Float32Array(MAX_POP_FOR_SIM * TRAIL_FLOATS_PER_INSTANCE),
+    biomeProgram, biomeU, biomeVao, biomeTex, biomeTexDim: 0,
     grassProgram, grassU, grassVao, grassTex, grassTexDim: 0,
     frameProgram, frameU, frameVao, frameBuf,
     instanceScratch: new Float32Array(4096 * FLOATS_PER_INSTANCE),
@@ -724,10 +823,13 @@ export function renderWorld(
   viewW: number,
   viewH: number,
   creatures: Float32Array,
-  grass: Float32Array,
+  grass: Uint8Array,
+  biome: Uint8Array | null,
+  biomeDirty: boolean,
   pop: number,
   world_size: number,
   grass_dim: number,
+  wrap_world: boolean,
   highlightMap: Map<number, number>,
 ): void {
   // v1.6 Wave C: stride is fixed at 8 post-SAB cutover; mismatch indicates
@@ -747,8 +849,8 @@ export function renderWorld(
   const renderWorldSpan = span("frame.render_world");
   try {
     renderWorldImpl(
-      gl, cam, viewW, viewH, creatures, grass, pop, world_size, grass_dim,
-      highlightMap,
+      gl, cam, viewW, viewH, creatures, grass, biome, biomeDirty, pop,
+      world_size, grass_dim, wrap_world, highlightMap,
     );
   } finally {
     renderWorldSpan.close();
@@ -761,10 +863,13 @@ function renderWorldImpl(
   viewW: number,
   viewH: number,
   creatures: Float32Array,
-  grass: Float32Array,
+  grass: Uint8Array,
+  biome: Uint8Array | null,
+  biomeDirty: boolean,
   pop: number,
   world_size: number,
   grass_dim: number,
+  wrap_world: boolean,
   highlightMap: Map<number, number>,
 ): void {
   const stride = CREATURE_STRIDE;
@@ -777,9 +882,35 @@ function renderWorldImpl(
   gl.clearColor(br, bg, bb, 1.0);
   gl.clear(gl.COLOR_BUFFER_BIT);
 
+  // ─── Biome layer (v2.0 Wave 1b) ───
+  // Drawn first, UNDER the grass. A static R8 biome-id texture mapped to flat
+  // per-biome colors. Uploaded only when the biome buffer changes (worker
+  // swap → `biomeDirty`), or the first time we see it. The grass density
+  // layer brightens green on top.
+  if (biome && biome.length === grass_dim * grass_dim) {
+    const dim = grass_dim;
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, s.biomeTex);
+    if (biomeDirty || dim !== s.biomeTexDim) {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, dim, dim, 0, gl.RED, gl.UNSIGNED_BYTE, biome);
+      s.biomeTexDim = dim;
+    }
+    gl.useProgram(s.biomeProgram);
+    gl.uniform2f(s.biomeU.viewport, viewW, viewH);
+    gl.uniform2f(s.biomeU.camPos, cam.cx, cam.cy);
+    gl.uniform1f(s.biomeU.zoom, cam.zoom);
+    gl.uniform1f(s.biomeU.worldSize, world_size);
+    // Visual-identity defaults (Wave 1c): Plains / Water / Desert flat colors.
+    gl.uniform3f(s.biomeU.plains, 74 / 255, 106 / 255, 58 / 255);
+    gl.uniform3f(s.biomeU.water, 40 / 255, 92 / 255, 168 / 255);
+    gl.uniform3f(s.biomeU.desert, 196 / 255, 178 / 255, 128 / 255);
+    gl.bindVertexArray(s.biomeVao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+
   // ─── Grass ───
   // Skipping the upload + draw entirely when the user toggles grass off is
-  // a real perf win at high cell counts (921_600 cells = 921 KB R8 upload
+  // a real perf win at high cell counts (1920² cells = ~3.7 MB R8 upload
   // per frame + a fullscreen-discard fragment pass).
   // v1.7: bracketed by `frame.render_world.grass` so the parent
   // `frame.render_world` row's overhead column reads correctly.
@@ -789,14 +920,14 @@ function renderWorldImpl(
       const dim = grass_dim;
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, s.grassTex);
-      // v1.11 (D): grass is now f32 per cell, uploaded as R32F. WebGL2
-      // supports R32F natively. No more (d * 255) as u8 quantize on the
-      // sim-worker side — the texture sees the exact density value.
+      // v2.0 Wave 1a: grass is u8 per cell, uploaded as R8. Full-texture
+      // upload every painted frame (dirty-rect deferred). R8 unorm sampling
+      // returns `.r` in [0, 1] directly, so the shader needs no rescale.
       if (dim !== s.grassTexDim) {
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, dim, dim, 0, gl.RED, gl.FLOAT, grass);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, dim, dim, 0, gl.RED, gl.UNSIGNED_BYTE, grass);
         s.grassTexDim = dim;
       } else {
-        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, dim, dim, gl.RED, gl.FLOAT, grass);
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, dim, dim, gl.RED, gl.UNSIGNED_BYTE, grass);
       }
       gl.useProgram(s.grassProgram);
       gl.uniform2f(s.grassU.viewport, viewW, viewH);
@@ -850,11 +981,11 @@ function renderWorldImpl(
     const minY = cam.cy - halfH;
     const maxY = cam.cy + halfH;
     // Grow the scratch buffer if needed (pop can exceed the initial reserve).
+    // The wrap-aware ghost-copy grow below widens this further when needed.
     const neededFloats = pop * FLOATS_PER_INSTANCE;
     if (s.instanceScratch.length < neededFloats) {
       s.instanceScratch = new Float32Array(neededFloats * 2);
     }
-    const scratch = s.instanceScratch;
 
     // v1.13 Wave 2: the main RAF callback seq-gates paints, so each call
     // here corresponds to a new snapshot. Rotate the id-keyed position
@@ -886,6 +1017,36 @@ function renderWorldImpl(
     let trailOff = 0;
     const enableTrails = pop <= 12000;
 
+    // v2.0 Wave 1c: wrap-aware draw. On a toroidal world a creature near x=0
+    // must also render at x=world_size+δ when the camera straddles the x=0 (or
+    // x=W) seam, and likewise for y. Build the small set of per-axis world
+    // offsets {-W, 0, +W} the visible frustum actually needs; the common case
+    // (not wrapping, or frustum well inside the world) is a single {0} offset
+    // so the inner loop stays a no-op pass. Grow the body scratch to cover the
+    // worst case (pop × ghost-copy count).
+    const W = world_size;
+    const xOffsets: number[] = [0];
+    const yOffsets: number[] = [0];
+    if (wrap_world && W > 0) {
+      if (minX < 0) xOffsets.push(-W);
+      if (maxX > W) xOffsets.push(W);
+      if (minY < 0) yOffsets.push(-W);
+      if (maxY > W) yOffsets.push(W);
+    }
+    const ghostCopies = xOffsets.length * yOffsets.length;
+    if (ghostCopies > 1) {
+      const worstFloats = pop * ghostCopies * FLOATS_PER_INSTANCE;
+      if (s.instanceScratch.length < worstFloats) {
+        s.instanceScratch = new Float32Array(worstFloats * 2);
+      }
+    }
+    const bodyScratch = s.instanceScratch;
+
+    // v2.0 Wave 1c: at survey zoom a body's on-screen radius drops below 1px.
+    // Rather than an AA-shaded disc (which fades to near-invisible), draw a
+    // flat ~1px point in the display color so faction territories stay legible.
+    const POINT_THRESHOLD_PX = 1.0;
+
     let off = 0;
     for (let i = 0; i < pop; i++) {
       const base = i * stride;
@@ -898,12 +1059,11 @@ function renderWorldImpl(
       const idHi = idView[base + 7];
       const cid = idHi * 4294967296 + idLo;
       const prev = prevById.get(cid);
-      const x = cx_raw;
-      const y = cy_raw;
-      const margin = radiusWorld + 2;
-      if (x < minX - margin || x > maxX + margin ||
-          y < minY - margin || y > maxY + margin) continue;
-      const radiusPx = Math.max(1, radiusWorld * PX_PER_SIZE * cam.zoom);
+      const rawRadiusPx = radiusWorld * PX_PER_SIZE * cam.zoom;
+      const isPoint = rawRadiusPx < POINT_THRESHOLD_PX;
+      const radiusPx = isPoint ? 1 : rawRadiusPx;
+      // inner_px sentinel: -1 ⇒ flat point (no shading), 0 ⇒ shaded disc.
+      const innerPx = isPoint ? -1 : 0;
       let cr = creatures[base + 3];
       let cg = creatures[base + 4];
       let cb = creatures[base + 5];
@@ -921,36 +1081,53 @@ function renderWorldImpl(
           cr *= scale; cg *= scale; cb *= scale;
         }
       }
-      scratch[off    ] = x;
-      scratch[off + 1] = y;
-      scratch[off + 2] = radiusPx;
-      scratch[off + 3] = 0; // inner_px (filled disc)
-      scratch[off + 4] = cr;
-      scratch[off + 5] = cg;
-      scratch[off + 6] = cb;
-      scratch[off + 7] = 1; // alpha
-      off += FLOATS_PER_INSTANCE;
+      const margin = radiusWorld + 2;
 
-      // Trail: only when we have a prev and the creature actually moved.
-      // Start = prev (one paint behind), end = current body position.
-      // Length = the inter-paint displacement; the FS fades alpha from 0
-      // at the back to v_color.a at the front, producing a comet tail.
-      // Thickness scales with body radius so big creatures get visible
-      // tails; min 2 px so small ones aren't lost at low zoom.
+      // Trail displacement (computed once; skip if it crosses the seam on a
+      // torus — a wrapped step would otherwise streak across the whole world).
+      let trailDx = 0, trailDy = 0, drawTrail = false;
       if (enableTrails && prev !== undefined) {
-        const dx = cx_raw - prev.x;
-        const dy = cy_raw - prev.y;
-        if (dx * dx + dy * dy > 0.04) {
-          trailScratch[trailOff    ] = prev.x;
-          trailScratch[trailOff + 1] = prev.y;
-          trailScratch[trailOff + 2] = x;
-          trailScratch[trailOff + 3] = y;
-          trailScratch[trailOff + 4] = cr;
-          trailScratch[trailOff + 5] = cg;
-          trailScratch[trailOff + 6] = cb;
-          trailScratch[trailOff + 7] = 0.6;
-          trailScratch[trailOff + 8] = Math.max(2, radiusPx * 0.6);
-          trailOff += TRAIL_FLOATS_PER_INSTANCE;
+        trailDx = cx_raw - prev.x;
+        trailDy = cy_raw - prev.y;
+        const seam = wrap_world && W > 0 && (Math.abs(trailDx) > W * 0.5 || Math.abs(trailDy) > W * 0.5);
+        drawTrail = !seam && (trailDx * trailDx + trailDy * trailDy > 0.04);
+      }
+
+      // Emit one (and, near a wrapped seam, up to a few ghost) copies.
+      for (let xi = 0; xi < xOffsets.length; xi++) {
+        const ox = xOffsets[xi];
+        const x = cx_raw + ox;
+        if (x < minX - margin || x > maxX + margin) continue;
+        for (let yi = 0; yi < yOffsets.length; yi++) {
+          const oy = yOffsets[yi];
+          const y = cy_raw + oy;
+          if (y < minY - margin || y > maxY + margin) continue;
+          bodyScratch[off    ] = x;
+          bodyScratch[off + 1] = y;
+          bodyScratch[off + 2] = radiusPx;
+          bodyScratch[off + 3] = innerPx;
+          bodyScratch[off + 4] = cr;
+          bodyScratch[off + 5] = cg;
+          bodyScratch[off + 6] = cb;
+          bodyScratch[off + 7] = 1; // alpha
+          off += FLOATS_PER_INSTANCE;
+
+          // Trail: start = prev (one paint behind), end = current body, both
+          // shifted by the same wrap offset so the segment stays attached to
+          // this ghost copy. FS fades alpha from 0 at the back to a at the
+          // front (comet tail). Thickness scales with body radius (min 2 px).
+          if (drawTrail && prev !== undefined && trailOff + TRAIL_FLOATS_PER_INSTANCE <= trailScratch.length) {
+            trailScratch[trailOff    ] = prev.x + ox;
+            trailScratch[trailOff + 1] = prev.y + oy;
+            trailScratch[trailOff + 2] = x;
+            trailScratch[trailOff + 3] = y;
+            trailScratch[trailOff + 4] = cr;
+            trailScratch[trailOff + 5] = cg;
+            trailScratch[trailOff + 6] = cb;
+            trailScratch[trailOff + 7] = 0.6;
+            trailScratch[trailOff + 8] = Math.max(2, radiusPx * 0.6);
+            trailOff += TRAIL_FLOATS_PER_INSTANCE;
+          }
         }
       }
     }
@@ -958,7 +1135,7 @@ function renderWorldImpl(
     const trailCount = (trailOff / TRAIL_FLOATS_PER_INSTANCE) | 0;
     if (bodyCount > 0) {
       gl.bindBuffer(gl.ARRAY_BUFFER, s.discInstanceBuf);
-      gl.bufferData(gl.ARRAY_BUFFER, scratch.subarray(0, off), gl.DYNAMIC_DRAW);
+      gl.bufferData(gl.ARRAY_BUFFER, bodyScratch.subarray(0, off), gl.DYNAMIC_DRAW);
 
       // ─── Halo pass ───
       // Soft Gaussian glow with per-creature breathing pulse. Drawn under
@@ -1024,6 +1201,21 @@ function renderWorldImpl(
       creatures.byteOffset,
       pop * stride * (creatures.BYTES_PER_ELEMENT / 4),
     );
+    // v2.0 Wave 1c: same wrap offsets as the body pass so a highlighted
+    // creature near the seam also rings at its wrapped position.
+    const W = world_size;
+    const halfW = (viewW / cam.zoom) * 0.5;
+    const halfH = (viewH / cam.zoom) * 0.5;
+    const hMinX = cam.cx - halfW, hMaxX = cam.cx + halfW;
+    const hMinY = cam.cy - halfH, hMaxY = cam.cy + halfH;
+    const hxOff: number[] = [0];
+    const hyOff: number[] = [0];
+    if (wrap_world && W > 0) {
+      if (hMinX < 0) hxOff.push(-W);
+      if (hMaxX > W) hxOff.push(W);
+      if (hMinY < 0) hyOff.push(-W);
+      if (hMaxY > W) hyOff.push(W);
+    }
     const scratch = s.instanceScratch;
     let off = 0;
     for (let k = 0; k < pop; k++) {
@@ -1036,22 +1228,31 @@ function renderWorldImpl(
       const cid = idHi * 4294967296 + idLo;
       const exp = highlightMap.get(cid);
       if (exp === undefined || nowMs >= exp) continue;
-      const x = creatures[base];
-      const y = creatures[base + 1];
+      const x0 = creatures[base];
+      const y0 = creatures[base + 1];
       const radiusWorld = creatures[base + 2];
       const radiusPx = Math.max(1, radiusWorld * PX_PER_SIZE * cam.zoom);
       const alpha = exp >= PERMANENT_EXP - 1
         ? 1.0
         : Math.min(1.0, (exp - nowMs) / HIGHLIGHT_FADE_MS);
-      scratch[off    ] = x;
-      scratch[off + 1] = y;
-      scratch[off + 2] = radiusPx + 4;
-      scratch[off + 3] = radiusPx + 2;
-      scratch[off + 4] = 255 / 255;
-      scratch[off + 5] = 200 / 255;
-      scratch[off + 6] = 50 / 255;
-      scratch[off + 7] = alpha;
-      off += FLOATS_PER_INSTANCE;
+      for (let xi = 0; xi < hxOff.length; xi++) {
+        const x = x0 + hxOff[xi];
+        if (x < hMinX - radiusWorld - 4 || x > hMaxX + radiusWorld + 4) continue;
+        for (let yi = 0; yi < hyOff.length; yi++) {
+          const y = y0 + hyOff[yi];
+          if (y < hMinY - radiusWorld - 4 || y > hMaxY + radiusWorld + 4) continue;
+          if (off + FLOATS_PER_INSTANCE > scratch.length) break;
+          scratch[off    ] = x;
+          scratch[off + 1] = y;
+          scratch[off + 2] = radiusPx + 4;
+          scratch[off + 3] = radiusPx + 2;
+          scratch[off + 4] = 255 / 255;
+          scratch[off + 5] = 200 / 255;
+          scratch[off + 6] = 50 / 255;
+          scratch[off + 7] = alpha;
+          off += FLOATS_PER_INSTANCE;
+        }
+      }
     }
     const hCount = (off / FLOATS_PER_INSTANCE) | 0;
     if (hCount > 0) {

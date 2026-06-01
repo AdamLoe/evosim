@@ -176,6 +176,10 @@ async function handleBoot(boot: SimMessageBoot): Promise<void> {
     boot.founder_count,
     boot.full_grass_on_init,
     boot.nn_topology_json ?? "",
+    // v2.0 Wave 1a: construction-only world shape.
+    boot.world_size,
+    boot.wrap_world,
+    boot.world_seed,
   );
   world.profile_enable(true);
 
@@ -231,12 +235,19 @@ async function handleBoot(boot: SimMessageBoot): Promise<void> {
     kind: "boot_ready",
     world_size: world.world_size,
     grass_dim: world.grass_dim,
+    // v2.0 Wave 1a: torus flag + resolved numeric biome seed + biome buffer
+    // geometry. The biome buffer lives in wasm linear memory next to the
+    // snapshot region; main reads it via a Uint8Array view at this offset.
+    wrap_world: world.wrap_world,
+    world_seed: world.world_seed,
     threads,
     rayon_ok: rayonOk,
     max_pop_for_sim: max_pop_for_sim(),
     wasm_memory: wasmInit.memory,
     snapshot_buf_byte_offset: world.snapshot_buf_byte_offset,
     snapshot_buf_byte_len: world.snapshot_buf_byte_len,
+    biome_buf_byte_offset: world.biome_buf_byte_offset,
+    biome_buf_byte_len: world.biome_buf_byte_len,
     control_sab: controlSab,
     sliders_defaults_json: world.sliders_defaults_json(),
   };

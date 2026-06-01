@@ -22,8 +22,10 @@
 import { test, expect, type Page } from "@playwright/test";
 
 async function readStatus(page: Page): Promise<string> {
+  // v1.13 Wave 2 removed `#status`; the live status line is now
+  // `#perf-status-line` in the bottom perf panel (perf-panel.ts).
   return await page.evaluate(
-    () => document.getElementById("status")?.textContent ?? "",
+    () => document.getElementById("perf-status-line")?.textContent ?? "",
   );
 }
 

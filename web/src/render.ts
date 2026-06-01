@@ -9,14 +9,22 @@ export interface Camera {
 
 export const PX_PER_SIZE = 2.5; // v6 §B: render radius = size × 2.5 px at base zoom
 
+// v2.0 Wave 1c: minimum zoom (px per world-unit). The world grew 1200 → 9600,
+// so the old 0.25 floor could survey only a ~6000px-wide window. 0.04 lets a
+// ~384px viewport frame the entire 9600 default world from a single view
+// (9600 × 0.04 = 384), and a normal ~1500px viewport surveys ~37 500u.
+export const MIN_ZOOM = 0.04;
+export const MAX_ZOOM = 16;
+
 export function makeCamera(worldSize: number): Camera {
-  // Initial zoom ≈ 1.33× (legacy was 4×). Picked so a fresh world shows
-  // most of the canvas without dropping below the clamp floor (0.25).
-  return { zoom: 4 / 3, cx: worldSize / 2, cy: worldSize / 2 };
+  // v2.0 Wave 1c: default zoom = 1.0 px/world-unit so a typical ~1500px
+  // viewport opens showing ~1500 world-units of the (much larger) world,
+  // centered. The camera tracks the runtime world size via clampCamera.
+  return { zoom: 1.0, cx: worldSize / 2, cy: worldSize / 2 };
 }
 
 export function clampCamera(cam: Camera, worldSize: number, viewW: number, viewH: number): void {
-  cam.zoom = Math.max(0.25, Math.min(16, cam.zoom));
+  cam.zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, cam.zoom));
   // Pan limit: world edge cannot leave the viewport center (v6 §N).
   cam.cx = Math.max(0, Math.min(worldSize, cam.cx));
   cam.cy = Math.max(0, Math.min(worldSize, cam.cy));

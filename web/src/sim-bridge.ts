@@ -63,8 +63,11 @@ export {
   CTRL_SEQ,
 };
 
-/** Protocol version. Bump on a breaking change to either message union. */
-export const SIM_BRIDGE_VERSION = 2;
+/** Protocol version. Bump on a breaking change to either message union.
+ *  v3 (v2.0 Wave 1c): boot carries world_size/wrap_world/world_seed and
+ *  boot_ready adds wrap_world/world_seed + the biome buffer geometry; the
+ *  snapshot grass region is now u8 (was f32). */
+export const SIM_BRIDGE_VERSION = 3;
 
 /**
  * Maximum simulation population.
@@ -103,51 +106,61 @@ export const CREATURE_STRIDE = 8;
  */
 export const SNAPSHOT_HEADER_BYTES = 32;
 
-/** Bytes per creature SoA region in one snapshot slot. */
+/** Bytes per creature SoA region in one snapshot slot. UNCHANGED in v2.0. */
 export const CREATURE_SOA_BYTES = MAX_POP_FOR_SIM * CREATURE_STRIDE * 4;
 
 /**
- * Bytes per grass density region in one snapshot slot.
+ * Runtime snapshot-slot geometry.
  *
- * v1.11 (A+D): raw f32 per cell instead of `(d * 255) as u8`. 4× more bytes,
- * but no per-cell quantize work in the sim worker — the loop is gone. The
- * renderer uploads as `R32F` instead of `R8`. Matches `GRASS_CELL_COUNT × 4`.
+ * v2.0 Wave 1a: the world is runtime-sized, so the grass region byte length
+ * (and therefore the slot/buffer totals) is no longer a compile-time
+ * constant. The grass region is now **u8** (one byte per cell, quantized
+ * Rust-side in `quantize_grass_into`) of `grass_cell_count` bytes — NOT the
+ * old f32 `921_600 × 4`. The renderer uploads it as `R8`.
+ *
+ * The single source of truth is the `grass_dim` reported in `boot_ready`
+ * (mirrored from `WorldHandle.grass_dim`); `grass_cell_count = grass_dim²`.
+ * Every per-frame view length and slot offset is derived from a `SlotLayout`
+ * built once at boot from that value. Getting this wrong silently
+ * over/under-runs the SAB slot, so it lives in ONE place.
  */
-export const GRASS_BYTES = 921_600 * 4;
+export interface SlotLayout {
+  /** Grass cells per axis (`grass_dim`). */
+  grassDim: number;
+  /** Grass cells per slot (`grass_dim²`); === u8 grass-region byte length. */
+  grassCellCount: number;
+  /** Header + creatures + grass, in bytes. */
+  slotBytes: number;
+}
 
 /**
- * Number of f32 grass cells per snapshot slot. Equals `GRASS_BYTES / 4` and
- * `GRASS_CELL_COUNT` on the Rust side. The renderer's `Float32Array` view
- * size is this number, not `GRASS_BYTES`.
+ * Build the runtime slot geometry from the boot-time `grass_dim`. The grass
+ * region is `grass_dim²` u8 bytes (one per cell); the creature region and
+ * header are world-size-independent.
  */
-export const GRASS_CELL_COUNT = GRASS_BYTES / 4;
+export function makeSlotLayout(grassDim: number): SlotLayout {
+  const grassCellCount = grassDim * grassDim;
+  return {
+    grassDim,
+    grassCellCount,
+    // u8 grass: 1 byte per cell (no ×4 — that was the f32 era).
+    slotBytes: SNAPSHOT_HEADER_BYTES + CREATURE_SOA_BYTES + grassCellCount,
+  };
+}
 
-/** Bytes per snapshot slot (header + creatures + grass). */
-export const SLOT_BYTES = SNAPSHOT_HEADER_BYTES + CREATURE_SOA_BYTES + GRASS_BYTES;
-
-/**
- * Total snapshot region size — two double-buffered slots.
- *
- * v1.11 (A): the snapshot region lives in wasm linear memory (not a separate
- * SharedArrayBuffer). The constant is kept for size validation and tests;
- * the actual base offset within wasm memory comes from
- * `WorldHandle.snapshot_buf_byte_offset` in the boot reply.
- */
-export const SNAPSHOT_SAB_BYTES = SLOT_BYTES * 2;
-
-/** Byte offset of snapshot slot `slot` (0 or 1) within the snapshot SAB. */
-export function slotOffset(slot: 0 | 1): number {
-  return slot * SLOT_BYTES;
+/** Byte offset of snapshot slot `slot` (0 or 1) within the snapshot region. */
+export function slotOffset(layout: SlotLayout, slot: 0 | 1): number {
+  return slot * layout.slotBytes;
 }
 
 /** Byte offset of the creature SoA within snapshot slot `slot`. */
-export function creatureSoAOffset(slot: 0 | 1): number {
-  return slotOffset(slot) + SNAPSHOT_HEADER_BYTES;
+export function creatureSoAOffset(layout: SlotLayout, slot: 0 | 1): number {
+  return slotOffset(layout, slot) + SNAPSHOT_HEADER_BYTES;
 }
 
-/** Byte offset of the grass density region within snapshot slot `slot`. */
-export function grassOffset(slot: 0 | 1): number {
-  return slotOffset(slot) + SNAPSHOT_HEADER_BYTES + CREATURE_SOA_BYTES;
+/** Byte offset of the u8 grass region within snapshot slot `slot`. */
+export function grassOffset(layout: SlotLayout, slot: 0 | 1): number {
+  return slotOffset(layout, slot) + SNAPSHOT_HEADER_BYTES + CREATURE_SOA_BYTES;
 }
 
 // ---------------------------------------------------------------------------
@@ -198,6 +211,14 @@ export interface SimMessageBoot {
    * "use Rust-side legacy default" (32→48→24→5). The worker passes this
    * verbatim into `WorldHandle.newWithFounderCount`. */
   nn_topology_json: string;
+  /** v2.0 Wave 1a: construction-only world shape. `world_size` is the world
+   * extent in world-units (default 9600). `wrap_world` selects torus vs
+   * walled. `world_seed` seeds the biome generator (0 ⇒ Rust picks a random
+   * one and reports it back). All three feed `newWithFounderCount`'s new
+   * trailing args. */
+  world_size: number;
+  wrap_world: boolean;
+  world_seed: number;
 }
 
 /** Discriminated union of every main → worker message shape. v1.10: just boot. */
@@ -211,13 +232,21 @@ export type SimMessage = SimMessageBoot;
 export interface SimReplyBootReady {
   kind: "boot_ready";
   world_size: number;
+  /** v2.0 Wave 1a: runtime grass cells per axis (1920 at the 9600 default).
+   * Sizes the grass + biome views as `grass_dim²` bytes each — the single
+   * source of truth for the SAB grass-region geometry. */
   grass_dim: number;
+  /** v2.0 Wave 1a: torus (wrap) vs walled world. Mirrors `WorldHandle.wrap_world`. */
+  wrap_world: boolean;
+  /** v2.0 Wave 1a: numeric biome seed actually used (Rust resolves 0 → random
+   * and reports the resolved value so a restart can reuse it). */
+  world_seed: number;
   threads: number;
   rayon_ok: boolean;
   max_pop_for_sim: number;
   /**
    * v1.11 (A): the wasm `WebAssembly.Memory` handle. Main builds a
-   * `Uint8Array` / `Float32Array` view over `wasm_memory.buffer` at the
+   * `Uint8Array` view over `wasm_memory.buffer` at the
    * `snapshot_buf_byte_offset` returned below. With shared memory enabled,
    * `WebAssembly.Memory` round-trips via `postMessage` and the underlying
    * SharedArrayBuffer is observed identically by both threads.
@@ -225,8 +254,13 @@ export interface SimReplyBootReady {
   wasm_memory: WebAssembly.Memory;
   /** Byte offset of the snapshot region within `wasm_memory.buffer`. */
   snapshot_buf_byte_offset: number;
-  /** Byte length of the snapshot region (== `SNAPSHOT_SAB_BYTES`). */
+  /** Byte length of the snapshot region (runtime; grass region is u8). */
   snapshot_buf_byte_len: number;
+  /** v2.0 Wave 1a: byte offset of the biome buffer (one u8 `Biome` per grass
+   * cell) within `wasm_memory.buffer`. Static for the worker's lifetime. */
+  biome_buf_byte_offset: number;
+  /** v2.0 Wave 1a: biome buffer length in bytes (== `grass_dim²`). */
+  biome_buf_byte_len: number;
   control_sab: SharedArrayBuffer | null;
   /** JSON map of every slider name → Rust default. Drift-guard input. */
   sliders_defaults_json: string;

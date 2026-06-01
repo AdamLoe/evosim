@@ -28,11 +28,15 @@ import { THEMES, applyTheme } from "../themes";
 // Construction-only sim slider names. Edits land in DevSliders via
 // set_slider so they round-trip through restart, but the active world keeps
 // whatever it spawned with until restart.
+// v2.0 Wave 1c: dropped `full_grass_on_init`; added the world-shape knobs
+// (`world_size`, `world_seed`, `wrap_world`).
 const CONSTRUCTION_ONLY_SLIDERS = new Set<string>([
   "founder_count",
   "energy_max",
   "grass_initial_seed_count",
-  "full_grass_on_init",
+  "world_size",
+  "world_seed",
+  "wrap_world",
 ]);
 
 const TOAST_CONSTRUCTION =
@@ -49,10 +53,24 @@ export function getEnergyMax(): number {
 export function getFounderCount(): number {
   return widgetReaders.get("founder_count")?.() ?? getSettings().founderCount;
 }
+// v2.0 Wave 1c: `full_grass_on_init` was removed from the Settings UI + the
+// persisted blob. The Rust constructor still takes the boolean arg, so boot
+// passes the Rust default (false) — there is no UI knob for it anymore.
 export function getFullGrassOnInit(): boolean {
-  const v = widgetReaders.get("full_grass_on_init")?.();
+  return false;
+}
+// v2.0 Wave 1a: construction-only world-shape accessors for the boot payload.
+export function getWorldSize(): number {
+  return widgetReaders.get("world_size")?.() ?? getSettings().worldSize;
+}
+export function getWrapWorld(): boolean {
+  const v = widgetReaders.get("wrap_world")?.();
   if (v !== undefined) return v !== 0;
-  return getSettings().fullGrassOnInit;
+  return getSettings().wrapWorld;
+}
+export function getWorldSeed(): number {
+  const v = widgetReaders.get("world_seed")?.();
+  return Math.max(0, Math.round(v ?? getSettings().worldSeed)) >>> 0;
 }
 
 // ─── Live widget state (drives currentSliderState) ────────────────────────
@@ -559,31 +577,60 @@ export function installDevPanel(getBridge: () => SimBridge): void {
     min: 0, max: 0.005, step: 0.0001,
     formatValue: (v) => v.toFixed(4),
   }));
-  grassSec.appendChild(makeStagedToggle({
-    label: "Full grass on new world",
-    simName: "full_grass_on_init",
-    settingKey: "fullGrassOnInit",
-    nextWorld: true,
-  }));
-  const initialSeedRow = makeStagedSlider({
+  // v2.0 Wave 1c: the "Full grass on new world" toggle was removed (the
+  // setting no longer persists; boot passes the Rust default false).
+  grassSec.appendChild(makeStagedSlider({
     label: "Initial seeded cells",
     simName: "grass_initial_seed_count",
     settingKey: "initialGrassSeedCount",
     min: 0, max: 8000, step: 1,
     formatValue: (v) => String(Math.round(v)),
     nextWorld: true,
-  });
-  grassSec.appendChild(initialSeedRow);
-  // Disable initialSeedRow when full_grass_on_init is true (and update live).
-  function syncFullGrassDisable(): void {
-    const v = widgetReaders.get("full_grass_on_init")?.();
-    initialSeedRow.classList.toggle("is-disabled", v === 1);
-  }
-  syncFullGrassDisable();
-  // Re-run sync whenever any widget changes — cheap.
-  box.addEventListener("input", syncFullGrassDisable);
-  box.addEventListener("change", syncFullGrassDisable);
+  }));
   box.appendChild(grassSec);
+
+  // ── World (v2.0 Wave 1a/1b) ──
+  // Construction-only world shape (restart-required, toast on apply) + the
+  // two live biome movement-penalty sliders.
+  const worldSec = section("World");
+  worldSec.appendChild(makeStagedSlider({
+    label: "World size",
+    simName: "world_size",
+    settingKey: "worldSize",
+    min: 1200, max: 19200, step: 100,
+    formatValue: (v) => String(Math.round(v)),
+    nextWorld: true,
+  }));
+  worldSec.appendChild(makeStagedSlider({
+    label: "World seed",
+    simName: "world_seed",
+    settingKey: "worldSeed",
+    min: 0, max: 4294967295, step: 1,
+    formatValue: (v) => (v === 0 ? "0 (random)" : String(Math.round(v))),
+    nextWorld: true,
+  }));
+  worldSec.appendChild(makeStagedToggle({
+    label: "Wrap world (torus)",
+    simName: "wrap_world",
+    settingKey: "wrapWorld",
+    nextWorld: true,
+  }));
+  // Live biome penalties (apply to the running world).
+  worldSec.appendChild(makeStagedSlider({
+    label: "Water move penalty",
+    simName: "water_movement_penalty",
+    settingKey: "waterMovementPenalty",
+    min: 0, max: 1, step: 0.01,
+    formatValue: (v) => v.toFixed(2),
+  }));
+  worldSec.appendChild(makeStagedSlider({
+    label: "Desert move penalty",
+    simName: "desert_movement_penalty",
+    settingKey: "desertMovementPenalty",
+    min: 0, max: 1, step: 0.01,
+    formatValue: (v) => v.toFixed(2),
+  }));
+  box.appendChild(worldSec);
 
   // ── Eat ──
   const eatSec = section("Eat");

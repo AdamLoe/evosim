@@ -7,8 +7,19 @@
 // older session whose schema diverged (e.g. v1.8's `eatCostMultiplier`) can't
 // fail typed parsing or carry stale state into a newer session.
 
-const STORAGE_KEY = "evosim.settings.v1";
-const SCHEMA_VERSION = 1;
+// v2.0 Wave 1c: settings schema is now versioned `major.minor`.
+//   * MAJOR mismatch  → breaking change (removed/renamed/retyped keys).
+//     On load the whole stored blob is discarded and defaults are used.
+//   * MINOR mismatch  → additive change (new keys only). On load the stored
+//     user values are kept and any keys missing from the blob fall back to
+//     their defaults (the normal `{...DEFAULTS, ...stored}` merge already does
+//     this). No reset.
+// The v2.0 world-shape changes (removed `fullGrassOnInit`, added world_size /
+// world_seed / wrap_world / biome penalties) are a MAJOR bump from the v1
+// single-`v=1` scheme, so every legacy v1 blob resets cleanly to defaults.
+const STORAGE_KEY = "evosim.settings.v2";
+const SCHEMA_MAJOR = 2;
+const SCHEMA_MINOR = 0;
 
 /** v1.12: one row of the 8-row mutation policy table. Mirrors the Rust
  * `Bucket` struct (`src/brain.rs`). `weight` is any non-negative float;
@@ -53,7 +64,9 @@ const VALID_ACTIVATIONS: ReadonlySet<string> = new Set([
 ]);
 
 export interface Settings {
-  v: number;
+  // v2.0 Wave 1c: schema version stamp split into major/minor (see header).
+  vMajor: number;
+  vMinor: number;
   targetTPS: number;
   autoRun: boolean;
   // Display toggles (live-apply, page-side only)
@@ -89,7 +102,10 @@ export interface Settings {
   repulsionMax: number;
   maxPopulation: number;
   initialGrassSeedCount: number;
-  fullGrassOnInit: boolean;
+  // v2.0 Wave 1b: live-tunable biome movement-penalty base severities [0, 1].
+  // Plains = 0 (implicit); Water/Desert read these. Apply to the running world.
+  waterMovementPenalty: number;
+  desertMovementPenalty: number;
   mutRate: number;
   // v1.12: 8 mutation buckets × {weight, rate, sigma}. Replaces the legacy
   // single-knob nnSigma. Bucket 0 carries the legacy `(1.0, 0.02, 0.02)`.
@@ -103,10 +119,18 @@ export interface Settings {
   splitGift: number;
   splitJitter: number;
   founderCount: number;
+  // v2.0 Wave 1a: construction-only world shape (restart-required). `worldSize`
+  // is the world extent (default 9600). `wrapWorld` selects torus vs walled.
+  // `worldSeed` seeds the biome generator (0 ⇒ Rust picks + reports a random
+  // one on first boot; the status strip then reuses it across restarts).
+  worldSize: number;
+  worldSeed: number;
+  wrapWorld: boolean;
 }
 
 export const DEFAULTS: Settings = {
-  v: SCHEMA_VERSION,
+  vMajor: SCHEMA_MAJOR,
+  vMinor: SCHEMA_MINOR,
   targetTPS: 180,
   autoRun: false,
   showProfiler: false,
@@ -129,7 +153,9 @@ export const DEFAULTS: Settings = {
   repulsionMax: 0.1,
   maxPopulation: 8_000,
   initialGrassSeedCount: 8000,
-  fullGrassOnInit: false,
+  // v2.0 Wave 1b: must match Rust WATER/DESERT_MOVEMENT_PENALTY_DEFAULT.
+  waterMovementPenalty: 0.8,
+  desertMovementPenalty: 0.4,
   mutRate: 1.0,
   mutationBuckets: DEFAULT_MUTATION_BUCKETS.map((b) => ({ ...b })),
   nnTopology: {
@@ -141,6 +167,11 @@ export const DEFAULTS: Settings = {
   splitGift: 30,
   splitJitter: 1,
   founderCount: 32,
+  // v2.0 Wave 1a: construction-only world shape. Must match Rust
+  // WORLD_SIZE_DEFAULT / WRAP_WORLD_DEFAULT. `worldSeed` 0 ⇒ "let Rust pick".
+  worldSize: 9600,
+  worldSeed: 0,
+  wrapWorld: true,
 };
 
 const KNOWN_KEYS = new Set<string>(Object.keys(DEFAULTS));
@@ -208,7 +239,21 @@ function readFromStorage(): Partial<Settings> {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return {};
-    return pickKnown(JSON.parse(raw));
+    const parsed = JSON.parse(raw) as unknown;
+    // v2.0 Wave 1c major/minor migration:
+    //   * A MAJOR mismatch (or a missing `vMajor`, i.e. a legacy v1 blob)
+    //     resets to defaults — drop the whole stored blob.
+    //   * A MINOR mismatch keeps the user's values; the `{...DEFAULTS,
+    //     ...stored}` merge below fills any keys the older blob lacked.
+    const storedMajor =
+      typeof parsed === "object" && parsed !== null
+        ? Number((parsed as Record<string, unknown>).vMajor)
+        : NaN;
+    if (storedMajor !== SCHEMA_MAJOR) {
+      // Major mismatch / unknown schema → clean reset to defaults.
+      return {};
+    }
+    return pickKnown(parsed);
   } catch {
     return {};
   }
@@ -223,11 +268,14 @@ export function hasStoredSetting<K extends keyof Settings>(key: K): boolean {
   return Object.prototype.hasOwnProperty.call(storedAtLoad, key);
 }
 
-// Live, in-memory copy. Persisted on every write.
+// Live, in-memory copy. Persisted on every write. The version stamp is always
+// rewritten to the current major.minor so a future load sees a coherent
+// schema marker (and a minor-only bump merges cleanly on the NEXT load).
 const current: Settings = {
   ...DEFAULTS,
   ...storedAtLoad,
-  v: SCHEMA_VERSION,
+  vMajor: SCHEMA_MAJOR,
+  vMinor: SCHEMA_MINOR,
 };
 
 function persist(): void {

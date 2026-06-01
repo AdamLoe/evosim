@@ -155,9 +155,16 @@ edits — re-opening Settings shows them still dirty.
 
 **Construction-only set** — these knobs ride
 `set_slider` and persist, but only shape the *next* world:
-`founder_count`, `energy_max`, `grass_initial_seed_count`,
-`full_grass_on_init`. Labelled `(next world)` via the CSS rule
-`.devpanel-row label.next-world::after`.
+`founder_count`, `energy_max`, `grass_initial_seed_count`, and (v2.0
+Wave 1a) the world-shape knobs `world_size`, `world_seed`, `wrap_world`.
+Labelled `(next world)` via the CSS rule
+`.devpanel-row label.next-world::after`. Apply/Restart fires the
+construction-only toast. **`full_grass_on_init` was removed** from the UI
++ the persisted blob in Wave 1c (boot passes the Rust default `false`).
+
+The new **World** Settings section also hosts two *live* (apply-to-running-
+world) sliders: `water_movement_penalty` / `desert_movement_penalty`
+(biome base severities, Wave 1b).
 
 **Toast text** lives in one place
 (`widgets/devpanel.ts → TOAST_CONSTRUCTION`) and fires through
@@ -214,13 +221,67 @@ dragged values, not the last-persisted ones):
 getInitialGrassSeedCount() → number
 getEnergyMax()             → number
 getFounderCount()          → number
-getFullGrassOnInit()       → boolean
+getFullGrassOnInit()       → boolean   // always false in v2.0 (knob removed)
+getWorldSize()             → number    // v2.0 Wave 1a
+getWrapWorld()             → boolean    // v2.0 Wave 1a
+getWorldSeed()            → number     // v2.0 Wave 1a (0 ⇒ "auto")
 currentSliderState()       → Record<string, number>
 ```
 
 `currentSliderState()` snapshots the in-memory widget value for every
 registered staged widget; the worker applies it via `set_slider` after
-construction.
+construction. The world-shape getters feed `newWithFounderCount`'s new
+trailing args (`world_size, wrap_world, world_seed`) — see below.
+
+## Runtime-dims SAB view binding (v2.0 Wave 1a)
+
+The world is runtime-sized, so the snapshot grass region and the biome
+buffer are no longer fixed-size constants. After `boot_ready`,
+`spawnSimWorker`:
+
+- builds `slotLayout = makeSlotLayout(ready.grass_dim)` — the **single
+  source of truth** for the per-slot byte geometry. The grass region is
+  now **u8** (`grass_dim²` bytes, NOT the old f32 `921_600 × 4`); the
+  creature region + header are world-size-independent.
+- binds `biomeView = new Uint8Array(wasm_memory.buffer,
+  biome_buf_byte_offset, biome_buf_byte_len)` — the static biome layer
+  (one u8 `Biome` per grass cell). Re-bound on every boot/restart with a
+  one-shot `biomeDirty` flag so the renderer uploads the biome texture
+  exactly once per worker swap.
+- stores `latestWrapWorld` / `latestWorldSeed` from the reply.
+
+The RAF frame loop derives every view length from `slotLayout`
+(`creatureSoAOffset`/`grassOffset` now take the layout), and the grass
+view is a `Uint8Array` of `layout.grassCellCount` bytes. Getting this
+wrong silently over/under-runs the SAB slot — hence one layout object,
+rebuilt per boot.
+
+## Settings schema migration (v2.0 Wave 1c)
+
+`settings.ts` versions the blob as **`major.minor`** under key
+`evosim.settings.v2` (was `evosim.settings.v1` / single `v=1`):
+
+- **`SCHEMA_MAJOR` mismatch** (or a missing `vMajor`, i.e. any legacy v1
+  blob) → the stored blob is **discarded** and defaults are used. The
+  v2.0 world-shape changes (removed `fullGrassOnInit`, added
+  `worldSize`/`worldSeed`/`wrapWorld` + biome penalties) are a major bump,
+  so every v1 blob resets cleanly.
+- **`SCHEMA_MINOR` mismatch** (additive-only) → user values are kept; the
+  `{...DEFAULTS, ...stored}` merge fills any keys the older blob lacked.
+  No reset.
+
+On persist the live copy always restamps `vMajor`/`vMinor` to the current
+values.
+
+## World seed in the status strip (v2.0 Wave 1a)
+
+A top-left `#status-strip` overlay (`index.html`, styled in `styles.css`)
+shows the numeric biome `world_seed` of the running world without opening
+the dev panel, plus a `⟳` reroll button. `setStatusStrip()` (in `main.ts`,
+called each painted frame, DOM-touches only on change) renders the seed;
+the reroll button picks a fresh non-zero u32 into `pendingWorldSeed` and
+restarts. A plain restart reuses `pendingWorldSeed` (same biome); a
+non-zero `world_seed` pinned in Settings overrides it.
 
 ## Code anchors
 
@@ -245,8 +306,10 @@ construction.
   rendered inside the Monitor tab.
 - `web/src/toast.ts` → `showToast(message, durationMs)`.
 - `web/src/settings.ts` → `Settings` interface, `DEFAULTS`,
-  `getSettings` / `setSetting` / `resetSettings`, the unknown-key
-  filter on load.
+  `getSettings` / `setSetting` / `resetSettings`, the major/minor schema
+  migration + unknown-key filter on load (key `evosim.settings.v2`).
+- `web/src/main.ts` → `makeSlotLayout` binding, `biomeView` /
+  `biomeDirty`, `setStatusStrip`, `pendingWorldSeed` + reroll wiring.
 - `web/src/themes.ts` → `Theme` interface, `THEMES` map,
   `DEFAULT_THEME_ID`, `applyTheme(id)`, `REQUIRED_TOKENS` invariant.
 
@@ -267,8 +330,9 @@ construction.
 - [`simulation-core.md`](simulation-core.md) — slider names + their
   Rust defaults.
 - [`shared-memory-and-protocol.md`](shared-memory-and-protocol.md) —
-  `boot` payload shape (includes `full_grass_on_init`), `boot_ready`
-  reply shape (includes `sliders_defaults_json`).
+  `boot` payload shape (v2.0: adds `world_size`/`wrap_world`/`world_seed`),
+  `boot_ready` reply shape (v2.0: adds `wrap_world`/`world_seed` + biome
+  buffer geometry; grass region is u8).
 - [`worker-runtime.md`](worker-runtime.md) — boot handshake.
 - [`profiler.md`](profiler.md) — the panel `#perf-box` renders into.
 - [`../decisions/cross-cutting.md`](../decisions/cross-cutting.md) —

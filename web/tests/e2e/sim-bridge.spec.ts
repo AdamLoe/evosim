@@ -22,8 +22,11 @@
 import { test, expect, type Page } from "@playwright/test";
 
 async function readStatus(page: Page): Promise<string> {
+  // v1.13 Wave 2 removed the top-bar `#status` span; the live status line is
+  // now `#perf-status-line` in the bottom perf panel (perf-panel.ts), updated
+  // once per painted frame as "seed: … · tick N · pop M · TPS · FPS".
   return await page.evaluate(
-    () => document.getElementById("status")?.textContent ?? "",
+    () => document.getElementById("perf-status-line")?.textContent ?? "",
   );
 }
 
@@ -34,8 +37,8 @@ async function readTick(page: Page): Promise<number> {
 }
 
 async function waitForBoot(page: Page): Promise<void> {
-  // status starts as "booting…", flips to "seed: … · tick N · pop P" once
-  // boot_ready lands and the first SAB snapshot is read.
+  // The status line flips to "seed: … · tick N · pop M …" once boot_ready
+  // lands and the first SAB snapshot is read.
   await expect
     .poll(async () => (await readStatus(page)).match(/tick \d+/) !== null, {
       timeout: 15_000,

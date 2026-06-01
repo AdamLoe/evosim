@@ -19,6 +19,9 @@ import {
   getEnergyMax,
   getFounderCount,
   getFullGrassOnInit,
+  getWorldSize,
+  getWrapWorld,
+  getWorldSeed,
   currentSliderState,
 } from "./widgets/devpanel";
 import { installCanvasClickHandler, resetInspectorSelection } from "./rail/inspector";
@@ -32,11 +35,12 @@ import {
   CTRL_CURRENT_SLOT,
   CTRL_SEQ,
   CREATURE_STRIDE,
-  GRASS_CELL_COUNT,
+  makeSlotLayout,
   creatureSoAOffset,
   grassOffset,
   slotOffset,
   readSnapshotHeader,
+  type SlotLayout,
   type SimReplyBootReady,
 } from "./sim-bridge";
 
@@ -110,7 +114,21 @@ let controlI32: Int32Array | null = null;
 let snapshotBuffer: ArrayBufferLike | null = null;
 let snapshotBaseOffset = 0;
 let snapshotView: DataView | null = null;
+// v2.0 Wave 1a: runtime slot geometry derived from the boot-time grass_dim.
+// Rebuilt on every boot/restart since world dims can change between runs.
+let slotLayout: SlotLayout | null = null;
+// v2.0 Wave 1a: biome layer (one u8 Biome tag per grass cell). A view over
+// wasm linear memory at biome_buf_byte_offset; static for the worker's
+// lifetime, re-bound on each boot/restart. Passed to the renderer which
+// uploads it once per worker swap as the under-grass biome texture.
+let biomeView: Uint8Array | null = null;
+let biomeDirty = true;
 let cachedSeed = "";
+// v2.0 Wave 1a: the numeric biome world_seed actually in use (resolved by
+// Rust when the user leaves it at 0). Surfaced in the top-left status strip
+// and reused verbatim on restart unless the user rerolls.
+let latestWorldSeed = 0;
+let latestWrapWorld = true;
 
 async function main(): Promise<void> {
   // v1.9.1: apply the persisted theme before any UI installer runs so the
@@ -150,6 +168,11 @@ async function main(): Promise<void> {
   // after a manual restart.
   installDevPanel(() => simBridge);
 
+  // v2.0 Wave 1a: seed the next-world biome seed from the persisted Settings
+  // value (0 ⇒ Rust randomizes on first boot and reports it back, which we
+  // then capture so restarts reuse the same biome until the user rerolls).
+  pendingWorldSeed = getWorldSeed();
+
   let simBridge = await spawnSimWorker(urlSeed);
 
   const cam = makeCamera(latestSnapshotWorldSize());
@@ -184,6 +207,18 @@ async function main(): Promise<void> {
   // bottom profiler panel height. Installed after applyRailOpen so the
   // initial visibility state is correct.
   installResizeHandles();
+
+  // v2.0 Wave 1a: top-left status-strip reroll → fresh biome seed + restart.
+  // A plain restart keeps `pendingWorldSeed` (same biome); reroll randomizes it.
+  const seedRerollBtn = document.getElementById("seed-reroll-btn");
+  seedRerollBtn?.addEventListener("click", () => {
+    // Pick a fresh non-zero u32 (0 means "let Rust randomize", which we want
+    // to avoid here so the displayed seed is the one actually used).
+    let s = (Math.floor(Math.random() * 0xffff_fffe) + 1) >>> 0;
+    if (s === 0) s = 1;
+    pendingWorldSeed = s;
+    void restart();
+  });
 
   async function restart(): Promise<void> {
     const oldBridge = simBridge;
@@ -258,7 +293,7 @@ async function main(): Promise<void> {
   // longer count one FPS per RAF.
   let lastPaintedSeq = -1;
   function frame(_now: number): void {
-    if (!controlI32 || !snapshotBuffer || !snapshotView) {
+    if (!controlI32 || !snapshotBuffer || !snapshotView || !slotLayout) {
       requestAnimationFrame(frame);
       return;
     }
@@ -269,28 +304,31 @@ async function main(): Promise<void> {
       requestAnimationFrame(frame);
       return;
     }
+    const layout = slotLayout;
 
     const frameSpan = span("frame");
     try {
       const readSpan = span("frame.snapshot.read");
       const rawSlot = Atomics.load(controlI32, CTRL_CURRENT_SLOT);
       const slot: 0 | 1 = rawSlot === 1 ? 1 : 0;
-      const header = readSnapshotHeader(snapshotView, slotOffset(slot));
+      const header = readSnapshotHeader(snapshotView, slotOffset(layout, slot));
       const pop = Math.min(header.pop, MAX_POP_FOR_SIM);
-      // v1.11 (A+D): snapshot region lives inside wasm.memory.buffer at
-      // snapshotBaseOffset. Grass is now f32 per cell (no quantize) — view
-      // length is GRASS_CELL_COUNT, not GRASS_BYTES.
+      // v2.0 Wave 1a: snapshot region lives inside wasm.memory.buffer at
+      // snapshotBaseOffset. Grass is now u8 (quantized 0..255 Rust-side) —
+      // the view length is grass_dim² bytes, derived from the boot-time
+      // grass_dim via `slotLayout`. Getting this wrong over/under-runs the
+      // SAB slot, so the geometry lives in exactly one place.
       const creatures = pop > 0
         ? new Float32Array(
             snapshotBuffer,
-            snapshotBaseOffset + creatureSoAOffset(slot),
+            snapshotBaseOffset + creatureSoAOffset(layout, slot),
             pop * CREATURE_STRIDE,
           )
         : new Float32Array(0);
-      const grass = new Float32Array(
+      const grass = new Uint8Array(
         snapshotBuffer,
-        snapshotBaseOffset + grassOffset(slot),
-        GRASS_CELL_COUNT,
+        snapshotBaseOffset + grassOffset(layout, slot),
+        layout.grassCellCount,
       );
       readSpan.close();
 
@@ -313,14 +351,21 @@ async function main(): Promise<void> {
         viewH,
         creatures,
         grass,
+        // v2.0 Wave 1a: biome layer (static u8 view) + a one-shot dirty flag
+        // so the renderer re-uploads the biome texture only on a worker swap.
+        biomeView,
+        biomeDirty,
         pop,
         latestWorldSize,
         latestGrassDim,
+        latestWrapWorld,
         highlights,
       );
+      biomeDirty = false;
 
       lastPaintedSeq = seq;
 
+      setStatusStrip();
       setPanelStatus({
         seed: cachedSeed,
         tick: header.tick,
@@ -340,6 +385,11 @@ async function main(): Promise<void> {
 
 let latestWorldSize = 0;
 let latestGrassDim = 0;
+// v2.0 Wave 1a: the numeric biome seed to construct the NEXT world with. The
+// status strip's reroll button and the Settings world_seed row write this;
+// boot reads it (0 ⇒ Rust picks + reports a fresh one, which we then capture
+// so subsequent restarts reuse the same biome unless the user rerolls).
+let pendingWorldSeed = 0;
 function latestSnapshotWorldSize(): number {
   return latestWorldSize;
 }
@@ -372,6 +422,14 @@ async function spawnSimWorker(seed: string): Promise<SimBridge> {
     initial_target_tps: targetTPS,
     initial_paused: paused,
     nn_topology_json,
+    // v2.0 Wave 1a: construction-only world shape. A non-zero `world_seed` in
+    // Settings means the user pinned a specific biome seed — honor it. A 0
+    // means "auto": reuse the last resolved/rerolled seed (`pendingWorldSeed`)
+    // so the same biome returns across plain restarts, or 0 on the very first
+    // boot (Rust then picks one and reports it back, which we capture).
+    world_size: getWorldSize(),
+    wrap_world: getWrapWorld(),
+    world_seed: getWorldSeed() !== 0 ? getWorldSeed() : pendingWorldSeed,
   });
 
   const ready = await bootReady;
@@ -409,6 +467,21 @@ async function spawnSimWorker(seed: string): Promise<SimBridge> {
   snapshotView = new DataView(snapshotBuffer, snapshotBaseOffset, ready.snapshot_buf_byte_len);
   latestWorldSize = ready.world_size;
   latestGrassDim = ready.grass_dim;
+  latestWrapWorld = ready.wrap_world;
+  latestWorldSeed = ready.world_seed;
+  // Reuse the resolved numeric seed on the next restart so the same biome
+  // layout returns; a reroll/edit in Settings overrides `pendingWorldSeed`.
+  pendingWorldSeed = ready.world_seed;
+  // v2.0 Wave 1a: build the runtime slot geometry from the reported grass_dim
+  // (the single source of truth) and bind the static biome layer view. The
+  // biome buffer is `grass_dim²` u8 bytes in wasm linear memory.
+  slotLayout = makeSlotLayout(ready.grass_dim);
+  biomeView = new Uint8Array(
+    snapshotBuffer,
+    ready.biome_buf_byte_offset,
+    ready.biome_buf_byte_len,
+  );
+  biomeDirty = true;
   // Stash the Rust-side slider defaults for the Wave D drift-guard e2e to
   // read. Cheap, only the test consumes it.
   (window as unknown as { __rustSlidersDefaults?: string }).__rustSlidersDefaults =
@@ -419,6 +492,17 @@ async function spawnSimWorker(seed: string): Promise<SimBridge> {
   // no post-boot mirror writes needed.
 
   return bridge;
+}
+
+// v2.0 Wave 1a: top-left status strip — surfaces the numeric biome world_seed
+// without opening the dev panel. Updated each painted frame; cheap (only
+// touches the DOM when the displayed seed actually changes).
+let statusStripSeedShown = -1;
+function setStatusStrip(): void {
+  if (latestWorldSeed === statusStripSeedShown) return;
+  statusStripSeedShown = latestWorldSeed;
+  const el = document.getElementById("status-seed");
+  if (el) el.textContent = `seed ${latestWorldSeed >>> 0}`;
 }
 
 // v1.9.1: rail open/closed helpers. Both the ⚙ button and the `~` hotkey
