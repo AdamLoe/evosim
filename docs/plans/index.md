@@ -59,6 +59,20 @@ the plan itself.
 
 ## Active plans
 
+- [`v2.0.3-grass-lod-pyramid.md`](v2.0.3-grass-lod-pyramid.md) — A u8
+  box-filter grass mip pyramid (clipmap) serving render LOD, snapshot, and
+  scale-invariant NN sensing from one structure. Removes the 1B-scale output
+  walls (upload bandwidth, texture size, density-dependent sense cost).
+  **Draft** — depends on v2.0.2 u8 density; absorbs v2.0.2's Phase 2.
+- [`v2.0.2-grass-scatter.md`](v2.0.2-grass-scatter.md) — Replace the grass
+  separable-blur with stochastic u8 scatter (lossy relaxed-atomic writes,
+  per-tile frozen source, ring-1/2/3 spread bias, decay sliders, tile-based
+  active set). The propagation perf fix at default scale; 1B-scale
+  render/snapshot work split to v2.0.3. Targets ~50–100× on grass compute,
+  ~20× on the tick. **Draft** — design agreed, supersedes the perf handoff.
+- [`v2.0.2-grass-perf-handoff.md`](v2.0.2-grass-perf-handoff.md) —
+  Earlier brief that proposed *materializing* the blur. **Superseded** by
+  the scatter plan above (we drop the blur instead); kept for context.
 - [`v2.0.1-mission.md`](v2.0.1-mission.md) — Patch-wave hub for v2.0.1:
   triage + fix the problems the lead surfaces against the shipped v2.0.0
   build. **Draft** — intake open, no streams launched yet.
