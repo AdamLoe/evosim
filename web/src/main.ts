@@ -301,6 +301,12 @@ async function main(): Promise<void> {
   // semantics) is owned by the perf panel via setPanelStatus(); we no
   // longer count one FPS per RAF.
   let lastPaintedSeq = -1;
+  // Camera snapshot used to detect pans/zooms that need a repaint while
+  // paused (seq frozen). Initialised to values that will never match the
+  // real camera so the very first frame always paints.
+  let lastPaintedCamX = NaN;
+  let lastPaintedCamY = NaN;
+  let lastPaintedCamZoom = NaN;
   function frame(_now: number): void {
     if (!controlI32 || !snapshotBuffer || !snapshotView || !slotLayout) {
       requestAnimationFrame(frame);
@@ -308,8 +314,50 @@ async function main(): Promise<void> {
     }
     const seq = Atomics.load(controlI32, CTRL_SEQ);
     if (seq === lastPaintedSeq) {
-      // No new snapshot since the last paint — skip this RAF entirely so
-      // the painted-frame FPS counter stays bounded by TPS.
+      // No new snapshot since the last paint. Re-render only when the camera
+      // moved (pan/zoom while paused) so the canvas reflects the new view.
+      const camMoved =
+        cam.cx !== lastPaintedCamX ||
+        cam.cy !== lastPaintedCamY ||
+        cam.zoom !== lastPaintedCamZoom;
+      if (camMoved && slotLayout) {
+        const layout = slotLayout;
+        const rawSlot = Atomics.load(controlI32, CTRL_CURRENT_SLOT);
+        const slot: 0 | 1 = rawSlot === 1 ? 1 : 0;
+        const header = readSnapshotHeader(snapshotView, slotOffset(layout, slot));
+        const pop = Math.min(header.pop, MAX_POP_FOR_SIM);
+        const creatures = pop > 0
+          ? new Float32Array(
+              snapshotBuffer,
+              snapshotBaseOffset + creatureSoAOffset(layout, slot),
+              pop * CREATURE_STRIDE,
+            )
+          : new Float32Array(0);
+        const grass = new Uint8Array(
+          snapshotBuffer,
+          snapshotBaseOffset + grassOffset(layout, slot),
+          layout.grassCellCount,
+        );
+        renderWorld(
+          gl!,
+          cam,
+          viewW,
+          viewH,
+          creatures,
+          grass,
+          biomeView,
+          biomeDirty,
+          pop,
+          latestWorldSize,
+          latestGrassDim,
+          latestWrapWorld,
+          highlights,
+        );
+        biomeDirty = false;
+        lastPaintedCamX = cam.cx;
+        lastPaintedCamY = cam.cy;
+        lastPaintedCamZoom = cam.zoom;
+      }
       requestAnimationFrame(frame);
       return;
     }
@@ -373,6 +421,9 @@ async function main(): Promise<void> {
       biomeDirty = false;
 
       lastPaintedSeq = seq;
+      lastPaintedCamX = cam.cx;
+      lastPaintedCamY = cam.cy;
+      lastPaintedCamZoom = cam.zoom;
 
       setStatusStrip();
       setPanelStatus({
@@ -549,6 +600,11 @@ const SVG_ATTRS =
   'stroke="currentColor" stroke-width="1.8" stroke-linecap="round" ' +
   'stroke-linejoin="round" aria-hidden="true"';
 const ICON_PERF = `<svg ${SVG_ATTRS}><rect x="2.5" y="3.5" width="19" height="13" rx="1.5"/><path d="M8 20.5h8M12 16.5v4"/><path d="M5.5 13.5l3-3 2.5 2.5 3.5-5 3.5 3.5"/></svg>`;
+// Rail-tab icons — copied verbatim from the rail-tab SVGs in index.html so the
+// top-bar buttons use the exact same visual language as the tabs they target.
+const ICON_SETTINGS = `<svg ${SVG_ATTRS}><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>`;
+const ICON_NN = `<svg ${SVG_ATTRS}><path d="M9.5 3.5c-1.4 0-2.5 1.1-2.5 2.5 0 .3.05.6.14.86C6 7.3 5 8.5 5 10c0 .5.1 1 .3 1.4C4.5 12 4 13 4 14c0 1.4 1 2.6 2.3 2.9.1 1.2 1.1 2.1 2.4 2.1.4 0 .8-.1 1.1-.3.3 1.1 1.3 1.8 2.5 1.8.1-1.1 1.1-2 2.2-2 0-1.4-1.1-2.5-2.5-2.5"></path><path d="M14.5 3.5c1.4 0 2.5 1.1 2.5 2.5 0 .3-.05.6-.14.86C18 7.3 19 8.5 19 10c0 .5-.1 1-.3 1.4.8.6 1.3 1.6 1.3 2.6 0 1.4-1 2.6-2.3 2.9-.1 1.2-1.1 2.1-2.4 2.1-.4 0-.8-.1-1.1-.3-.3 1.1-1.3 1.8-2.5 1.8V3.5c.7 0 1.4.3 1.8.8"></path><path d="M12 4v17"></path></svg>`;
+const ICON_INSPECTOR = `<svg ${SVG_ATTRS}><circle cx="11" cy="11" r="7"></circle><path d="M21 21l-5-5"></path></svg>`;
 
 function makeIconBtn(id: string, title: string, html: string): HTMLButtonElement {
   const btn = document.createElement("button");
@@ -572,14 +628,14 @@ function makeTextBtn(id: string, label: string, title: string): HTMLButtonElemen
 }
 
 // Top bar lives in the top-right corner: text labels for the three
-// primary actions (Play/Pause, Restart, Auto-restart) + a perf icon
-// for the bottom-panel toggle. Settings lives in the rail tabs now —
-// no top-bar ⚙ shortcut. Highlight state for the toggleable buttons
-// (auto-restart, perf) is refreshed by a low-rate interval.
+// primary actions (Play/Pause, Restart, Auto-restart) + icon buttons for the
+// bottom-panel toggle and three right-rail openers (Settings, NN, Inspector).
+// Highlight state for the toggleable buttons (auto-restart, perf, rail) is
+// refreshed by a low-rate interval.
 function installTopBarButtons(
   getBridge: () => SimBridge,
   onRestart: () => void,
-  _rail: RailState,
+  rail: RailState,
 ): void {
   const bar = document.getElementById("top-bar");
   if (!bar) return;
@@ -617,8 +673,7 @@ function installTopBarButtons(
     autoBtn.classList.toggle("is-active", next);
   });
 
-  // 4. Perf — bottom panel toggle. Stays as an icon since it's a global
-  //    UI affordance, not an action.
+  // 4. Perf — bottom panel toggle.
   const perfBtn = makeIconBtn("perf-btn", "Toggle profiler panel", ICON_PERF);
   perfBtn.addEventListener("click", () => {
     const next = !getSettings().showProfiler;
@@ -627,11 +682,35 @@ function installTopBarButtons(
     perfBtn.classList.toggle("is-active", next);
   });
 
-  bar.append(playBtn, restartBtn, autoBtn, perfBtn);
+  // 5-7. Three rail-panel openers: Settings, NN, Inspector.
+  //   Each button opens the rail (if collapsed) AND switches to its tab.
+  //   Active style (.iconbtn.is-active) is shown when the rail is open AND
+  //   that button's tab is the current active one. The 250 ms refreshHighlights
+  //   interval keeps this accurate after external changes (~ hotkey, canvas
+  //   inspector click).
+  const openRailTab = (tab: import("./rail/index").RailTab): void => {
+    setRailOpen(true);
+    rail.switchTab(tab);
+  };
+
+  const settingsBtn = makeIconBtn("settings-rail-btn", "Settings (~)", ICON_SETTINGS);
+  settingsBtn.addEventListener("click", () => openRailTab("settings"));
+
+  const nnBtn = makeIconBtn("nn-rail-btn", "Neural network", ICON_NN);
+  nnBtn.addEventListener("click", () => openRailTab("nn"));
+
+  const inspectorBtn = makeIconBtn("inspector-rail-btn", "Inspector", ICON_INSPECTOR);
+  inspectorBtn.addEventListener("click", () => openRailTab("inspector"));
+
+  bar.append(playBtn, restartBtn, autoBtn, perfBtn, settingsBtn, nnBtn, inspectorBtn);
 
   const refreshHighlights = (): void => {
+    const railOpen = getSettings().railOpen;
     autoBtn.classList.toggle("is-active", getSettings().autoRun);
     perfBtn.classList.toggle("is-active", getSettings().showProfiler);
+    settingsBtn.classList.toggle("is-active", railOpen && rail.activeTab === "settings");
+    nnBtn.classList.toggle("is-active", railOpen && rail.activeTab === "nn");
+    inspectorBtn.classList.toggle("is-active", railOpen && rail.activeTab === "inspector");
   };
   refreshPlayLabel();
   refreshHighlights();

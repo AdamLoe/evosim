@@ -715,6 +715,45 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 - **Revisit when**: new biomes ship and need new trait axes (forest →
   social/fear, tundra → cold-tolerance).
 
+### Grass spreads as a disc via separable blur + 8-neighbour max; active-tile frontier (v2.0.1)
+
+- **Decision**: Grass propagation uses a two-pass separable `[1,2,1]/4`
+  blur (horizontal then vertical = a 3×3 Gaussian) and spills via the
+  **max of that blur over a cell's 8 neighbours**, replacing the old
+  4-neighbour Von Neumann kernel. Logistic growth `r·v·(1−v/K)` and the
+  `[0,K]` clamp are unchanged. Work is scoped by a **32×32 active-tile
+  frontier**: only tiles holding a cell in `(ε, K−ε)` (plus their fringe)
+  are processed; empty and saturated-equilibrium tiles are skipped. The
+  snapshot grass write is **dirty-tile-incremental**
+  (`GrassGrid::quantize_dirty_tiles_into`).
+- **Why**: The 4-neighbour kernel grows grass in visually unnatural
+  diamonds (L1 reach, zero diagonal). The separable blur rounds the
+  front; the **8-neighbour max** (not the blur alone) is what actually
+  achieves isotropy — a blur with a 4-cardinal max stays diamond-ish
+  (~0.81 axis/diag) while the 8-neighbour max reaches disc-like (~1.2).
+  Keeping it a **max** (not a sum) preserves the anti-cascade rule (one
+  ripe neighbour grants the boost; neighbours don't stack). The
+  active-tile frontier exists because the vast majority of cells sit at
+  bare-0 or saturated-K equilibrium and recomputing them every tick over
+  a 1920² grid is wasted work; processing only the frontier is bit-
+  identical to a full-grid pass (equivalence-tested).
+- **Applies to**: `architecture/simulation-core.md`,
+  `architecture/render-pipeline.md`.
+- **Alternatives considered**: every-N-tick cadence throttling (rejected
+  — trades visual smoothness for speed); u16/u8 fixed-point density
+  (deferred — precision risk, measure first).
+- **Tradeoffs**: The shipped blur is evaluated on the fly (recomputed
+  per-cell × per-neighbour), which is correct but expensive; materializing
+  the horizontal pass into a scratch buffer is a tracked follow-up.
+  Determinism is preserved (pure read-`density`/write-`scratch`,
+  single-thread == rayon).
+- **Code anchors**: `src/grass.rs` (`compute_propagation`, `blur_at`,
+  `quantize_dirty_tiles_into`, `GRASS_TILE_SIZE`, `GRASS_EQ_EPS`),
+  `src/grass_v201_tests.rs`.
+- **Revisit when**: the propagation pass dominates the tick budget
+  (materialize the separable passes; confirm the frontier skips saturated
+  tiles at steady state).
+
 ## See also
 
 - [`../architecture/simulation-core.md`](../architecture/simulation-core.md)

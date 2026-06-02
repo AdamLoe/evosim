@@ -186,8 +186,17 @@ with `diet` + `body_size` (Wave 2).
   matmul as `fan_in`.
 - The tick step order (see below). Every named phase has a `tick.<name>`
   profile span; `tick.nn` and `tick.grass_step` are leaves.
-- The grass mechanic: logistic in-cell growth + cross-kernel propagation,
-  grazed bite-by-bite at `GRASS_MAX / grass_bites_per_block` density per
+- The grass mechanic: logistic in-cell growth + organic-disc spread via a
+  two-pass separable `[1,2,1]/4` blur (horizontal then vertical = a 3×3
+  Gaussian) with an 8-neighbour max-of-blur spill, clamped to `[0, K]`.
+  Pure read-`density`/write-`scratch` keeps single-thread == rayon
+  deterministic. Processing is confined to a **32×32 active-tile frontier**:
+  only MIXED tiles (cells in `(ε, K−ε)`) and their 8-neighbour fringe are
+  processed each tick; empty/saturated tiles are skipped. Grazed tiles
+  re-enter the frontier via `mark_tile_active`. The snapshot grass write is
+  **dirty-tile-incremental** via `quantize_dirty_tiles_into` — only tiles
+  changed since the last write to each ping-pong slot are re-quantized.
+  Grazed bite-by-bite at `GRASS_MAX / grass_bites_per_block` density per
   bite, yielding `grass_energy_per_bite` energy per bite.
 - The eat mechanic: per-bite transfer of
   `eat_bite_fraction * prey.energy * (1 - prey.armor)` (armor is 0 today
@@ -202,8 +211,10 @@ with `diet` + `body_size` (Wave 2).
 
 - **Snapshot SAB layout, message protocol** — owned by
   [`shared-memory-and-protocol.md`](shared-memory-and-protocol.md). Sim
-  core exposes `WorldHandle::write_snapshot_to(creatures, grass, stats)`;
-  the byte layout it writes is the protocol's contract.
+  core exposes `WorldHandle::write_snapshot(slot)`; the byte layout it
+  writes into wasm linear memory is the protocol's contract. The FLIP
+  (`CTRL_CURRENT_SLOT`) and BUMP (`CTRL_SEQ`) are done by TS in
+  `sim-worker.ts` after the wasm call returns.
 - **Worker spawn / tick loop / pacing** — owned by
   [`worker-runtime.md`](worker-runtime.md). Sim core is single-threaded
   from its own perspective; the rayon pool is initialized by the worker.
@@ -222,7 +233,7 @@ holds the only `WorldHandle` and calls into it via:
 
 ```text
 WorldHandle::step_n(n: u32) -> bool                   // one or more ticks
-WorldHandle::write_snapshot_to(c, g, s)               // SAB byte dump
+WorldHandle::write_snapshot(slot: u32)                // write snapshot bytes into wasm memory (TS then publishes CTRL_CURRENT_SLOT / CTRL_SEQ)
 WorldHandle::set_slider(name: &str, value: f32)       // sole mutation entry
 WorldHandle::sliders_defaults_json() -> String        // canonical DevSliders defaults
 WorldHandle::creature_at(wx, wy, tol) -> Option<f64>  // inspector click
@@ -455,7 +466,9 @@ is packed into the snapshot for the renderer (2b draws the ring); see
   `NN_OUTPUTS == 5` compile-assert. Width tests: `src/brain_width_tests.rs`.
 - `src/creature.rs` → `CreatureSoA`, `Action` (3 variants), `Action::ALL`.
 - `src/grass.rs` → `GrassGrid`, `compute_propagation`, `bilinear_sample`,
-  `consume`, `for_each_cell_overlapping_circle`, `rebuild_row_bitset`.
+  `consume`, `for_each_cell_overlapping_circle`, `rebuild_row_bitset`,
+  `resync_active_from_density`, `mark_all_tiles_dirty`,
+  `quantize_dirty_tiles_into`, `GRASS_TILE_SIZE`, `GRASS_EQ_EPS`.
 - `src/grid.rs` → `SpatialGrid` (carries `dims: WorldDims`), `cell_of`
   (instance method: clamp walled / `rem_euclid` toroidal), `rebuild`,
   `for_each_in_radius` (wrap-aware cell fold).
@@ -488,10 +501,10 @@ is packed into the snapshot for the renderer (2b draws the ring); see
   `MATING_COOLDOWN_TICKS_DEFAULT = 200`, `MATING_CONTACT_RADIUS_FACTOR = 1.5`.
   (`LUT_RADIUS = 4` lives in `src/world/proximity.rs`.)
 - `src/wasm_api.rs` → `WorldHandle`, `WorldHandle::set_slider`,
-  `WorldHandle::write_snapshot_to`,
+  `WorldHandle::write_snapshot`,
   `WorldHandle::sliders_defaults_json`,
   `WorldHandle::profile_enable`,
-  `WorldHandle::profile_clear` (v1.9.1),
+  `WorldHandle::profile_clear`,
   `WorldHandle::profile_report_json`,
   free functions `max_pop_for_sim`,
   `rayon_current_num_threads`.
@@ -523,7 +536,7 @@ single-`set_slider`-entry-point rule.
 ## See also
 
 - [`shared-memory-and-protocol.md`](shared-memory-and-protocol.md) — what
-  `write_snapshot_to` actually writes.
+  `write_snapshot` writes into wasm memory and how TS publishes it.
 - [`worker-runtime.md`](worker-runtime.md) — who calls `step_n`.
 - [`profiler.md`](profiler.md) — where the `tick.*` spans live in the
   larger tree.

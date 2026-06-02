@@ -63,7 +63,7 @@ Notable coverage by file:
 | `src/world/nn.rs` | NN input layout, slot offsets, threaded NN matches sequential NN bit-for-bit (when seeded), chunk-range partition invariants. |
 | `src/world/proximity.rs` | Sector LUT correctness, wall proximity edges, grass density bilinear seam wrap. |
 | `src/brain.rs` | Forward-pass shape, Leaky ReLU sign behaviour, mutation produces finite values. |
-| `src/grass.rs` | Density init, in-cell growth, cross-kernel propagation, row-has-density bitset rebuild. |
+| `src/grass.rs` | Density init, in-cell growth, two-pass separable Gaussian propagation (active-tile path equivalence to full-grid reference), dirty-tile quantize correctness, bilinear sample, row-has-density bitset rebuild. See also `src/grass_v201_tests.rs` for the v2.0.1 active-tile + dirty-tile test module. |
 | `src/grid.rs` | `cell_of` boundary clamping, `for_each_in_radius` enumeration. |
 | `src/profiler.rs` | Ring buffer pruning, four-tree minting via `ensure_root`, RAII span correctness. |
 

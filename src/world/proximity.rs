@@ -34,8 +34,8 @@ use crate::grid::SpatialGrid;
 ///     cell, both in `[-MAX_OFFSET, MAX_OFFSET]`.
 ///   - `min_dist_sq` is the squared *lower bound* on the world-unit distance
 ///     from the creature to anything in that cell. Specifically:
-///         min_dist = sqrt((max(0, |dxo|-1) * HASH_CELL)² +
-///                         (max(0, |dyo|-1) * HASH_CELL)²)
+///     min_dist = sqrt((max(0, |dxo|-1) * HASH_CELL)² +
+///     (max(0, |dyo|-1) * HASH_CELL)²)
 ///     The `-1` accounts for the creature sitting anywhere inside its home
 ///     cell — the home cell and any 8-neighbor overlap on at least one axis.
 ///

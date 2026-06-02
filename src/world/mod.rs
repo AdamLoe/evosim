@@ -455,6 +455,11 @@ impl World {
                 *d = k;
             }
             grass.rebuild_row_bitset();
+            // v2.0.1 §2/§3: density was set wholesale outside propagation — rebuild
+            // the per-tile class + active set, and mark all tiles dirty so the
+            // first snapshot writes the full (now-saturated) grass region.
+            grass.resync_active_from_density();
+            grass.mark_all_tiles_dirty();
         }
         // v2.0 Wave 1b/3a: the active input layout is driven by `wrap_world` +
         // `species_mode` (drops ReservedPredator; WallProximity only when walled;

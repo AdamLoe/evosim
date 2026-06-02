@@ -174,6 +174,40 @@ tick" guard or a light partner cooldown.
 
 ---
 
+## v2.0.2 — carried forward from v2.0.1 (top of the queue)
+
+Shipped in v2.0.1: toroidal grass/biome tiling, pan/zoom while paused,
+three top-right Settings/NN/Inspector buttons, zoom-out creature LOD,
+organic (disc) grass spread, grass active-tile frontier + dirty-tile
+snapshot quantize. Deferred out of v2.0.1:
+
+- **[TOP] Materialize the grass blur (perf).** v2.0.1's disc-shape fix made
+  spread organic by computing the separable [1,2,1] blur ON THE FLY —
+  per-cell × per-8-neighbour recompute (~835 ns/cell, ~1.6 ms/row). The sim
+  measured at **2 TPS, grass_step = 99% of tick** at the 9600² default. Fix:
+  materialize the horizontal pass into a scratch buffer once, then the
+  vertical pass + 8-neighbour max reads scratch — true O(1)/cell. Keep the
+  disc shape + all determinism/equivalence tests green. Then **verify the
+  active-tile frontier actually skips saturated tiles at steady state** (at
+  2 TPS the sim never reached saturation, so the frontier's payoff is
+  unconfirmed) and **re-measure TPS**. OPEN: confirm whether v2.0.1's grass
+  cost is a regression vs `main` or pre-existing (needs a `main` baseline).
+- **u16 fixed-point grass density.** Deferred from v2.0.1 ("measure
+  first"). ~×1.3–1.8 compute + cheaper snapshot copy; precision risk at low
+  growth rates (u8 rejected for stair-stepping; u16 chosen). Touches all
+  density consumers (sensors/graze). Layout-safe (snapshot stays u8).
+- **`grass_initial_seed_count` slider mismatch (bug).** Rejected at boot as
+  "unknown slider" — Rust↔TS slider-name mismatch. One-line fix.
+- **Decoupled snapshot writer — DROPPED, not deferred.** Measured
+  `write_output_sab` = 2.3% of tick, so a writer thread isn't worth it.
+  Recorded for posterity in case the snapshot ever grows: (1) the PUBLISH
+  (`CTRL_SEQ`/`CTRL_CURRENT_SLOT`) lives in **TS** (`sim-worker.ts`) against
+  the JS control SAB — a separate buffer from wasm memory — so a Rust writer
+  thread **cannot** publish directly; the workable shape is a wasm-memory
+  seqlock ticket the TS tick loop mirrors to the control SAB. (2) Grass
+  off-thread would need `quantize_dirty_tiles_into` to read a **frozen**
+  density stage, not live `&mut self`.
+
 ## Performance deep-dive at 1920² (deferred, profiler-gated)
 
 v2.0 ships the straightforward implementation and **trusts the profiler**

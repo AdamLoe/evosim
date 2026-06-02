@@ -56,7 +56,7 @@ fn same_world_seed_reproduces_identical_seeding() {
         "same world_seed must seed the same population"
     );
     assert!(
-        a.creatures.len() > 0,
+        !a.creatures.is_empty(),
         "species seeding must produce founders"
     );
 

@@ -602,9 +602,16 @@ impl WorldHandle {
             None
         };
         let grass_off = slot_base + SNAPSHOT_HEADER_BYTES + SNAPSHOT_CREATURE_BYTES;
-        let density: &[f32] = &self.inner.grass.density;
         let grass_region = &mut self.snapshot_buf[grass_off..grass_off + grass_bytes];
-        quantize_grass_into(density, grass_region);
+        // v2.0.1 §3: re-quantize ONLY the tiles dirty for THIS ping-pong slot
+        // (dirty tracked by the grass frontier/graze path). Unchanged tiles keep
+        // their valid prior bytes in this persistent slot, so the snapshot stays a
+        // full `grass_cell_count`-byte u8 region (NO wire/layout change) while we
+        // write only the frontier. Self-contained callable the writer wave's
+        // `pack()` invokes directly — see `GrassGrid::quantize_dirty_tiles_into`.
+        self.inner
+            .grass
+            .quantize_dirty_tiles_into(grass_region, slot_idx);
         let grass_end = if profile_on {
             Some(crate::profiler::clock_now_us_threadsafe())
         } else {
@@ -845,7 +852,9 @@ impl WorldHandle {
             28 => self.apply_starting_species_member_variance(value),
             29 => self.apply_mating_cooldown_ticks(value.max(0.0) as u32),
             // v1.12: 8 mutation buckets × 3 fields.
-            n if n >= SLIDER_BUCKET_BASE && n < SLIDER_BUCKET_BASE + MUTATION_BUCKET_COUNT * 3 => {
+            n if (SLIDER_BUCKET_BASE..SLIDER_BUCKET_BASE + MUTATION_BUCKET_COUNT * 3)
+                .contains(&n) =>
+            {
                 let rel = n - SLIDER_BUCKET_BASE;
                 self.apply_mutation_bucket(rel / 3, rel % 3, value);
             }

@@ -131,7 +131,7 @@ impl SpeciesRegistry {
 
     /// Remove the species with `id`, if present (dynamic-registry support for
     /// v2.1). Returns true if a species was removed.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub fn remove(&mut self, id: u16) -> bool {
         if let Some(pos) = self.species.iter().position(|s| s.id == id) {
             self.species.remove(pos);
@@ -171,7 +171,7 @@ impl SpeciesRegistry {
     }
 
     #[inline]
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.species.is_empty()
     }

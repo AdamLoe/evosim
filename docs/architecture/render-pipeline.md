@@ -62,21 +62,26 @@ RAF callback (wrapped in `span("frame")`):
      (e.g., during restart). `slotLayout` is built once per boot from the
      boot-time `grass_dim` (see shared-memory-and-protocol.md).
   2. open `frame.snapshot.read` span
-     2a. slot = Atomics.load(controlI32, CTRL_CURRENT_SLOT)
-     2b. header = readSnapshotHeader(snapshotView, slotOffset(layout, slot))
-     2c. creatures = new Float32Array(snapshotSab, creatureSoAOffset(layout, slot), pop * CREATURE_STRIDE)
-     2d. grass     = new Uint8Array(snapshotSab, grassOffset(layout, slot), layout.grassCellCount)
+     2a. seq  = Atomics.load(controlI32, CTRL_SEQ)
+     2b. slot = Atomics.load(controlI32, CTRL_CURRENT_SLOT)
+     2c. header = readSnapshotHeader(snapshotView, slotOffset(layout, slot))
+     2d. creatures = new Float32Array(snapshotBuffer, creatureSoAOffset(layout, slot), pop * CREATURE_STRIDE)
+     2e. grass     = new Uint8Array(snapshotBuffer, grassOffset(layout, slot), layout.grassCellCount)
          // u8, one byte per cell; length = grass_dim² (NOT a constant)
+         // snapshotBuffer is wasm.memory.buffer (wasm linear memory, not a separate SAB)
   3. close `frame.snapshot.read`
-  4. (auto-restart on world_ended if enabled)
-  5. pollRail(rail, header, simBridge, creatures, pop)
-  6. renderWorld(gl, cam, viewW, viewH, creatures, grass,
+  4. If seq === lastPaintedSeq AND camera unchanged → skip paint (seq-gated: FPS ≤ TPS).
+     Exception: if the camera moved (pan/zoom while paused), repaint with the
+     existing snapshot so the canvas reflects the new view without needing a new tick.
+  5. (auto-restart on world_ended if enabled)
+  6. pollRail(rail, header, simBridge, creatures, pop)
+  7. renderWorld(gl, cam, viewW, viewH, creatures, grass,
                  biomeView, biomeDirty, pop, worldSize, grassDim,
                  wrapWorld, highlights)
      // biomeView is a static Uint8Array over wasm memory at
      // biome_buf_byte_offset; biomeDirty is true only on a worker swap so
      // the biome texture re-uploads once, not per frame.
-  7. update top-left status strip (world_seed) + perf-panel status line
+  8. update top-left status strip (world_seed) + perf-panel status line
 ```
 
 `renderWorld` opens `frame.render_world` and inside it
@@ -284,6 +289,18 @@ buffer (the highlight pass below reuses the body `instanceScratch`, so a
 shared buffer would clobber it) and drawn with a second
 `drawArraysInstanced` after the body draw.
 
+**Flash LOD guard.** The flash annulus is skipped when the creature's
+raw screen radius is below `MID_THRESHOLD_PX` (4 px) — at that size the
+annulus is not legible.
+
+**Body-ring LOD.** The outline ring (`u_ring_inner` / `u_ring_outer`
+uniforms) is a per-draw-call zoom-scaled uniform, not per-creature. A
+representative radius (`1.0 × PX_PER_SIZE × zoom`) determines the tier:
+far zoom (`< MID_THRESHOLD_PX`) → ring suppressed (`inner == outer ==
+1.0`); mid zoom (`MID` to `NEAR_THRESHOLD_PX` = 12 px) → slim 1.5%-wide
+ring (`0.985..1.0`); near zoom (`≥ NEAR`) → full 4%-wide ring
+(`0.96..1.0`). Thresholds are `const` in `renderWorldImpl`.
+
 **FlashTag → color legend** (RGBs owned TS-side in `render-gl.ts`,
 matching the `FlashTag` enum order in `src/creature.rs`):
 
@@ -328,13 +345,21 @@ at the 9600u default). The texture dimension is the runtime `grass_dim`
 from `boot_ready`, compared against a cached `grassTexDim`: a **full
 `texImage2D`** runs on first use / dim change, a `texSubImage2D` on every
 subsequent painted frame. The snapshot grass region is u8 (quantized
-Rust-side in `quantize_grass_into`, density/`GRASS_MAX` → 0..255); R8 is a
-normalized unorm format so the shader's `texture(...).r` returns 0..1
-directly — no float-linear extension, no shader rescale.
+Rust-side via `quantize_dirty_tiles_into` — only dirty frontier tiles are
+re-quantized per tick; `GRASS_MAX` → 0..255); R8 is a normalized unorm
+format so the shader's `texture(...).r` returns 0..1 directly — no
+float-linear extension, no shader rescale.
 
-> **Full upload every painted frame.** Dirty-rect upload is deliberately
-> deferred (v2.0). At 1920² this is a ~3.7 MB `texSubImage2D` per paint —
-> the obvious next perf lever if a larger world is targeted.
+**Toroidal tiling on zoom-out.** When `wrap_world` is on and the camera
+frustum extends past a world edge, `renderWorldImpl` issues extra grass
+draw calls with a shifted camera position (the same per-axis offset set
+`{-W, 0, +W}` used by creatures), so the grass and biome layers tile
+seamlessly on zoom-out. The biome layer uses the same offset loop.
+
+> **Full GL texture upload every painted frame.** The `texSubImage2D`
+> covers the full `dim × dim` grass byte region even though Rust only
+> re-quantizes dirty tiles into the snapshot buffer. Dirty-rect GL upload
+> is a tracked backlog item. At 1920² this is a ~3.7 MB upload per paint.
 
 `UNPACK_ALIGNMENT` is set to 1 at init (each R8 row is `dim` bytes, not a
 multiple of 4). The fragment shader tints the field a theme-driven green

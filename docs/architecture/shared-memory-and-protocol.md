@@ -281,10 +281,10 @@ The worker's `writeSnapshotToSAB()` follows a strict order:
 const current = Atomics.load(ctrl, CTRL_CURRENT_SLOT);
 const inactive: 0 | 1 = current === 0 ? 1 : 0;
 
-world.write_snapshot_to(creaturesView, grassView, statsView);
+world.write_snapshot(inactive);  // Rust writes bytes into wasm linear memory
 
-Atomics.store(ctrl, CTRL_CURRENT_SLOT, inactive);   // FLIP
-Atomics.add(ctrl, CTRL_SEQ, 1);                     // BUMP
+Atomics.store(ctrl, CTRL_CURRENT_SLOT, inactive);   // FLIP  (TS, not Rust)
+Atomics.add(ctrl, CTRL_SEQ, 1);                     // BUMP  (TS, not Rust)
 ```
 
 Store before add: if main observes the seq bump, the next
@@ -330,7 +330,7 @@ if it advanced, the bytes are guaranteed to be coherent.
   `SLIDER_COUNT`, `WorldHandle::set_slider`,
   `WorldHandle::set_slider_by_index`,
   `WorldHandle::record_profile_sample`,
-  `WorldHandle::write_snapshot_to`, `max_pop_for_sim` free function.
+  `WorldHandle::write_snapshot`, `max_pop_for_sim` free function.
 - [`src/bin/gen_bindings.rs`](../../src/bin/gen_bindings.rs) — codegen
   binary + drift unit test.
 - [`web/src/generated/control-sab.ts`](../../web/src/generated/control-sab.ts) +
@@ -351,8 +351,11 @@ if it advanced, the bytes are guaranteed to be coherent.
   `WorldDims` (runtime `grass_dim` / `grass_cell_count` / `hash_dim`),
   `WORLD_SIZE_DEFAULT = 9600`, `GRASS_CELL_SIZE = 5.0`, `Biome` enum.
 - [`src/wasm_api.rs`](../../src/wasm_api.rs) → `SnapshotLayout`
-  (runtime grass/slot/buf/biome byte sizes), `quantize_grass_into`
-  (f32→u8 on snapshot write), the `biome_buf_byte_offset/len` getters.
+  (runtime grass/slot/buf/biome byte sizes), `WorldHandle::write_snapshot`
+  (writes bytes into wasm linear memory; TS then publishes the slot), the
+  `biome_buf_byte_offset/len` getters.
+- [`src/grass.rs`](../../src/grass.rs) → `GrassGrid::quantize_dirty_tiles_into`
+  (dirty-tile-incremental f32→u8 quantize, called by `write_snapshot`).
 
 ## Update when
 

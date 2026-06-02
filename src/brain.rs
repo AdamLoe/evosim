@@ -70,6 +70,7 @@ impl Activation {
             _ => return None,
         })
     }
+    #[allow(dead_code)]
     pub fn as_str(self) -> &'static str {
         match self {
             Activation::LReLU => "lrelu",
@@ -181,7 +182,7 @@ impl NnTopology {
             ));
         }
         for (idx, &w) in hidden_sizes.iter().enumerate() {
-            if w < 8 || w > NN_MAX_HIDDEN_WIDTH {
+            if !(8..=NN_MAX_HIDDEN_WIDTH).contains(&w) {
                 return Err(format!(
                     "hidden_sizes[{idx}]={w} out of [8, {NN_MAX_HIDDEN_WIDTH}]"
                 ));
@@ -218,6 +219,7 @@ impl NnTopology {
     pub fn activations(&self) -> &[Activation] {
         &self.activations
     }
+    #[allow(dead_code)]
     pub fn hidden_count(&self) -> usize {
         self.hidden_sizes.len()
     }
@@ -410,6 +412,7 @@ impl Brain {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     pub fn zero() -> Self {
         Self::zero_with(NnTopology::legacy())
     }
@@ -488,7 +491,7 @@ impl Brain {
         // ─── Output matmul: last_hidden → output. Output projection
         //     (tanh on slots 0..2) overrides the user's activation choice.
         let t_start = if timed { clock_now_us_threadsafe() } else { 0 };
-        let last_hidden_buf: &[f32] = if (hidden_count - 1) % 2 == 0 {
+        let last_hidden_buf: &[f32] = if (hidden_count - 1).is_multiple_of(2) {
             &scratch_a[..fan_in]
         } else {
             &scratch_b[..fan_in]
@@ -550,7 +553,7 @@ impl Brain {
         }
 
         let hidden_count = hidden_sizes.len();
-        let last_hidden: &[f32] = if (hidden_count - 1) % 2 == 0 {
+        let last_hidden: &[f32] = if (hidden_count - 1).is_multiple_of(2) {
             &*scratch_a
         } else {
             &*scratch_b
@@ -610,7 +613,7 @@ impl Brain {
     ) -> (Self, f32) {
         let mut child = parent.clone();
         let total: f32 = policy.buckets.iter().map(|b| b.weight.max(0.0)).sum();
-        if !(total > 0.0) {
+        if total <= 0.0 {
             return (child, 0.0);
         }
         // Pick a bucket by weighted draw.

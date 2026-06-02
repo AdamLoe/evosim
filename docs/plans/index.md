@@ -59,6 +59,9 @@ the plan itself.
 
 ## Active plans
 
+- [`v2.0.1-mission.md`](v2.0.1-mission.md) — Patch-wave hub for v2.0.1:
+  triage + fix the problems the lead surfaces against the shipped v2.0.0
+  build. **Draft** — intake open, no streams launched yet.
 - [`v2.0.0-mission.md`](v2.0.0-mission.md) — World, body, species:
   editable runtime `world_size` (default 8× linear / 64× area),
   optional toroidal wrap, 3 biomes, evolving body genome, opt-in

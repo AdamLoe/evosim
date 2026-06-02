@@ -980,7 +980,7 @@ pub(crate) struct PickTimings {
     pub forward_us: u64,
     /// v1.12: per-matmul wall clock. Length cap = `NN_MAX_MATMULS` (8 hidden
     /// + 1 output). Only the first `topology.matmul_count()` slots are written
-    /// per pass; the rest stay zero and the drain skips them.
+    ///   per pass; the rest stay zero and the drain skips them.
     pub forward_layer_us: [u64; NN_MAX_MATMULS],
 }
 

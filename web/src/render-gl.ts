@@ -522,11 +522,11 @@ function initRenderer(gl: WebGL2RenderingContext): GLState {
     ringInner: mustGet(gl.getUniformLocation(discProgram, "u_ring_inner"), "u_ring_inner"),
     ringOuter: mustGet(gl.getUniformLocation(discProgram, "u_ring_outer"), "u_ring_outer"),
   };
-  // Ring stops are constants — set once at link time. Thickness isn't a
-  // theme concern; per-theme styling lives in u_ring_color's alpha.
+  // Ring stop uniforms (u_ring_inner / u_ring_outer) are now set per-frame
+  // in renderWorldImpl based on zoom level (v2.0.1 LOD). Initialize to the
+  // near-zoom defaults so an early draw before the first renderWorldImpl call
+  // does not leave them uninitialised.
   gl.useProgram(discProgram);
-  // Ring sits at the actual disc edge (0.96..1.0) and is half the thickness
-  // of the v1.9.2 initial values (was 0.84..0.92 — 8% inset and 8% thick).
   gl.uniform1f(discU.ringInner, 0.96);
   gl.uniform1f(discU.ringOuter, 1.0);
 
@@ -910,11 +910,32 @@ function renderWorldImpl(
   gl.clearColor(br, bg, bb, 1.0);
   gl.clear(gl.COLOR_BUFFER_BIT);
 
+  // v2.0.1: Compute toroidal tile offsets EARLY so both the grass/biome
+  // and creature passes can share the same frustum-derived offset sets.
+  // Matches the creature pass logic exactly (see xOffsets/yOffsets below).
+  const W_early = world_size;
+  const tileHalfW = cam.zoom > 0 ? (viewW / cam.zoom) * 0.5 : 0;
+  const tileHalfH = cam.zoom > 0 ? (viewH / cam.zoom) * 0.5 : 0;
+  const tileMinX = cam.cx - tileHalfW;
+  const tileMaxX = cam.cx + tileHalfW;
+  const tileMinY = cam.cy - tileHalfH;
+  const tileMaxY = cam.cy + tileHalfH;
+  const tileXOffsets: number[] = [0];
+  const tileYOffsets: number[] = [0];
+  if (wrap_world && W_early > 0) {
+    if (tileMinX < 0) tileXOffsets.push(-W_early);
+    if (tileMaxX > W_early) tileXOffsets.push(W_early);
+    if (tileMinY < 0) tileYOffsets.push(-W_early);
+    if (tileMaxY > W_early) tileYOffsets.push(W_early);
+  }
+
   // ─── Biome layer (v2.0 Wave 1b) ───
   // Drawn first, UNDER the grass. A static R8 biome-id texture mapped to flat
   // per-biome colors. Uploaded only when the biome buffer changes (worker
   // swap → `biomeDirty`), or the first time we see it. The grass density
   // layer brightens green on top.
+  // v2.0.1: Toroidal tiling — issue extra draws for each non-zero offset pair
+  // by shifting u_cam_pos, matching the creature ghost-copy approach exactly.
   if (biome && biome.length === grass_dim * grass_dim) {
     const dim = grass_dim;
     gl.activeTexture(gl.TEXTURE0);
@@ -925,7 +946,6 @@ function renderWorldImpl(
     }
     gl.useProgram(s.biomeProgram);
     gl.uniform2f(s.biomeU.viewport, viewW, viewH);
-    gl.uniform2f(s.biomeU.camPos, cam.cx, cam.cy);
     gl.uniform1f(s.biomeU.zoom, cam.zoom);
     gl.uniform1f(s.biomeU.worldSize, world_size);
     // Visual-identity defaults (Wave 1c): Plains / Water / Desert flat colors.
@@ -933,7 +953,15 @@ function renderWorldImpl(
     gl.uniform3f(s.biomeU.water, 40 / 255, 92 / 255, 168 / 255);
     gl.uniform3f(s.biomeU.desert, 196 / 255, 178 / 255, 128 / 255);
     gl.bindVertexArray(s.biomeVao);
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    for (let xi = 0; xi < tileXOffsets.length; xi++) {
+      for (let yi = 0; yi < tileYOffsets.length; yi++) {
+        gl.uniform2f(s.biomeU.camPos,
+          cam.cx - tileXOffsets[xi],
+          cam.cy - tileYOffsets[yi],
+        );
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      }
+    }
   }
 
   // ─── Grass ───
@@ -942,6 +970,7 @@ function renderWorldImpl(
   // per frame + a fullscreen-discard fragment pass).
   // v1.7: bracketed by `frame.render_world.grass` so the parent
   // `frame.render_world` row's overhead column reads correctly.
+  // v2.0.1: Toroidal tiling — same extra-draw loop as biome above.
   if (getSettings().showGrass) {
     const grassSpan = span("frame.render_world.grass");
     try {
@@ -959,7 +988,6 @@ function renderWorldImpl(
       }
       gl.useProgram(s.grassProgram);
       gl.uniform2f(s.grassU.viewport, viewW, viewH);
-      gl.uniform2f(s.grassU.camPos, cam.cx, cam.cy);
       gl.uniform1f(s.grassU.zoom, cam.zoom);
       gl.uniform1f(s.grassU.worldSize, world_size);
       gl.uniform1f(s.grassU.opacity, getSettings().grassOpacity);
@@ -967,7 +995,15 @@ function renderWorldImpl(
       const tint = readGrassTint();
       gl.uniform3f(s.grassU.tint, tint[0], tint[1], tint[2]);
       gl.bindVertexArray(s.grassVao);
-      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      for (let xi = 0; xi < tileXOffsets.length; xi++) {
+        for (let yi = 0; yi < tileYOffsets.length; yi++) {
+          gl.uniform2f(s.grassU.camPos,
+            cam.cx - tileXOffsets[xi],
+            cam.cy - tileYOffsets[yi],
+          );
+          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        }
+      }
     } finally {
       grassSpan.close();
     }
@@ -1081,6 +1117,12 @@ function renderWorldImpl(
     // Rather than an AA-shaded disc (which fades to near-invisible), draw a
     // flat ~1px point in the display color so faction territories stay legible.
     const POINT_THRESHOLD_PX = 1.0;
+    // v2.0.1 LOD thresholds (zoom-adaptive ring + flash):
+    //   < MID_THRESHOLD_PX  → small shaded circle, no flash, no visible ring
+    //   MID..NEAR           → slim ring (0.985..1.0), no flash
+    //   ≥ NEAR_THRESHOLD_PX → full ring (0.96..1.0), flash allowed
+    const MID_THRESHOLD_PX = 4.0;
+    const NEAR_THRESHOLD_PX = 12.0;
 
     let off = 0;
     for (let i = 0; i < pop; i++) {
@@ -1147,7 +1189,9 @@ function renderWorldImpl(
           // v2.0 Wave 2b: action ring-flash. Draw a transient outer annulus in
           // the tag's color when flash_ticks > 0. Fades with the countdown.
           // Coexists with the inspector selection ring (separate pass below).
-          if (flashTicks > 0 && flashTag > 0 && flashTag < FLASH_COLORS.length) {
+          // v2.0.1: skip flash at far/mid zoom — below MID_THRESHOLD_PX the
+          // body is too small for the annulus to be legible.
+          if (rawRadiusPx >= MID_THRESHOLD_PX && flashTicks > 0 && flashTag > 0 && flashTag < FLASH_COLORS.length) {
             if (flashOff + FLOATS_PER_INSTANCE > flashScratch.length) {
               const grown = new Float32Array(flashScratch.length * 2);
               grown.set(flashScratch);
@@ -1242,6 +1286,28 @@ function renderWorldImpl(
         s.discU.ringColor,
         ringColor[0], ringColor[1], ringColor[2], ringColor[3],
       );
+      // v2.0.1: zoom-adaptive body ring. Use a representative screen radius
+      // (median creature at current zoom) to pick a LOD tier. The ring uniforms
+      // are vec1 globals that affect all instances in this draw call, so we
+      // choose the tier based on the overall zoom level rather than per-creature.
+      // At far zoom (typical radius < MID_THRESHOLD_PX) suppress the ring
+      // entirely (inner==outer=1.0); at mid zoom use a slim 1.5%-wide ring;
+      // at near zoom restore the full 4%-wide ring (0.96..1.0).
+      // A typical creature has radiusWorld≈1; rawRadiusPx = radiusWorld*PX_PER_SIZE*zoom.
+      const typicalRadiusPx = 1.0 * PX_PER_SIZE * cam.zoom;
+      if (typicalRadiusPx >= NEAR_THRESHOLD_PX) {
+        // Near zoom: full ring visible
+        gl.uniform1f(s.discU.ringInner, 0.96);
+        gl.uniform1f(s.discU.ringOuter, 1.0);
+      } else if (typicalRadiusPx >= MID_THRESHOLD_PX) {
+        // Mid zoom: slim 1.5% ring — subtle shading cue but not visually heavy
+        gl.uniform1f(s.discU.ringInner, 0.985);
+        gl.uniform1f(s.discU.ringOuter, 1.0);
+      } else {
+        // Far zoom: suppress ring (inner == outer, smoothstep collapses to 0)
+        gl.uniform1f(s.discU.ringInner, 1.0);
+        gl.uniform1f(s.discU.ringOuter, 1.0);
+      }
       gl.bindVertexArray(s.discVao);
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, bodyCount);
 
