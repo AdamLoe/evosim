@@ -32,6 +32,8 @@ const SCHEMA_MAJOR = 2;
 // values and merge the new keys from DEFAULTS.
 // v2.0.4 S1: added `lodBias` (render-side LOD nudge knob) — new additive key
 // with default 0.0 → MINOR bump 3 → 4. Existing v2 blobs keep their values.
+// v2.0.4 S6: added `grassMultisight` construction toggle (same MINOR bump 3 → 4).
+// Existing v2 blobs keep their values and pick up the new key from DEFAULTS.
 const SCHEMA_MINOR = 4;
 
 /** v1.12: one row of the 8-row mutation policy table. Mirrors the Rust
@@ -176,6 +178,10 @@ export interface Settings {
   // level in write_snapshot — positive values pick a finer pyramid level.
   // Default 0.0 (no bias). Biasing finer than the budget can hold crops edges.
   lodBias: number;
+  // v2.0.4 S6: construction-only multi-band grass NN sight. ON = near+far band
+  // (16 grass NN inputs); OFF = near band only (8 inputs, legacy). Default ON.
+  // Must match Rust GRASS_MULTISIGHT_DEFAULT (true).
+  grassMultisight: boolean;
 }
 
 export const DEFAULTS: Settings = {
@@ -249,6 +255,8 @@ export const DEFAULTS: Settings = {
   grassSpreadRing2Pct: 0.22,
   // v2.0.4 S1: LOD bias. Default 0.0 (no bias = computed level is used as-is).
   lodBias: 0.0,
+  // v2.0.4 S6: multi-band grass sight. Must match Rust GRASS_MULTISIGHT_DEFAULT (true).
+  grassMultisight: true,
 };
 
 const KNOWN_KEYS = new Set<string>(Object.keys(DEFAULTS));

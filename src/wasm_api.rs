@@ -123,6 +123,8 @@ pub const SLIDER_NAMES: &[&str] = &[
     // v2.0.4 S1: render-side LOD knob. APPEND-ONLY — existing indices stable.
     "lod_bias", // 60 f32 — subtracted from computed mip level (finer detail)
                 //    nudge-within-budget: biasing finer than budget crops edges.
+    // v2.0.4 S6: multi-band NN grass sight construction toggle.
+    "grass_multisight", // 61 bool (0/non-zero) construction — multi-band grass NN sight
 ];
 
 /// First mutation-bucket slider slot. v2.0 Wave 3a (shifted from 24 to 30 after
@@ -1088,6 +1090,12 @@ impl WorldHandle {
     fn apply_grass_spread_ring2_pct(&mut self, value: f32) {
         self.inner.sliders.grass_spread_ring2_pct = value.clamp(0.0, 1.0);
     }
+    /// v2.0.4 S6: construction-only multi-band grass NN sight toggle.
+    /// Writing to the slider updates the DevSliders field so the NEXT world
+    /// picks up the value; the running world's layout is unchanged.
+    fn apply_grass_multisight(&mut self, value: bool) {
+        self.inner.sliders.grass_multisight = value;
+    }
     /// Apply a dev-panel slider live by name. JS console workflow
     /// (BUILD-REPORT Known Issue #4). Returns `Err` on unknown name so a
     /// console typo is visible instead of silently ignored.
@@ -1180,6 +1188,8 @@ impl WorldHandle {
             59 => self.apply_grass_spread_ring2_pct(value),
             // v2.0.4 S1: render-side LOD knob (index 60).
             60 => self.apply_lod_bias(value),
+            // v2.0.4 S6: multi-band grass sight construction toggle (index 61).
+            61 => self.apply_grass_multisight(value != 0.0),
             _ => {} // out-of-range: silently ignore (forward-compat with newer TS).
         }
     }

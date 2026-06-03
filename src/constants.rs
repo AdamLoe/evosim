@@ -295,6 +295,40 @@ pub const GRASS_SPREAD_RING3_PCT_DEFAULT: f32 = 0.08;
 /// that neighbour active next tick). The three radial bands split [1, radius].
 pub const GRASS_SPREAD_RADIUS: i32 = 3;
 
+// ---- Multi-band grass sight (v2.0.4 S6) ----
+//
+// `GrassBandsFar` extends the single near band (GRASS_PROXIMITY_RANGE) with
+// a second far band sampled from the LOD pyramid at a coarser mip level.
+// Each band still uses NN_SECTORS (8) directional sectors.
+//
+// Band design:
+//   Near: radius = GRASS_PROXIMITY_RANGE (20u) → mip level 0 (raw L0, 5u/cell)
+//   Far:  radius = GRASS_FAR_SIGHT_RADIUS (160u) → mip level GRASS_FAR_MIP_LEVEL (3)
+//         At L3 the effective cell size is 5u × 2³ = 40u; 4 cells = 160u radius.
+//         O(1) per tap — single `sample_clamped` read on the pyramid level.
+//
+// Default ON (multi-band); single-band variant retained via DevSliders toggle.
+// The toggle is construction-scoped (changes the NN input width and discards brains).
+//
+// MAX_NN_INPUTS constraint: adding 8 extra far-band slots pushes walled+species to
+// 51 real → 56 padded, exceeding MAX_NN_INPUTS=48. The multi-band layout therefore
+// falls back to single-band when walled + species_mode is on. See nn.rs for the
+// 4-way layout table.
+
+/// Far grass sensing radius (world-units). At the default 5u cell and mip level 3
+/// (40u/cell), 4 cells out = 160u. This gives creatures far-field awareness of
+/// grass density that the near band (20u) completely misses.
+pub const GRASS_FAR_SIGHT_RADIUS: f32 = 160.0;
+
+/// Pyramid mip level for the far grass band. Level 3 has effective cell size
+/// 5u × 2³ = 40u; sampling 4 cells from the creature gives 160u coverage.
+/// This is O(1) per tap regardless of actual cell coverage.
+pub const GRASS_FAR_MIP_LEVEL: usize = 3;
+
+/// Default for the `grass_multisight` construction setting. True = multi-band
+/// (near+far); false = single-band (legacy near only). Default ON.
+pub const GRASS_MULTISIGHT_DEFAULT: bool = true;
+
 // ---- Legacy NN input layout offsets (test-only calibration anchors) ----
 // v2.0 Wave 1a: these pin the *legacy* (walled, ReservedPredator-present)
 // width-32 slot order. The *active* default layout is now driven by

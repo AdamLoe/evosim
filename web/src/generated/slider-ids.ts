@@ -67,9 +67,10 @@ export const SLIDER_NAMES = [
   "grass_spread_ring1_pct",
   "grass_spread_ring2_pct",
   "lod_bias",
+  "grass_multisight",
 ] as const;
 
-export const SLIDER_COUNT = 61 as const;
+export const SLIDER_COUNT = 62 as const;
 
 export type SliderName = (typeof SLIDER_NAMES)[number];
 
