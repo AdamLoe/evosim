@@ -185,6 +185,7 @@ fn build_inputs_at(w: &mut World, x: f32, y: f32) -> [f32; MAX_NN_INPUTS] {
         w.dims.wrap_world,
         w.sliders.water_movement_penalty,
         w.sliders.desert_movement_penalty,
+        w.dims.grass_cell_size,
     );
     build_nn_input(
         0,

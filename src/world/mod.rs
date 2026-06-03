@@ -208,6 +208,12 @@ pub struct DevSliders {
     pub grass_spread_ring1_pct: f32,
     /// Ring-2 (distance 1.5–2.5 cells) probability weight. Live.
     pub grass_spread_ring2_pct: f32,
+    // ── v2.0.4 S2: grass cell size construction knob ──────────────────────────
+    /// Construction-only: grass cell size in world-units. Drives `grass_dim =
+    /// round(world_size / grass_cell_size)`. Larger cells ⇒ fewer cells ⇒
+    /// less grass_step work (cell count ∝ 1/size²). Restart-required (rebuild
+    /// dims, capacity[], biome grid, snapshot slot). Default 5.0.
+    pub grass_cell_size: f32,
 }
 
 impl Default for DevSliders {
@@ -258,6 +264,8 @@ impl Default for DevSliders {
             grass_spread_amount: GRASS_SPREAD_AMOUNT_DEFAULT,
             grass_spread_ring1_pct: GRASS_SPREAD_RING1_PCT_DEFAULT,
             grass_spread_ring2_pct: GRASS_SPREAD_RING2_PCT_DEFAULT,
+            // v2.0.4 S2: grass cell size — default preserves current behaviour.
+            grass_cell_size: GRASS_CELL_SIZE_DEFAULT,
         }
     }
 }
@@ -476,7 +484,13 @@ impl World {
         let seed_string = seed.into();
         let mut rng = SimRng::from_string(&seed_string);
         // v2.0 Wave 1a: runtime dims computed once from the construction settings.
-        let dims = WorldDims::from_world_size(sliders.world_size, sliders.wrap_world);
+        // v2.0.4 S2: use the construction grass_cell_size so grass_dim reflects
+        // the chosen cell size (not the compile-time GRASS_CELL_SIZE default).
+        let dims = WorldDims::from_world_size_with_cell_size(
+            sliders.world_size,
+            sliders.wrap_world,
+            sliders.grass_cell_size,
+        );
         let world_seed = sliders.world_seed;
         // v2.0 Wave 1b: static biome map from `world_seed` (independent of the
         // sim RNG above). Built once; read O(1) per tick via `biome_at`.
@@ -737,13 +751,14 @@ impl World {
     pub(crate) fn biome_cell_index(&self, x: f32, y: f32) -> usize {
         let dim = self.dims.grass_dim;
         let ws = self.dims.world_size;
+        let cs = self.dims.grass_cell_size;
         let (px, py) = if self.dims.wrap_world {
             (x.rem_euclid(ws), y.rem_euclid(ws))
         } else {
             (x.clamp(0.0, ws), y.clamp(0.0, ws))
         };
-        let ix = ((px / GRASS_CELL_SIZE) as usize).min(dim - 1);
-        let iy = ((py / GRASS_CELL_SIZE) as usize).min(dim - 1);
+        let ix = ((px / cs) as usize).min(dim - 1);
+        let iy = ((py / cs) as usize).min(dim - 1);
         iy * dim + ix
     }
 
@@ -834,6 +849,8 @@ impl World {
                 // v2.0.2 Stream 1d: push current slider values into the kernel.
                 self.grass
                     .apply_scatter_params(self.scatter_params_from_sliders());
+                // C2: gate per-tile profiling clocks off the profiler enabled-state.
+                self.grass.set_profile_scatter(self.profile.enabled());
                 self.grass.compute_propagation(
                     self.sliders.grass_in_cell_growth_r,
                     self.sliders.grass_propagation_rate_k,
@@ -917,6 +934,8 @@ impl World {
             // v2.0.2 Stream 1d: push current slider values into the kernel.
             self.grass
                 .apply_scatter_params(self.scatter_params_from_sliders());
+            // C2: gate per-tile profiling clocks off the profiler enabled-state.
+            self.grass.set_profile_scatter(self.profile.enabled());
             self.grass.compute_propagation(
                 self.sliders.grass_in_cell_growth_r,
                 self.sliders.grass_propagation_rate_k,

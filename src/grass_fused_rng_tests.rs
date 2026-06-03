@@ -245,6 +245,7 @@ fn scatter_does_not_advance_sim_rng() {
         grass_dim: 128,
         grass_cell_count: 128 * 128,
         hash_dim: 64,
+        grass_cell_size: 5.0,
     };
 
     // Build a scatter grid seeded with some grass.

@@ -21,6 +21,7 @@ const DIMS: WorldDims = WorldDims {
     grass_dim: 96,
     grass_cell_count: 96 * 96,
     hash_dim: 48,
+    grass_cell_size: 5.0,
 };
 
 /// Build a scatter grid: a partial-density plains patch (will grow + spread) and,

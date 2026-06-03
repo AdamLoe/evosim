@@ -368,6 +368,10 @@ export interface SimReplyBootReady {
    * Sizes the grass + biome views as `grass_dim²` bytes each — the single
    * source of truth for the SAB grass-region geometry. */
   grass_dim: number;
+  /** v2.0.4 S2: grass cell size in world-units used at construction. Default 5.0.
+   * The renderer uses this for UV transform: cellSizeL = grass_cell_size × 2^mip.
+   * Single source of truth: Rust `WorldHandle.grass_cell_size` (runtime field). */
+  grass_cell_size: number;
   /** v2.0 Wave 1a: torus (wrap) vs walled world. Mirrors `WorldHandle.wrap_world`. */
   wrap_world: boolean;
   /** v2.0 Wave 1a: numeric biome seed actually used (Rust resolves 0 → random

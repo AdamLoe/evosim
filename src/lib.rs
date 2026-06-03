@@ -25,6 +25,11 @@ pub use wasm_api::*;
 #[path = "wasm_lod_config_tests.rs"]
 mod wasm_lod_config_tests;
 
+// v2.0.4 S2: grass_size construction slider — cell-count scaling + rebuild tests.
+#[cfg(test)]
+#[path = "grass_size_tests.rs"]
+mod grass_size_tests;
+
 // Threads: re-export `init_thread_pool` so wasm-bindgen emits an
 // `initThreadPool(num_threads: number) => Promise<void>` JS export.
 // JS must `await initThreadPool(navigator.hardwareConcurrency)` before

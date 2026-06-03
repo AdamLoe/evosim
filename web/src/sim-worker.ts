@@ -269,6 +269,9 @@ async function handleBoot(boot: SimMessageBoot): Promise<void> {
     kind: "boot_ready",
     world_size: world.world_size,
     grass_dim: world.grass_dim,
+    // v2.0.4 S2: runtime grass cell size (default 5.0; adjustable via grass_size slider).
+    // The renderer uses this for UV transform so it stays correct at non-default sizes.
+    grass_cell_size: world.grass_cell_size,
     // v2.0 Wave 1a: torus flag + resolved numeric biome seed + biome buffer
     // geometry. The biome buffer lives in wasm linear memory next to the
     // snapshot region; main reads it via a Uint8Array view at this offset.

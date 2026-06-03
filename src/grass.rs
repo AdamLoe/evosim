@@ -9,7 +9,7 @@
 //! §Initial grass seed / §Bilinear sampling.
 
 use crate::constants::{
-    WorldDims, GRASS_CELL_SIZE, GRASS_DECAY_AMOUNT_DEFAULT, GRASS_DECAY_PCT_DEFAULT, GRASS_MAX,
+    WorldDims, GRASS_DECAY_AMOUNT_DEFAULT, GRASS_DECAY_PCT_DEFAULT, GRASS_MAX,
     GRASS_PYRAMID_MAX_LEVELS, GRASS_SPREAD_AMOUNT_DEFAULT, GRASS_SPREAD_PCT_DEFAULT,
     GRASS_SPREAD_RADIUS, GRASS_SPREAD_RING1_PCT_DEFAULT, GRASS_SPREAD_RING2_PCT_DEFAULT,
     GRASS_SPREAD_RING3_PCT_DEFAULT,
@@ -2018,9 +2018,11 @@ impl GrassGrid {
         };
 
         // Convert to fractional cell coordinates. Cell i's center is at
-        // (i + 0.5) * GRASS_CELL_SIZE. Subtract 0.5 so cell centers fall at integers.
-        let fx = xw / GRASS_CELL_SIZE - 0.5;
-        let fy = yw / GRASS_CELL_SIZE - 0.5;
+        // (i + 0.5) * cell_size. Subtract 0.5 so cell centers fall at integers.
+        // v2.0.4 S2: use the construction-time cell size from dims.
+        let cs = self.dims.grass_cell_size;
+        let fx = xw / cs - 0.5;
+        let fy = yw / cs - 0.5;
 
         let ix0 = fx.floor() as i32;
         let iy0 = fy.floor() as i32;
@@ -2110,10 +2112,12 @@ impl GrassGrid {
 
         // Search radius expanded by half cell size so the candidate window includes
         // every cell whose bounding box could intersect the circle.
-        let search_r = r + GRASS_CELL_SIZE * 0.5;
-        let r_cells = (search_r / GRASS_CELL_SIZE).ceil() as i32 + 1;
-        let cx_cell = (cx / GRASS_CELL_SIZE).floor() as i32;
-        let cy_cell = (cy / GRASS_CELL_SIZE).floor() as i32;
+        // v2.0.4 S2: use the construction-time cell size from dims.
+        let cs = self.dims.grass_cell_size;
+        let search_r = r + cs * 0.5;
+        let r_cells = (search_r / cs).ceil() as i32 + 1;
+        let cx_cell = (cx / cs).floor() as i32;
+        let cy_cell = (cy / cs).floor() as i32;
         let dim = self.dims.grass_dim as i32;
         let dimu = self.dims.grass_dim;
         let wrap = self.dims.wrap_world;
@@ -2143,10 +2147,10 @@ impl GrassGrid {
                 // Circle-vs-AABB: find nearest point on the cell box to (cx, cy),
                 // then check if that distance is ≤ r. The box uses the unfolded
                 // jx/jy so a seam-straddling query measures the short way around.
-                let box_x_min = jx as f32 * GRASS_CELL_SIZE;
-                let box_x_max = box_x_min + GRASS_CELL_SIZE;
-                let box_y_min = jy as f32 * GRASS_CELL_SIZE;
-                let box_y_max = box_y_min + GRASS_CELL_SIZE;
+                let box_x_min = jx as f32 * cs;
+                let box_x_max = box_x_min + cs;
+                let box_y_min = jy as f32 * cs;
+                let box_y_max = box_y_min + cs;
                 let nearest_x = cx.clamp(box_x_min, box_x_max);
                 let nearest_y = cy.clamp(box_y_min, box_y_max);
                 let dx = nearest_x - cx;
@@ -2163,6 +2167,7 @@ impl GrassGrid {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constants::GRASS_CELL_SIZE;
     use crate::rng::SimRng;
 
     // v2.0 Wave 1a: grass dims are runtime. These module-local test constants
@@ -2174,6 +2179,7 @@ mod tests {
         grass_dim: 240,
         grass_cell_count: 240 * 240,
         hash_dim: 120,
+        grass_cell_size: 5.0,
     };
     const GRASS_GRID_DIM: usize = TEST_DIMS.grass_dim;
     const GRASS_CELL_COUNT: usize = TEST_DIMS.grass_cell_count;

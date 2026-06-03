@@ -14,10 +14,6 @@ import { getSettings } from "./settings";
 import { span } from "./perf";
 import { CREATURE_STRIDE, MAX_POP_FOR_SIM, GRASS_LOD_BUDGET_AXIS, type WindowMetadata } from "./sim-bridge";
 
-// v2.0.3 Stream 2c: grass cell size in world units (matches Rust GRASS_CELL_SIZE = 5.0).
-// Used to derive the UV transform from the clipmap window metadata.
-const GRASS_CELL_SIZE = 5.0;
-
 // v1.13 Wave 2: position interpolation between snapshots was removed. The
 // main RAF callback now seq-gates paints (FPS ≤ TPS) so painting the same
 // snapshot twice — a precondition for lerping — is forbidden. The trail
@@ -926,6 +922,10 @@ export function renderWorld(
   pop: number,
   world_size: number,
   grass_dim: number,
+  // v2.0.4 S2: runtime grass cell size in world-units (default 5.0). Required for
+  // the UV transform: cellSizeL = grass_cell_size × 2^mipLevel. Comes from the
+  // boot_ready payload (WorldHandle.grass_cell_size) so non-default sizes work.
+  grass_cell_size: number,
   wrap_world: boolean,
   highlightMap: Map<number, number>,
   // v2.0.3 Stream 2c: clipmap window metadata (mip level, origin, dims).
@@ -950,7 +950,7 @@ export function renderWorld(
   try {
     renderWorldImpl(
       gl, cam, viewW, viewH, creatures, grass, biomeWin, pop,
-      world_size, grass_dim, wrap_world, highlightMap, windowMeta,
+      world_size, grass_dim, grass_cell_size, wrap_world, highlightMap, windowMeta,
     );
   } finally {
     renderWorldSpan.close();
@@ -968,6 +968,7 @@ function renderWorldImpl(
   pop: number,
   world_size: number,
   grass_dim: number,
+  grass_cell_size: number,
   wrap_world: boolean,
   highlightMap: Map<number, number>,
   windowMeta: WindowMetadata | null,
@@ -1036,8 +1037,9 @@ function renderWorldImpl(
       biomeWin.subarray(0, winW * winH),
     );
 
-    // UV transform — identical formula to the grass path (GRASS_CELL_SIZE × 2^mip × BUDGET).
-    const cellSizeL = GRASS_CELL_SIZE * Math.pow(2, mipLevel);
+    // UV transform — identical formula to the grass path (grass_cell_size × 2^mip × BUDGET).
+    // v2.0.4 S2: uses the runtime cell size (not the legacy constant 5.0).
+    const cellSizeL = grass_cell_size * Math.pow(2, mipLevel);
     const uvScaleVal = world_size / (cellSizeL * GRASS_LOD_BUDGET_AXIS);
     const uvOffsetX = -winOriginX / GRASS_LOD_BUDGET_AXIS;
     const uvOffsetY = -winOriginY / GRASS_LOD_BUDGET_AXIS;
@@ -1103,14 +1105,15 @@ function renderWorldImpl(
       );
 
       // UV transform:
-      //   u_uv_scale  = world_size / (GRASS_CELL_SIZE * 2^mipLevel * BUDGET_AXIS)
+      //   u_uv_scale  = world_size / (grass_cell_size * 2^mipLevel * BUDGET_AXIS)
       //   u_uv_offset = -vec2(winOriginX, winOriginY) / BUDGET_AXIS
       // This maps a_corner ∈ [0,1] (world fraction) to the window sub-region
       // of the budget texture. At default scale (mip=0, origin=(0,0), win=1920):
-      //   scale = 9600 / (5 * 1 * 2048) = 0.9375  (= 1920/2048 = winW/BUDGET)
+      //   scale = 9600 / (5 * 1 * 4096) ≈ 0.469  (= 1920/4096 = winW/BUDGET)
       //   offset = (0,0)
-      // giving v_uv ∈ [0, 0.9375] — exactly the 1920 data pixels in 2048 texture.
-      const cellSizeL = GRASS_CELL_SIZE * Math.pow(2, mipLevel);
+      // giving v_uv ∈ [0, ≈0.469] — exactly the 1920 data pixels in 4096 texture.
+      // v2.0.4 S2: uses the runtime cell size (not the legacy constant 5.0).
+      const cellSizeL = grass_cell_size * Math.pow(2, mipLevel);
       const uvScaleVal = world_size / (cellSizeL * GRASS_LOD_BUDGET_AXIS);
       const uvOffsetX = -winOriginX / GRASS_LOD_BUDGET_AXIS;
       const uvOffsetY = -winOriginY / GRASS_LOD_BUDGET_AXIS;

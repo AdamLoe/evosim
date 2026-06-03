@@ -48,6 +48,8 @@ const CONSTRUCTION_ONLY_SLIDERS = new Set<string>([
   "starting_species_member_variance",
   // v2.0.4 S6: multi-band grass sight (changes NN layout → restart required).
   "grass_multisight",
+  // v2.0.4 S2: grass cell size (resizes grass_dim + snapshot slot → restart required).
+  "grass_size",
 ]);
 
 const TOAST_CONSTRUCTION =
@@ -119,6 +121,10 @@ export function getGrassMultisight(): boolean {
   const v = widgetReaders.get("grass_multisight")?.();
   if (v !== undefined) return v !== 0;
   return getSettings().grassMultisight;
+}
+// v2.0.4 S2: grass cell size accessor for the boot payload (construction-only).
+export function getGrassSize(): number {
+  return widgetReaders.get("grass_size")?.() ?? getSettings().grassSize;
 }
 
 // ─── Live widget state (drives currentSliderState) ────────────────────────
@@ -765,6 +771,18 @@ export function installDevPanel(getBridge: () => SimBridge): void {
     label: "Multi-band grass sight",
     simName: "grass_multisight",
     settingKey: "grassMultisight",
+    nextWorld: true,
+  }));
+  // v2.0.4 S2: grass cell size (construction-only — resizes grass_dim + snapshot).
+  // Larger cells ⇒ fewer cells ⇒ less grass_step work (cell count ∝ 1/size²).
+  // Default 5.0 (1920² at world 9600u). At 10u → 960², at 20u → 480².
+  // Restart-required: changes dims, capacity[], biome grid, snapshot slot.
+  grassSec.appendChild(makeStagedSlider({
+    label: "Grass cell size",
+    simName: "grass_size",
+    settingKey: "grassSize",
+    min: 5, max: 20, step: 1,
+    formatValue: (v) => `${Math.round(v)}u`,
     nextWorld: true,
   }));
   box.appendChild(grassSec);

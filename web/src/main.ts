@@ -390,6 +390,8 @@ async function main(): Promise<void> {
           pop,
           latestWorldSize,
           latestGrassDim,
+          // v2.0.4 S2: runtime grass cell size for UV transform.
+          latestGrassCellSize,
           latestWrapWorld,
           highlights,
           // v2.0.3 Stream 2c: pass latest window metadata for UV transform.
@@ -464,6 +466,8 @@ async function main(): Promise<void> {
         pop,
         latestWorldSize,
         latestGrassDim,
+        // v2.0.4 S2: runtime grass cell size for UV transform.
+        latestGrassCellSize,
         latestWrapWorld,
         highlights,
         // v2.0.3 Stream 2c: pass latest window metadata for UV transform.
@@ -495,6 +499,8 @@ async function main(): Promise<void> {
 
 let latestWorldSize = 0;
 let latestGrassDim = 0;
+// v2.0.4 S2: runtime grass cell size (default 5.0; non-default when grass_size slider is moved).
+let latestGrassCellSize = 5.0;
 // v2.0 Wave 1a: the numeric biome seed to construct the NEXT world with. The
 // status strip's reroll button and the Settings world_seed row write this;
 // boot reads it (0 ⇒ Rust picks + reports a fresh one, which we then capture
@@ -598,6 +604,8 @@ async function spawnSimWorker(seed: string): Promise<SimBridge> {
   snapshotView = new DataView(snapshotBuffer, snapshotBaseOffset, ready.snapshot_buf_byte_len);
   latestWorldSize = ready.world_size;
   latestGrassDim = ready.grass_dim;
+  // v2.0.4 S2: store the construction-time cell size so the renderer UV transform is correct.
+  latestGrassCellSize = ready.grass_cell_size;
   latestWrapWorld = ready.wrap_world;
   latestWorldSeed = ready.world_seed;
   // Reuse the resolved numeric seed on the next restart so the same biome

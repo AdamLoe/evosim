@@ -125,6 +125,8 @@ pub const SLIDER_NAMES: &[&str] = &[
                 //    nudge-within-budget: biasing finer than budget crops edges.
     // v2.0.4 S6: multi-band NN grass sight construction toggle.
     "grass_multisight", // 61 bool (0/non-zero) construction — multi-band grass NN sight
+    // v2.0.4 S2: grass cell size construction knob.
+    "grass_size", // 62 f32 (construction) — grass cell size in world-units (5–20u)
 ];
 
 /// First mutation-bucket slider slot. v2.0 Wave 3a (shifted from 24 to 30 after
@@ -537,11 +539,14 @@ impl WorldHandle {
         self.inner.dims.grass_dim as u32
     }
 
-    /// Grass cell size in world-units (5.0). Constant accessor; used by the
-    /// render layer for world→screen coordinate conversion.
+    /// Grass cell size in world-units. v2.0.4 S2: returns the construction-time
+    /// value (default 5.0; adjustable via the `grass_size` slider). Used by the
+    /// render layer for world→screen UV computation. Exposed in the boot_ready
+    /// payload so the renderer reads the correct cell size even at non-default
+    /// slider values.
     #[wasm_bindgen(getter)]
     pub fn grass_cell_size(&self) -> f32 {
-        GRASS_CELL_SIZE
+        self.inner.dims.grass_cell_size
     }
 
     // ─── v1.11 (A+D): wasm-memory snapshot writer ────────────────────────────
@@ -680,8 +685,11 @@ impl WorldHandle {
         //   WARNING: if lod_bias drives level below what the budget can hold,
         //   the window will clamp at GRASS_LOD_BUDGET_AXIS and crop edges.
         let world_size = self.inner.world_size();
+        // v2.0.4 S2: use the construction-time cell size (not the constant 5.0)
+        // so the LOD threshold is correct when grass_size != 5.0.
+        let cell_size = self.inner.dims.grass_cell_size;
         let safe_zoom = if cam_zoom > 0.0 { cam_zoom } else { 1.0 };
-        let visible_cell_span_x = (world_size / safe_zoom) / GRASS_CELL_SIZE;
+        let visible_cell_span_x = (world_size / safe_zoom) / cell_size;
         let level_f = (visible_cell_span_x / GRASS_LOD_BUDGET_AXIS as f32)
             .max(1.0)
             .log2()
@@ -723,8 +731,8 @@ impl WorldHandle {
 
         // Window origin: center on camera, clamped to level bounds.
         // Camera world coords → level-k cell coords.
-        let cam_cx_cells = (cam_cx / (GRASS_CELL_SIZE * scale)).floor() as isize;
-        let cam_cy_cells = (cam_cy / (GRASS_CELL_SIZE * scale)).floor() as isize;
+        let cam_cx_cells = (cam_cx / (cell_size * scale)).floor() as isize;
+        let cam_cy_cells = (cam_cy / (cell_size * scale)).floor() as isize;
         let half_w = (raw_win_w / 2) as isize;
         let half_h = (raw_win_h / 2) as isize;
         let ox = (cam_cx_cells - half_w).max(0) as usize;
@@ -1096,6 +1104,11 @@ impl WorldHandle {
     fn apply_grass_multisight(&mut self, value: bool) {
         self.inner.sliders.grass_multisight = value;
     }
+    /// v2.0.4 S2: construction-only grass cell size. Floored at 1.0 to prevent
+    /// a degenerate grid. The active world keeps its dims; only shapes next world.
+    fn apply_grass_cell_size(&mut self, value: f32) {
+        self.inner.sliders.grass_cell_size = value.max(1.0);
+    }
     /// Apply a dev-panel slider live by name. JS console workflow
     /// (BUILD-REPORT Known Issue #4). Returns `Err` on unknown name so a
     /// console typo is visible instead of silently ignored.
@@ -1190,6 +1203,8 @@ impl WorldHandle {
             60 => self.apply_lod_bias(value),
             // v2.0.4 S6: multi-band grass sight construction toggle (index 61).
             61 => self.apply_grass_multisight(value != 0.0),
+            // v2.0.4 S2: grass cell size construction knob (index 62).
+            62 => self.apply_grass_cell_size(value),
             _ => {} // out-of-range: silently ignore (forward-compat with newer TS).
         }
     }
@@ -1447,6 +1462,8 @@ impl WorldHandle {
             "grass_spread_amount": d.grass_spread_amount,
             "grass_spread_ring1_pct": d.grass_spread_ring1_pct,
             "grass_spread_ring2_pct": d.grass_spread_ring2_pct,
+            // v2.0.4 S2: grass cell size construction knob. Default 5.0.
+            "grass_size": d.grass_cell_size,
         });
         // v1.12: 8 mutation buckets × 3 fields. Names match SLIDER_NAMES.
         let obj = json.as_object_mut().expect("json! produced an object");

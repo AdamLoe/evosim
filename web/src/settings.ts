@@ -34,7 +34,9 @@ const SCHEMA_MAJOR = 2;
 // with default 0.0 → MINOR bump 3 → 4. Existing v2 blobs keep their values.
 // v2.0.4 S6: added `grassMultisight` construction toggle (same MINOR bump 3 → 4).
 // Existing v2 blobs keep their values and pick up the new key from DEFAULTS.
-const SCHEMA_MINOR = 4;
+// v2.0.4 S2: added `grassSize` construction knob (cell size, default 5.0) →
+// MINOR bump 4 → 5. Existing v2 blobs keep their values.
+const SCHEMA_MINOR = 5;
 
 /** v1.12: one row of the 8-row mutation policy table. Mirrors the Rust
  * `Bucket` struct (`src/brain.rs`). `weight` is any non-negative float;
@@ -182,6 +184,12 @@ export interface Settings {
   // (16 grass NN inputs); OFF = near band only (8 inputs, legacy). Default ON.
   // Must match Rust GRASS_MULTISIGHT_DEFAULT (true).
   grassMultisight: boolean;
+  // v2.0.4 S2: construction-only grass cell size in world-units. Larger cells
+  // → fewer cells → less grass_step work (cell count ∝ 1/size²). Restart-
+  // required (resizes grass_dim, capacity[], biome grid, snapshot slot).
+  // Default 5.0 (= Rust GRASS_CELL_SIZE_DEFAULT). Valid range: 5–20u.
+  // Must match Rust GRASS_CELL_SIZE_DEFAULT (5.0).
+  grassSize: number;
 }
 
 export const DEFAULTS: Settings = {
@@ -257,6 +265,8 @@ export const DEFAULTS: Settings = {
   lodBias: 0.0,
   // v2.0.4 S6: multi-band grass sight. Must match Rust GRASS_MULTISIGHT_DEFAULT (true).
   grassMultisight: true,
+  // v2.0.4 S2: grass cell size. Must match Rust GRASS_CELL_SIZE_DEFAULT (5.0).
+  grassSize: 5.0,
 };
 
 const KNOWN_KEYS = new Set<string>(Object.keys(DEFAULTS));

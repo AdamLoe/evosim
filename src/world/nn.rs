@@ -25,6 +25,10 @@ pub(crate) struct BiomeSampler<'a> {
     wrap: bool,
     water_penalty: f32,
     desert_penalty: f32,
+    /// v2.0.4 S2: grass cell size at construction (default 5.0). Used by
+    /// `penalty_at` to convert world coords to cell indices correctly when
+    /// a non-default cell size was chosen.
+    grass_cell_size: f32,
 }
 
 impl<'a> BiomeSampler<'a> {
@@ -35,6 +39,7 @@ impl<'a> BiomeSampler<'a> {
         wrap: bool,
         water_penalty: f32,
         desert_penalty: f32,
+        grass_cell_size: f32,
     ) -> Self {
         Self {
             grid,
@@ -43,6 +48,7 @@ impl<'a> BiomeSampler<'a> {
             wrap,
             water_penalty,
             desert_penalty,
+            grass_cell_size,
         }
     }
 
@@ -62,13 +68,14 @@ impl<'a> BiomeSampler<'a> {
     ) -> f32 {
         let dim = self.grass_dim;
         let ws = self.world_size;
+        let cs = self.grass_cell_size;
         let (px, py) = if self.wrap {
             (x.rem_euclid(ws), y.rem_euclid(ws))
         } else {
             (x.clamp(0.0, ws), y.clamp(0.0, ws))
         };
-        let ix = ((px / GRASS_CELL_SIZE) as usize).min(dim - 1);
-        let iy = ((py / GRASS_CELL_SIZE) as usize).min(dim - 1);
+        let ix = ((px / cs) as usize).min(dim - 1);
+        let iy = ((py / cs) as usize).min(dim - 1);
         let p = match biome_from_u8(self.grid[iy * dim + ix]) {
             Biome::Plains => return 0.0,
             Biome::Water => self.water_penalty * (1.0 - water_affinity),
@@ -124,6 +131,7 @@ impl World {
                     self.dims.wrap_world,
                     self.sliders.water_movement_penalty,
                     self.sliders.desert_movement_penalty,
+                    self.dims.grass_cell_size,
                 );
                 let stats_ref = std::sync::Arc::clone(&self.nn_stats);
 
@@ -246,6 +254,7 @@ impl World {
                 self.dims.wrap_world,
                 self.sliders.water_movement_penalty,
                 self.sliders.desert_movement_penalty,
+                self.dims.grass_cell_size,
             );
             for &(lo, hi) in ranges {
                 let mut input_buf = [0.0f32; MAX_NN_INPUTS];
@@ -870,7 +879,7 @@ pub(crate) fn build_nn_input(
     let wa = creatures.genome[i].water_affinity;
     let ht = creatures.genome[i].heat_tolerance;
     if let Some(o) = layout.offset_of(NnInputGroup::BiomeDir) {
-        let step = GRASS_CELL_SIZE;
+        let step = biome.grass_cell_size;
         buf[o] = biome.penalty_at(x, y - step, wa, ht); // N
         buf[o + 1] = biome.penalty_at(x, y + step, wa, ht); // S
         buf[o + 2] = biome.penalty_at(x + step, y, wa, ht); // E
@@ -1168,6 +1177,7 @@ mod tests {
             w.dims.wrap_world,
             w.sliders.water_movement_penalty,
             w.sliders.desert_movement_penalty,
+            w.dims.grass_cell_size,
         );
         build_nn_input(
             0,

@@ -28,6 +28,7 @@ const DIMS: WorldDims = WorldDims {
     grass_dim: 128,
     grass_cell_count: 128 * 128,
     hash_dim: 64,
+    grass_cell_size: 5.0,
 };
 
 const WORLD_SEED: u32 = 0xFE57_1234;

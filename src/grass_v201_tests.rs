@@ -11,7 +11,7 @@
 //! below should be tightened to the u16 LSB tolerance.
 
 use super::*;
-use crate::constants::WorldDims;
+use crate::constants::{WorldDims, GRASS_CELL_SIZE};
 use crate::rng::SimRng;
 
 // Grids are kept small so the debug-mode full-grid reference scan in the
@@ -24,6 +24,7 @@ const DIMS_WRAP: WorldDims = WorldDims {
     grass_dim: 128,
     grass_cell_count: 128 * 128,
     hash_dim: 64,
+    grass_cell_size: 5.0,
 };
 
 // WALLED grid for boundary-sensitive equivalence checks. 128² = 4×4 tiles.
@@ -33,6 +34,7 @@ const DIMS_WALLED: WorldDims = WorldDims {
     grass_dim: 128,
     grass_cell_count: 128 * 128,
     hash_dim: 64,
+    grass_cell_size: 5.0,
 };
 
 fn make_grid(dims: WorldDims) -> GrassGrid {

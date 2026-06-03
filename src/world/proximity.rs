@@ -358,7 +358,8 @@ pub(crate) fn compute_grass_density_sectors(
     *out = [0.0f32; 8];
     let range = GRASS_PROXIMITY_RANGE;
     let range2 = range * range;
-    let cell = GRASS_CELL_SIZE;
+    // v2.0.4 S2: use the construction-time cell size from dims.
+    let cell = grass.dims.grass_cell_size;
     let inv_cell = 1.0 / cell;
     let cell_area = cell * cell;
     let dim = grass.dims.grass_dim as i32;

@@ -213,6 +213,7 @@ mod tests {
         grass_dim: 240,
         grass_cell_count: 240 * 240,
         hash_dim: 120,
+        grass_cell_size: 5.0,
     };
     const HASH_DIM: usize = TEST_DIMS.hash_dim;
     const WORLD_SIZE: f32 = TEST_DIMS.world_size;

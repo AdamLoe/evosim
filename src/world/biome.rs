@@ -21,7 +21,6 @@
 
 use crate::constants::{
     Biome, WorldDims, GRASS_CAPACITY_DESERT, GRASS_CAPACITY_PLAINS, GRASS_CAPACITY_WATER,
-    GRASS_CELL_SIZE,
 };
 
 /// Independent SplitMix64 PRNG, seeded from `world_seed`. Deliberately NOT the
@@ -136,12 +135,14 @@ pub(crate) fn generate_biome_grid(world_seed: u32, dims: &WorldDims) -> Vec<u8> 
     let desert = scatter_blobs(&mut rng, n_desert, world_size);
 
     let mut grid = vec![Biome::Plains as u8; dims.grass_cell_count];
-    let half = GRASS_CELL_SIZE * 0.5;
+    // v2.0.4 S2: use the construction-time cell size from dims.
+    let cs = dims.grass_cell_size;
+    let half = cs * 0.5;
     for iy in 0..grass_dim {
-        let cy = iy as f32 * GRASS_CELL_SIZE + half;
+        let cy = iy as f32 * cs + half;
         let row = iy * grass_dim;
         for ix in 0..grass_dim {
-            let cx = ix as f32 * GRASS_CELL_SIZE + half;
+            let cx = ix as f32 * cs + half;
             // Water wins overlaps; check water first.
             let in_water = water
                 .iter()
@@ -175,8 +176,10 @@ pub(crate) fn biome_at_pos(biome_grid: &[u8], dims: &WorldDims, x: f32, y: f32) 
     } else {
         (x.clamp(0.0, ws), y.clamp(0.0, ws))
     };
-    let ix = ((px / GRASS_CELL_SIZE) as usize).min(dim - 1);
-    let iy = ((py / GRASS_CELL_SIZE) as usize).min(dim - 1);
+    // v2.0.4 S2: use the construction-time cell size from dims.
+    let cs = dims.grass_cell_size;
+    let ix = ((px / cs) as usize).min(dim - 1);
+    let iy = ((py / cs) as usize).min(dim - 1);
     biome_from_u8(biome_grid[iy * dim + ix])
 }
 

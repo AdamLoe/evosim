@@ -191,8 +191,19 @@ pub const MAX_CHUNKS: usize = 16;
 // grid at 1920² (vs a ruinous 7680² at the old 1.25u). Sim-internal grass density
 // stays f32 (dynamics unchanged); only the *snapshot* grass region quantizes to
 // u8 (one byte per cell) — see `wasm_api.rs`.
-/// Grass cell size in world-units.
+//
+// v2.0.4 S2: `grass_cell_size` is now a CONSTRUCTION-ONLY slider (default 5.0).
+// Larger cells → fewer cells → less grass_step work (cell count ∝ 1/size²).
+// The active value lives on `DevSliders.grass_cell_size` and is read at world
+// construction via `WorldDims::from_world_size_with_cell_size`. This constant
+// is kept as the default/fallback value so existing call sites (tests, default
+// constructors) remain unchanged. Do NOT use it at live grass-dim read sites;
+// read `world.dims.grass_cell_size` instead.
+/// Default grass cell size in world-units. v2.0.4 S2: still the default; the
+/// runtime value is `DevSliders.grass_cell_size` → `WorldDims.grass_cell_size`.
 pub const GRASS_CELL_SIZE: f32 = 5.0;
+/// Default for the `grass_cell_size` construction slider. Matches `GRASS_CELL_SIZE`.
+pub const GRASS_CELL_SIZE_DEFAULT: f32 = GRASS_CELL_SIZE;
 /// Maximum density per cell (clamped post-step).
 pub const GRASS_MAX: f32 = 1.0;
 /// v2.0.3 Stream 2a: maximum number of pyramid levels (L0 alias + owned L1+
@@ -540,28 +551,47 @@ pub const CROSSOVER_MODE_DEFAULT: CrossoverMode = CrossoverMode::FiftyFifty;
 /// on `World`, `GrassGrid`, and `SpatialGrid` so every bounds/clamp/wrap/spawn
 /// site reads the same derived dims. The snapshot grass region (u8) and the
 /// `biomeSab` (u8) are both sized from `grass_cell_count`.
+///
+/// v2.0.4 S2: `grass_cell_size` added. The construction slider default is
+/// `GRASS_CELL_SIZE_DEFAULT` (5.0); the LOD computation in `wasm_api.rs` and
+/// `biome_cell_index` in `world/mod.rs` both read this field so they honour
+/// whatever cell size was chosen at construction.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WorldDims {
     /// World extent in world-units (square world, `[0, world_size]`).
     pub world_size: f32,
     /// Whether the world is toroidal (wrap) or walled (clamp).
     pub wrap_world: bool,
-    /// Grass cells per axis: `round(world_size / GRASS_CELL_SIZE)`.
+    /// Grass cells per axis: `round(world_size / grass_cell_size)`.
     pub grass_dim: usize,
     /// Total grass cells: `grass_dim²`.
     pub grass_cell_count: usize,
     /// Spatial-hash cells per axis: `ceil(world_size / HASH_CELL)`.
     pub hash_dim: usize,
+    /// Grass cell size in world-units used at construction. Default
+    /// `GRASS_CELL_SIZE_DEFAULT` (5.0); adjustable via the `grass_size` slider.
+    /// Stored so the LOD computation and biome-cell lookup use the correct value
+    /// throughout the world's lifetime.
+    pub grass_cell_size: f32,
 }
 
 impl WorldDims {
-    /// Compute runtime dims from a world size + wrap flag. Clamps `world_size`
-    /// to a sane floor so a degenerate construction setting can't produce a
-    /// zero-dim grid.
+    /// Compute runtime dims from a world size + wrap flag, using the default
+    /// `GRASS_CELL_SIZE` (5.0). All existing test/default-construction call
+    /// sites use this overload. Clamps `world_size` to a sane floor so a
+    /// degenerate construction setting can't produce a zero-dim grid.
     pub fn from_world_size(world_size: f32, wrap_world: bool) -> Self {
-        // Floor at one grass cell + one hash cell so dims are always ≥ 1.
-        let ws = world_size.max(GRASS_CELL_SIZE.max(HASH_CELL));
-        let grass_dim = (ws / GRASS_CELL_SIZE).round() as usize;
+        Self::from_world_size_with_cell_size(world_size, wrap_world, GRASS_CELL_SIZE)
+    }
+
+    /// Compute runtime dims with an explicit grass cell size. Used by the
+    /// `grass_size` construction slider path. `cell_size` is floored at 1.0 to
+    /// prevent a zero or negative cell size from producing a degenerate grid.
+    pub fn from_world_size_with_cell_size(world_size: f32, wrap_world: bool, cell_size: f32) -> Self {
+        let cs = cell_size.max(1.0);
+        // Floor world_size at one grass cell + one hash cell so dims are always ≥ 1.
+        let ws = world_size.max(cs.max(HASH_CELL));
+        let grass_dim = (ws / cs).round() as usize;
         let grass_dim = grass_dim.max(1);
         let grass_cell_count = grass_dim * grass_dim;
         let hash_dim = (ws / HASH_CELL).ceil() as usize;
@@ -572,6 +602,7 @@ impl WorldDims {
             grass_dim,
             grass_cell_count,
             hash_dim,
+            grass_cell_size: cs,
         }
     }
 }
