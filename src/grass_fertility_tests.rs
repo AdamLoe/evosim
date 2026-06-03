@@ -67,6 +67,7 @@ fn total_bytes(g: &GrassGrid) -> u64 {
 /// PROBABILITY (always fires). Seed two isolated cells:
 ///   - "full" cell at GRASS_MAX (byte 255)
 ///   - "low" cell at 1/8 of GRASS_MAX (byte ~32)
+///
 /// Both surrounded by empty cells. After ONE tick, the target cells they
 /// spread into should have add bytes proportional to their source density.
 ///

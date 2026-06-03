@@ -1,8 +1,8 @@
-/// v2.0.4 S1: unit tests for the LOD level formula, lod_bias knob, and
-/// aspect-ratio fix.
-///
-/// These tests exercise the math used in `write_snapshot` without constructing
-/// a full wasm runtime — they call the same formula directly.
+// v2.0.4 S1: unit tests for the LOD level formula, lod_bias knob, and
+// aspect-ratio fix.
+//
+// These tests exercise the math used in `write_snapshot` without constructing
+// a full wasm runtime — they call the same formula directly.
 
 #[cfg(test)]
 mod tests {

@@ -351,6 +351,7 @@ fn variant_freeze_alloc_instr(
 }
 
 /// VARIANT 3 — freeze + alloc + instr + 4 hashes per grassy cell (production RNG).
+#[allow(clippy::too_many_arguments)]
 fn variant_rng_4hash(
     density: &[AtomicU8],
     tiles: &[(usize, usize, usize, usize, usize)],
@@ -402,6 +403,7 @@ fn variant_rng_4hash(
 
 /// VARIANT 4 — freeze + alloc + instr + 1 hash bit-sliced into 4 (fused RNG, C3 candidate).
 /// One grass_hash_u64 call; extract four 16-bit sub-words as uniform [0,1) draws.
+#[allow(clippy::too_many_arguments)]
 fn variant_rng_1hash(
     density: &[AtomicU8],
     tiles: &[(usize, usize, usize, usize, usize)],
@@ -459,6 +461,7 @@ fn variant_rng_1hash(
 /// VARIANT 5 — freeze + alloc + instr + 4 hashes + RMW (scatter_add/scatter_sub).
 /// Includes the actual RMW atomics on the density field. No spread-target resolution
 /// (skips the disc sample and tile activation) — isolates RMW cost increment.
+#[allow(clippy::too_many_arguments)]
 fn variant_rng_4hash_rmw(
     density: &[AtomicU8],
     tiles: &[(usize, usize, usize, usize, usize)],
@@ -519,6 +522,7 @@ fn variant_rng_4hash_rmw(
 /// Uses a Geometric(spread_pct) gap to skip non-spreading cells.
 /// Decay is still per-cell; only the spread gate is replaced by skip.
 /// Compares against variant_rng_4hash to isolate the skip benefit.
+#[allow(clippy::too_many_arguments)]
 fn variant_geom_skip(
     density: &[AtomicU8],
     tiles: &[(usize, usize, usize, usize, usize)],
@@ -603,6 +607,7 @@ fn variant_geom_skip(
 // AtomicU64::fetch_add on shared counters contend across cores, revealing the
 // false-sharing cost that is invisible to the sequential variants above.
 
+#[allow(clippy::too_many_arguments)]
 fn variant_rng_4hash_par(
     density: &[AtomicU8],
     tiles: &[(usize, usize, usize, usize, usize)],

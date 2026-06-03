@@ -87,9 +87,9 @@ fn render_lod_constants() -> String {
     out.push_str("//\n");
     out.push_str("// LOD constants shared between the sim worker (Rust) and renderer (TS).\n");
     out.push_str("// Single source: Rust → gen-bindings → this file → TS consumers.\n\n");
-    out.push_str(&format!(
-        "/** v2.0.4 S1: clipmap budget axis in cells. The worker publishes at most\n"
-    ));
+    out.push_str(
+        "/** v2.0.4 S1: clipmap budget axis in cells. The worker publishes at most\n",
+    );
     out.push_str(" * `GRASS_LOD_BUDGET_AXIS × GRASS_LOD_BUDGET_AXIS` grass bytes per slot.\n");
     out.push_str(" * Both the LOD switch threshold AND the window/texture clamp ceiling.\n");
     out.push_str(" * Raising it pushes downsampling later and allows a bigger window\n");

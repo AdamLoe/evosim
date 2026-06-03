@@ -60,7 +60,7 @@ fn far_band_wrap_near_seam_no_panic() {
     compute_grass_far_band_sectors(5.0, 5.0, &grass, &mut out);
     for (s, &v) in out.iter().enumerate() {
         assert!(
-            v >= 0.0 && v <= 1.0,
+            (0.0..=1.0).contains(&v),
             "sector {s} = {v} out of [0,1] in wrap-near-seam test"
         );
     }
@@ -78,7 +78,7 @@ fn far_band_walled_clamp_negative_y() {
     compute_grass_far_band_sectors(10.0, 10.0, &grass, &mut out);
     for (s, &v) in out.iter().enumerate() {
         assert!(
-            v >= 0.0 && v <= 1.0,
+            (0.0..=1.0).contains(&v),
             "sector {s} = {v} out of [0,1] in walled-clamp test"
         );
     }
@@ -243,7 +243,7 @@ fn far_band_outputs_always_bounded() {
         compute_grass_far_band_sectors(ws / 2.0, ws / 2.0, &grass, &mut out);
         for (s, &v) in out.iter().enumerate() {
             assert!(
-                v >= 0.0 && v <= 1.0,
+                (0.0..=1.0).contains(&v),
                 "fill={fill}: sector {s} = {v} out of [0,1]"
             );
         }
@@ -278,10 +278,7 @@ fn walled_species_multisight_falls_back_to_single_band() {
 
 #[test]
 fn grass_multisight_default_is_on() {
-    assert!(
-        GRASS_MULTISIGHT_DEFAULT,
-        "GRASS_MULTISIGHT_DEFAULT must be true"
-    );
+    const { assert!(GRASS_MULTISIGHT_DEFAULT, "GRASS_MULTISIGHT_DEFAULT must be true") }
 }
 
 /// The default World construction (wrap=true, species=false, multisight=true)
