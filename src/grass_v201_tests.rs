@@ -69,6 +69,8 @@ fn make_grid(dims: WorldDims) -> GrassGrid {
         row_body_calls: AtomicU64::new(0),
         dispatch_calls: AtomicU64::new(0),
         pyramid: GrassPyramid::new(dims.grass_dim),
+        // v2.0.4 C2: profiling gate — off by default.
+        profile_scatter: false,
     }
 }
 
