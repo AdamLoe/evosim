@@ -19,7 +19,11 @@ fn creature_region_size_unchanged() {
         MAX_POP_FOR_SIM * 32,
         "creature region size must stay MAX_POP_FOR_SIM × 32"
     );
-    assert_eq!(SNAPSHOT_HEADER_BYTES, 32, "header bytes unchanged");
+    // v2.0.3 Stream 2b: header bumped 32 → 64 (adds 32 bytes of window metadata).
+    assert_eq!(
+        SNAPSHOT_HEADER_BYTES, 64,
+        "header bumped to 64 (window metadata)"
+    );
 }
 
 /// New lane offsets: x@0, y@4, radius@8, color_u32@12, id_lo@16, id_hi@20,

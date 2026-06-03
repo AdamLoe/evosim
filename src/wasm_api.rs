@@ -112,6 +112,14 @@ pub const SLIDER_NAMES: &[&str] = &[
     "bucket_7_weight",
     "bucket_7_rate",
     "bucket_7_sigma", // 51..54
+    // v2.0.2 Stream 1d: scatter kernel live-tuning sliders. APPEND-ONLY —
+    // existing indices must stay stable (1e reads slider idx 8 by index).
+    "grass_decay_pct",        // 54 f32 — decay probability per tick
+    "grass_decay_amount",     // 55 f32 — density subtracted on decay
+    "grass_spread_pct",       // 56 f32 — spread probability per tick
+    "grass_spread_amount",    // 57 f32 — density added to spread target
+    "grass_spread_ring1_pct", // 58 f32 — ring-1 disc-band weight
+    "grass_spread_ring2_pct", // 59 f32 — ring-2 disc-band weight
 ];
 
 /// First mutation-bucket slider slot. v2.0 Wave 3a (shifted from 24 to 30 after
@@ -142,48 +150,94 @@ pub const SLIDER_COUNT: usize = SLIDER_NAMES.len();
 // same size.
 
 /// Bytes per snapshot stats header (matches `SNAPSHOT_HEADER_BYTES` TS-side).
-/// 20 bytes payload + 12 bytes padding so the creature SoA that follows is
-/// 32-byte aligned (creature stride is 32 bytes).
-pub const SNAPSHOT_HEADER_BYTES: usize = 32;
+/// v2.0.3 Stream 2b: bumped 32 → 64 to add 32 bytes of window-metadata fields
+/// (8 × u32 LE) while keeping the creature SoA 32-byte aligned.
+///
+/// Full layout (all LE):
+///   off  0: `tick`         u32
+///   off  4: `pop`          u32
+///   off  8: `world_ended`  u32 (0/1)
+///   off 12: `tps_bits`     u32 (= f32::to_bits(tps))
+///   off 16: `jank_count`   u32
+///   off 20..32: reserved / padding (unchanged)
+///   off 32: `mip_level`    u32  — pyramid LOD level used (0 = full-res)
+///   off 36: `win_origin_x` u32  — window origin X in level-k cells
+///   off 40: `win_origin_y` u32  — window origin Y in level-k cells
+///   off 44: `win_w`        u32  — window width  in level-k cells
+///   off 48: `win_h`        u32  — window height in level-k cells
+///   off 52: `tex_dim_w`    u32  — texture upload width  (= win_w for now)
+///   off 56: `tex_dim_h`    u32  — texture upload height (= win_h for now)
+///   off 60: `wrap_mode`    u32  — 0 = clamp (walled), 1 = wrap (torus)
+pub const SNAPSHOT_HEADER_BYTES: usize = 64;
 /// Bytes per creature record in the snapshot SoA (matches CREATURE_STRIDE × 4).
 pub const SNAPSHOT_CREATURE_STRIDE: usize = 32;
 /// Total creature SoA region size per slot. UNCHANGED in v2.0 (world-size
 /// independent — sized by `MAX_POP_FOR_SIM`).
 pub const SNAPSHOT_CREATURE_BYTES: usize = MAX_POP_FOR_SIM * SNAPSHOT_CREATURE_STRIDE;
 
+/// v2.0.3 Stream 2b: clipmap budget axis in cells. The worker publishes at most
+/// `GRASS_LOD_BUDGET_AXIS × GRASS_LOD_BUDGET_AXIS` grass bytes per slot.
+/// At the default grass_dim = 1920 (< 2048) this equals the full field.
+pub const GRASS_LOD_BUDGET_AXIS: usize = 2048;
+
+/// v2.0.3 Stream 2b: pan margin factor. The published window covers the
+/// visible viewport × GRASS_LOD_MARGIN_FACTOR (centered). A full-viewport pan
+/// in any direction stays covered for ≥ 1 tick without a new window.
+pub const GRASS_LOD_MARGIN_FACTOR: f32 = 1.5;
+
 /// Computed snapshot region sizes for a given grass cell count. v2.0 Wave 1a:
-/// the grass region is `grass_cell_count` BYTES (u8 per cell, quantized on
-/// write), so the per-slot/buf totals are runtime values, not constants.
+/// the grass region is runtime-sized from `grass_cell_count`; v2.0.3 Stream 2b:
+/// the region is now bounded by `GRASS_LOD_BUDGET_AXIS²` (clipmap budget).
+/// v2.0.3 Stream 2d: the slot now also carries a mode-downsampled biome window
+/// of the same size as the grass window (appended after grass).
 #[derive(Clone, Copy, Debug)]
 struct SnapshotLayout {
-    /// u8 grass region size per slot = grass_cell_count bytes.
+    /// u8 grass region size per slot = min(grass_dim, budget_axis)² bytes.
+    /// This is the allocation size; only `win_w * win_h` bytes are meaningful
+    /// per slot (read from the window metadata in the header).
     grass_bytes: usize,
-    /// header + creatures + grass.
+    /// v2.0.3 Stream 2d: u8 biome window region per slot = same max-allocation
+    /// as grass_bytes (min(grass_dim, budget_axis)²). The actual written bytes
+    /// are `win_w * win_h` matching the grass window, mode-downsampled.
+    biome_win_bytes: usize,
+    /// header + creatures + grass + biome_win.
     slot_bytes: usize,
     /// two double-buffered slots.
     buf_bytes: usize,
     /// biomeSab size = grass_cell_count bytes (u8 per cell).
     biome_bytes: usize,
+    /// The full grass_dim (cells per axis), for window-compute reference.
+    grass_dim: usize,
 }
 
 impl SnapshotLayout {
     fn from_grass_cell_count(grass_cell_count: usize) -> Self {
-        // u8 grass: one byte per cell. The biomeSab mirrors the same cell count.
-        let grass_bytes = grass_cell_count;
-        let slot_bytes = SNAPSHOT_HEADER_BYTES + SNAPSHOT_CREATURE_BYTES + grass_bytes;
-        let buf_bytes = 2 * slot_bytes;
-        // Computed-dims-equality safety model: the grass region and the biomeSab
-        // are both derived from the same `grass_cell_count`, so they must agree.
-        let biome_bytes = grass_cell_count;
+        // grass_dim = sqrt(grass_cell_count) (square grid).
+        let grass_dim = (grass_cell_count as f64).sqrt() as usize;
         debug_assert_eq!(
-            grass_bytes, biome_bytes,
-            "snapshot grass region (u8) and biomeSab must both equal grass_cell_count bytes"
+            grass_dim * grass_dim,
+            grass_cell_count,
+            "grass must be square"
         );
+        // Grass window budget: min(grass_dim, budget_axis)².
+        // At default scale (1920 < 2048) this equals grass_cell_count.
+        let win_axis = grass_dim.min(GRASS_LOD_BUDGET_AXIS);
+        let grass_bytes = win_axis * win_axis;
+        // v2.0.3 Stream 2d: biome window allocation = same max size as grass window.
+        let biome_win_bytes = grass_bytes;
+        let slot_bytes =
+            SNAPSHOT_HEADER_BYTES + SNAPSHOT_CREATURE_BYTES + grass_bytes + biome_win_bytes;
+        let buf_bytes = 2 * slot_bytes;
+        // biomeSab mirrors the full grass_cell_count (unchanged — biome is always
+        // the full field; windowed biome is a 2d concern).
+        let biome_bytes = grass_cell_count;
         Self {
             grass_bytes,
+            biome_win_bytes,
             slot_bytes,
             buf_bytes,
             biome_bytes,
+            grass_dim,
         }
     }
 }
@@ -516,6 +570,14 @@ impl WorldHandle {
         self.snapshot_layout.grass_bytes as u32
     }
 
+    /// v2.0.3 Stream 2d: bytes per biome window region per slot.
+    /// = min(grass_dim, budget_axis)² — same allocation budget as grass_bytes.
+    /// The actual written bytes are win_w × win_h per tick (from window metadata).
+    #[wasm_bindgen(getter)]
+    pub fn snapshot_biome_win_bytes(&self) -> u32 {
+        self.snapshot_layout.biome_win_bytes as u32
+    }
+
     // ─── v2.0 Wave 1a: dedicated biome SAB ───────────────────────────────────
 
     /// Byte offset of the biome buffer (one u8 `Biome` per grass cell) inside
@@ -533,22 +595,40 @@ impl WorldHandle {
         self.snapshot_layout.biome_bytes as u32
     }
 
-    /// Write a full snapshot (stats header + creature SoA + f32 grass) into
-    /// the requested slot of `self.snapshot_buf` (which lives in wasm linear
+    /// Write a full snapshot (stats header + creature SoA + clipmap grass window)
+    /// into the requested slot of `self.snapshot_buf` (which lives in wasm linear
     /// memory). No JS-side `Uint8Array` parameters — main reads the same
     /// region via a view over `wasm.memory.buffer`. The atomic flip + seq
     /// bump on the control SAB remain the worker's responsibility.
     ///
+    /// v2.0.3 Stream 2b: the camera parameters (`cam_cx`, `cam_cy`, `cam_zoom`,
+    /// `viewport_w`, `viewport_h`) are supplied by the worker (read from the
+    /// camera SAB lanes). The function computes the LOD level and clipmap window
+    /// from these values, fills `grass_region` via `pyramid.viewport_window`, and
+    /// writes the window metadata into header bytes [32..64).
+    ///
     /// Layout per slot (little-endian throughout):
-    ///   `[0..20)`   tick, pop, world_ended, tps_bits, jank_count   (u32 each)
-    ///   `[20..32)`  padding (32-byte align for creature SoA)
-    ///   `[32..32 + MAX_POP_FOR_SIM × 32)` creature SoA, 32 B stride. v2.0 Wave
-    ///     2a lane order (8 lanes): x, y, radius, color_u32, id_lo, id_hi,
-    ///     packed_u32, (pad). See `fill_creature_bytes` / `genome_color_u32` /
-    ///     `pack_render_u32` for the packed-field bit layouts.
-    ///   `[trailing grass_cell_count bytes)` u8 quantized grass density
+    ///   `[0..20)`    tick, pop, world_ended, tps_bits, jank_count (u32 each)
+    ///   `[20..32)`   padding (unchanged; 32-byte align for creature SoA)
+    ///   `[32..64)`   window metadata (8 × u32 LE): mip_level, win_origin_x,
+    ///                win_origin_y, win_w, win_h, tex_dim_w, tex_dim_h, wrap_mode
+    ///   `[64..64+SNAPSHOT_CREATURE_BYTES)` creature SoA, 32 B stride
+    ///   `[grass region: min(grass_dim,2048)² bytes]` clipmap window grass bytes
+    ///   `[biome window: min(grass_dim,2048)² bytes]` mode-downsampled biome tags
+    ///
+    /// v2.0.3 Stream 2d: the biome window immediately follows the grass region.
+    /// It holds the same win_w × win_h bytes mode-downsampled from the static
+    /// level-0 biome grid. UV transform is identical to the grass channel.
     #[wasm_bindgen]
-    pub fn write_snapshot(&mut self, slot: u32) {
+    pub fn write_snapshot(
+        &mut self,
+        slot: u32,
+        cam_cx: f32,
+        cam_cy: f32,
+        cam_zoom: f32,
+        viewport_w: u32,
+        viewport_h: u32,
+    ) {
         let profile_on = self.inner.profile.enabled();
         let snap_start = if profile_on {
             Some(crate::profiler::clock_now_us_threadsafe())
@@ -558,8 +638,83 @@ impl WorldHandle {
 
         let slot_bytes = self.snapshot_layout.slot_bytes;
         let grass_bytes = self.snapshot_layout.grass_bytes;
+        let grass_dim = self.snapshot_layout.grass_dim;
         let slot_idx = (slot as usize) & 1;
         let slot_base = slot_idx * slot_bytes;
+
+        // ── v2.0.3 Stream 2b: Compute clipmap window from camera params ─────
+        //
+        // LOD formula: level = floor(log2(max(1.0, visible_cell_span / budget_axis)))
+        //   clamped to [0, max_level].
+        // visible_cell_span = (world_size / cam_zoom) / GRASS_CELL_SIZE
+        //
+        // Default scale (world_size=9600, zoom=1.0, GRASS_CELL_SIZE=5.0):
+        //   visible_cell_span = (9600 / 1.0) / 5.0 = 1920
+        //   ratio = 1920 / 2048 ≈ 0.9375  (< 1.0)
+        //   .max(1.0) clamps ratio to 1.0 before log2 → log2(1.0) = 0 → floor(0) = 0
+        //   → full field, byte-identical to pre-2b output.
+        //   (Without the .max(1.0) pre-clamp, log2(0.9375) = -0.09 and floor would
+        //   give -1, not 0 — the pre-clamp is what keeps level=0 at default scale.)
+        let world_size = self.inner.world_size();
+        let safe_zoom = if cam_zoom > 0.0 { cam_zoom } else { 1.0 };
+        let visible_cell_span = (world_size / safe_zoom) / GRASS_CELL_SIZE;
+        let level_f = (visible_cell_span / GRASS_LOD_BUDGET_AXIS as f32)
+            .max(1.0)
+            .log2()
+            .floor();
+        let max_level = self.inner.grass.pyramid.num_levels().saturating_sub(1);
+        let mip_level = (level_f as usize).min(max_level);
+
+        // Level dims at chosen mip level.
+        let (level_w, level_h) = self.inner.grass.pyramid.level_dim(mip_level);
+
+        // Visible region in level-k cells (derived from viewport + zoom + mip scale).
+        // At level k, each cell represents 2^k base cells, so the visible span in
+        // level-k cells is visible_cell_span / 2^k.
+        let scale = (1usize << mip_level) as f32;
+        let vis_cells_x = (visible_cell_span / scale).ceil() as usize;
+        let vis_cells_y = vis_cells_x; // square viewport approximation; margin below
+
+        // Window = viewport × GRASS_LOD_MARGIN_FACTOR, clamped to level bounds.
+        // The margin ensures that a full-viewport pan stays covered for ≥ 1 tick.
+        let raw_win_w = ((vis_cells_x as f32 * GRASS_LOD_MARGIN_FACTOR).ceil() as usize)
+            .min(level_w)
+            .min(GRASS_LOD_BUDGET_AXIS);
+        let raw_win_h = ((vis_cells_y as f32 * GRASS_LOD_MARGIN_FACTOR).ceil() as usize)
+            .min(level_h)
+            .min(GRASS_LOD_BUDGET_AXIS);
+
+        // Window origin: center on camera, clamped to level bounds.
+        // Camera world coords → level-k cell coords.
+        let cam_cx_cells = (cam_cx / (GRASS_CELL_SIZE * scale)).floor() as isize;
+        let cam_cy_cells = (cam_cy / (GRASS_CELL_SIZE * scale)).floor() as isize;
+        let half_w = (raw_win_w / 2) as isize;
+        let half_h = (raw_win_h / 2) as isize;
+        let ox = (cam_cx_cells - half_w).max(0) as usize;
+        let oy = (cam_cy_cells - half_h).max(0) as usize;
+        // Clamp so the window doesn't extend past the level edge.
+        // TODO (Stage-3 wrap-seam): For toroidal worlds this clamp is wrong —
+        // when the camera is near the seam the origin should be allowed to
+        // overflow (so viewport_window can wrap it modulo lw/lh). Remove this
+        // clamp for the wrap_world=true path once viewport_window supports wrap.
+        let win_origin_x = ox.min(level_w.saturating_sub(raw_win_w));
+        let win_origin_y = oy.min(level_h.saturating_sub(raw_win_h));
+        let win_w = raw_win_w.min(level_w);
+        let win_h = raw_win_h.min(level_h);
+
+        // DEFAULT-SCALE INVARIANT: at default (zoom=1, world_size=9600, grass_dim=1920):
+        //   mip_level=0, level_dim=(1920,1920), visible_cell_span=1920.
+        //   raw_win_w = ceil(1920 * 1.5) clamped to min(1920, 2048) = 1920.
+        //   origin clamped to [0,0] (viewport centered → half=960, cam_cx≈4800→cx_cells≈960→0).
+        //   win_w=1920, win_h=1920 — full 1920×1920 field.
+        //   slot grass bytes = 1920² = grass_cell_count. Byte-identical to pre-2b.
+        _ = grass_dim; // verified via debug_assert below
+
+        debug_assert!(
+            win_w * win_h <= grass_bytes,
+            "window ({win_w}×{win_h}={}) exceeds allocated slot grass_bytes {grass_bytes}",
+            win_w * win_h
+        );
 
         // Creatures: write the per-creature 32 B records directly into the
         // creature region. No JS boundary — `write_creatures_each` builds an
@@ -582,20 +737,38 @@ impl WorldHandle {
             None
         };
 
-        // Stats header — 20 bytes LE at slot offset 0.
+        // Stats header — bytes [0..20) of the slot, LE.
         let tps_bits = self.tps().to_bits();
         let jank = self.jank_count;
         let tick = self.inner.tick;
         let ended = if self.inner.world_ended { 1u32 } else { 0u32 };
-        let header = &mut self.snapshot_buf[slot_base..slot_base + 20];
-        header[0..4].copy_from_slice(&tick.to_le_bytes());
-        header[4..8].copy_from_slice(&(pop_written as u32).to_le_bytes());
-        header[8..12].copy_from_slice(&ended.to_le_bytes());
-        header[12..16].copy_from_slice(&tps_bits.to_le_bytes());
-        header[16..20].copy_from_slice(&jank.to_le_bytes());
+        {
+            let header = &mut self.snapshot_buf[slot_base..slot_base + 20];
+            header[0..4].copy_from_slice(&tick.to_le_bytes());
+            header[4..8].copy_from_slice(&(pop_written as u32).to_le_bytes());
+            header[8..12].copy_from_slice(&ended.to_le_bytes());
+            header[12..16].copy_from_slice(&tps_bits.to_le_bytes());
+            header[16..20].copy_from_slice(&jank.to_le_bytes());
+        }
 
-        // Grass: v2.0 Wave 1a quantizes f32 density (0..GRASS_MAX) → u8 (0..255),
-        // one byte per cell, directly into the snapshot region. No JS boundary.
+        // v2.0.3 Stream 2b: window metadata — bytes [32..64) of the slot, LE.
+        // 8 × u32: mip_level, win_origin_x, win_origin_y, win_w, win_h,
+        //           tex_dim_w, tex_dim_h, wrap_mode.
+        let wrap_mode: u32 = if self.inner.dims.wrap_world { 1 } else { 0 };
+        {
+            let wmeta = &mut self.snapshot_buf[slot_base + 32..slot_base + 64];
+            wmeta[0..4].copy_from_slice(&(mip_level as u32).to_le_bytes());
+            wmeta[4..8].copy_from_slice(&(win_origin_x as u32).to_le_bytes());
+            wmeta[8..12].copy_from_slice(&(win_origin_y as u32).to_le_bytes());
+            wmeta[12..16].copy_from_slice(&(win_w as u32).to_le_bytes());
+            wmeta[16..20].copy_from_slice(&(win_h as u32).to_le_bytes());
+            wmeta[20..24].copy_from_slice(&(win_w as u32).to_le_bytes()); // tex_dim_w = win_w
+            wmeta[24..28].copy_from_slice(&(win_h as u32).to_le_bytes()); // tex_dim_h = win_h
+            wmeta[28..32].copy_from_slice(&wrap_mode.to_le_bytes());
+        }
+
+        // Grass: v2.0.3 Stream 2b — extract clipmap window via pyramid.viewport_window.
+        // At default scale: mip_level=0, win=(0,0,1920,1920), full-field copy.
         let grass_start = if profile_on {
             Some(crate::profiler::clock_now_us_threadsafe())
         } else {
@@ -603,20 +776,92 @@ impl WorldHandle {
         };
         let grass_off = slot_base + SNAPSHOT_HEADER_BYTES + SNAPSHOT_CREATURE_BYTES;
         let grass_region = &mut self.snapshot_buf[grass_off..grass_off + grass_bytes];
-        // v2.0.1 §3: re-quantize ONLY the tiles dirty for THIS ping-pong slot
-        // (dirty tracked by the grass frontier/graze path). Unchanged tiles keep
-        // their valid prior bytes in this persistent slot, so the snapshot stays a
-        // full `grass_cell_count`-byte u8 region (NO wire/layout change) while we
-        // write only the frontier. Self-contained callable the writer wave's
-        // `pack()` invokes directly — see `GrassGrid::quantize_dirty_tiles_into`.
-        self.inner
-            .grass
-            .quantize_dirty_tiles_into(grass_region, slot_idx);
+        // Split-borrow: density and pyramid are separate fields of grass.
+        let density = &self.inner.grass.density;
+        let pyramid = &self.inner.grass.pyramid;
+        pyramid.viewport_window(
+            density,
+            mip_level,
+            win_origin_x,
+            win_origin_y,
+            win_w,
+            win_h,
+            grass_region,
+        );
         let grass_end = if profile_on {
             Some(crate::profiler::clock_now_us_threadsafe())
         } else {
             None
         };
+
+        // v2.0.3 Stream 2d: Biome window — mode-downsampled, same window as grass.
+        //
+        // The biome field is a static `Vec<u8>` of `Biome as u8` tags (one per
+        // grass cell at level 0, row-major). Mode downsample at `mip_level`:
+        // each output cell (ox, oy) at level k corresponds to a 2^k × 2^k block
+        // of level-0 cells. We accumulate per-tag counts and emit the most-frequent
+        // (ties broken by lowest tag value = lowest u8).
+        //
+        // At default scale: mip_level=0, win=(0,0,1920,1920).
+        // A 1×1 block at level 0 → count[biome_grid[cell]] = 1 → that tag wins.
+        // Byte-identical to the full biome_grid slice that the static path wrote.
+        //
+        // PERF NOTE: This recomputes the biome window on every tick. Because the
+        // biome field is static (never changes), this is redundant work. A
+        // precomputed static biome mode-pyramid (mirroring GrassPyramid) would
+        // avoid the recompute but is OUT OF 2d SCOPE (needs a struct in
+        // world/mod.rs). Flagged as a Stage-3 perf item.
+        let biome_win_off = grass_off + grass_bytes;
+        let biome_win_bytes = self.snapshot_layout.biome_win_bytes;
+        {
+            let biome_region =
+                &mut self.snapshot_buf[biome_win_off..biome_win_off + biome_win_bytes];
+            let biome_grid = &self.inner.biome_grid;
+            let grass_dim_l0 = self.snapshot_layout.grass_dim; // level-0 dim
+
+            // Scale factor: each level-k cell covers 2^mip_level level-0 cells per axis.
+            let block = 1usize << mip_level;
+
+            for out_y in 0..win_h {
+                // Level-k row index (within the level's grid).
+                let lk_row = win_origin_y + out_y;
+                // Corresponding level-0 row start (clamped to level-0 bounds).
+                let l0_row_base = (lk_row * block).min(grass_dim_l0.saturating_sub(1));
+
+                for out_x in 0..win_w {
+                    let lk_col = win_origin_x + out_x;
+                    let l0_col_base = (lk_col * block).min(grass_dim_l0.saturating_sub(1));
+
+                    // Accumulate tag counts over the 2^mip_level × 2^mip_level block.
+                    // We only have 3 biome tags (0=Plains, 1=Water, 2=Desert) so a
+                    // small fixed array is cheaper than a HashMap.
+                    let mut counts = [0u32; 4]; // index by tag byte; 4 = max tag + 1
+                    for dy in 0..block {
+                        let row = (l0_row_base + dy).min(grass_dim_l0 - 1);
+                        for dx in 0..block {
+                            let col = (l0_col_base + dx).min(grass_dim_l0 - 1);
+                            let tag = biome_grid[row * grass_dim_l0 + col] as usize;
+                            let idx = tag.min(counts.len() - 1);
+                            counts[idx] += 1;
+                        }
+                    }
+                    // Mode: most-frequent tag; tie-break = lowest tag value (lowest index).
+                    let mut best_tag = 0u8;
+                    let mut best_count = 0u32;
+                    for (tag, &cnt) in counts.iter().enumerate() {
+                        if cnt > best_count {
+                            best_count = cnt;
+                            best_tag = tag as u8;
+                        }
+                    }
+                    biome_region[out_y * win_w + out_x] = best_tag;
+                }
+            }
+        }
+
+        // Suppress unused-variable warning for viewport dimensions (used in future
+        // margin calculation; currently we use square viewport approximation).
+        let _ = (viewport_w, viewport_h);
 
         if let (Some(start), Some(c0), Some(c1), Some(g0), Some(g1)) = (
             snap_start,
@@ -775,6 +1020,31 @@ impl WorldHandle {
         // would have no slot in the snapshot creature region).
         self.inner.sliders.max_population = value.clamp(1, MAX_POP_FOR_SIM as u32);
     }
+    // ── v2.0.2 Stream 1d: scatter kernel live setters ─────────────────────
+    /// Decay probability per tick, clamped [0, 1].
+    fn apply_grass_decay_pct(&mut self, value: f32) {
+        self.inner.sliders.grass_decay_pct = value.clamp(0.0, 1.0);
+    }
+    /// Decay amount (f32 grass-amount domain), clamped non-negative.
+    fn apply_grass_decay_amount(&mut self, value: f32) {
+        self.inner.sliders.grass_decay_amount = value.max(0.0);
+    }
+    /// Spread probability per tick, clamped [0, 1].
+    fn apply_grass_spread_pct(&mut self, value: f32) {
+        self.inner.sliders.grass_spread_pct = value.clamp(0.0, 1.0);
+    }
+    /// Spread amount (f32 grass-amount domain), clamped non-negative.
+    fn apply_grass_spread_amount(&mut self, value: f32) {
+        self.inner.sliders.grass_spread_amount = value.max(0.0);
+    }
+    /// Ring-1 disc-band weight, clamped [0, 1].
+    fn apply_grass_spread_ring1_pct(&mut self, value: f32) {
+        self.inner.sliders.grass_spread_ring1_pct = value.clamp(0.0, 1.0);
+    }
+    /// Ring-2 disc-band weight, clamped [0, 1].
+    fn apply_grass_spread_ring2_pct(&mut self, value: f32) {
+        self.inner.sliders.grass_spread_ring2_pct = value.clamp(0.0, 1.0);
+    }
     /// Apply a dev-panel slider live by name. JS console workflow
     /// (BUILD-REPORT Known Issue #4). Returns `Err` on unknown name so a
     /// console typo is visible instead of silently ignored.
@@ -858,6 +1128,13 @@ impl WorldHandle {
                 let rel = n - SLIDER_BUCKET_BASE;
                 self.apply_mutation_bucket(rel / 3, rel % 3, value);
             }
+            // v2.0.2 Stream 1d: scatter kernel sliders (indices 54–59).
+            54 => self.apply_grass_decay_pct(value),
+            55 => self.apply_grass_decay_amount(value),
+            56 => self.apply_grass_spread_pct(value),
+            57 => self.apply_grass_spread_amount(value),
+            58 => self.apply_grass_spread_ring1_pct(value),
+            59 => self.apply_grass_spread_ring2_pct(value),
             _ => {} // out-of-range: silently ignore (forward-compat with newer TS).
         }
     }
@@ -1006,18 +1283,23 @@ impl WorldHandle {
     /// Count of grass cells where density > 0. O(921_600) — negligible at v1 scale.
     #[wasm_bindgen]
     pub fn live_grass_cell_count(&self) -> u32 {
+        // v2.0.2 Stream 1a: density is u8-backed — a non-zero stored byte means
+        // the cell has grass (decode is monotone so `byte > 0` ⇔ `density > 0`).
         self.inner
             .grass
             .density
             .iter()
-            .filter(|&&d| d > 0.0)
+            .filter(|b| b.load(core::sync::atomic::Ordering::Relaxed) > 0)
             .count() as u32
     }
 
     /// Sum of all grass cell densities. O(921_600) — negligible at v1 scale.
     #[wasm_bindgen]
     pub fn total_grass_density(&self) -> f32 {
-        self.inner.grass.density.iter().sum()
+        // v2.0.2 Stream 1a: decode each u8 cell to its f32 grass amount and sum.
+        (0..self.inner.grass.density.len())
+            .map(|c| self.inner.grass.dget(c))
+            .sum()
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -1103,6 +1385,13 @@ impl WorldHandle {
             "starting_species_member_count": d.starting_species_member_count as f32,
             "starting_species_member_variance": d.starting_species_member_variance,
             "mating_cooldown_ticks": d.mating_cooldown_ticks as f32,
+            // v2.0.2 Stream 1d: scatter kernel defaults.
+            "grass_decay_pct": d.grass_decay_pct,
+            "grass_decay_amount": d.grass_decay_amount,
+            "grass_spread_pct": d.grass_spread_pct,
+            "grass_spread_amount": d.grass_spread_amount,
+            "grass_spread_ring1_pct": d.grass_spread_ring1_pct,
+            "grass_spread_ring2_pct": d.grass_spread_ring2_pct,
         });
         // v1.12: 8 mutation buckets × 3 fields. Names match SLIDER_NAMES.
         let obj = json.as_object_mut().expect("json! produced an object");
@@ -1324,18 +1613,23 @@ fn write_creatures_each_into(world: &World, dst: &mut [u8]) -> usize {
 /// v2.0 Wave 1a: quantize f32 grass density (0..`GRASS_MAX`) → u8 (0..255), one
 /// byte per cell, into `dst` (which must be exactly `density.len()` bytes). The
 /// renderer (TS stream) uploads this as an R8 texture and rescales by 1/255.
+///
+/// v2.0.3 Stream 2b: gated off wasm32 — `write_snapshot` now uses
+/// `pyramid.viewport_window` directly. `write_snapshot_to_native` (tests only)
+/// still calls this.
+#[cfg(not(target_arch = "wasm32"))]
 #[inline]
-fn quantize_grass_into(density: &[f32], dst: &mut [u8]) {
+fn quantize_grass_into(density: &[core::sync::atomic::AtomicU8], dst: &mut [u8]) {
     debug_assert_eq!(
         density.len(),
         dst.len(),
         "u8 grass region must be one byte per cell"
     );
-    let inv_max = 1.0 / GRASS_MAX;
+    // v2.0.2 Stream 1a: density is already stored on the snapshot u8 scale
+    // (GRASS_MAX ⇒ 255), so quantizing is a direct Relaxed-load byte copy. This
+    // produces the exact same bytes the old f32→u8 round-trip did.
     for (d, out) in density.iter().zip(dst.iter_mut()) {
-        // clamp to [0, GRASS_MAX] then scale to [0, 255], rounding to nearest.
-        let q = (d * inv_max).clamp(0.0, 1.0) * 255.0;
-        *out = (q + 0.5) as u8;
+        *out = d.load(core::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -1516,10 +1810,9 @@ mod tests {
             "grass region size = grass_cell_count bytes (u8 per cell)"
         );
         for i in 0..cell_count {
-            let expected = {
-                let q = (handle.inner.grass.density[i] / GRASS_MAX).clamp(0.0, 1.0) * 255.0;
-                (q + 0.5) as u8
-            };
+            // v2.0.2 Stream 1a: density is now stored on the snapshot u8 scale, so
+            // the snapshot byte must equal the stored byte exactly (a byte copy).
+            let expected = handle.inner.grass.dget_u8(i);
             assert_eq!(grass[i], expected, "cell {i} u8 quantize mismatch");
         }
     }
@@ -1621,7 +1914,7 @@ mod tests {
             .grass
             .density
             .iter()
-            .filter(|&&d| d > 0.0)
+            .filter(|b| b.load(core::sync::atomic::Ordering::Relaxed) > 0)
             .count() as u32;
         assert_eq!(
             live, manual,

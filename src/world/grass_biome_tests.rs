@@ -39,22 +39,40 @@ fn full_grass_on_init_respects_biome_capacity() {
     let mut saw_water = false;
     let mut saw_desert = false;
     for idx in 0..w.biome_grid.len() {
-        let dens = w.grass.density[idx];
         let cap = w.grass.capacity[idx];
+        // Stage 3: byte-exact assertion. full_grass_on_init fills each cell to
+        // encode(cap), so dget_u8(idx) must equal the cap byte exactly.
+        let cap_byte = {
+            let q = (cap / GRASS_MAX).clamp(0.0, 1.0) * 255.0;
+            (q + 0.5) as u8
+        };
+        let d_byte = w.grass.dget_u8(idx);
         match crate::world::biome::biome_from_u8(w.biome_grid[idx]) {
+            // encode(GRASS_CAPACITY_PLAINS * GRASS_MAX = 1.0) = 255
             Biome::Plains => {
                 assert!((cap - GRASS_CAPACITY_PLAINS * GRASS_MAX).abs() < 1e-6);
-                assert!((dens - cap).abs() < 1e-6, "plains cell must fill to cap");
+                assert_eq!(
+                    d_byte, cap_byte,
+                    "plains cell {idx} must fill to cap byte {cap_byte}"
+                );
                 saw_plains = true;
             }
+            // encode(GRASS_CAPACITY_DESERT * GRASS_MAX = 0.30) = 77
             Biome::Desert => {
                 assert!((cap - GRASS_CAPACITY_DESERT * GRASS_MAX).abs() < 1e-6);
-                assert!((dens - cap).abs() < 1e-6, "desert cell must fill to cap");
+                assert_eq!(
+                    d_byte, cap_byte,
+                    "desert cell {idx} must fill to cap byte {cap_byte}"
+                );
                 saw_desert = true;
             }
+            // encode(GRASS_CAPACITY_WATER * GRASS_MAX = 0.04) = 10
             Biome::Water => {
                 assert!((cap - GRASS_CAPACITY_WATER * GRASS_MAX).abs() < 1e-6);
-                assert!((dens - cap).abs() < 1e-6, "water cell must fill to cap");
+                assert_eq!(
+                    d_byte, cap_byte,
+                    "water cell {idx} must fill to cap byte {cap_byte}"
+                );
                 saw_water = true;
             }
         }
@@ -82,15 +100,25 @@ fn initial_seed_capped_by_biome_capacity() {
         },
     );
     for idx in 0..w.biome_grid.len() {
-        let dens = w.grass.density[idx];
         let cap = w.grass.capacity[idx];
+        let cap_byte = {
+            let q = (cap / GRASS_MAX).clamp(0.0, 1.0) * 255.0;
+            (q + 0.5) as u8
+        };
+        let d_byte = w.grass.dget_u8(idx);
+        // Stage 3: byte-exact assertions.
+        // Seeded cells are set to encode(cap), so they must store exactly cap_byte.
+        // Unseeded cells are 0. No byte should EXCEED cap_byte.
         assert!(
-            dens <= cap + 1e-6,
-            "seeded density {dens} exceeds biome cap {cap} at cell {idx}"
+            d_byte <= cap_byte,
+            "seeded density byte {d_byte} exceeds biome cap byte {cap_byte} at cell {idx}"
         );
-        // Any non-empty cell was seeded to exactly its cap.
-        if dens > 0.0 {
-            assert!((dens - cap).abs() < 1e-6, "seeded cell must equal its cap");
+        // Any non-empty cell was seeded to exactly its cap byte.
+        if d_byte > 0 {
+            assert_eq!(
+                d_byte, cap_byte,
+                "seeded cell {idx} must store exactly cap byte {cap_byte}"
+            );
         }
     }
 }
@@ -113,30 +141,55 @@ fn regrowth_saturates_at_biome_capacity() {
     let mut g = GrassGrid::new_with_capacity(&mut rng, 0, dims, Some(&biome));
     // Seed each target cell with a small density and grow with high logistic
     // rate, no propagation, so each cell evolves toward its own capacity.
-    g.density[water_idx] = 0.01;
-    g.density[desert_idx] = 0.01;
-    g.density[plains_idx] = 0.01;
+    g.dset(water_idx, 0.01);
+    g.dset(desert_idx, 0.01);
+    g.dset(plains_idx, 0.01);
     for _ in 0..2000 {
         g.step(0.5, 0.0);
     }
-    let water = g.density[water_idx];
-    let desert = g.density[desert_idx];
-    let plains = g.density[plains_idx];
-    assert!(
-        (water - GRASS_CAPACITY_WATER).abs() < 1e-3,
-        "water cell must saturate near {GRASS_CAPACITY_WATER}; got {water}"
+    // Note: f32 values are no longer used; assertions operate on bytes directly.
+    let _water = g.dget(water_idx);
+    let _desert = g.dget(desert_idx);
+    let _plains = g.dget(plains_idx);
+    // Stage 3: byte-exact assertions on the stable fixed points of the quantized
+    // logistic map (2000 steps, r=0.5, k=0.0):
+    //   Water  (cap=0.04): byte 10  — decode(10)=0.03922 < cap; step stays 10.
+    //   Desert (cap=0.30): byte 76  — encode(0.30)=77 but decode(77)=0.30196>cap, so
+    //                                  logistic drives d back down; decode(76)=0.29804
+    //                                  is the stable fixed point (step 76→76).
+    //   Plains (cap=1.0):  byte 254 — decode(254)=0.99608; step→0.99803, rounds to 254.
+    //                                  byte 255 is theoretically stable but unreachable
+    //                                  from below: the step from 254 never crosses 255.
+    assert_eq!(
+        g.dget_u8(water_idx),
+        10u8,
+        "water cell must saturate at byte 10; got byte {}",
+        g.dget_u8(water_idx)
     );
-    assert!(
-        (desert - GRASS_CAPACITY_DESERT).abs() < 1e-3,
-        "desert cell must saturate near {GRASS_CAPACITY_DESERT}; got {desert}"
+    assert_eq!(
+        g.dget_u8(desert_idx),
+        76u8,
+        "desert cell must saturate at byte 76 (stable fixed point at cap 0.30); got byte {}",
+        g.dget_u8(desert_idx)
     );
-    assert!(
-        (plains - GRASS_CAPACITY_PLAINS).abs() < 1e-3,
-        "plains cell must saturate near {GRASS_CAPACITY_PLAINS}; got {plains}"
+    assert_eq!(
+        g.dget_u8(plains_idx),
+        254u8,
+        "plains cell must saturate at byte 254 (stable fixed point at cap 1.0, r=0.5); got byte {}",
+        g.dget_u8(plains_idx)
     );
-    // No cell ever exceeds its capacity.
-    for (&d, &c) in g.density.iter().zip(g.capacity.iter()) {
-        assert!(d <= c + 1e-6, "density {d} exceeded capacity {c}");
+    // No cell ever exceeds its capacity byte.
+    for c in 0..g.capacity.len() {
+        let d_byte = g.dget_u8(c);
+        // cap_byte = encode(capacity[c]); stored density must not exceed it.
+        let cap_byte = {
+            let q = (g.capacity[c] / GRASS_MAX).clamp(0.0, 1.0) * 255.0;
+            (q + 0.5) as u8
+        };
+        assert!(
+            d_byte <= cap_byte,
+            "cell {c}: density byte {d_byte} exceeded capacity byte {cap_byte}"
+        );
     }
 }
 
@@ -152,7 +205,8 @@ fn biome_grass_propagation_is_deterministic() {
     let mut rng_b = SimRng::from_u64(99);
     let mut b = GrassGrid::new_with_capacity(&mut rng_b, 5_000, dims, Some(&biome));
     assert_eq!(
-        a.density, b.density,
+        a.density_u8_snapshot(),
+        b.density_u8_snapshot(),
         "seed must produce identical init density"
     );
     assert_eq!(a.capacity, b.capacity, "capacity must be identical");
@@ -162,7 +216,8 @@ fn biome_grass_propagation_is_deterministic() {
         b.step(0.05, 0.01);
     }
     assert_eq!(
-        a.density, b.density,
+        a.density_u8_snapshot(),
+        b.density_u8_snapshot(),
         "biome grass propagation must stay deterministic"
     );
 }
@@ -181,7 +236,8 @@ fn all_plains_matches_legacy_behavior() {
     let mut biome = GrassGrid::new_with_capacity(&mut rng_biome, 2_000, dims, Some(&plains));
 
     assert_eq!(
-        legacy.density, biome.density,
+        legacy.density_u8_snapshot(),
+        biome.density_u8_snapshot(),
         "all-plains biome init must equal legacy init"
     );
     for _ in 0..100 {
@@ -189,7 +245,8 @@ fn all_plains_matches_legacy_behavior() {
         biome.step(0.05, 0.02);
     }
     assert_eq!(
-        legacy.density, biome.density,
+        legacy.density_u8_snapshot(),
+        biome.density_u8_snapshot(),
         "all-plains propagation must match legacy GRASS_MAX-cap behavior"
     );
 }

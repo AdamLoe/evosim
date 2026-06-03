@@ -31,6 +31,11 @@ import {
 } from "./sim-bridge";
 import {
   CONTROL_SAB_BYTES,
+  CTRL_CAMERA_CX_BITS,
+  CTRL_CAMERA_CY_BITS,
+  CTRL_CAMERA_VIEWPORT_H,
+  CTRL_CAMERA_VIEWPORT_W,
+  CTRL_CAMERA_ZOOM_BITS,
   CTRL_CONTROL_EPOCH,
   CTRL_INSPECT_REQ_EPOCH,
   CTRL_INSPECT_REQ_ID_HI,
@@ -99,6 +104,14 @@ let controlSab: SharedArrayBuffer | null = null;
 let ctrlI32: Int32Array | null = null;
 let ctrlF32: Float32Array | null = null;
 let ctrlBytes: Uint8Array | null = null;
+
+// v2.0.3 Stream 2b: camera lane values read each tick from the control SAB.
+// Default values produce the full-field window (zoom=1.0) before main writes.
+let camCx = 0.0;
+let camCy = 0.0;
+let camZoom = 1.0;
+let camViewportW = 0;
+let camViewportH = 0;
 
 // Locals refreshed at the top of every tick from the control SAB.
 let paused = false;
@@ -289,6 +302,18 @@ function readControlSab(): void {
     targetTPS = tps;
   }
 
+  // v2.0.3 Stream 2b: read camera lanes. F32Array reads are non-atomic but
+  // that is acceptable — a partial-frame stale value just shifts the window by
+  // ≤1 cell, which is within the 25% margin guarantee.
+  const cx = ctrlF32[CTRL_CAMERA_CX_BITS];
+  const cy = ctrlF32[CTRL_CAMERA_CY_BITS];
+  const zoom = ctrlF32[CTRL_CAMERA_ZOOM_BITS];
+  if (Number.isFinite(cx)) camCx = cx;
+  if (Number.isFinite(cy)) camCy = cy;
+  if (Number.isFinite(zoom) && zoom > 0) camZoom = zoom;
+  camViewportW = Atomics.load(ctrlI32, CTRL_CAMERA_VIEWPORT_W) >>> 0;
+  camViewportH = Atomics.load(ctrlI32, CTRL_CAMERA_VIEWPORT_H) >>> 0;
+
   // Sliders: gated on epoch advance. 22 lanes is cheap when actually changed,
   // but skipping the loop every tick saves cycles in the steady state.
   const ctrlEpoch = Atomics.load(ctrlI32, CTRL_CONTROL_EPOCH);
@@ -423,7 +448,10 @@ function writeSnapshotToSAB(): void {
   const current = Atomics.load(ctrlI32, CTRL_CURRENT_SLOT);
   const inactive: 0 | 1 = current === 0 ? 1 : 0;
 
-  world.write_snapshot(inactive);
+  // v2.0.3 Stream 2b: pass camera params so Rust can compute the clipmap window.
+  // The camera defaults (camCx=0, camCy=0, camZoom=1.0) on the very first tick
+  // before main writes produce a safe (full-field at zoom=1) window.
+  world.write_snapshot(inactive, camCx, camCy, camZoom, camViewportW, camViewportH);
 
   // Publish: flip slot, then bump seq (store-before-add).
   Atomics.store(ctrlI32, CTRL_CURRENT_SLOT, inactive);

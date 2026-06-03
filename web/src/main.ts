@@ -44,10 +44,18 @@ import {
   makeSlotLayout,
   creatureSoAOffset,
   grassOffset,
+  biomeWinOffset,
   slotOffset,
   readSnapshotHeader,
+  readWindowMetadata,
+  CTRL_CAMERA_CX_BITS,
+  CTRL_CAMERA_CY_BITS,
+  CTRL_CAMERA_ZOOM_BITS,
+  CTRL_CAMERA_VIEWPORT_W,
+  CTRL_CAMERA_VIEWPORT_H,
   type SlotLayout,
   type SimReplyBootReady,
+  type WindowMetadata,
 } from "./sim-bridge";
 
 // v1.13 Wave 2: the `#status` span in the top bar is gone; the status line
@@ -111,6 +119,18 @@ export function setExternalTargetTPS(tps: number): void {
 
 let controlSab: SharedArrayBuffer | null = null;
 let controlI32: Int32Array | null = null;
+// v2.0.3 Stream 2b: Float32Array view over the same control SAB for writing
+// camera lanes as f32-bits (same pattern as slider writes).
+let controlF32: Float32Array | null = null;
+// v2.0.3 Stream 2b: latest window metadata read from the consumed snapshot slot.
+// Stored here; the renderer (2c) will read it to drive windowed texture upload.
+let latestWindowMetadata: WindowMetadata | null = null;
+/** v2.0.3 Stream 2b: accessor for the renderer (2c) to read the latest window
+ *  metadata without importing the full frame state. Returns null before the
+ *  first snapshot is consumed. */
+export function getLatestWindowMetadata(): WindowMetadata | null {
+  return latestWindowMetadata;
+}
 /**
  * v1.11 (A): snapshot region lives in wasm linear memory. These are
  * (re)constructed from the `WebAssembly.Memory.buffer` returned in
@@ -123,12 +143,10 @@ let snapshotView: DataView | null = null;
 // v2.0 Wave 1a: runtime slot geometry derived from the boot-time grass_dim.
 // Rebuilt on every boot/restart since world dims can change between runs.
 let slotLayout: SlotLayout | null = null;
-// v2.0 Wave 1a: biome layer (one u8 Biome tag per grass cell). A view over
-// wasm linear memory at biome_buf_byte_offset; static for the worker's
-// lifetime, re-bound on each boot/restart. Passed to the renderer which
-// uploads it once per worker swap as the under-grass biome texture.
-let biomeView: Uint8Array | null = null;
-let biomeDirty = true;
+// v2.0.3 Stream 2d: biome tint now comes from the per-slot biome window channel
+// (mode-downsampled, same win_w × win_h as the grass window). The old static
+// biomeView + biomeDirty approach is superseded — biomeWin is read from the
+// snapshot slot each frame using biomeWinOffset(). No module-level state needed.
 let cachedSeed = "";
 // v2.0 Wave 1a: the numeric biome world_seed actually in use (resolved by
 // Rust when the user leaves it at 0). Surfaced in the top-left status strip
@@ -312,6 +330,19 @@ async function main(): Promise<void> {
       requestAnimationFrame(frame);
       return;
     }
+
+    // v2.0.3 Stream 2b: write camera SAB lanes each RAF so the worker has an
+    // up-to-date view of camera state when it calls write_snapshot.
+    // f32-bits for cx/cy/zoom (same pattern as slider writes in SimBridge);
+    // u32 for viewport width/height.
+    if (controlF32) {
+      controlF32[CTRL_CAMERA_CX_BITS]   = cam.cx;
+      controlF32[CTRL_CAMERA_CY_BITS]   = cam.cy;
+      controlF32[CTRL_CAMERA_ZOOM_BITS] = cam.zoom;
+      Atomics.store(controlI32, CTRL_CAMERA_VIEWPORT_W, viewW >>> 0);
+      Atomics.store(controlI32, CTRL_CAMERA_VIEWPORT_H, viewH >>> 0);
+    }
+
     const seq = Atomics.load(controlI32, CTRL_SEQ);
     if (seq === lastPaintedSeq) {
       // No new snapshot since the last paint. Re-render only when the camera
@@ -324,7 +355,10 @@ async function main(): Promise<void> {
         const layout = slotLayout;
         const rawSlot = Atomics.load(controlI32, CTRL_CURRENT_SLOT);
         const slot: 0 | 1 = rawSlot === 1 ? 1 : 0;
-        const header = readSnapshotHeader(snapshotView, slotOffset(layout, slot));
+        const slotBaseOff = slotOffset(layout, slot);
+        const header = readSnapshotHeader(snapshotView, slotBaseOff);
+        // Also refresh window metadata on camera-pan repaint.
+        latestWindowMetadata = readWindowMetadata(snapshotView, slotBaseOff);
         const pop = Math.min(header.pop, MAX_POP_FOR_SIM);
         const creatures = pop > 0
           ? new Float32Array(
@@ -336,7 +370,13 @@ async function main(): Promise<void> {
         const grass = new Uint8Array(
           snapshotBuffer,
           snapshotBaseOffset + grassOffset(layout, slot),
-          layout.grassCellCount,
+          layout.grassRegionBytes,
+        );
+        // v2.0.3 Stream 2d: read the biome window from the slot (after grass).
+        const biomeWin = new Uint8Array(
+          snapshotBuffer,
+          snapshotBaseOffset + biomeWinOffset(layout, slot),
+          layout.biomeWinBytes,
         );
         renderWorld(
           gl!,
@@ -345,15 +385,16 @@ async function main(): Promise<void> {
           viewH,
           creatures,
           grass,
-          biomeView,
-          biomeDirty,
+          // v2.0.3 Stream 2d: biome window from the slot (mode-downsampled).
+          biomeWin,
           pop,
           latestWorldSize,
           latestGrassDim,
           latestWrapWorld,
           highlights,
+          // v2.0.3 Stream 2c: pass latest window metadata for UV transform.
+          latestWindowMetadata,
         );
-        biomeDirty = false;
         lastPaintedCamX = cam.cx;
         lastPaintedCamY = cam.cy;
         lastPaintedCamZoom = cam.zoom;
@@ -368,13 +409,16 @@ async function main(): Promise<void> {
       const readSpan = span("frame.snapshot.read");
       const rawSlot = Atomics.load(controlI32, CTRL_CURRENT_SLOT);
       const slot: 0 | 1 = rawSlot === 1 ? 1 : 0;
-      const header = readSnapshotHeader(snapshotView, slotOffset(layout, slot));
+      const slotBase = slotOffset(layout, slot);
+      const header = readSnapshotHeader(snapshotView, slotBase);
+      // v2.0.3 Stream 2b: read the window metadata from the slot header [32..64).
+      // Stored for use by the renderer (2c wires it into the GPU upload path).
+      latestWindowMetadata = readWindowMetadata(snapshotView, slotBase);
       const pop = Math.min(header.pop, MAX_POP_FOR_SIM);
-      // v2.0 Wave 1a: snapshot region lives inside wasm.memory.buffer at
-      // snapshotBaseOffset. Grass is now u8 (quantized 0..255 Rust-side) —
-      // the view length is grass_dim² bytes, derived from the boot-time
-      // grass_dim via `slotLayout`. Getting this wrong over/under-runs the
-      // SAB slot, so the geometry lives in exactly one place.
+      // v2.0 Wave 1a / v2.0.3 Stream 2b: snapshot region lives inside
+      // wasm.memory.buffer at snapshotBaseOffset. Grass is a u8 clipmap window
+      // of `grassRegionBytes` bytes (= min(grass_dim, 2048)² at default scale
+      // equals grassCellCount — byte-identical to the pre-2b layout).
       const creatures = pop > 0
         ? new Float32Array(
             snapshotBuffer,
@@ -385,7 +429,13 @@ async function main(): Promise<void> {
       const grass = new Uint8Array(
         snapshotBuffer,
         snapshotBaseOffset + grassOffset(layout, slot),
-        layout.grassCellCount,
+        layout.grassRegionBytes,
+      );
+      // v2.0.3 Stream 2d: read the biome window from the slot (after grass).
+      const biomeWin = new Uint8Array(
+        snapshotBuffer,
+        snapshotBaseOffset + biomeWinOffset(layout, slot),
+        layout.biomeWinBytes,
       );
       readSpan.close();
 
@@ -408,17 +458,17 @@ async function main(): Promise<void> {
         viewH,
         creatures,
         grass,
-        // v2.0 Wave 1a: biome layer (static u8 view) + a one-shot dirty flag
-        // so the renderer re-uploads the biome texture only on a worker swap.
-        biomeView,
-        biomeDirty,
+        // v2.0.3 Stream 2d: biome window from the snapshot slot (mode-downsampled,
+        // same win_w × win_h as grass). Replaces the static biomeView path.
+        biomeWin,
         pop,
         latestWorldSize,
         latestGrassDim,
         latestWrapWorld,
         highlights,
+        // v2.0.3 Stream 2c: pass latest window metadata for UV transform.
+        latestWindowMetadata,
       );
-      biomeDirty = false;
 
       lastPaintedSeq = seq;
       lastPaintedCamX = cam.cx;
@@ -523,6 +573,19 @@ async function spawnSimWorker(seed: string): Promise<SimBridge> {
   }
   controlSab = ready.control_sab;
   controlI32 = new Int32Array(controlSab);
+  // v2.0.3 Stream 2b: Float32Array view for camera lane writes (f32-bits).
+  controlF32 = controlSab ? new Float32Array(controlSab) : null;
+  // Fix minor #7: pre-seed the SAB camera lanes to world-center / zoom=1.0
+  // so that the first snapshot the worker writes uses a sensible window rather
+  // than cx=cy=0, zoom=0 (the SAB default). Without this, any world larger
+  // than the viewport or at non-default zoom shows a one-frame artifact
+  // (anchored top-left corner instead of world-center). We write before the
+  // first RAF fires, using the real world_size from the boot reply.
+  if (controlF32) {
+    controlF32[CTRL_CAMERA_CX_BITS]   = ready.world_size / 2;
+    controlF32[CTRL_CAMERA_CY_BITS]   = ready.world_size / 2;
+    controlF32[CTRL_CAMERA_ZOOM_BITS] = 1.0;
+  }
   // v1.11 (A): the snapshot region lives at a fixed offset inside the
   // worker's wasm linear memory. With shared memory enabled,
   // `wasm.memory.buffer` is a SharedArrayBuffer-compatible view both
@@ -544,12 +607,10 @@ async function spawnSimWorker(seed: string): Promise<SimBridge> {
   // (the single source of truth) and bind the static biome layer view. The
   // biome buffer is `grass_dim²` u8 bytes in wasm linear memory.
   slotLayout = makeSlotLayout(ready.grass_dim);
-  biomeView = new Uint8Array(
-    snapshotBuffer,
-    ready.biome_buf_byte_offset,
-    ready.biome_buf_byte_len,
-  );
-  biomeDirty = true;
+  // v2.0.3 Stream 2d: biome tint now comes from the per-slot biome window
+  // channel (mode-downsampled, appended after the grass region in each slot).
+  // The biome_buf (full-field static, biome_buf_byte_offset/len) is no longer
+  // read by the renderer — the slot carries the windowed biome data instead.
   // Stash the Rust-side slider defaults for the Wave D drift-guard e2e to
   // read. Cheap, only the test consumes it.
   (window as unknown as { __rustSlidersDefaults?: string }).__rustSlidersDefaults =

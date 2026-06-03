@@ -284,28 +284,66 @@ above; `crossover_mode` is the Rust f32 encoding (`0`=average,
 non-zero=fifty_fifty). The earlier `world_size, wrap_world, world_seed`
 args (v2.0 Wave 1a) come from the world-shape getters.
 
-## Runtime-dims SAB view binding (v2.0 Wave 1a)
+## Runtime-dims SAB view binding
 
 The world is runtime-sized, so the snapshot grass region and the biome
-buffer are no longer fixed-size constants. After `boot_ready`,
+window are no longer fixed-size constants. After `boot_ready`,
 `spawnSimWorker`:
 
 - builds `slotLayout = makeSlotLayout(ready.grass_dim)` — the **single
   source of truth** for the per-slot byte geometry. The grass region is
-  now **u8** (`grass_dim²` bytes, NOT the old f32 `921_600 × 4`); the
+  **u8**, `min(grass_dim, 2048)²` bytes (the clipmap budget axis);
+  at the default `grass_dim` of 1920 this equals `grass_dim²`. The
   creature region + header are world-size-independent.
-- binds `biomeView = new Uint8Array(wasm_memory.buffer,
-  biome_buf_byte_offset, biome_buf_byte_len)` — the static biome layer
-  (one u8 `Biome` per grass cell). Re-bound on every boot/restart with a
-  one-shot `biomeDirty` flag so the renderer uploads the biome texture
-  exactly once per worker swap.
+- pre-seeds the camera SAB lanes to world-center (`ready.world_size / 2`)
+  and zoom `1.0` so the first snapshot the worker writes uses a sensible
+  window rather than the SAB-default `cx=cy=0, zoom=0`.
 - stores `latestWrapWorld` / `latestWorldSeed` from the reply.
 
-The RAF frame loop derives every view length from `slotLayout`
-(`creatureSoAOffset`/`grassOffset` now take the layout), and the grass
-view is a `Uint8Array` of `layout.grassCellCount` bytes. Getting this
-wrong silently over/under-runs the SAB slot — hence one layout object,
-rebuilt per boot.
+The biome window is now read from the snapshot slot each frame
+(`biomeWinOffset(layout, slot)`) rather than from a separately bound
+static buffer. Getting the slot geometry wrong silently over/under-runs
+the SAB slot — hence one layout object, rebuilt per boot.
+
+## Camera SAB lanes and window metadata
+
+Five control-SAB lanes carry camera state from the main thread to the
+worker each RAF so the worker can compute the correct clipmap window when
+it calls `write_snapshot`:
+
+| Constant | Slot | Type | Value written |
+|---|---|---|---|
+| `CTRL_CAMERA_CX_BITS` | 120 | f32-bits | `cam.cx` |
+| `CTRL_CAMERA_CY_BITS` | 121 | f32-bits | `cam.cy` |
+| `CTRL_CAMERA_ZOOM_BITS` | 122 | f32-bits | `cam.zoom` |
+| `CTRL_CAMERA_VIEWPORT_W` | 123 | u32 | `viewW` |
+| `CTRL_CAMERA_VIEWPORT_H` | 124 | u32 | `viewH` |
+
+`main.ts` writes all five lanes every RAF via its `controlF32` /
+`controlI32` views before testing the snapshot sequence number.  On the
+very first boot (before the first RAF fires) `spawnSimWorker` pre-seeds
+`cx = cy = worldSize/2`, `zoom = 1.0` using the `world_size` from
+`boot_ready`; the viewport lanes stay `0` until the first RAF.
+
+The worker's `readControlSab()` reads the five lanes at the top of every
+tick (f32 reads for cx/cy/zoom, `Atomics.load` for the two u32 viewport
+lanes) into local variables (`camCx`, `camCy`, `camZoom`,
+`camViewportW`, `camViewportH`). `writeSnapshotToSAB()` passes those
+locals to `world.write_snapshot(slot, camCx, camCy, camZoom,
+camViewportW, camViewportH)` so Rust computes the LOD level and window
+origin in the same tick. The f32 reads are non-atomic (acceptable —
+a partial-frame stale value shifts the window by at most one cell, within
+the 25% margin).
+
+The snapshot header carries the result as 8 window-metadata u32 fields at
+bytes [32..64): `mip_level`, `win_origin_x`, `win_origin_y`, `win_w`,
+`win_h`, `tex_dim_w`, `tex_dim_h`, `wrap_mode`. The main thread reads
+these via `readWindowMetadata(snapshotView, slotBase)` on every consumed
+snapshot (and on camera-pan repaints of the same snapshot), storing the
+result in `latestWindowMetadata`. That value is forwarded to
+`renderWorld()` on every frame so the renderer applies the correct UV
+transform and performs a `texSubImage2D` of the exact `win_w × win_h`
+window.
 
 ## Settings schema migration (v2.0 Wave 1c)
 
@@ -367,8 +405,17 @@ non-zero `world_seed` pinned in Settings overrides it.
 - `web/src/settings.ts` → `Settings` interface, `DEFAULTS`,
   `getSettings` / `setSetting` / `resetSettings`, the major/minor schema
   migration + unknown-key filter on load (key `evosim.settings.v2`).
-- `web/src/main.ts` → `makeSlotLayout` binding, `biomeView` /
-  `biomeDirty`, `setStatusStrip`, `pendingWorldSeed` + reroll wiring.
+- `web/src/main.ts` → `makeSlotLayout` binding, `latestWindowMetadata` /
+  `getLatestWindowMetadata`, camera-lane pre-seed + RAF writes
+  (`CTRL_CAMERA_*` constants), `setStatusStrip`, `pendingWorldSeed` +
+  reroll wiring.
+- `web/src/sim-worker.ts` → `readControlSab` (camera lane read),
+  `writeSnapshotToSAB` (passes camera params to `world.write_snapshot`).
+- `web/src/sim-bridge.ts` → `CTRL_CAMERA_CX_BITS` / `CTRL_CAMERA_CY_BITS`
+  / `CTRL_CAMERA_ZOOM_BITS` / `CTRL_CAMERA_VIEWPORT_W` /
+  `CTRL_CAMERA_VIEWPORT_H` re-exports; `readWindowMetadata`;
+  `WindowMetadata` interface; `SNAPSHOT_HEADER_BYTES` (64); `SlotLayout`;
+  `makeSlotLayout`; `biomeWinOffset`.
 - `web/src/themes.ts` → `Theme` interface, `THEMES` map,
   `DEFAULT_THEME_ID`, `applyTheme(id)`, `REQUIRED_TOKENS` invariant.
 

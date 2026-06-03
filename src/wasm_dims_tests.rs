@@ -27,6 +27,8 @@ fn dims_1200() {
 /// The snapshot grass region (u8) + the biomeSab byte sizes both derive from
 /// `grass_cell_count` and agree (computed-dims-equality model). Exercised
 /// against a real boot at a small walled world so the buffers stay test-cheap.
+/// v2.0.3 Stream 2d: slot_bytes now includes the biome window region (same size
+/// as the grass region), so slot = header + creatures + grass + biome_win.
 #[test]
 fn snapshot_and_biome_sizes_derive_from_grass_cell_count() {
     // Small 1200u walled world → 240² = 57_600 grass cells.
@@ -55,12 +57,16 @@ fn snapshot_and_biome_sizes_derive_from_grass_cell_count() {
     assert_eq!(h.biome_buf_byte_len() as usize, cells);
     // The two derived sizes must be equal (same source dim).
     assert_eq!(h.snapshot_grass_bytes(), h.biome_buf_byte_len());
+    // v2.0.3 Stream 2d: biome window allocation = same as grass bytes.
+    assert_eq!(h.snapshot_biome_win_bytes() as usize, cells);
 
-    // Slot/buf totals follow from header + creatures + u8 grass.
+    // Slot/buf totals follow from header + creatures + u8 grass + biome_win.
+    // (Stream 2d: biome_win appended after grass — same allocation size.)
     let header = h.snapshot_header_bytes() as usize;
     let creatures = h.snapshot_creature_bytes() as usize;
+    let biome_win = h.snapshot_biome_win_bytes() as usize;
     let slot = h.snapshot_slot_bytes() as usize;
-    assert_eq!(slot, header + creatures + cells);
+    assert_eq!(slot, header + creatures + cells + biome_win);
     assert_eq!(h.snapshot_buf_byte_len() as usize, 2 * slot);
 }
 

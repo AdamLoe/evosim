@@ -51,11 +51,34 @@ optional = true
 version = "1.10"
 optional = true
 
+# Native criterion benchmark: grass scatter vs blur propagation speedup.
+# criterion = "0.5" is the last stable release and does not require nightly.
+# NOTE: wasm-bindgen / web-sys are NOT dev-deps — grass.rs compiles fine on
+# native x86_64 (the wasm-bindgen usage in grass.rs is zero; the profiler's
+# wasm32 branches are gated by cfg(target_arch)).
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+rayon = "1.10"
+
+[[bench]]
+name = "grass_scatter"
+harness = false
+
+[[bench]]
+name = "grass_attribution"
+harness = false
+
 [profile.release]
 opt-level = 3
 lto = "thin"
 codegen-units = 1
 panic = "abort"
+
+# criterion requires panic=unwind (uses catch_unwind internally). Override the
+# bench profile (which inherits release's panic=abort) just for native benches.
+# wasm-pack never uses this profile; it only uses [profile.release] above.
+[profile.bench]
+panic = "unwind"
 
 [profile.dev]
 opt-level = 1

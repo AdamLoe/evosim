@@ -59,20 +59,31 @@ the plan itself.
 
 ## Active plans
 
-- [`v2.0.3-grass-lod-pyramid.md`](v2.0.3-grass-lod-pyramid.md) — A u8
-  box-filter grass mip pyramid (clipmap) serving render LOD, snapshot, and
-  scale-invariant NN sensing from one structure. Removes the 1B-scale output
-  walls (upload bandwidth, texture size, density-dependent sense cost).
-  **Draft** — depends on v2.0.2 u8 density; absorbs v2.0.2's Phase 2.
-- [`v2.0.2-grass-scatter.md`](v2.0.2-grass-scatter.md) — Replace the grass
-  separable-blur with stochastic u8 scatter (lossy relaxed-atomic writes,
-  per-tile frozen source, ring-1/2/3 spread bias, decay sliders, tile-based
-  active set). The propagation perf fix at default scale; 1B-scale
-  render/snapshot work split to v2.0.3. Targets ~50–100× on grass compute,
-  ~20× on the tick. **Draft** — design agreed, supersedes the perf handoff.
-- [`v2.0.2-grass-perf-handoff.md`](v2.0.2-grass-perf-handoff.md) —
-  Earlier brief that proposed *materializing* the blur. **Superseded** by
-  the scatter plan above (we drop the blur instead); kept for context.
+- [`v2.0.4-grass-tuning-perf.md`](v2.0.4-grass-tuning-perf.md) — **Active wave, ready
+  for orchestration.** LOD config (budget=4096 + `lod_bias` + aspect fix),
+  `grass_size` slider, per-cell scatter perf (alloc/instrumentation/RNG-fusion/
+  geometric-skip), density-weighted "fertility" spread, far-grass multi-band NN
+  sight. Decisions resolved; carries the **execution hub** (S0 recon-first +
+  fallback, 7 streams, DAG, gates, worktree map).
+- [`perf-optimization-ideas.md`](perf-optimization-ideas.md) — **long-lived** perf
+  backlog (cadence/visibility gating, event-sampling, mip-skip throttle, far NN
+  sight, deterministic-scatter). Menu of deferred ideas; never deleted.
+- [`grass-perf-closeout.md`](grass-perf-closeout.md) — **Lead handoff / review surface**
+  for the grass-perf effort. Code-complete + fully gated green (both feature sets, e2e
+  11/11); durable facts migrated. Headlines the **ratification items** (threaded run-to-run
+  non-reproducibility, blur deletion, feel-tune) + the toroidal wrap-seam limitation.
+  **Review** — start here.
+- [`grass-perf-hub.md`](grass-perf-hub.md) — **Orchestration hub**: the full build-first
+  log, every decision, and the carried-forward debt (each item fixed/confirmed/deferred).
+  **Review** — the detailed record behind the close-out.
+- [`grass-perf-recon.md`](grass-perf-recon.md) · [`grass-perf-recon-stage2.md`](grass-perf-recon-stage2.md)
+  · [`grass-stage3-review.md`](grass-stage3-review.md) — recon maps (Stage 1 / Stage 2) +
+  the Stage-3 code review & perf numbers. Scratch; delete with the effort.
+- [`v2.0.2-grass-scatter.md`](v2.0.2-grass-scatter.md) — Stage-1 design spec (stochastic u8
+  scatter). **Shipped** — durable facts migrated to `architecture/` + `decisions/`;
+  `okay_to_delete: true`.
+- [`v2.0.3-grass-lod-pyramid.md`](v2.0.3-grass-lod-pyramid.md) — Stage-2 design spec (u8 LOD
+  mip pyramid + windowed snapshot). **Shipped** — durable facts migrated; `okay_to_delete: true`.
 - [`v2.0.1-mission.md`](v2.0.1-mission.md) — Patch-wave hub for v2.0.1:
   triage + fix the problems the lead surfaces against the shipped v2.0.0
   build. **Draft** — intake open, no streams launched yet.

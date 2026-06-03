@@ -1209,7 +1209,7 @@ mod tests {
     #[test]
     fn nn_input_grass_sector_empty_grid_is_zero() {
         let mut w = World::new("s5b-grass-empty");
-        w.grass.density.fill(0.0);
+        w.grass.fill_density(0.0);
         w.grass.rebuild_row_bitset();
         let inp = build_for_founder(&mut w);
         for s in 0..NN_SECTORS {

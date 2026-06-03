@@ -60,9 +60,15 @@ export const SLIDER_NAMES = [
   "bucket_7_weight",
   "bucket_7_rate",
   "bucket_7_sigma",
+  "grass_decay_pct",
+  "grass_decay_amount",
+  "grass_spread_pct",
+  "grass_spread_amount",
+  "grass_spread_ring1_pct",
+  "grass_spread_ring2_pct",
 ] as const;
 
-export const SLIDER_COUNT = 54 as const;
+export const SLIDER_COUNT = 60 as const;
 
 export type SliderName = (typeof SLIDER_NAMES)[number];
 

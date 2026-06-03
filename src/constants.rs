@@ -195,6 +195,13 @@ pub const MAX_CHUNKS: usize = 16;
 pub const GRASS_CELL_SIZE: f32 = 5.0;
 /// Maximum density per cell (clamped post-step).
 pub const GRASS_MAX: f32 = 1.0;
+/// v2.0.3 Stream 2a: maximum number of pyramid levels (L0 alias + owned L1+
+/// buffers). The pyramid builder stops at 1×1 or when it would exceed this cap,
+/// whichever comes first. At grass_dim = 1920 (default) repeated halving
+/// (ceil-divide) yields 11 levels before reaching 1×1 — well under the cap.
+/// Raise this only if you need more levels at larger grid sizes; 16 is enough
+/// for a 65536² world. Append-only constant — do not remove.
+pub const GRASS_PYRAMID_MAX_LEVELS: usize = 16;
 // ---- Biome grass carrying capacity (v2.0 Wave 1) ----
 // Per-biome multiplier on `GRASS_MAX` for a cell's grass *carrying capacity*.
 // Applied to BOTH the initial seed value and the per-cell logistic/clamp ceiling
@@ -224,9 +231,64 @@ pub const GRASS_ENERGY_PER_BITE_DEFAULT: f32 = 10.0;
 /// grass cell. Density removed per bite = GRASS_MAX / bites_per_block.
 /// Live-tunable via DevSliders.grass_bites_per_block.
 pub const GRASS_BITES_PER_BLOCK_DEFAULT: u32 = 2;
+/// Fixed bites-per-block for Stage-1 graze energy quantization (v2.0.2 Stream 1e).
+///
+/// Stream 1e treats `grass_bites_per_block` as a constant (not a live slider)
+/// so that `density_chunk = GRASS_MAX / GRASS_BITES_PER_BLOCK` is a stable f32
+/// with a predictable u8 representation. At 2, `density_chunk = 0.5`, which
+/// encodes to exactly 128 u8 bytes — 128/255 of the full range — giving
+/// 128 u8 levels per bite, well above the "≥ 8 levels/bite" cap required for
+/// valid u8 energy-reward granularity (cap ≤ 32 → ≥ 8 levels/bite). Matches
+/// `GRASS_BITES_PER_BLOCK_DEFAULT` so the slider default and the constant agree.
+/// The spec names no other value; 2 is the shipped default and the simplest cap
+/// that satisfies the u8-floor guard. Stage 3 can re-expose as a live slider
+/// once the graze path handles arbitrary chunk sizes.
+pub const GRASS_BITES_PER_BLOCK: u32 = 2;
 /// Default for `full_grass_on_init`: when true, world init fills every grass
 /// cell to `GRASS_MAX` instead of seeding `grass_initial_seed_count` cells.
 pub const FULL_GRASS_ON_INIT_DEFAULT: bool = false;
+
+// ---- Grass SCATTER kernel (v2.0.2 Stream 1b) ----
+// Stochastic per-cell scatter propagation that REPLACES the separable blur as the
+// live propagation path (the blur is retained behind a selector for the bench).
+// Per tick, for each cell that has grass (read from a frozen per-tile source
+// snapshot), using a position-addressable `(world_seed, tile, tick)` hash RNG:
+//   - DECAY roll: with prob GRASS_DECAY_PCT, subtract GRASS_DECAY_AMOUNT (floor 0).
+//   - SPREAD roll: with prob GRASS_SPREAD_PCT, pick ONE target offset from the
+//     precomputed DISC table (radial band chosen by the ring1/2/3 weights, angle
+//     uniform → round footprint), and add GRASS_SPREAD_AMOUNT to it, clamped to
+//     the target cell's biome cap.
+// All writes are relaxed load→compute→clamp→store on the AtomicU8 field (cross-
+// tile legal; concurrent collisions clobber wholesale — accepted noise).
+//
+// These are the kernel's working defaults until the six/seven sliders (Stream 1d)
+// are wired through DevSliders; the kernel reads slider values when present and
+// falls back to these. Tuned per the plan's persistence target: PLAINS
+// super-critical (spread-in ≫ decay-out so patches self-sustain), WATER
+// sub-critical (cap 0.04 = u8 level 10 throttles reinforcement → thin shoreline).
+//
+/// Per-tick probability a grass cell rolls a decay event.
+pub const GRASS_DECAY_PCT_DEFAULT: f32 = 0.02;
+/// Density subtracted (f32 grass-amount domain) on a decay event; floored at 0.
+/// 1/255 ≈ 0.0039 is the u8 quantization floor; this is ~2 bytes so decay is
+/// always visible (never stalls sub-quantum).
+pub const GRASS_DECAY_AMOUNT_DEFAULT: f32 = 0.008;
+/// Per-tick probability a grass cell rolls a spread event onto one disc target.
+pub const GRASS_SPREAD_PCT_DEFAULT: f32 = 0.55;
+/// Density added to the chosen spread target (f32 grass-amount domain), clamped
+/// to the target's biome cap. Larger than the decay amount so plains stays
+/// super-critical (a patch refills its own grazed/decayed gaps).
+pub const GRASS_SPREAD_AMOUNT_DEFAULT: f32 = 0.05;
+/// Spread distance radial-band weights: probability mass for ring 1 / 2 / 3 of the
+/// disc table (need not sum to 1 — normalized at table build). Ring 1 dominant so
+/// spread is mostly local (tight patches), with a light long tail.
+pub const GRASS_SPREAD_RING1_PCT_DEFAULT: f32 = 0.70;
+pub const GRASS_SPREAD_RING2_PCT_DEFAULT: f32 = 0.22;
+pub const GRASS_SPREAD_RING3_PCT_DEFAULT: f32 = 0.08;
+/// Spread reach in cells = the disc table radius. Must be ≤ GRASS_TILE_SIZE so a
+/// cross-tile spread lands in an immediate fringe neighbour (the fringe rule keeps
+/// that neighbour active next tick). The three radial bands split [1, radius].
+pub const GRASS_SPREAD_RADIUS: i32 = 3;
 
 // ---- Legacy NN input layout offsets (test-only calibration anchors) ----
 // v2.0 Wave 1a: these pin the *legacy* (walled, ReservedPredator-present)

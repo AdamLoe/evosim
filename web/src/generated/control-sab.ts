@@ -29,6 +29,11 @@ export const CTRL_NN_STATS_EPOCH = 104 as const;
 export const CTRL_NN_STATS_LEN = 105 as const;
 export const CTRL_SPECIES_TABLE_EPOCH = 112 as const;
 export const CTRL_SPECIES_TABLE_LEN = 113 as const;
+export const CTRL_CAMERA_CX_BITS = 120 as const;
+export const CTRL_CAMERA_CY_BITS = 121 as const;
+export const CTRL_CAMERA_ZOOM_BITS = 122 as const;
+export const CTRL_CAMERA_VIEWPORT_W = 123 as const;
+export const CTRL_CAMERA_VIEWPORT_H = 124 as const;
 export const CTRL_I32_REGION_LEN = 256 as const;
 
 export const INSPECT_RESP_OFFSET = 1024 as const;

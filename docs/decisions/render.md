@@ -209,21 +209,190 @@
 - **Code anchors**: `src/creature.rs → FlashTag`, `src/world/tick.rs →
   flash_decay`, `web/src/render-gl.ts` (the flash pass + `flashScratch`).
 
-### Biomes render as flat per-cell color under the grass (v2.0)
+### Grass uses a u8 box-filter mip pyramid (clipmap) for render LOD and snapshot windowing
+
+- **Decision**: `GrassGrid` carries a `GrassPyramid` — a u8 mip pyramid built
+  by box-filter mean-downsampling from L0 (the live density field) up through
+  ~12 levels at the default `grass_dim = 1920`. L0 aliases the density field
+  directly; L1+ are owned, edge-clamped. The pyramid is refreshed each tick at
+  step 7b (after grass advances, before energy). It serves two consumers: (1)
+  render LOD — the snapshot worker extracts a clipmap window at the appropriate
+  mip level; (2) snapshot windowing — only the visible region at that level is
+  published per slot.
+- **Why**: At `grass_dim` > 2048 a full-resolution copy would exceed the
+  budget; even at the default 1920² the copy is ~3.7 MB per tick. A pyramid
+  lets the snapshot be both bandwidth-bounded (`GRASS_LOD_BUDGET_AXIS = 2048`
+  cells per axis) and LOD-correct at any zoom. Mean downsampling (box filter)
+  is the correct aggregate for a density field — no aliasing from nearest.
+- **Applies to**: `architecture/render-pipeline.md`,
+  `architecture/shared-memory-and-protocol.md`.
+- **Code anchors**: `src/grass.rs → GrassPyramid`, `GrassGrid`
+  (pyramid field, step-7b refresh); `src/wasm_api.rs → write_snapshot`
+  (LOD level + window extraction via `pyramid.viewport_window`).
+
+### LOD level formula and budget constants
+
+- **Decision**: `GRASS_LOD_BUDGET_AXIS = 2048` cells per axis; margin factor
+  `GRASS_LOD_MARGIN_FACTOR = 1.5×` (the published window covers the visible
+  viewport × 1.5, centered on the camera). LOD level =
+  `floor(log2(max(1.0, visible_cell_span / GRASS_LOD_BUDGET_AXIS)))`, where
+  `visible_cell_span = (world_size / cam_zoom) / GRASS_CELL_SIZE`. The `max(1.0)`
+  pre-clamp ensures `log2` is never called on a value < 1.0 (which would give
+  a negative level). Level is then clamped to `[0, max_level]`.
+- **Why**: The budget axis of 2048 is >= `grass_dim` at the default world size
+  (1920 < 2048), so the default-scale window equals the full field and output
+  is byte-identical to the pre-pyramid path — zero regression at the shipped
+  default. The 1.5× margin means a full-viewport pan in any direction stays
+  covered for at least one tick without a new window being needed.
+- **Tradeoffs**: The square-viewport approximation (vis_cells_x == vis_cells_y)
+  means portrait/landscape viewports may over-request slightly on the narrow
+  axis. Acceptable given the margin.
+- **Applies to**: `architecture/render-pipeline.md`,
+  `architecture/shared-memory-and-protocol.md`.
+- **Code anchors**: `src/wasm_api.rs` (`GRASS_LOD_BUDGET_AXIS`,
+  `GRASS_LOD_MARGIN_FACTOR`, `write_snapshot` LOD computation block).
+- **Revisit when**: viewport aspect ratio becomes significant (tall/wide worlds
+  benefit from separate x/y window dimensions).
+
+### Grass and biome textures are fixed 2048² R8; per-frame texSubImage2D of the window
+
+- **Decision**: Both the grass and biome textures are allocated once at
+  `GRASS_LOD_BUDGET_AXIS² = 2048×2048` (R8, `UNSIGNED_BYTE`). Per frame,
+  `texSubImage2D` uploads only the `win_w × win_h` window bytes into the `(0,0)`
+  corner of each texture (subarray-guarded). `NEAREST` filtering is used for
+  both min and mag (trilinear is reserved via the `u_lod_blend` uniform, always
+  `0.0` now). UV transform uniforms map the world-space quad into the window
+  sub-region: `u_uv_scale = world_size / (GRASS_CELL_SIZE * 2^mipLevel * BUDGET_AXIS)`,
+  `u_uv_offset = -vec2(winOriginX, winOriginY) / BUDGET_AXIS`. At default
+  scale (mip=0, origin=(0,0)) this reduces to identity — no behavior change.
+- **Why**: A fixed allocation avoids per-frame `texImage2D` resize overhead.
+  Uploading only the window avoids uploading the entire budget² texture when the
+  window is smaller. Nearest-mip first keeps the implementation simple; switching
+  to trilinear later requires only a `texParameteri` change and making `u_lod_blend`
+  non-zero.
+- **Applies to**: `architecture/render-pipeline.md`.
+- **Code anchors**: `web/src/render-gl.ts → initRenderer` (texture allocation,
+  `GRASS_LOD_BUDGET_AXIS`); `web/src/render-gl.ts → renderWorldImpl` (the
+  `texSubImage2D` upload + UV uniform writes for both grass and biome programs).
+
+### Biome tint uses a mode-downsampled snapshot biome channel (not a separate mip)
+
+- **Decision**: The biome texture fed to the `BIOME_FS` shader is not a
+  precomputed biome mip pyramid. Instead, `write_snapshot` recomputes a
+  mode-downsampled biome window (the most-frequent biome tag in each
+  `2^mipLevel × 2^mipLevel` block of level-0 cells) on every tick, using the
+  same window parameters as the grass channel. The result is appended to the
+  slot immediately after the grass region (`biome_win_bytes = min(grass_dim,
+  GRASS_LOD_BUDGET_AXIS)²` allocation). The biome UV transform in `BIOME_FS` is
+  identical to `GRASS_VS`, so tint stays locked to the grass window at every LOD
+  level.
+- **Why**: Mode downsampling is correct for a categorical field (unlike mean,
+  which would produce fractional biome ids). Keeping biome as a snapshot channel
+  rather than a separate SAB avoids another buffer, and the biome field is static
+  so the recompute could be precomputed — but that is deferred (noted as a perf
+  TODO in `write_snapshot`). The alternative (a precomputed static biome
+  mode-pyramid struct) is out of scope for the 2d grass-perf effort.
+- **Tradeoffs**: Biome window recomputed every tick even though biome is static;
+  acceptable at current performance. A precomputed biome mode-pyramid would
+  eliminate this work but requires a new struct in `world/mod.rs`.
+- **Applies to**: `architecture/render-pipeline.md`,
+  `architecture/shared-memory-and-protocol.md`.
+- **Code anchors**: `src/wasm_api.rs → write_snapshot` (biome mode-downsample
+  loop); `web/src/render-gl.ts → renderWorldImpl` (biome channel upload +
+  UV uniforms); `web/src/sim-bridge.ts → biomeWinOffset` / `WindowMetadata`.
+
+### Camera SAB lanes carry cx/cy/zoom/viewport to the worker for window computation
+
+- **Decision**: Five control-SAB slots at indices 120–124 carry the current
+  camera state from main to the worker each RAF:
+  `CTRL_CAMERA_CX_BITS = 120` (cx as f32 bits),
+  `CTRL_CAMERA_CY_BITS = 121` (cy as f32 bits),
+  `CTRL_CAMERA_ZOOM_BITS = 122` (zoom as f32 bits),
+  `CTRL_CAMERA_VIEWPORT_W = 123` (u32),
+  `CTRL_CAMERA_VIEWPORT_H = 124` (u32).
+  `main.ts` writes these each RAF (and pre-seeds them at first-tick init to
+  `world_size / 2`, `world_size / 2`, zoom `1.0`). The sim worker passes them
+  into `write_snapshot` as `cam_cx/cam_cy/cam_zoom/viewport_w/viewport_h`; wasm
+  cannot read the JS SAB directly.
+- **Why**: The worker needs camera state to compute the LOD level and clipmap
+  window without polling JS. The SAB is the natural low-latency channel for
+  main→worker state without a message-passing round trip. Storing as raw f32
+  bits avoids any float-packing issues across the SAB i32 view.
+- **Applies to**: `architecture/shared-memory-and-protocol.md`,
+  `architecture/worker-runtime.md`.
+- **Code anchors**: `web/src/generated/control-sab.ts`
+  (`CTRL_CAMERA_CX_BITS`…`CTRL_CAMERA_VIEWPORT_H`); `web/src/main.ts`
+  (RAF write + first-tick init); `src/wasm_api.rs → write_snapshot`
+  (the five camera parameters).
+
+### SNAPSHOT_HEADER_BYTES bumped 32→64 to carry window metadata
+
+- **Decision**: The per-slot snapshot header is 64 bytes (was 32). Bytes
+  `[32..64)` carry 8 × u32 LE window-metadata fields: `mip_level`,
+  `win_origin_x`, `win_origin_y`, `win_w`, `win_h`, `tex_dim_w`, `tex_dim_h`,
+  `wrap_mode`. The creature SoA still starts at offset 64 (32-byte aligned).
+- **Why**: The renderer needs the window parameters to compute the UV transform
+  and to call `texSubImage2D` with the correct dimensions. Embedding them in the
+  header is the lowest-latency path (same atomic flip as the snapshot data)
+  and keeps the contract self-describing.
+- **Applies to**: `architecture/shared-memory-and-protocol.md`.
+- **Code anchors**: `src/wasm_api.rs` (`SNAPSHOT_HEADER_BYTES = 64`,
+  the window-metadata write block in `write_snapshot`);
+  `web/src/sim-bridge.ts → readWindowMetadata`, `SNAPSHOT_HEADER_BYTES`,
+  `WindowMetadata`.
+
+### Default-scale window equals the full field (byte-identical to pre-LOD path)
+
+- **Decision**: The LOD and window logic is designed so that at the shipping
+  default (world_size=9600, zoom=1.0, grass_dim=1920, GRASS_CELL_SIZE=5.0):
+  mip_level=0, window=(0,0,1920,1920), win_w×win_h = 1920² = grass_cell_count.
+  The slot grass bytes are byte-identical to the pre-pyramid path.
+- **Why**: Zero-regression guarantee at the default scale means the new code
+  cannot silently introduce a rendering difference for the most common case.
+  The design invariant also validates the LOD formula: the `max(1.0)` pre-clamp
+  before `log2` is what keeps `level=0` when `visible_cell_span / BUDGET_AXIS ≈ 0.9375 < 1.0`.
+- **Applies to**: `architecture/render-pipeline.md`.
+- **Code anchors**: `src/wasm_api.rs → write_snapshot` (the DEFAULT-SCALE
+  INVARIANT comment block).
+
+### Toroidal wrap-seam is a known limitation at grass_dim > 2048
+
+- **Decision**: When the camera is near the world seam on a toroidal world with
+  `grass_dim > 2048` (i.e., non-default zoom-out), the clipmap window origin is
+  clamped to `[0, level_dim - win]` rather than allowed to overflow and wrap.
+  This means a window straddling the seam shows the wrong grass/biome region.
+  The limitation is documented in `write_snapshot` and is NOT fixed.
+- **Why**: Supporting toroidal wrap in `viewport_window` requires the window
+  origin to overflow modulo `level_dim`, which `pyramid.viewport_window` does
+  not currently implement. At the shipped default (`grass_dim=1920 < 2048`) the
+  window always equals the full field and the seam never arises. Fixing this is
+  a Stage-3 item (the TODO comment in `write_snapshot` marks the exact clamp to
+  remove).
+- **Applies to**: `architecture/render-pipeline.md`.
+- **Code anchors**: `src/wasm_api.rs → write_snapshot`
+  (the `TODO (Stage-3 wrap-seam)` comment on the `win_origin_x/y` clamp).
+
+### Biomes render as flat per-cell color under the grass, fed from the snapshot biome channel
 
 - **Decision**: The biome layer is a second full-screen world-quad drawn
-  **under** the grass, sampling a static R8 biome-id texture (one u8 `Biome`
+  **under** the grass, sampling an R8 biome-id texture (one u8 `Biome`
   tag per grass cell) with NEAREST filtering — each cell a flat color
-  (Plains/Water/Desert). The texture is a view over wasm linear memory and is
-  uploaded **once per worker swap** (a `biomeDirty` flag), not per frame.
-- **Why**: Simple to ship and cheap — the biome map is static for a world's
-  life, so a per-frame re-upload would be pure waste. Textured / height-shaded
-  biomes are v2.1+. Drawing under the grass lets grass density brighten green
-  on top of terrain.
+  (Plains/Water/Desert). The texture data comes from the per-slot windowed
+  biome channel in the snapshot (mode-downsampled, same `win_w × win_h` as
+  the grass window), uploaded via `texSubImage2D` into the `(0,0)` corner of
+  a fixed `GRASS_LOD_BUDGET_AXIS² = 2048²` R8 texture each frame. The UV
+  transform is identical to the grass channel (same `u_uv_scale/u_uv_offset`
+  uniforms).
+- **Why**: Feeding biome from the snapshot slot (rather than a separate static
+  SAB view) keeps biome tint locked to the grass clipmap window at every LOD
+  level — no UV mismatch when zoomed out. Drawing under the grass lets grass
+  density brighten green on top of terrain. Textured / height-shaded biomes are
+  a future concern (v2.1+).
 - **Applies to**: `architecture/render-pipeline.md`,
   `architecture/shared-memory-and-protocol.md`.
 - **Code anchors**: `web/src/render-gl.ts → BIOME_VS/BIOME_FS`,
-  `web/src/main.ts` (`biomeView` / `biomeDirty`).
+  `web/src/render-gl.ts → renderWorldImpl` (biome upload + UV uniforms);
+  `src/wasm_api.rs → write_snapshot` (biome mode-downsample into slot).
 
 ### Per-species population graph, fed by the polled species table (v2.0)
 

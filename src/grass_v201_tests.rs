@@ -41,28 +41,41 @@ fn make_grid(dims: WorldDims) -> GrassGrid {
     let n = dims.grass_cell_count;
     GrassGrid {
         dims,
-        density: vec![0.0f32; n],
+        // v2.0.2 Stream 1a: density is `AtomicU8`, zero-filled.
+        density: (0..n).map(|_| AtomicU8::new(0)).collect(),
         capacity: vec![GRASS_MAX; n],
         scratch: vec![0.0f32; n],
         row_has_density: vec![0u64; dims.grass_dim.div_ceil(64)],
         tiles_per_axis: tpa,
-        tile_active: vec![0u64; tile_words],
-        tile_active_next: vec![0u64; tile_words],
-        tile_dirty: [vec![0u64; tile_words], vec![0u64; tile_words]],
+        tile_active: (0..tile_words).map(|_| AtomicU64::new(0)).collect(),
+        tile_active_next: (0..tile_words).map(|_| AtomicU64::new(0)).collect(),
+        tile_dirty: [
+            (0..tile_words).map(|_| AtomicU64::new(0)).collect(),
+            (0..tile_words).map(|_| AtomicU64::new(0)).collect(),
+        ],
         tile_class: vec![TILE_EMPTY; tpa * tpa],
+        // v2.0.2 Stream 1b: these v2.0.1 equivalence/disc tests exercise the BLUR
+        // path; default the grid to Blur so their assertions are unchanged.
+        propagation: GrassPropagation::Blur,
+        world_seed: 0,
+        scatter_tick: 0,
+        // v2.0.2 Stream 1d: scatter params default to working constants.
+        scatter_params: ScatterParams::default(),
+        disc: default_disc_table(),
         par_chunks_us: AtomicU64::new(0),
         chunks_mut_us: AtomicU64::new(0),
         row_body_us: AtomicU64::new(0),
         row_body_self_us: AtomicU64::new(0),
         row_body_calls: AtomicU64::new(0),
         dispatch_calls: AtomicU64::new(0),
+        pyramid: GrassPyramid::new(dims.grass_dim),
     }
 }
 
 fn seed_center(g: &mut GrassGrid) {
     let dim = g.dims.grass_dim;
     let c = (dim / 2) * dim + dim / 2;
-    g.density[c] = GRASS_MAX;
+    g.dset(c, GRASS_MAX);
     g.resync_active_from_density();
     g.mark_all_tiles_dirty();
 }
@@ -90,7 +103,7 @@ fn spread_is_disc_not_diamond() {
     let at = |ix: i64, iy: i64| -> f32 {
         let wx = ix.rem_euclid(dim as i64) as usize;
         let wy = iy.rem_euclid(dim as i64) as usize;
-        g.density[wy * dim + wx]
+        g.dget(wy * dim + wx)
     };
     // Reach east along +x axis.
     let mut axis_reach = 0i64;
@@ -134,7 +147,7 @@ fn empty_neighbourhood_stays_zero() {
     for _ in 0..20 {
         g.compute_propagation(0.5, 0.5);
     }
-    assert!(g.density.iter().all(|&d| d == 0.0));
+    assert!(g.density_u8_snapshot().iter().all(|&b| b == 0));
 }
 
 // ─── §2: active-tile == full-grid bit-equivalence ───────────────────────────
@@ -150,8 +163,8 @@ fn assert_active_equals_full(dims: WorldDims, r: f32, k: f32, ticks: usize) {
     let n = dims.grass_cell_count;
     for _ in 0..200 {
         let idx = seeded_rng.index(n);
-        fast.density[idx] = GRASS_MAX;
-        refg.density[idx] = GRASS_MAX;
+        fast.dset(idx, GRASS_MAX);
+        refg.dset(idx, GRASS_MAX);
     }
     fast.resync_active_from_density();
     fast.mark_all_tiles_dirty();
@@ -160,7 +173,8 @@ fn assert_active_equals_full(dims: WorldDims, r: f32, k: f32, ticks: usize) {
         fast.compute_propagation(r, k);
         refg.compute_propagation_full(r, k);
         assert_eq!(
-            fast.density, refg.density,
+            fast.density_u8_snapshot(),
+            refg.density_u8_snapshot(),
             "active-tile path diverged from full-grid scan at tick {t}"
         );
     }
@@ -190,8 +204,8 @@ fn active_tile_equals_full_grid_with_grazing() {
     // in (the case where reactivation matters).
     for iy in 40..96 {
         for ix in 40..96 {
-            fast.density[iy * dim + ix] = GRASS_MAX;
-            refg.density[iy * dim + ix] = GRASS_MAX;
+            fast.dset(iy * dim + ix, GRASS_MAX);
+            refg.dset(iy * dim + ix, GRASS_MAX);
         }
     }
     fast.resync_active_from_density();
@@ -206,14 +220,23 @@ fn active_tile_equals_full_grid_with_grazing() {
         if cell < n {
             // fast: through consume (reactivates the tile)
             fast.consume(cell, 0.5, 1.0);
-            // ref: drain directly + resync the whole active set from density
-            let cur = refg.density[cell];
-            refg.density[cell] = (cur - cur.min(0.5)).max(0.0);
+            // ref: drain directly using the same u8-byte arithmetic as consume()
+            // (v2.0.2 Stream 1e: consume now works in u8 bytes, not f32, so the
+            // reference must match byte-for-byte to keep active == full-grid).
+            // chunk_bytes = encode_density(0.5) = round(0.5/1.0*255) = 128.
+            let cur_byte = refg.dget_u8(cell);
+            let chunk_bytes: u8 = 128; // encode_density(0.5).max(1)
+            let taken_bytes = cur_byte.min(chunk_bytes);
+            // dset(decode(new_byte)) is exact: encode(n/255*GRASS_MAX) = n.
+            let new_byte = cur_byte - taken_bytes;
+            let new_val = (new_byte as f32 / 255.0) * GRASS_MAX;
+            refg.dset(cell, new_val);
         }
         fast.compute_propagation(r, k);
         refg.compute_propagation_full(r, k);
         assert_eq!(
-            fast.density, refg.density,
+            fast.density_u8_snapshot(),
+            refg.density_u8_snapshot(),
             "active-tile + graze diverged from full-grid scan at tick {t}"
         );
     }
@@ -234,30 +257,29 @@ fn propagation_is_deterministic_same_seed() {
     let mut rng = SimRng::from_u64(7);
     for _ in 0..300 {
         let idx = rng.index(n);
-        a.density[idx] = GRASS_MAX;
-        b.density[idx] = GRASS_MAX;
+        a.dset(idx, GRASS_MAX);
+        b.dset(idx, GRASS_MAX);
     }
     a.resync_active_from_density();
     b.resync_active_from_density();
     for t in 0..40 {
         a.compute_propagation(0.03, 0.4);
         b.compute_propagation(0.03, 0.4);
-        assert_eq!(a.density, b.density, "non-deterministic at tick {t}");
+        assert_eq!(
+            a.density_u8_snapshot(),
+            b.density_u8_snapshot(),
+            "non-deterministic at tick {t}"
+        );
     }
 }
 
 // ─── §3: dirty-tile snapshot quantize parity + both-slots-valid ─────────────
 
 /// Full reference quantize (every cell), matching the legacy `quantize_grass_into`.
+/// v2.0.2 Stream 1a: density is now stored on the SAME u8 scale, so a full
+/// quantize is the raw byte snapshot.
 fn full_quantize(g: &GrassGrid) -> Vec<u8> {
-    let inv_max = 1.0 / GRASS_MAX;
-    g.density
-        .iter()
-        .map(|&d| {
-            let q = (d * inv_max).clamp(0.0, 1.0) * 255.0;
-            (q + 0.5) as u8
-        })
-        .collect()
+    g.density_u8_snapshot()
 }
 
 /// After stepping with dirty-tile-only re-quantize into a single slot, that slot
@@ -270,7 +292,7 @@ fn dirty_tile_quantize_matches_full() {
     let mut g = make_grid(dims);
     let mut rng = SimRng::from_u64(11);
     for _ in 0..150 {
-        g.density[rng.index(n)] = GRASS_MAX;
+        g.dset(rng.index(n), GRASS_MAX);
     }
     g.resync_active_from_density();
     g.mark_all_tiles_dirty();
@@ -306,7 +328,7 @@ fn both_slots_valid_after_dirty_writes() {
     let mut g = make_grid(dims);
     let mut rng = SimRng::from_u64(13);
     for _ in 0..150 {
-        g.density[rng.index(n)] = GRASS_MAX;
+        g.dset(rng.index(n), GRASS_MAX);
     }
     g.resync_active_from_density();
     g.mark_all_tiles_dirty();
@@ -341,12 +363,13 @@ fn consume_drains_and_marks_dirty() {
     let mut g = make_grid(dims);
     let dim = dims.grass_dim;
     let cell = 50 * dim + 50;
-    g.density[cell] = GRASS_MAX;
+    g.dset(cell, GRASS_MAX);
     g.resync_active_from_density();
     // Clear dirty so we can observe the graze re-dirtying.
+    // v2.0.2 Stream 1c: tile_dirty is now Vec<AtomicU64>; clear via Relaxed store.
     for slot in 0..2 {
-        for w in g.tile_dirty[slot].iter_mut() {
-            *w = 0;
+        for w in g.tile_dirty[slot].iter() {
+            w.store(0, std::sync::atomic::Ordering::Relaxed);
         }
     }
     let got = g.consume(cell, 0.5, 10.0);
@@ -354,9 +377,14 @@ fn consume_drains_and_marks_dirty() {
         (got - 10.0).abs() < 1e-6,
         "ripe consume returns full energy"
     );
-    assert!(
-        (g.density[cell] - (GRASS_MAX - 0.5)).abs() < 1e-6,
-        "cell drained"
+    // Stage 3: byte-exact assertion.
+    // encode(GRASS_MAX) = 255, encode(0.5) = 128; drain = 255 - 128 = 127.
+    // decode(127) = 127/255 * GRASS_MAX ≠ exactly 0.5, but byte 127 IS the
+    // exact stored value after consume() subtracts chunk_bytes=128 from 255.
+    assert_eq!(
+        g.dget_u8(cell),
+        127u8,
+        "cell must be drained to exactly byte 127 (255 - 128)"
     );
     let t = (50 / GRASS_TILE_SIZE) * g.tiles_per_axis + 50 / GRASS_TILE_SIZE;
     assert!(
@@ -373,9 +401,19 @@ fn consume_drains_and_marks_dirty() {
 /// unchanged by the wave).
 #[test]
 fn bilinear_sample_contract_unchanged() {
-    let mut g = make_grid(DIMS_WRAP);
-    g.density[5] = 0.42;
+    let g = make_grid(DIMS_WRAP);
+    g.dset(5, 0.42);
     let x = 5.5 * GRASS_CELL_SIZE;
     let y = 0.5 * GRASS_CELL_SIZE;
-    assert!((g.bilinear_sample(x, y) - 0.42).abs() < 1e-5);
+    // Stage 3: byte-exact assertion.
+    // dset(5, 0.42) stores encode(0.42) = 107; decode(107) = 107/255 * GRASS_MAX.
+    // bilinear_sample at cell center returns dget(5) exactly (no interpolation weight
+    // on the zero-valued neighbours), so the sample must equal dget(5) to f32 epsilon.
+    let expected = g.dget(5); // decode(encode(0.42)) = decode(107)
+    assert_eq!(g.dget_u8(5), 107u8, "dset(5, 0.42) must store byte 107");
+    assert!(
+        (g.bilinear_sample(x, y) - expected).abs() < 1e-6,
+        "bilinear_sample at cell center must equal dget(5) exactly; got {}",
+        g.bilinear_sample(x, y)
+    );
 }

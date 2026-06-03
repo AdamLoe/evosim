@@ -7,22 +7,26 @@ The WebGL2 renderer, the camera, and the per-frame SAB snapshot read.
 A single instanced WebGL2 draw call for every creature body (plus a
 second instanced pass for the rare highlight rings), one full-screen
 quad sampling an **R8 grass density** texture, one full-screen quad
-sampling an **R8 biome-id** texture drawn UNDER the grass (v2.0 Wave 1b),
-and one `LINE_LOOP` for the world-bounds frame. The render loop runs on
-the main thread, owns no wasm handle, and reads the live snapshot SAB
-slot directly via typed arrays — no copy, no postMessage.
+sampling an **R8 biome-id** texture drawn UNDER the grass, and one
+`LINE_LOOP` for the world-bounds frame. The render loop runs on the main
+thread, owns no wasm handle, and reads the live snapshot SAB slot directly
+via typed arrays — no copy, no postMessage.
 
-> **v2.0 Wave 1a:** the world is runtime-sized (default 9600u → a 1920²
-> grass grid). The grass + biome texture dimensions and every snapshot
-> view length derive from the `grass_dim` reported in `boot_ready`, not
-> from a compile-time constant. The snapshot grass region is **u8**
-> (`grass_dim²` bytes, quantized Rust-side), uploaded as `gl.R8`.
+Both the grass and biome textures are fixed **2048×2048 R8** allocations
+(`GRASS_LOD_BUDGET_AXIS = 2048`). Each frame the renderer uploads only the
+sim-chosen clipmap window (`win_w × win_h` bytes) into the `(0, 0)` corner
+via `texSubImage2D`, then applies a UV transform (`u_uv_scale`/`u_uv_offset`)
+to map the world-space quad into that window. The sim worker selects the
+pyramid LOD level and window origin and publishes them in the snapshot header
+(bytes [32..64)); the renderer reads them as `WindowMetadata` each frame. At
+the default scale (`grass_dim = 1920 < 2048`) the window equals the full
+field and the upload is byte-identical to a full-field path.
 
 ## What it owns
 
 - The GL programs (`disc`, `grass`, `biome`, `frame`), VAOs, instance
-  buffers, the R8 grass texture, the **static R8 biome texture**, and the
-  instance scratch buffer.
+  buffers, the fixed 2048² R8 grass texture, the fixed 2048² R8 biome
+  texture, and the instance scratch buffer.
 - JS-side **frustum culling**. Per-creature x/y/radius is read from the
   SoA; off-screen creatures are skipped before they touch the instance
   buffer.
@@ -66,8 +70,11 @@ RAF callback (wrapped in `span("frame")`):
      2b. slot = Atomics.load(controlI32, CTRL_CURRENT_SLOT)
      2c. header = readSnapshotHeader(snapshotView, slotOffset(layout, slot))
      2d. creatures = new Float32Array(snapshotBuffer, creatureSoAOffset(layout, slot), pop * CREATURE_STRIDE)
-     2e. grass     = new Uint8Array(snapshotBuffer, grassOffset(layout, slot), layout.grassCellCount)
-         // u8, one byte per cell; length = grass_dim² (NOT a constant)
+     2e. grass    = new Uint8Array(snapshotBuffer, grassOffset(layout, slot),    layout.grassRegionBytes)
+         biomeWin = new Uint8Array(snapshotBuffer, biomeWinOffset(layout, slot), layout.biomeWinBytes)
+         // grass: u8 clipmap window, min(grass_dim,2048)² bytes per slot
+         // biomeWin: mode-downsampled biome window, same allocation size
+         // windowMeta = readWindowMetadata(snapshotView, slotBaseOff)
          // snapshotBuffer is wasm.memory.buffer (wasm linear memory, not a separate SAB)
   3. close `frame.snapshot.read`
   4. If seq === lastPaintedSeq AND camera unchanged → skip paint (seq-gated: FPS ≤ TPS).
@@ -76,11 +83,14 @@ RAF callback (wrapped in `span("frame")`):
   5. (auto-restart on world_ended if enabled)
   6. pollRail(rail, header, simBridge, creatures, pop)
   7. renderWorld(gl, cam, viewW, viewH, creatures, grass,
-                 biomeView, biomeDirty, pop, worldSize, grassDim,
-                 wrapWorld, highlights)
-     // biomeView is a static Uint8Array over wasm memory at
-     // biome_buf_byte_offset; biomeDirty is true only on a worker swap so
-     // the biome texture re-uploads once, not per frame.
+                 biomeWin, pop, worldSize, grassDim,
+                 wrapWorld, highlights, windowMeta)
+     // biomeWin is the per-slot windowed biome bytes from the snapshot
+     // (mode-downsampled, same win_w×win_h as the grass window).
+     // windowMeta carries mip_level, win_origin_x/y, win_w/h, tex dims,
+     // wrap mode; consumed each frame to drive the UV transform + texSubImage2D.
+     // Also writes camera SAB lanes (cx/cy/zoom as f32-bits at slots 120-122;
+     // viewport_w/h as u32 at slots 123-124) so the worker knows the view.
   8. update top-left status strip (world_seed) + perf-panel status line
 ```
 
@@ -338,52 +348,80 @@ if (exp === undefined || nowMs >= exp) continue;
 The pass is rare (≤ 1–2 rings/frame typically) so it does not need to
 fit in the body-pack loop.
 
-## Grass (v2.0 Wave 1a)
+## Grass and biome textures
 
-**R8** texture, `grass_dim × grass_dim` (1920 × 1920 ≈ 3.7 MB per upload
-at the 9600u default). The texture dimension is the runtime `grass_dim`
-from `boot_ready`, compared against a cached `grassTexDim`: a **full
-`texImage2D`** runs on first use / dim change, a `texSubImage2D` on every
-subsequent painted frame. The snapshot grass region is u8 (quantized
-Rust-side via `quantize_dirty_tiles_into` — only dirty frontier tiles are
-re-quantized per tick; `GRASS_MAX` → 0..255); R8 is a normalized unorm
-format so the shader's `texture(...).r` returns 0..1 directly — no
-float-linear extension, no shader rescale.
+Both the grass density and biome layers share a fixed **2048×2048 R8
+texture** allocated once in `initRenderer` (`GRASS_LOD_BUDGET_AXIS = 2048`).
+The texture is never resized; only the window sub-region changes per frame.
+
+**Grass.** The snapshot grass region is a u8 clipmap window:
+`min(grass_dim, 2048)²` bytes per slot, carrying exactly `win_w × win_h`
+meaningful bytes at the sim-chosen LOD level. The renderer calls
+`texSubImage2D` each painted frame to upload only the `win_w × win_h`
+window into the `(0, 0)` corner of the 2048² texture (subarray-guarded to
+guard against `UNPACK_ROW_LENGTH` latent footguns). `UNPACK_ALIGNMENT` is
+set to 1 at init; R8 is a normalized unorm format so the shader's
+`texture(...).r` returns 0..1 with no shader rescale.
+
+**Biome.** The per-slot biome window (mode-downsampled, same `win_w × win_h`
+as grass) is appended immediately after the grass region in the slot
+(`biomeWinOffset`). It is uploaded the same way — `texSubImage2D` of
+`win_w × win_h` bytes into the `(0, 0)` corner of its own 2048² R8 texture
+— every frame. The biome texture uses `NEAREST` filtering so each cell
+renders as a flat color.
+
+**LOD level.** The sim's Rust worker computes the pyramid level and window
+origin each tick (`write_snapshot` reads the camera SAB lanes and publishes
+the window via `budget_axis = 2048`, margin 1.5×,
+`level = floor(log2(visible_cell_span / budget_axis))`). At default scale
+(`grass_dim = 1920`) the window equals the full field and the upload is
+byte-identical to a full-field path (1920² bytes ≈ 3.7 MB). The LOD level
+is carried in `windowMeta.mipLevel` (snapshot header bytes [32..36)).
+
+**UV transform.** Both grass and biome programs receive the same two uniforms
+to map the world-space quad UV into the window sub-region of the 2048² texture:
+
+```
+u_uv_scale  = world_size / (GRASS_CELL_SIZE × 2^mipLevel × BUDGET_AXIS)
+u_uv_offset = -vec2(winOriginX, winOriginY) / BUDGET_AXIS
+```
+
+At default scale (mip=0, origin=(0,0), win=1920):
+`scale = 9600 / (5 × 1 × 2048) ≈ 0.9375` and `offset = (0,0)`,
+giving `v_uv ∈ [0, 0.9375]` — exactly the 1920 data pixels in the 2048
+texture. This collapses to the identity mapping at default scale.
+`u_lod_blend` is reserved for future trilinear blending and is always `0.0`.
 
 **Toroidal tiling on zoom-out.** When `wrap_world` is on and the camera
 frustum extends past a world edge, `renderWorldImpl` issues extra grass
-draw calls with a shifted camera position (the same per-axis offset set
-`{-W, 0, +W}` used by creatures), so the grass and biome layers tile
-seamlessly on zoom-out. The biome layer uses the same offset loop.
+and biome draw calls with a shifted camera position (the per-axis offset
+set `{-W, 0, +W}` shared with creatures), so both layers tile seamlessly.
 
-> **Full GL texture upload every painted frame.** The `texSubImage2D`
-> covers the full `dim × dim` grass byte region even though Rust only
-> re-quantizes dirty tiles into the snapshot buffer. Dirty-rect GL upload
-> is a tracked backlog item. At 1920² this is a ~3.7 MB upload per paint.
+**NEAREST mip filter.** Both textures use `gl.NEAREST` for min and mag
+filtering. Trilinear blending is reserved for a future pass (one
+`texParameteri` change enables it when `u_lod_blend` is wired).
 
-`UNPACK_ALIGNMENT` is set to 1 at init (each R8 row is `dim` bytes, not a
-multiple of 4). The fragment shader tints the field a theme-driven green
-(`var(--grass-tint)` parsed as a vec3 uniform), with alpha tracking the
-sampled density so under-blend leaves the layer beneath (biome / clear
-color) showing through where grass is thin; `discard` at density=0 stays
-for the empty-cell fast path. The overall alpha is scaled by
-`settings.grassOpacity`.
+> **Known limitation — toroidal wrap seam.** A clipmap window straddling
+> the world wrap boundary (grass_dim > 2048, non-default zoom, toroidal
+> world) shows the wrong grass/biome region because the window is a
+> rectangular crop that cannot span the seam. This is a documented TODO in
+> the code; it does not affect the default (grass_dim=1920) configuration.
 
-If `settings.showGrass === false` the upload + draw is skipped entirely
-— at high cell counts this is a real perf win.
+If `settings.showGrass === false` the grass upload + draw is skipped
+entirely — at high cell counts this is a real perf win.
 
-## Biome layer (v2.0 Wave 1b)
+## Biome layer
 
 A second full-screen world-quad drawn **UNDER the grass**, before it, so
-grass density brightens green on top. It samples a **static R8 biome-id
-texture** (`grass_dim × grass_dim`, one u8 `Biome` tag per grass cell:
-0=Plains, 1=Water, 2=Desert) with **NEAREST** filtering so each cell is a
-flat color. The biome buffer is a `Uint8Array` over wasm linear memory at
-`biome_buf_byte_offset` (`grass_dim²` bytes); the renderer uploads it
-**once per worker swap** — `main.ts` passes a `biomeDirty` flag that is
-true only on boot/restart, so the static texture is not re-uploaded per
-frame. The fragment shader recovers the integer tag
-(`floor(.r * 255 + 0.5)`) and maps it to a flat color:
+grass density brightens green on top. It samples an **R8 biome-id texture**
+(one u8 `Biome` tag per cell: 0=Plains, 1=Water, 2=Desert) with **NEAREST**
+filtering so each cell is a flat color. The biome data is carried as a
+windowed clipmap in the per-slot biome window (mode-downsampled, same
+`win_w × win_h` as the grass window); the renderer uploads it via
+`texSubImage2D` every painted frame using the same UV transform as grass —
+biome tint therefore tracks the grass window at every LOD level. The
+fragment shader recovers the integer tag (`floor(.r * 255 + 0.5)`) and maps
+it to a flat color:
 
 | Biome  | id | color (rgb)        |
 |--------|----|--------------------|
@@ -394,10 +432,11 @@ frame. The fragment shader recovers the integer tag
 These are **visual-identity defaults** (Wave 1c) — adjust in `BIOME_FS`'s
 `u_plains` / `u_water` / `u_desert` uniforms.
 
-### Grass shading (v1.9.2)
+### Grass shading
 
-- Texture filter is plain `LINEAR` (min + mag); no mipmapping (R8 unorm,
-  full re-upload each frame).
+- Texture filter is `NEAREST` (min + mag); trilinear blending is reserved
+  via the `u_lod_blend` uniform (always `0.0`) and can be enabled later by
+  changing one `texParameteri` call.
 - `u_grass_tint` (vec3) is parsed from the `--grass-tint` CSS var via
   `getComputedStyle` and cached against the previous string so we
   re-parse only on theme swap.
@@ -413,20 +452,30 @@ These are **visual-identity defaults** (Wave 1c) — adjust in `BIOME_FS`'s
 - `web/src/render-gl.ts` → `renderWorld`, `renderWorldImpl`,
   `initRenderer`, `DISC_VS`/`DISC_FS`, `GRASS_VS`/`GRASS_FS`,
   `BIOME_VS`/`BIOME_FS`, `FRAME_VS`/`FRAME_FS`, `FLOATS_PER_INSTANCE`,
-  the wrap-offset ghost-copy loop, `PERMANENT_EXP`, `HIGHLIGHT_FADE_MS`.
+  `GRASS_CELL_SIZE`, the wrap-offset ghost-copy loop, `PERMANENT_EXP`,
+  `HIGHLIGHT_FADE_MS`.
+- `web/src/sim-bridge.ts` → `GRASS_LOD_BUDGET_AXIS`, `WindowMetadata`,
+  `readWindowMetadata`, `makeSlotLayout`, `grassOffset`, `biomeWinOffset`,
+  `SNAPSHOT_HEADER_BYTES`, `CTRL_CAMERA_CX_BITS`/`CTRL_CAMERA_CY_BITS`/
+  `CTRL_CAMERA_ZOOM_BITS`/`CTRL_CAMERA_VIEWPORT_W`/`CTRL_CAMERA_VIEWPORT_H`.
 - `web/src/render.ts` → `Camera`, `PX_PER_SIZE`, `MIN_ZOOM`/`MAX_ZOOM`,
   `makeCamera`, `clampCamera`, `worldToScreen`.
 - `web/src/camera.ts` → `attachCameraControls`.
-- `web/src/main.ts` → the RAF `frame` callback and `spawnSimWorker`'s
-  SAB binding.
+- `web/src/main.ts` → the RAF `frame` callback, camera SAB lane writes,
+  `getLatestWindowMetadata`, and `spawnSimWorker`'s SAB binding.
 - `web/src/rail/highlight.ts` → `highlights` map, TTL semantics.
 
 ## Update when
 
 - The creature SoA stride changes (renderer's stride guard, instance
   pack reads, id extraction offsets all break).
-- The grass texture format or dimension changes (the `gl.R8` /
-  `gl.RED` / `gl.UNSIGNED_BYTE` triple here and the upload path).
+- The grass/biome texture format changes (the `gl.R8` / `gl.RED` /
+  `gl.UNSIGNED_BYTE` triple and the upload path). The texture dimensions
+  are now fixed at `GRASS_LOD_BUDGET_AXIS²` and do not change per boot.
+- The clipmap window metadata layout changes (snapshot header bytes
+  [32..64); `readWindowMetadata`; the `u_uv_scale`/`u_uv_offset` derivation
+  in `renderWorldImpl`; the `GRASS_CELL_SIZE` constant; or the camera SAB
+  lanes at control-SAB slots 120–124).
 - A new per-frame span is added (must nest under `frame` to avoid
   orphaning).
 - The id encoding changes (currently raw u32 pair via `f32::from_bits`

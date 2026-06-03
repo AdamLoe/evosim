@@ -64,7 +64,7 @@ use self::tick::AttackPick;
 use crate::brain::{Brain, MutationPolicy, NnTopology};
 use crate::constants::*;
 use crate::creature::{Action, CreatureSoA, FlashTag, Genome};
-use crate::grass::GrassGrid;
+use crate::grass::{GrassGrid, GrassPropagation};
 use crate::grid::SpatialGrid;
 use crate::rng::SimRng;
 use serde::{Deserialize, Serialize};
@@ -176,6 +176,23 @@ pub struct DevSliders {
     /// v2.0 Wave 3a live: initiator-only post-mating cooldown (ticks). The
     /// initiator pays this after a successful `Mate`; the partner is unaffected.
     pub mating_cooldown_ticks: u32,
+    // ── v2.0.2 Stream 1d: scatter kernel live-tuning sliders ─────────────────
+    // Six parameters for the stochastic u8 scatter propagation kernel. All live
+    // (take effect on the next tick). Defaults mirror the Stream 1b working
+    // constants so behavior is byte-identical before any slider is moved.
+    /// Per-tick probability a grass cell rolls a decay event. Live.
+    pub grass_decay_pct: f32,
+    /// Density subtracted on a decay event (f32 grass-amount domain). Live.
+    pub grass_decay_amount: f32,
+    /// Per-tick probability a grass cell rolls a spread event. Live.
+    pub grass_spread_pct: f32,
+    /// Density added to the chosen spread target. Live.
+    pub grass_spread_amount: f32,
+    /// Ring-1 (distance 0–1.5 cells) probability weight for disc-table band
+    /// sampling. Ring-3 weight is implicitly `max(0, 1 - ring1 - ring2)`. Live.
+    pub grass_spread_ring1_pct: f32,
+    /// Ring-2 (distance 1.5–2.5 cells) probability weight. Live.
+    pub grass_spread_ring2_pct: f32,
 }
 
 impl Default for DevSliders {
@@ -216,6 +233,14 @@ impl Default for DevSliders {
             starting_species_member_count: STARTING_SPECIES_MEMBER_COUNT_DEFAULT,
             starting_species_member_variance: STARTING_SPECIES_MEMBER_VARIANCE_DEFAULT,
             mating_cooldown_ticks: MATING_COOLDOWN_TICKS_DEFAULT,
+            // v2.0.2 Stream 1d: scatter kernel defaults — must match the Stream 1b
+            // working constants so behavior is byte-identical before sliders move.
+            grass_decay_pct: GRASS_DECAY_PCT_DEFAULT,
+            grass_decay_amount: GRASS_DECAY_AMOUNT_DEFAULT,
+            grass_spread_pct: GRASS_SPREAD_PCT_DEFAULT,
+            grass_spread_amount: GRASS_SPREAD_AMOUNT_DEFAULT,
+            grass_spread_ring1_pct: GRASS_SPREAD_RING1_PCT_DEFAULT,
+            grass_spread_ring2_pct: GRASS_SPREAD_RING2_PCT_DEFAULT,
         }
     }
 }
@@ -448,11 +473,18 @@ impl World {
             dims,
             Some(&biome_grid),
         );
+        // v2.0.2 Stream 1b: the LIVE sim runs the stochastic scatter kernel
+        // (low-level grid ctor defaults to Blur for the existing grid-direct
+        // tests). Thread the world seed into the per-cell scatter hash RNG (the
+        // tick is refreshed before each propagation call in `step`).
+        grass.set_propagation(GrassPropagation::Scatter);
+        grass.world_seed = world_seed;
         if sliders.full_grass_on_init {
             // Fill every cell to its biome carrying capacity (not a flat
             // GRASS_MAX) so "full grass" still respects biome richness.
-            for (d, &k) in grass.density.iter_mut().zip(grass.capacity.iter()) {
-                *d = k;
+            // v2.0.2 Stream 1a: density is u8-backed — encode each cap via `dset`.
+            for c in 0..grass.capacity.len() {
+                grass.dset(c, grass.capacity[c]);
             }
             grass.rebuild_row_bitset();
             // v2.0.1 §2/§3: density was set wholesale outside propagation — rebuild
@@ -746,6 +778,21 @@ impl World {
         p.clamp(0.0, 1.0)
     }
 
+    /// v2.0.2 Stream 1d: extract the six scatter DevSliders fields into a
+    /// `ScatterParams` struct, which the caller passes to
+    /// `GrassGrid::apply_scatter_params` before each propagation step.
+    #[inline]
+    fn scatter_params_from_sliders(&self) -> crate::grass::ScatterParams {
+        crate::grass::ScatterParams {
+            decay_pct: self.sliders.grass_decay_pct,
+            decay_amount: self.sliders.grass_decay_amount,
+            spread_pct: self.sliders.grass_spread_pct,
+            spread_amount: self.sliders.grass_spread_amount,
+            ring1_pct: self.sliders.grass_spread_ring1_pct,
+            ring2_pct: self.sliders.grass_spread_ring2_pct,
+        }
+    }
+
     /// Run one sim tick. Returns true while there is meaningful work happening.
     /// Once the population is gone we mark `world_ended` and switch to a thin
     /// grass-only path so the canvas keeps filling in the background while the
@@ -764,6 +811,11 @@ impl World {
             // advance and the bitset to stay consistent.
             {
                 crate::profile_span!(&self.profile, "tick.grass_step");
+                // v2.0.2 Stream 1b: refresh the scatter RNG tick before the pass.
+                self.grass.scatter_tick = self.tick;
+                // v2.0.2 Stream 1d: push current slider values into the kernel.
+                self.grass
+                    .apply_scatter_params(self.scatter_params_from_sliders());
                 self.grass.compute_propagation(
                     self.sliders.grass_in_cell_growth_r,
                     self.sliders.grass_propagation_rate_k,
@@ -842,6 +894,11 @@ impl World {
         {
             crate::profile_span!(&self.profile, "tick.grass_step");
             let gs_root_start = crate::profiler::clock_now_us_threadsafe();
+            // v2.0.2 Stream 1b: refresh the scatter RNG tick before the pass.
+            self.grass.scatter_tick = self.tick;
+            // v2.0.2 Stream 1d: push current slider values into the kernel.
+            self.grass
+                .apply_scatter_params(self.scatter_params_from_sliders());
             self.grass.compute_propagation(
                 self.sliders.grass_in_cell_growth_r,
                 self.sliders.grass_propagation_rate_k,
@@ -902,6 +959,14 @@ impl World {
                 1,
             );
         }
+
+        // 7b. Pyramid refresh (v2.0.3 Stream 2a): rebuild the u8 box-filter mip
+        //     levels from the freshly-settled density field. Runs AFTER grass_step
+        //     (density is quiescent — relaxed loads are stable) and BEFORE
+        //     write_snapshot so the pyramid reflects the current tick's grass.
+        //     Borrow: `GrassGrid::refresh_pyramid` takes `&mut self` and handles
+        //     the internal split-borrow (density/tile_active vs pyramid) itself.
+        self.grass.refresh_pyramid();
 
         // 8. Energy bookkeeping.
         {

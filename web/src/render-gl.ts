@@ -12,7 +12,11 @@
 import { type Camera, PX_PER_SIZE } from "./render";
 import { getSettings } from "./settings";
 import { span } from "./perf";
-import { CREATURE_STRIDE, MAX_POP_FOR_SIM } from "./sim-bridge";
+import { CREATURE_STRIDE, MAX_POP_FOR_SIM, GRASS_LOD_BUDGET_AXIS, type WindowMetadata } from "./sim-bridge";
+
+// v2.0.3 Stream 2c: grass cell size in world units (matches Rust GRASS_CELL_SIZE = 5.0).
+// Used to derive the UV transform from the clipmap window metadata.
+const GRASS_CELL_SIZE = 5.0;
 
 // v1.13 Wave 2: position interpolation between snapshots was removed. The
 // main RAF callback now seq-gates paints (FPS ≤ TPS) so painting the same
@@ -182,9 +186,12 @@ void main() {
 // Biome layer (v2.0 Wave 1b): a fullscreen world-quad drawn UNDER the grass.
 // Samples an R8 biome-id texture (one u8 `Biome` tag per grass cell: 0=Plains,
 // 1=Water, 2=Desert) with NEAREST filtering so cells stay flat-colored, and
-// maps each id to a flat biome color. The grass density layer brightens on
-// top. The texture is static for the world's lifetime — uploaded once on a
-// worker swap, not per frame.
+// maps each id to a flat biome color. The grass density layer brightens on top.
+//
+// v2.0.3 Stream 2d: the biome texture is now a windowed clipmap (same window as
+// the grass channel). u_uv_offset + u_uv_scale map the world-space quad UV into
+// the window sub-region of the budget² texture — IDENTICAL formula to GRASS_VS.
+// This keeps biome tint locked to the grass window at every LOD level.
 const BIOME_VS = `#version 300 es
 precision highp float;
 layout(location = 0) in vec2 a_corner;   // unit quad [0, 1]
@@ -193,11 +200,14 @@ uniform vec2 u_viewport;
 uniform vec2 u_cam_pos;
 uniform float u_zoom;
 uniform float u_world_size;
+// v2.0.3 Stream 2d: clipmap UV transform — same derivation as GRASS_VS.
+uniform vec2 u_uv_scale;
+uniform vec2 u_uv_offset;
 
 out vec2 v_uv;
 
 void main() {
-  v_uv = a_corner;
+  v_uv = a_corner * u_uv_scale + u_uv_offset;
   vec2 world_pos = a_corner * u_world_size;
   vec2 px_pos = (world_pos - u_cam_pos) * u_zoom + u_viewport * 0.5;
   vec2 ndc = (px_pos / u_viewport) * 2.0 - 1.0;
@@ -227,6 +237,12 @@ void main() {
 // brightens green by density. Quantization to u8 (0..255) happens Rust-side
 // in `quantize_grass_into`; R8 unorm sampling returns `.r` already normalized
 // to [0, 1], so the shader needs no extra scaling.
+// v2.0.3 Stream 2c: u_uv_offset + u_uv_scale map the world-space quad UV into
+// the clipmap window sub-region of the budget² texture.
+// Derivation: budget_uv = a_corner * u_uv_scale + u_uv_offset where
+//   u_uv_scale  = world_size / (GRASS_CELL_SIZE * 2^mip_level * BUDGET_AXIS)
+//   u_uv_offset = -vec2(win_origin_x, win_origin_y) / BUDGET_AXIS
+// u_lod_blend is reserved for future trilinear blending (always 0.0 now).
 const GRASS_VS = `#version 300 es
 precision highp float;
 layout(location = 0) in vec2 a_corner;   // unit quad [0, 1]
@@ -235,11 +251,15 @@ uniform vec2 u_viewport;
 uniform vec2 u_cam_pos;
 uniform float u_zoom;
 uniform float u_world_size;
+// v2.0.3 Stream 2c: clipmap UV transform uniforms.
+uniform vec2 u_uv_scale;
+uniform vec2 u_uv_offset;
 
 out vec2 v_uv;
 
 void main() {
-  v_uv = a_corner;
+  // UV into the budget² texture: maps world fraction → window sub-region.
+  v_uv = a_corner * u_uv_scale + u_uv_offset;
   vec2 world_pos = a_corner * u_world_size;
   vec2 px_pos = (world_pos - u_cam_pos) * u_zoom + u_viewport * 0.5;
   vec2 ndc = (px_pos / u_viewport) * 2.0 - 1.0;
@@ -254,6 +274,8 @@ uniform sampler2D u_grass;
 uniform float u_opacity;
 uniform float u_time;
 uniform vec3 u_grass_tint;
+// v2.0.3 Stream 2c: reserved for future trilinear LOD blending (always 0.0 now).
+uniform float u_lod_blend;
 out vec4 out_color;
 
 // v1.9.2: base tint is themed (default soft green for Charcoal). A
@@ -268,7 +290,8 @@ void main() {
   float wave = 0.08 * sin(v_uv.x * 18.0 + u_time * 0.6)
              + 0.06 * sin(v_uv.y * 22.0 - u_time * 0.4);
   float d2 = clamp(d + wave * d, 0.0, 1.0);
-  out_color = vec4(u_grass_tint, d2 * u_opacity);
+  // u_lod_blend reserved: always 0.0 in this wave (nearest-mip only).
+  out_color = vec4(u_grass_tint, d2 * u_opacity * (1.0 - u_lod_blend * 0.0));
 }`;
 
 // Trail program (v1.9.2 Wave 3): a thin quad-as-line drawn between two
@@ -412,9 +435,14 @@ interface GLState {
     plains: WebGLUniformLocation;
     water: WebGLUniformLocation;
     desert: WebGLUniformLocation;
+    // v2.0.3 Stream 2d: clipmap UV transform (mirrors grassU).
+    uvScale: WebGLUniformLocation;
+    uvOffset: WebGLUniformLocation;
   };
   biomeVao: WebGLVertexArrayObject;
   biomeTex: WebGLTexture;
+  // v2.0.3 Stream 2d: biome texture is now budget²-sized (same as grass).
+  // biomeTexDim is kept for initial texImage2D allocation tracking only.
   biomeTexDim: number;
   grassProgram: WebGLProgram;
   grassU: {
@@ -425,10 +453,15 @@ interface GLState {
     opacity: WebGLUniformLocation;
     time: WebGLUniformLocation;
     tint: WebGLUniformLocation;
+    // v2.0.3 Stream 2c: clipmap UV transform + LOD blend reserve.
+    uvScale: WebGLUniformLocation;
+    uvOffset: WebGLUniformLocation;
+    lodBlend: WebGLUniformLocation;
   };
   grassVao: WebGLVertexArrayObject;
   grassTex: WebGLTexture;
-  grassTexDim: number;
+  // v2.0.3 Stream 2c: texture is now fixed GRASS_LOD_BUDGET_AXIS² — no per-frame resize.
+  // grassTexDim removed; budget texture allocated once in initRenderer.
   frameProgram: WebGLProgram;
   frameU: {
     viewport: WebGLUniformLocation;
@@ -639,14 +672,29 @@ function initRenderer(gl: WebGL2RenderingContext): GLState {
     plains: mustGet(gl.getUniformLocation(biomeProgram, "u_plains"), "u_plains"),
     water: mustGet(gl.getUniformLocation(biomeProgram, "u_water"), "u_water"),
     desert: mustGet(gl.getUniformLocation(biomeProgram, "u_desert"), "u_desert"),
+    // v2.0.3 Stream 2d: clipmap UV transform (mirrors grassU).
+    uvScale: mustGet(gl.getUniformLocation(biomeProgram, "u_uv_scale"), "u_uv_scale"),
+    uvOffset: mustGet(gl.getUniformLocation(biomeProgram, "u_uv_offset"), "u_uv_offset"),
   };
-  // Biome id texture (R8). NEAREST so each cell is one flat color; CLAMP edges.
+  // v2.0.3 Stream 2d: biome id texture (R8). NEAREST so each cell is flat color.
+  // Allocated at GRASS_LOD_BUDGET_AXIS² (same budget as grass) once in initRenderer.
+  // Per-frame we texSubImage2D only the win_w × win_h window bytes at (0,0).
   const biomeTex = mustGet(gl.createTexture(), "createTexture");
   gl.bindTexture(gl.TEXTURE_2D, biomeTex);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  // Allocate fixed budget² storage (null data; filled per frame).
+  gl.texImage2D(
+    gl.TEXTURE_2D, 0, gl.R8,
+    GRASS_LOD_BUDGET_AXIS, GRASS_LOD_BUDGET_AXIS,
+    0, gl.RED, gl.UNSIGNED_BYTE, null,
+  );
+  // Initialize UV transform to identity (full-field default; overwritten per frame).
+  gl.useProgram(biomeProgram);
+  gl.uniform2f(biomeU.uvScale, 1.0, 1.0);
+  gl.uniform2f(biomeU.uvOffset, 0.0, 0.0);
 
   // ─── Grass program ───
   const grassProgram = link(
@@ -679,21 +727,39 @@ function initRenderer(gl: WebGL2RenderingContext): GLState {
     opacity: mustGet(gl.getUniformLocation(grassProgram, "u_opacity"), "u_opacity"),
     time: mustGet(gl.getUniformLocation(grassProgram, "u_time"), "u_time"),
     tint: mustGet(gl.getUniformLocation(grassProgram, "u_grass_tint"), "u_grass_tint"),
+    // v2.0.3 Stream 2c: clipmap UV transform + LOD blend.
+    uvScale: mustGet(gl.getUniformLocation(grassProgram, "u_uv_scale"), "u_uv_scale"),
+    uvOffset: mustGet(gl.getUniformLocation(grassProgram, "u_uv_offset"), "u_uv_offset"),
+    lodBlend: mustGet(gl.getUniformLocation(grassProgram, "u_lod_blend"), "u_lod_blend"),
   };
 
   // v2.0 Wave 1a: grass texture is R8 (u8 density per cell, quantized
-  // Rust-side in `quantize_grass_into`). R8 is a normalized unorm format, so
-  // it filters with plain LINEAR natively — no OES_texture_float_linear dance.
+  // Rust-side in `quantize_grass_into`). R8 is a normalized unorm format.
   // R8 requires `UNPACK_ALIGNMENT = 1` since each row is `dim` bytes (not a
   // multiple of 4 in general); set it once here (it's global GL state, but
   // the only single-byte textures we upload are grass + biome).
+  // v2.0.3 Stream 2c: allocate the budget² texture once at GRASS_LOD_BUDGET_AXIS
+  // size (2048×2048 = ~4 MB R8). Each frame we texSubImage2D only the win_w×win_h
+  // window bytes into the (0,0) corner. NEAREST filtering per Q2 decision
+  // (nearest-mip first; trilinear enabled later by changing one texParameteri).
   gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
   const grassTex = mustGet(gl.createTexture(), "createTexture");
   gl.bindTexture(gl.TEXTURE_2D, grassTex);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  // Allocate the fixed budget² texture storage with null data (filled per frame).
+  gl.texImage2D(
+    gl.TEXTURE_2D, 0, gl.R8,
+    GRASS_LOD_BUDGET_AXIS, GRASS_LOD_BUDGET_AXIS,
+    0, gl.RED, gl.UNSIGNED_BYTE, null,
+  );
+  // Initialize UV transform to identity (full-field default; overwritten per frame).
+  gl.useProgram(grassProgram);
+  gl.uniform2f(grassU.uvScale, 1.0, 1.0);
+  gl.uniform2f(grassU.uvOffset, 0.0, 0.0);
+  gl.uniform1f(grassU.lodBlend, 0.0);
 
   // ─── Frame program ───
   const frameProgram = link(
@@ -727,7 +793,7 @@ function initRenderer(gl: WebGL2RenderingContext): GLState {
     trailProgram, trailU, trailVao, trailInstanceBuf,
     trailScratch: new Float32Array(MAX_POP_FOR_SIM * TRAIL_FLOATS_PER_INSTANCE),
     biomeProgram, biomeU, biomeVao, biomeTex, biomeTexDim: 0,
-    grassProgram, grassU, grassVao, grassTex, grassTexDim: 0,
+    grassProgram, grassU, grassVao, grassTex,
     frameProgram, frameU, frameVao, frameBuf,
     instanceScratch: new Float32Array(4096 * FLOATS_PER_INSTANCE),
     flashScratch: new Float32Array(1024 * FLOATS_PER_INSTANCE),
@@ -852,13 +918,19 @@ export function renderWorld(
   viewH: number,
   creatures: Float32Array,
   grass: Uint8Array,
-  biome: Uint8Array | null,
-  biomeDirty: boolean,
+  // v2.0.3 Stream 2d: biome is now the per-slot windowed biome bytes from the
+  // snapshot (mode-downsampled, same win_w×win_h as grass). Null before first
+  // snapshot. The old static biome Uint8Array (from biome_buf) is no longer
+  // passed; the slot carries the windowed data alongside grass.
+  biomeWin: Uint8Array | null,
   pop: number,
   world_size: number,
   grass_dim: number,
   wrap_world: boolean,
   highlightMap: Map<number, number>,
+  // v2.0.3 Stream 2c: clipmap window metadata (mip level, origin, dims).
+  // Null before the first snapshot is consumed; falls back to full-field defaults.
+  windowMeta: WindowMetadata | null,
 ): void {
   // v1.6 Wave C: stride is fixed at 8 post-SAB cutover; mismatch indicates
   // Rust/TS const drift on `sim-bridge.ts`'s `CREATURE_STRIDE`.
@@ -877,8 +949,8 @@ export function renderWorld(
   const renderWorldSpan = span("frame.render_world");
   try {
     renderWorldImpl(
-      gl, cam, viewW, viewH, creatures, grass, biome, biomeDirty, pop,
-      world_size, grass_dim, wrap_world, highlightMap,
+      gl, cam, viewW, viewH, creatures, grass, biomeWin, pop,
+      world_size, grass_dim, wrap_world, highlightMap, windowMeta,
     );
   } finally {
     renderWorldSpan.close();
@@ -892,13 +964,13 @@ function renderWorldImpl(
   viewH: number,
   creatures: Float32Array,
   grass: Uint8Array,
-  biome: Uint8Array | null,
-  biomeDirty: boolean,
+  biomeWin: Uint8Array | null,
   pop: number,
   world_size: number,
   grass_dim: number,
   wrap_world: boolean,
   highlightMap: Map<number, number>,
+  windowMeta: WindowMetadata | null,
 ): void {
   const stride = CREATURE_STRIDE;
   if (!state) state = initRenderer(gl);
@@ -929,21 +1001,47 @@ function renderWorldImpl(
     if (tileMaxY > W_early) tileYOffsets.push(W_early);
   }
 
-  // ─── Biome layer (v2.0 Wave 1b) ───
-  // Drawn first, UNDER the grass. A static R8 biome-id texture mapped to flat
-  // per-biome colors. Uploaded only when the biome buffer changes (worker
-  // swap → `biomeDirty`), or the first time we see it. The grass density
-  // layer brightens green on top.
-  // v2.0.1: Toroidal tiling — issue extra draws for each non-zero offset pair
-  // by shifting u_cam_pos, matching the creature ghost-copy approach exactly.
-  if (biome && biome.length === grass_dim * grass_dim) {
-    const dim = grass_dim;
+  // ─── Biome layer (v2.0 Wave 1b, v2.0.3 Stream 2d) ───
+  // Drawn first, UNDER the grass. An R8 biome-id texture mapped to flat
+  // per-biome colors. The grass density layer brightens green on top.
+  //
+  // v2.0.3 Stream 2d: the biome texture is now fed from the per-slot windowed
+  // biome channel (mode-downsampled, same win_w × win_h as the grass window).
+  // Uploaded every frame via texSubImage2D at (0,0) into the budget²-sized
+  // biomeTex (allocated once in initRenderer). The UV transform reuses the
+  // same u_uv_scale/u_uv_offset derived from the grass window metadata.
+  //
+  // At default scale: mip=0, origin=(0,0), win=1920×1920 — byte-identical
+  // to the old full-field path. Biome tint is visually unchanged at default scale.
+  //
+  // v2.0.1: Toroidal tiling — extra draws for each non-zero offset pair.
+  if (biomeWin && biomeWin.length > 0) {
+    // Derive win_w/win_h from windowMeta (same as grass path).
+    const winW    = windowMeta ? windowMeta.winW    : grass_dim;
+    const winH    = windowMeta ? windowMeta.winH    : grass_dim;
+    const mipLevel   = windowMeta ? windowMeta.mipLevel   : 0;
+    const winOriginX = windowMeta ? windowMeta.winOriginX : 0;
+    const winOriginY = windowMeta ? windowMeta.winOriginY : 0;
+
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, s.biomeTex);
-    if (biomeDirty || dim !== s.biomeTexDim) {
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, dim, dim, 0, gl.RED, gl.UNSIGNED_BYTE, biome);
-      s.biomeTexDim = dim;
-    }
+    // Upload the windowed biome bytes into the (0,0) corner of the budget² texture.
+    // Fix minor #6: pass an explicit subarray of winW*winH bytes so the upload
+    // is correct if UNPACK_ROW_LENGTH is ever set (currently 0/unset, but
+    // this makes the call robust against that latent footgun).
+    gl.texSubImage2D(
+      gl.TEXTURE_2D, 0,
+      0, 0, winW, winH,
+      gl.RED, gl.UNSIGNED_BYTE,
+      biomeWin.subarray(0, winW * winH),
+    );
+
+    // UV transform — identical formula to the grass path (GRASS_CELL_SIZE × 2^mip × BUDGET).
+    const cellSizeL = GRASS_CELL_SIZE * Math.pow(2, mipLevel);
+    const uvScaleVal = world_size / (cellSizeL * GRASS_LOD_BUDGET_AXIS);
+    const uvOffsetX = -winOriginX / GRASS_LOD_BUDGET_AXIS;
+    const uvOffsetY = -winOriginY / GRASS_LOD_BUDGET_AXIS;
+
     gl.useProgram(s.biomeProgram);
     gl.uniform2f(s.biomeU.viewport, viewW, viewH);
     gl.uniform1f(s.biomeU.zoom, cam.zoom);
@@ -952,6 +1050,9 @@ function renderWorldImpl(
     gl.uniform3f(s.biomeU.plains, 74 / 255, 106 / 255, 58 / 255);
     gl.uniform3f(s.biomeU.water, 40 / 255, 92 / 255, 168 / 255);
     gl.uniform3f(s.biomeU.desert, 196 / 255, 178 / 255, 128 / 255);
+    // v2.0.3 Stream 2d: clipmap UV transform (same as grass).
+    gl.uniform2f(s.biomeU.uvScale, uvScaleVal, uvScaleVal);
+    gl.uniform2f(s.biomeU.uvOffset, uvOffsetX, uvOffsetY);
     gl.bindVertexArray(s.biomeVao);
     for (let xi = 0; xi < tileXOffsets.length; xi++) {
       for (let yi = 0; yi < tileYOffsets.length; yi++) {
@@ -971,21 +1072,49 @@ function renderWorldImpl(
   // v1.7: bracketed by `frame.render_world.grass` so the parent
   // `frame.render_world` row's overhead column reads correctly.
   // v2.0.1: Toroidal tiling — same extra-draw loop as biome above.
+  // v2.0.3 Stream 2c: texSubImage2D only the win_w × win_h window bytes into
+  // the fixed GRASS_LOD_BUDGET_AXIS² budget texture at (0,0). The UV transform
+  // (u_uv_scale, u_uv_offset) maps the world-space quad into the window region.
   if (getSettings().showGrass) {
     const grassSpan = span("frame.render_world.grass");
     try {
-      const dim = grass_dim;
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, s.grassTex);
-      // v2.0 Wave 1a: grass is u8 per cell, uploaded as R8. Full-texture
-      // upload every painted frame (dirty-rect deferred). R8 unorm sampling
-      // returns `.r` in [0, 1] directly, so the shader needs no rescale.
-      if (dim !== s.grassTexDim) {
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, dim, dim, 0, gl.RED, gl.UNSIGNED_BYTE, grass);
-        s.grassTexDim = dim;
-      } else {
-        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, dim, dim, gl.RED, gl.UNSIGNED_BYTE, grass);
-      }
+
+      // v2.0.3 Stream 2c: derive win_w/win_h and mip_level from windowMeta.
+      // Fall back to full-field defaults (mip=0, origin=(0,0), win=grass_dim)
+      // when metadata is not yet available (before the first snapshot).
+      const mipLevel   = windowMeta ? windowMeta.mipLevel   : 0;
+      const winOriginX = windowMeta ? windowMeta.winOriginX : 0;
+      const winOriginY = windowMeta ? windowMeta.winOriginY : 0;
+      const winW       = windowMeta ? windowMeta.winW       : grass_dim;
+      const winH       = windowMeta ? windowMeta.winH       : grass_dim;
+
+      // Upload only the window bytes into the budget texture sub-region (0,0).
+      // grass[] carries exactly winW × winH bytes (grassRegionBytes = min(dim,BUDGET)²;
+      // at default scale that equals grass_dim² — same as before).
+      // Fix minor #6: explicit subarray guard — robust if UNPACK_ROW_LENGTH is
+      // ever set (currently 0/unset; this is a latent footgun defence).
+      gl.texSubImage2D(
+        gl.TEXTURE_2D, 0,
+        0, 0, winW, winH,
+        gl.RED, gl.UNSIGNED_BYTE,
+        grass.subarray(0, winW * winH),
+      );
+
+      // UV transform:
+      //   u_uv_scale  = world_size / (GRASS_CELL_SIZE * 2^mipLevel * BUDGET_AXIS)
+      //   u_uv_offset = -vec2(winOriginX, winOriginY) / BUDGET_AXIS
+      // This maps a_corner ∈ [0,1] (world fraction) to the window sub-region
+      // of the budget texture. At default scale (mip=0, origin=(0,0), win=1920):
+      //   scale = 9600 / (5 * 1 * 2048) = 0.9375  (= 1920/2048 = winW/BUDGET)
+      //   offset = (0,0)
+      // giving v_uv ∈ [0, 0.9375] — exactly the 1920 data pixels in 2048 texture.
+      const cellSizeL = GRASS_CELL_SIZE * Math.pow(2, mipLevel);
+      const uvScaleVal = world_size / (cellSizeL * GRASS_LOD_BUDGET_AXIS);
+      const uvOffsetX = -winOriginX / GRASS_LOD_BUDGET_AXIS;
+      const uvOffsetY = -winOriginY / GRASS_LOD_BUDGET_AXIS;
+
       gl.useProgram(s.grassProgram);
       gl.uniform2f(s.grassU.viewport, viewW, viewH);
       gl.uniform1f(s.grassU.zoom, cam.zoom);
@@ -994,6 +1123,9 @@ function renderWorldImpl(
       gl.uniform1f(s.grassU.time, performance.now() / 1000);
       const tint = readGrassTint();
       gl.uniform3f(s.grassU.tint, tint[0], tint[1], tint[2]);
+      gl.uniform2f(s.grassU.uvScale, uvScaleVal, uvScaleVal);
+      gl.uniform2f(s.grassU.uvOffset, uvOffsetX, uvOffsetY);
+      gl.uniform1f(s.grassU.lodBlend, 0.0);
       gl.bindVertexArray(s.grassVao);
       for (let xi = 0; xi < tileXOffsets.length; xi++) {
         for (let yi = 0; yi < tileYOffsets.length; yi++) {

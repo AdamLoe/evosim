@@ -10,6 +10,48 @@ use twox_hash::XxHash64;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SimRng(pub Xoshiro256PlusPlus);
 
+/// v2.0.2 Stream 1b: stateless, position-addressable hash RNG for the grass
+/// scatter kernel. **This is deliberately NOT `SimRng`** — the scatter rolls run
+/// inside a rayon `par_iter` over active tiles, so they must not draw from the
+/// shared sequential `SimRng` (that would need a lock and make the draw order
+/// thread-dependent, desyncing the *creature* stream and breaking global
+/// determinism). Instead a cell's draws are a pure hash of
+/// `(world_seed, cell_or_tile_id, tick, salt)` → order-independent, lock-free,
+/// and it never touches `SimRng`.
+///
+/// `salt` distinguishes independent draws for the same cell+tick (e.g. the decay
+/// roll vs the spread roll vs the spread-target pick) so they are uncorrelated.
+///
+/// The mixer is SplitMix64's finalizer applied to a folded key. It is fast
+/// (a handful of xor/mul/shift) and has good avalanche — sufficient for visual
+/// "living noise"; cryptographic quality is not required. Determinism scope: the
+/// *draw* for a fixed key is reproducible (so grass never perturbs `SimRng`); the
+/// *field* is not reproducible across thread counts (lossy relaxed writes), and
+/// is not required to be (see the v2.0.2 plan).
+#[inline]
+pub fn grass_hash_u64(world_seed: u32, id: u64, tick: u32, salt: u32) -> u64 {
+    // Fold the four key parts into one 64-bit word with odd-constant multiplies
+    // (each constant is a large odd number → bijective mod 2^64, so distinct keys
+    // stay distinct before the avalanche finalizer).
+    let mut z = id
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add((world_seed as u64).wrapping_mul(0xD1B5_4A32_D192_ED03))
+        .wrapping_add((tick as u64).wrapping_mul(0xCA5A_826F_5C26_2A4D))
+        .wrapping_add((salt as u64).wrapping_mul(0x2545_F491_4F6C_DD1D));
+    // SplitMix64 finalizer (good avalanche).
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// v2.0.2 Stream 1b: a hashed `u64` mapped to `[0, 1)` (top 24 bits, matching
+/// [`SimRng::unit`]'s precision). Pure function of the inputs.
+#[inline]
+pub fn grass_unit(world_seed: u32, id: u64, tick: u32, salt: u32) -> f32 {
+    let bits = (grass_hash_u64(world_seed, id, tick, salt) >> 40) as u32;
+    (bits as f32) / ((1u32 << 24) as f32)
+}
+
 impl SimRng {
     pub fn from_u64(seed: u64) -> Self {
         Self(Xoshiro256PlusPlus::seed_from_u64(seed))

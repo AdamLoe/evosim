@@ -684,6 +684,49 @@ export function installDevPanel(getBridge: () => SimBridge): void {
     formatValue: (v) => String(Math.round(v)),
     nextWorld: true,
   }));
+  // v2.0.2 Stream 1d: scatter kernel live-tuning sliders. All staged (live).
+  grassSec.appendChild(makeStagedSlider({
+    label: "Scatter decay prob",
+    simName: "grass_decay_pct",
+    settingKey: "grassDecayPct",
+    min: 0, max: 1, step: 0.005,
+    formatValue: (v) => v.toFixed(3),
+  }));
+  grassSec.appendChild(makeStagedSlider({
+    label: "Scatter decay amt",
+    simName: "grass_decay_amount",
+    settingKey: "grassDecayAmount",
+    min: 0, max: 0.5, step: 0.001,
+    formatValue: (v) => v.toFixed(3),
+  }));
+  grassSec.appendChild(makeStagedSlider({
+    label: "Scatter spread prob",
+    simName: "grass_spread_pct",
+    settingKey: "grassSpreadPct",
+    min: 0, max: 1, step: 0.01,
+    formatValue: (v) => v.toFixed(2),
+  }));
+  grassSec.appendChild(makeStagedSlider({
+    label: "Scatter spread amt",
+    simName: "grass_spread_amount",
+    settingKey: "grassSpreadAmount",
+    min: 0, max: 0.5, step: 0.005,
+    formatValue: (v) => v.toFixed(3),
+  }));
+  grassSec.appendChild(makeStagedSlider({
+    label: "Spread ring-1 weight",
+    simName: "grass_spread_ring1_pct",
+    settingKey: "grassSpreadRing1Pct",
+    min: 0, max: 1, step: 0.01,
+    formatValue: (v) => v.toFixed(2),
+  }));
+  grassSec.appendChild(makeStagedSlider({
+    label: "Spread ring-2 weight",
+    simName: "grass_spread_ring2_pct",
+    settingKey: "grassSpreadRing2Pct",
+    min: 0, max: 1, step: 0.01,
+    formatValue: (v) => v.toFixed(2),
+  }));
   box.appendChild(grassSec);
 
   // ── World (v2.0 Wave 1a/1b) ──

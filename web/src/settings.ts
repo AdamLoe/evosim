@@ -27,7 +27,10 @@ const SCHEMA_MAJOR = 2;
 // `startingSpeciesMemberVariance`) + the live `matingCooldownTicks` — all new
 // additive keys with defaults → MINOR bump 1 → 2. Existing v2 blobs keep their
 // values and merge the new keys from DEFAULTS.
-const SCHEMA_MINOR = 2;
+// v2.0.2 Stream 1d: added six scatter kernel live-tuning sliders — all new
+// additive keys with defaults → MINOR bump 2 → 3. Existing v2 blobs keep their
+// values and merge the new keys from DEFAULTS.
+const SCHEMA_MINOR = 3;
 
 /** v1.12: one row of the 8-row mutation policy table. Mirrors the Rust
  * `Bucket` struct (`src/brain.rs`). `weight` is any non-negative float;
@@ -159,6 +162,14 @@ export interface Settings {
   // mode). Apply to the running world. Must match Rust
   // MATING_COOLDOWN_TICKS_DEFAULT.
   matingCooldownTicks: number;
+  // v2.0.2 Stream 1d: six scatter kernel live-tuning sliders. All live (apply
+  // to the running world). Defaults must match the Rust GRASS_*_DEFAULT consts.
+  grassDecayPct: number;
+  grassDecayAmount: number;
+  grassSpreadPct: number;
+  grassSpreadAmount: number;
+  grassSpreadRing1Pct: number;
+  grassSpreadRing2Pct: number;
 }
 
 export const DEFAULTS: Settings = {
@@ -220,6 +231,16 @@ export const DEFAULTS: Settings = {
   // v2.0 Wave 3b: live mating cooldown. Must match Rust
   // MATING_COOLDOWN_TICKS_DEFAULT (200).
   matingCooldownTicks: 200,
+  // v2.0.2 Stream 1d: scatter kernel defaults. Must match Rust constants:
+  // GRASS_DECAY_PCT_DEFAULT (0.02), GRASS_DECAY_AMOUNT_DEFAULT (0.008),
+  // GRASS_SPREAD_PCT_DEFAULT (0.55), GRASS_SPREAD_AMOUNT_DEFAULT (0.05),
+  // GRASS_SPREAD_RING1_PCT_DEFAULT (0.70), GRASS_SPREAD_RING2_PCT_DEFAULT (0.22).
+  grassDecayPct: 0.02,
+  grassDecayAmount: 0.008,
+  grassSpreadPct: 0.55,
+  grassSpreadAmount: 0.05,
+  grassSpreadRing1Pct: 0.70,
+  grassSpreadRing2Pct: 0.22,
 };
 
 const KNOWN_KEYS = new Set<string>(Object.keys(DEFAULTS));

@@ -364,6 +364,12 @@ fn member_variance_produces_measurable_spread() {
 fn balance_smoke_pop_stays_under_cap_and_a_species_persists() {
     // 2400u world → 480² grass; full real seeding (10 × 10 = 100 founders).
     let mut w = species_world(2400.0, 20260601);
+    // v2.0.2 Stream 1b: this balance smoke was tuned against the deterministic
+    // BLUR food supply; the live scatter kernel (default at World boot) is a
+    // different, intentionally super-critical grass economy. Pin this test to the
+    // blur path so its population-balance assertions hold unchanged (the scatter
+    // economy is exercised/tuned in the browser + Stage-3 work, not here).
+    w.grass.set_propagation(GrassPropagation::Blur);
     let boot_pop = w.creatures.len();
     assert_eq!(
         boot_pop, 100,

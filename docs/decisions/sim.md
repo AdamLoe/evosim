@@ -715,44 +715,218 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 - **Revisit when**: new biomes ship and need new trait axes (forest →
   social/fear, tundra → cold-tolerance).
 
-### Grass spreads as a disc via separable blur + 8-neighbour max; active-tile frontier (v2.0.1)
+### Grass density field is `Vec<AtomicU8>` on the snapshot quantization scale (v2.0.2)
 
-- **Decision**: Grass propagation uses a two-pass separable `[1,2,1]/4`
-  blur (horizontal then vertical = a 3×3 Gaussian) and spills via the
-  **max of that blur over a cell's 8 neighbours**, replacing the old
-  4-neighbour Von Neumann kernel. Logistic growth `r·v·(1−v/K)` and the
-  `[0,K]` clamp are unchanged. Work is scoped by a **32×32 active-tile
-  frontier**: only tiles holding a cell in `(ε, K−ε)` (plus their fringe)
-  are processed; empty and saturated-equilibrium tiles are skipped. The
-  snapshot grass write is **dirty-tile-incremental**
-  (`GrassGrid::quantize_dirty_tiles_into`).
-- **Why**: The 4-neighbour kernel grows grass in visually unnatural
-  diamonds (L1 reach, zero diagonal). The separable blur rounds the
-  front; the **8-neighbour max** (not the blur alone) is what actually
-  achieves isotropy — a blur with a 4-cardinal max stays diamond-ish
-  (~0.81 axis/diag) while the 8-neighbour max reaches disc-like (~1.2).
-  Keeping it a **max** (not a sum) preserves the anti-cascade rule (one
-  ripe neighbour grants the boost; neighbours don't stack). The
-  active-tile frontier exists because the vast majority of cells sit at
-  bare-0 or saturated-K equilibrium and recomputing them every tick over
-  a 1920² grid is wasted work; processing only the frontier is bit-
-  identical to a full-grid pass (equivalence-tested).
+- **Decision**: The in-memory grass density field is `Vec<AtomicU8>` (1
+  byte/cell). The encoding scale is the same one the snapshot has always
+  used: `round(clamp(d / GRASS_MAX, 0, 1) × 255)`, so `GRASS_MAX → 255`
+  and `0 → 0`. The decode inverse is `u8 / 255 × GRASS_MAX`. Because the
+  live field now holds those same bytes, the snapshot copy-out is a
+  trivial byte copy and the rendered picture is unchanged. All reads
+  `load(Relaxed) → decode → f32`; all writes `encode → store(Relaxed)`.
+- **Why**: Storing the snapshot scale in-memory eliminates the quantize
+  step from the hot write path (byte copy replaces per-cell multiply +
+  round). It also enables the stochastic scatter kernel (below) to
+  operate entirely in u8, avoiding f32 double-buffering entirely. 1 byte
+  vs 4 bytes per cell also reduces working-set pressure at 1920²
+  (3.7 MB vs 14.7 MB).
 - **Applies to**: `architecture/simulation-core.md`,
   `architecture/render-pipeline.md`.
-- **Alternatives considered**: every-N-tick cadence throttling (rejected
-  — trades visual smoothness for speed); u16/u8 fixed-point density
-  (deferred — precision risk, measure first).
-- **Tradeoffs**: The shipped blur is evaluated on the fly (recomputed
-  per-cell × per-neighbour), which is correct but expensive; materializing
-  the horizontal pass into a scratch buffer is a tracked follow-up.
-  Determinism is preserved (pure read-`density`/write-`scratch`,
-  single-thread == rayon).
-- **Code anchors**: `src/grass.rs` (`compute_propagation`, `blur_at`,
-  `quantize_dirty_tiles_into`, `GRASS_TILE_SIZE`, `GRASS_EQ_EPS`),
-  `src/grass_v201_tests.rs`.
-- **Revisit when**: the propagation pass dominates the tick budget
-  (materialize the separable passes; confirm the frontier skips saturated
-  tiles at steady state).
+- **Code anchors**: `src/grass.rs → GrassGrid::density` (field),
+  `encode_density`, `decode_density`, `GrassGrid::dget`, `GrassGrid::dset`,
+  `GrassGrid::dget_u8`, `GrassGrid::density_u8_snapshot`.
+
+### Stochastic u8 scatter kernel is the live propagation path; blur retained behind a selector (v2.0.2)
+
+- **Decision**: `compute_propagation_scatter` is the **live propagation
+  path** — `World` boot sets `GrassPropagation::Scatter` on the grid.
+  The old separable-Gaussian `compute_propagation_blur` is **retained**
+  behind the `GrassPropagation::{Scatter,Blur}` selector; grid-direct
+  test constructors default to `Blur` so existing blur tests keep passing
+  without rewrite. Deletion of blur is a future lead call.
+- **Scatter mechanics**: per active tile, rayon-parallel over the active
+  tile set — (1) freeze the tile's source bytes into a transient local
+  buffer (no intra-tile cascade); (2) for each source cell that has grass,
+  roll using a per-cell **SplitMix64 hash RNG** keyed on
+  `(world_seed, cell, tick, salt)` (grass never touches `SimRng`):
+  **decay roll** — prob `decay_pct`, lossy relaxed RMW subtract
+  `decay_amount` (floor ≥ 1 byte when non-zero), saturating at 0;
+  **spread roll** — prob `spread_pct`, pick one offset from the
+  **precomputed round disc table** (radial band by ring1/2/3 weights,
+  uniform angle → round footprint), lossy relaxed RMW add `spread_amount`
+  (floor ≥ 1 byte), clamp to the target cell's biome-cap byte. No
+  spontaneous spawn — a zero-byte cell is skipped as a source. (3)
+  Frontier: tiles written to are marked active+dirty next tick via atomic
+  `fetch_or`; cross-tile spread lands in the immediate 8-fringe neighbour
+  (spread radius ≤ `GRASS_TILE_SIZE = 32`). Measured ~34× faster than
+  blur, linear O(N) over active tiles, does not balloon past the 2048
+  budget.
+- **Why**: The blur path is O(frontier × cells/tile × blur-taps) and
+  must run the full logistic-growth + propagation-rate math per cell, with
+  an f32 double-buffer. Scatter replaces all that with 4 hash queries + 2
+  atomic RMW ops per cell, in place, no scratch buffer. The visual result
+  is organic-looking patches with a tunable radial spread profile; the
+  disc table (not Chebyshev rings) keeps the footprint round at all zoom
+  levels. The tile_class equilibrium heuristic (EMPTY/SATURATED/MIXED) is
+  NOT maintained on the scatter path — the frontier is driven by
+  grass-presence only, which is sufficient.
+- **Applies to**: `architecture/simulation-core.md`.
+- **Tradeoffs**: The blur is NOT deleted (perf hit ~34× but not the
+  50–100× stretch target; deletion deferred). The blur's tile_class
+  equilibrium logic is inert on the scatter path.
+- **Code anchors**: `src/grass.rs → compute_propagation_scatter`,
+  `compute_propagation_blur`, `GrassPropagation`, `DiscTable`,
+  `ScatterParams`, `GrassGrid::scatter_params`;
+  `src/constants.rs → GRASS_DECAY_PCT_DEFAULT`, `GRASS_DECAY_AMOUNT_DEFAULT`,
+  `GRASS_SPREAD_PCT_DEFAULT`, `GRASS_SPREAD_AMOUNT_DEFAULT`,
+  `GRASS_SPREAD_RING1_PCT_DEFAULT`, `GRASS_SPREAD_RING2_PCT_DEFAULT`,
+  `GRASS_SPREAD_RING3_PCT_DEFAULT`, `GRASS_SPREAD_RADIUS`.
+- **Revisit when**: the blur deletion decision is made by the lead (the
+  bench is the trigger).
+
+### Threaded scatter is intentionally non-reproducible; single-threaded runs are deterministic — PENDING LEAD RATIFICATION (v2.0.2)
+
+- **Decision**: Single-threaded runs are deterministic (same seed →
+  same output). Under `--features threads` and the live wasm sim (always
+  threaded), the scatter lossy cross-tile relaxed RMW makes grass density
+  — and hence creature behavior that senses it — **intentionally
+  non-reproducible** run-to-run. This is the accepted perf-vs-reproducibility
+  trade-off. The 2 determinism tests assert exact equality only under
+  `#[cfg(not(feature="threads"))]`; threaded tests assert liveness +
+  bounded population delta only.
+- **Why**: A fully-reproducible scatter under threads would require either
+  tile-local-only spread (no cross-tile writes), per-tile inbox merge
+  (queue incoming cross-tile adds, apply after all tiles finish), or
+  CAS-add (retry loop on every RMW). All three alternatives impose
+  significant complexity or cost: tile-local spread narrows the effective
+  disc; inbox merge adds per-tile allocation; CAS-add contends heavily at
+  dense frontiers. The lossy relaxed RMW is a wholesale collision on rare
+  concurrent cross-tile writes — the per-run grass trajectory differs but
+  the statistical properties (patch density, frontier speed) are stable.
+  This trade-off is accepted at the implementation level but **requires
+  lead ratification** for whether determinism is a durable contract.
+- **Alternatives considered**: tile-local spread only (rejected — shrinks
+  effective disc radius, breaks long-range seeding); per-tile inbox merge
+  (viable but complex; deferred as the preferred fix-path if ratification
+  requires reproducibility); CAS-add loop (rejected — contention too high
+  at dense frontiers).
+- **Applies to**: `architecture/simulation-core.md`.
+- **Revisit when**: the lead ratifies or rejects the reproducibility
+  trade-off; if rejected, implement per-tile inbox merge.
+
+### GRASS_EQ_EPS = 1/255 (one u8 quantum) (v2.0.3)
+
+- **Decision**: `GRASS_EQ_EPS` (the epsilon below which a cell is
+  classified EMPTY and above `cap − EPS` is classified SATURATED) is
+  `1.0 / 255.0` — exactly one u8 quantization step.
+- **Why**: The original value of `1e-4` was 39× smaller than one u8
+  quantum (1/255 ≈ 3.92e-3). Water-cap cells (cap=0.04, byte 10/255 ≈
+  0.0392) never classified SATURATED because `0.0392 < 0.04 − 1e-4 =
+  0.0399`. All Water tiles remained permanently MIXED, preventing the
+  frontier skip. Raising to exactly one u8 step means any cell whose f32
+  value round-trips to within one quantum of `cap − EPS` is correctly
+  classified saturated, restoring the frontier skip for biome-capped cells.
+- **Applies to**: `architecture/simulation-core.md`,
+  `src/grass.rs → GRASS_EQ_EPS`.
+
+### 6 live grass sliders (SLIDER_NAMES 54–59); GRASS_BITES_PER_BLOCK = 2 constant (v2.0.2)
+
+- **Decision**: Six live sliders wire into `GrassGrid.scatter_params` via
+  `WorldHandle` apply_ setters: `grass_decay_pct` (54),
+  `grass_decay_amount` (55), `grass_spread_pct` (56),
+  `grass_spread_amount` (57), `grass_spread_ring1_pct` (58),
+  `grass_spread_ring2_pct` (59). Ring 3 is implicit (disc table
+  normalizes all three; ring3 = max(0, 1 − ring1 − ring2)).
+  `GRASS_BITES_PER_BLOCK = 2` is a **compile-time constant** (not a live
+  slider) so that `density_chunk = GRASS_MAX / 2 = 0.5` encodes to
+  exactly 128 u8 bytes — 128 u8 levels per bite, satisfying the
+  `≥ 8 levels/bite` u8-floor guard. The `.max(1)` floor on `consume`
+  means a grass-present cell never yields 0 energy.
+- **Why**: Making bites-per-block constant avoids tracking the u8
+  representation of an arbitrary slider value (arbitrary chunk sizes can
+  produce u8 encodings near 0, making the `.max(1)` floor non-trivial to
+  reason about). The six scatter sliders let the operator tune decay vs
+  spread dynamics and the radial distribution live without a restart.
+- **Applies to**: `architecture/simulation-core.md`.
+- **Code anchors**: `src/constants.rs → GRASS_BITES_PER_BLOCK`,
+  `GRASS_BITES_PER_BLOCK_DEFAULT`;
+  `src/wasm_api.rs → SLIDER_NAMES` (indices 54–59), `try_set_slider`;
+  `src/grass.rs → GrassGrid::consume`.
+
+### Grass pyramid: u8 box-filter mip clipmap over the density field (v2.0.3)
+
+- **Decision**: `GrassPyramid` is a u8 box-filter mip pyramid over
+  `GrassGrid`. L0 aliases the live `density` field (not stored in the
+  pyramid). L1+ are owned, MEAN-downsampled, edge-clamped u8 buffers.
+  Each Lk cell is the arithmetic mean of its (up to) 4 in-bounds Lk-1
+  parent cells: `(sum + count/2) / count` (round-before-truncate). At the
+  default `grass_dim = 1920` this yields ~11 levels before reaching 1×1
+  (well under the `GRASS_PYRAMID_MAX_LEVELS = 16` cap). Refreshed each
+  tick in `World::step` at step 7b — after grass advances, before energy
+  — as a full recompute. Serves render LOD + snapshot windowing; a
+  dirty-subtree partial refresh keyed off `tile_active` is a tracked TODO.
+- **Why**: The snapshot's write path publishes a **clipmap window** of
+  the pyramid (not the whole field) — the LOD level and window are chosen
+  to fit a 2048² render budget at any zoom. At default scale (zoom=1,
+  grass_dim=1920 < 2048) the window is byte-identical to the pre-effort
+  full-field copy. At zoomed-out views, higher LOD levels are sampled and
+  the window covers more world space, keeping the snapshot size fixed.
+  The pyramid's L0 alias avoids a copy of the full density field on every
+  tick; only L1+ (O(N/3) total) need recomputing.
+- **Applies to**: `architecture/simulation-core.md`,
+  `architecture/render-pipeline.md`,
+  `architecture/shared-memory-and-protocol.md`.
+- **Tradeoffs**: Refresh is a full recompute each tick (O(N×1/3) over all
+  owned levels). Active-set-keyed partial refresh is deferred; see the
+  `TODO(stage3-pyramid-perf)` anchor in `src/grass.rs`.
+  Toroidal wrap-seam: a window straddling the world wrap on a toroidal
+  world (grass_dim > 2048, non-default zoom) shows the wrong region —
+  documented TODO in `GrassPyramid::viewport_window`, not yet fixed.
+- **Code anchors**: `src/grass.rs → GrassPyramid`, `GrassGrid::pyramid`,
+  `GrassGrid::refresh_pyramid`;
+  `src/constants.rs → GRASS_PYRAMID_MAX_LEVELS`.
+
+### Grass sensing: 1/d² proximity sector scan retained; mip-pyramid NN sensing not implemented (v2.0.3)
+
+- **Decision**: Grass NN sensing remains the existing
+  `compute_grass_density_sectors` — a 1/d² weighted bilinear sector scan
+  over the `GRASS_PROXIMITY_RANGE`. `MAX_NN_INPUTS = 48` is unchanged.
+  The 2e mip-sensing NN variant (sensing off pyramid LOD levels) was
+  **not implemented**.
+- **Why**: The pyramid is available and would allow coarser-grid sensing
+  at low computational cost, but the 2e variant required changes to the
+  NN input layout (new slot group, ABI implications) without a clear
+  improvement signal from the current sim. Shipping without it keeps the
+  NN input surface stable and avoids discarding all current brains on
+  upgrade. The pyramid remains available for a future lead call.
+- **Applies to**: `architecture/simulation-core.md`.
+- **Code anchors**: `src/world/proximity.rs → compute_grass_density_sectors`;
+  `src/constants.rs → MAX_NN_INPUTS`, `GRASS_PROXIMITY_RANGE`.
+- **Revisit when**: sensing range or LOD becomes a meaningful perf
+  bottleneck, or a mip-sensing design is benchmarked and shows measurable
+  NN quality gain.
+
+### Grass spreads as a disc via separable blur + 8-neighbour max; active-tile frontier (v2.0.1)
+
+- **Decision**: The `Blur` propagation path (retained behind the
+  `GrassPropagation` selector) uses a two-pass separable `[1,2,1]/4`
+  blur (horizontal then vertical = a 3×3 Gaussian) and spills via the
+  **max of that blur over a cell's 8 neighbours**. Logistic growth
+  `r·v·(1−v/K)` and the `[0,K]` clamp are unchanged. Work is scoped by a
+  **32×32 active-tile frontier**: only tiles in `(ε, K−ε)` (plus their
+  fringe) are processed. This is no longer the live propagation path
+  (Scatter is); it is retained for benchmarking and as the default for
+  low-level grid tests.
+- **Why**: The 4-neighbour kernel grows grass in unnatural diamonds
+  (L1 reach). The separable blur rounds the front; the 8-neighbour max is
+  what achieves isotropy. Keeping it as a **max** (not a sum) preserves
+  the anti-cascade rule. The active-tile frontier makes the full-grid pass
+  unnecessary; equilibrium tiles are skipped exactly (equivalence-tested).
+- **Applies to**: `architecture/simulation-core.md`.
+- **Code anchors**: `src/grass.rs → compute_propagation_blur`, `blur_at`,
+  `GRASS_TILE_SIZE`; `src/grass_v201_tests.rs`.
+- **Revisit when**: the lead decides to delete the blur path (Stage 3 of
+  the grass-perf effort).
 
 ## See also
 

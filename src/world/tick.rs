@@ -46,8 +46,13 @@ impl World {
             return;
         }
 
-        let bites_per_block = self.sliders.grass_bites_per_block.max(1) as f32;
-        let density_chunk = GRASS_MAX / bites_per_block;
+        // v2.0.2 Stream 1e: `grass_bites_per_block` is treated as a CONSTANT this
+        // stage (the six-not-seven decision). Use `GRASS_BITES_PER_BLOCK` from
+        // constants.rs so `density_chunk` is stable and its u8 representation is
+        // predictable (0.5 → 128 bytes at bpb=2 — well above the ≥8 level guard).
+        // The slider (`self.sliders.grass_bites_per_block`) is wired and retained
+        // for future live-tuning (Stage 3); it is NOT used here this stage.
+        let density_chunk = GRASS_MAX / GRASS_BITES_PER_BLOCK as f32;
         let energy_per_bite = self.sliders.grass_energy_per_bite;
 
         for i in 0..n {
@@ -752,7 +757,7 @@ mod tests {
     #[test]
     fn graze_no_overlap_yields_zero_gain() {
         let mut w = World::new("graze-barren");
-        w.grass.density.fill(0.0);
+        w.grass.fill_density(0.0);
         w.creatures.action_this_tick[0] = Action::Graze;
         let before = w.creatures.energy[0];
         w.graze();
@@ -788,7 +793,7 @@ mod tests {
         w.creatures.action_this_tick[0] = Action::Graze;
 
         // Seed the entire grass grid with GRASS_MAX.
-        w.grass.density.fill(GRASS_MAX);
+        w.grass.fill_density(GRASS_MAX);
 
         // Count how many cells overlap using CREATURE_SIZE body radius.
         let ri = CREATURE_SIZE * BODY_RADIUS_PER_SIZE;
@@ -816,13 +821,15 @@ mod tests {
             GRASS_ENERGY_PER_BITE_DEFAULT
         );
         // Confirm grass density actually decreased at the center cell.
-        let density_chunk = GRASS_MAX / GRASS_BITES_PER_BLOCK_DEFAULT as f32;
-        let expected_density = GRASS_MAX - density_chunk;
+        let _density_chunk = GRASS_MAX / GRASS_BITES_PER_BLOCK_DEFAULT as f32;
         let center_cell = cell_iy * GRASS_GRID_DIM + cell_ix;
-        assert!(
-            (w.grass.density[center_cell] - expected_density).abs() < 1e-5,
-            "center cell density should have dropped by one chunk ({density_chunk}); got {}",
-            w.grass.density[center_cell]
+        // Stage 3: byte-exact assertion.
+        // encode(GRASS_MAX=1.0) = 255; chunk = 0.5 → encode(0.5) = 128.
+        // post_byte = 255 - 128 = 127.
+        assert_eq!(
+            w.grass.dget_u8(center_cell),
+            127u8,
+            "center cell must drop to byte 127 after one bite (255 - 128)"
         );
     }
 
@@ -842,8 +849,8 @@ mod tests {
         let iy = ((cy / GRASS_CELL_SIZE).floor() as usize).min(GRASS_GRID_DIM - 1);
         let east_cell = iy * GRASS_GRID_DIM + (GRASS_GRID_DIM - 1);
         let west_cell = iy * GRASS_GRID_DIM;
-        w.grass.density[east_cell] = GRASS_MAX;
-        w.grass.density[west_cell] = GRASS_MAX;
+        w.grass.dset(east_cell, GRASS_MAX);
+        w.grass.dset(west_cell, GRASS_MAX);
 
         w.graze();
 
@@ -851,21 +858,18 @@ mod tests {
         // because its box [0, GRASS_CELL_SIZE] contains the creature position
         // (nearest point = 0, dist = 0). The east cell (ix=dim-1) is far away and
         // not reached (walled world). West cell must be drained.
-        let west_drained = w.grass.density[west_cell] < GRASS_MAX - 1e-6;
+        let west_drained = w.grass.dget(west_cell) < GRASS_MAX - 1e-6;
         assert!(
             west_drained,
             "west seam cell (ix=0) must be grazed; creature at x=0 is inside cell box [0,5]; density={}",
-            w.grass.density[west_cell]
+            w.grass.dget(west_cell)
         );
     }
 
     /// P1e test 4: single cell at density 1.0 → gain == GRASS_ENERGY_PER_BITE_DEFAULT.
     #[test]
     fn graze_per_cell_cap_holds() {
-        use crate::constants::{
-            GRASS_BITES_PER_BLOCK_DEFAULT, GRASS_CELL_SIZE, GRASS_ENERGY_PER_BITE_DEFAULT,
-            GRASS_MAX,
-        };
+        use crate::constants::{GRASS_CELL_SIZE, GRASS_ENERGY_PER_BITE_DEFAULT, GRASS_MAX};
 
         let mut w = World::new("graze-cap");
         let mut g0 = crate::creature::Genome::median();
@@ -880,7 +884,7 @@ mod tests {
         w.creatures.action_this_tick[0] = Action::Graze;
 
         let cell_idx = iy * GRASS_GRID_DIM + ix;
-        w.grass.density[cell_idx] = GRASS_MAX;
+        w.grass.dset(cell_idx, GRASS_MAX);
 
         let energy_before = w.creatures.energy[0];
         w.graze();
@@ -890,11 +894,14 @@ mod tests {
             (gained - GRASS_ENERGY_PER_BITE_DEFAULT).abs() < 1e-4,
             "gained={gained} expected={GRASS_ENERGY_PER_BITE_DEFAULT}"
         );
-        let density_chunk = GRASS_MAX / GRASS_BITES_PER_BLOCK_DEFAULT as f32;
-        assert!(
-            (w.grass.density[cell_idx] - (GRASS_MAX - density_chunk)).abs() < 1e-5,
-            "density should drop by one chunk ({density_chunk}); got {}",
-            w.grass.density[cell_idx]
+        // Stage 3: byte-exact assertion.
+        // GRASS_BITES_PER_BLOCK_DEFAULT=2, chunk = GRASS_MAX/2 = 0.5.
+        // encode(GRASS_MAX=1.0) = 255; encode(0.5) = 128; post_byte = 255 - 128 = 127.
+        assert_eq!(
+            w.grass.dget_u8(cell_idx),
+            127u8,
+            "density must drop to byte 127 after one bite (255 - 128); got byte {}",
+            w.grass.dget_u8(cell_idx)
         );
     }
 
@@ -916,7 +923,7 @@ mod tests {
         w.creatures.action_this_tick[0] = Action::Graze;
 
         let cell_idx = iy * GRASS_GRID_DIM + ix;
-        w.grass.density[cell_idx] = GRASS_MAX;
+        w.grass.dset(cell_idx, GRASS_MAX);
 
         let energy_before = w.creatures.energy[0];
         w.graze();
@@ -939,7 +946,7 @@ mod tests {
         let mut g0 = crate::creature::Genome::median();
         g0.diet = 0.0; // pure grazer → full graze yield (matches pre-genome)
         w.creatures.genome[0] = g0;
-        w.grass.density.fill(GRASS_MAX);
+        w.grass.fill_density(GRASS_MAX);
 
         let cx = WORLD_SIZE * 0.5;
         let cy = WORLD_SIZE * 0.5;
@@ -947,12 +954,13 @@ mod tests {
         w.creatures.y[0] = cy;
         w.creatures.action_this_tick[0] = Action::Graze;
 
-        let density_before: f32 = w.grass.density.iter().sum();
+        // v2.0.2 Stream 1a: sum decoded u8 densities.
+        let density_before: f32 = (0..w.grass.density.len()).map(|c| w.grass.dget(c)).sum();
         let energy_before = w.creatures.energy[0];
 
         w.graze();
 
-        let density_after: f32 = w.grass.density.iter().sum();
+        let density_after: f32 = (0..w.grass.density.len()).map(|c| w.grass.dget(c)).sum();
         let energy_after = w.creatures.energy[0];
 
         let density_consumed = density_before - density_after;
@@ -960,9 +968,19 @@ mod tests {
         let density_chunk = GRASS_MAX / GRASS_BITES_PER_BLOCK_DEFAULT as f32;
         let bites_from_energy = energy_gained / GRASS_ENERGY_PER_BITE_DEFAULT;
         let bites_from_density = density_consumed / density_chunk;
+        // Stage 3: byte-exact assertion.
+        // Every ripe cell starts at byte 255; chunk = 0.5 → byte 128; post = byte 127.
+        // decode(255) - decode(127) = (128/255) * GRASS_MAX.
+        // density_chunk = 0.5 (exact f32 for GRASS_MAX/2).
+        // bites_from_density per cell = (128/255) / 0.5 = 256/255.
+        // bites_from_energy per cell = 1.0 (exact, energy = GRASS_ENERGY_PER_BITE_DEFAULT).
+        // Exact systematic error = (256/255 - 1) * N = N/255, where N = bites_from_energy.
+        let n = bites_from_energy.round();
+        let exact_density_side = n * (256.0_f32 / 255.0_f32);
         assert!(
-            (bites_from_energy - bites_from_density).abs() < 1e-3,
-            "bite count from energy ({bites_from_energy}) must match density side ({bites_from_density})"
+            (bites_from_density - exact_density_side).abs() < 1e-3,
+            "bite count from density ({bites_from_density}) must equal N*256/255 = {exact_density_side} \
+             (N={n} bites, each draining 128/255 density / chunk 0.5)"
         );
 
         // Sanity: creature should have gained at least one bite's worth.
@@ -1139,7 +1157,7 @@ mod tests {
         w.creatures.x[0] = cx;
         w.creatures.y[0] = cy;
         w.creatures.action_this_tick[0] = Action::Graze;
-        w.grass.density.fill(GRASS_MAX);
+        w.grass.fill_density(GRASS_MAX);
         w.graze();
         assert_eq!(
             w.creatures.flash_tag[0],

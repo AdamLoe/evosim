@@ -186,18 +186,73 @@ with `diet` + `body_size` (Wave 2).
   matmul as `fan_in`.
 - The tick step order (see below). Every named phase has a `tick.<name>`
   profile span; `tick.nn` and `tick.grass_step` are leaves.
-- The grass mechanic: logistic in-cell growth + organic-disc spread via a
-  two-pass separable `[1,2,1]/4` blur (horizontal then vertical = a 3×3
-  Gaussian) with an 8-neighbour max-of-blur spill, clamped to `[0, K]`.
-  Pure read-`density`/write-`scratch` keeps single-thread == rayon
-  deterministic. Processing is confined to a **32×32 active-tile frontier**:
-  only MIXED tiles (cells in `(ε, K−ε)`) and their 8-neighbour fringe are
-  processed each tick; empty/saturated tiles are skipped. Grazed tiles
-  re-enter the frontier via `mark_tile_active`. The snapshot grass write is
-  **dirty-tile-incremental** via `quantize_dirty_tiles_into` — only tiles
-  changed since the last write to each ping-pong slot are re-quantized.
-  Grazed bite-by-bite at `GRASS_MAX / grass_bites_per_block` density per
-  bite, yielding `grass_energy_per_bite` energy per bite.
+- The grass mechanic: the density field is `Vec<AtomicU8>` (`GrassGrid::density`),
+  stored on the snapshot quantization scale — a raw u8 IS the renderable density
+  byte (`GRASS_MAX ⇒ 255`, `0 ⇒ 0`). Accessors `dget`/`dset` encode/decode via
+  `encode_density`/`decode_density`; `dget_u8` and `density_u8_snapshot` expose
+  the raw bytes. The active-tile frontier bitsets
+  (`tile_active`/`tile_active_next`/`tile_dirty`) are `Vec<AtomicU64>`, set via
+  `fetch_or(Relaxed)` so scatter workers can mark neighbour tiles without a data
+  race. The frontier tracks **grass presence** (non-zero cells) — not tile
+  equilibrium classes — on the scatter path.
+
+  `GrassGrid::compute_propagation` dispatches on a `GrassPropagation` selector:
+
+  - **`GrassPropagation::Scatter`** (the LIVE path, set at `World` boot):
+    stochastic u8 scatter. Per tick, over the active-tile set (rayon-parallel),
+    each worker (1) freezes its tile's source bytes locally, (2) for each
+    non-zero source cell rolls a **decay** event (prob `decay_pct`, subtract
+    `decay_amount` u8, floored at 0) and a **spread** event (prob `spread_pct`,
+    add `spread_amount` u8 to a disc-table target, clamped to the target's
+    biome-cap byte). The spread target is picked from a precomputed round disc
+    (`DiscTable`, `GRASS_SPREAD_RADIUS = 3` cells): a radial band is chosen by
+    the ring-weight cumulative distribution (ring1/ring2/ring3), then a uniform
+    offset within that band — so the angular distribution is isotropic.
+    Cross-tile writes are lossy relaxed RMW (`scatter_add`/`scatter_sub`);
+    concurrent collisions clobber one update wholesale — accepted noise.
+    No spontaneous spawn; a dead cell is never a spread source.
+    The per-cell hash RNG is `grass_unit(world_seed, cell, tick, salt)` — a
+    stateless SplitMix64-finalizer hash over those four keys — and **never
+    touches `SimRng`**. This keeps grass rolls order-independent, lock-free, and
+    isolated from the creature RNG stream. Measured ~34× faster than blur.
+
+  - **`GrassPropagation::Blur`** (retained, not deleted): the original
+    deterministic separable-Gaussian path — two-pass `[1,2,1]/4` horizontal
+    then vertical blur, 8-neighbour max-of-blur spill, clamped to `[0, K]`.
+    Grid-direct test constructors default to `Blur` so existing propagation
+    tests keep passing without rewriting their assertions.
+
+  Both paths share the **32×32 active-tile frontier**: only MIXED/frontier tiles
+  and their 8-neighbour fringe are processed; equilibrium tiles are skipped. Grazed
+  tiles re-enter via `mark_tile_active`. The snapshot grass write is
+  **dirty-tile-incremental** via `quantize_dirty_tiles_into`.
+
+  **GrassPyramid** (`GrassGrid::pyramid`): a u8 box-filter mip pyramid (clipmap).
+  L0 aliases the live `density` field; L1+ are owned, mean-downsampled
+  (edge-clamped, `(sum + count/2) / count`), ~12 levels at default `grass_dim
+  1920` (stopping when both axes reach 1, up to `GRASS_PYRAMID_MAX_LEVELS = 16`).
+  Refreshed each tick at step 7b via `GrassGrid::refresh_pyramid` (full recompute;
+  active-set-keyed partial refresh is a noted TODO). Serves render LOD + snapshot
+  windowing.
+
+  **Graze** uses u8 quantization: `density_chunk = GRASS_MAX /
+  GRASS_BITES_PER_BLOCK` (constant `GRASS_BITES_PER_BLOCK = 2`, so 128 u8 levels
+  per bite); `consume` encodes `density_chunk` to a byte, floors to `.max(1)` so a
+  bite always removes at least 1 byte, yields `grass_energy_per_bite` per bite.
+  Six live grass sliders wire into `GrassGrid.scatter_params` (`ScatterParams`):
+  `grass_decay_pct` (54), `grass_decay_amount` (55), `grass_spread_pct` (56),
+  `grass_spread_amount` (57), `grass_spread_ring1_pct` (58),
+  `grass_spread_ring2_pct` (59); ring3 weight is implicit (`max(0, 1−r1−r2)`).
+
+  **Determinism.** Single-threaded runs are deterministic (same seed → same
+  output). Under `--features threads` (and in the live wasm sim, which is always
+  threaded), the scatter kernel's lossy cross-tile relaxed RMW makes the grass
+  density field — and hence any creature behaviour that senses it —
+  **intentionally non-reproducible run-to-run**. This is an accepted
+  perf-vs-reproducibility trade-off (lead ratification pending). The two
+  determinism tests assert exact equality only under
+  `#[cfg(not(feature="threads"))]`; threaded tests assert liveness + bounded
+  population delta.
 - The eat mechanic: per-bite transfer of
   `eat_bite_fraction * prey.energy * (1 - prey.armor)` (armor is 0 today
   — the multiplier is retained for forward compatibility).
@@ -286,16 +341,20 @@ fn step(&mut self) -> bool {
 
     // 1. tick.grid.rebuild      — SpatialGrid::rebuild
     // 2. tick.nn                — chunked Brain::forward (LEAF in tick tree)
-    // 3. tick.movement          — apply_movement_and_repulsion
-    // 4. tick.graze             — multi-cell density consume (sequential)
-    // 5. tick.attack            — per-bite energy transfer (v2.0 Wave 2a: Eat→Attack)
-    // 6. tick.grass_step        — grass propagation + bitset rebuild (LEAF)
-    // 7. tick.energy_bookkeeping
-    // 8. tick.collect_deaths
-    // 9. tick.handle_births     — single-pool: split; species_mode: handle_mating
-    //                             (sexual Mate) + RANDOM CULL back to MAX_POP_FOR_SIM
-    //10. tick.color_ema         — ring-flash decay (v2.0 Wave 2a; span name kept)
-    //11. tick.bookkeeping_tail  — last_action promote, tick++, world-end check
+    // 4. tick.movement          — apply_movement_and_repulsion
+    // 5. tick.graze             — multi-cell density consume (sequential)
+    // 6. tick.attack            — per-bite energy transfer (Eat→Attack)
+    // 7. tick.grass_step        — compute_propagation (Scatter or Blur per selector)
+    //                             + rebuild_row_bitset (LEAF)
+    // 7b.(no span)              — GrassGrid::refresh_pyramid — full mip recompute
+    //                             after grass settles, before write_snapshot
+    // 8. tick.energy_bookkeeping
+    // 9a.(tick.handle_births)   — species_mode only: handle_mating (sexual Mate)
+    // 9b.tick.collect_deaths
+    //10. tick.handle_births     — single-pool asexual Split
+    //                             RANDOM CULL back to MAX_POP_FOR_SIM each birth phase
+    //12. tick.color_ema         — ring-flash decay (span name kept)
+    //    tick.bookkeeping_tail  — last_action promote, tick++, world-end check
 }
 ```
 
@@ -465,10 +524,23 @@ is packed into the snapshot for the renderer (2b draws the ring); see
   `input_width` field + `with_input_width`), the `lrelu` helper, the
   `NN_OUTPUTS == 5` compile-assert. Width tests: `src/brain_width_tests.rs`.
 - `src/creature.rs` → `CreatureSoA`, `Action` (3 variants), `Action::ALL`.
-- `src/grass.rs` → `GrassGrid`, `compute_propagation`, `bilinear_sample`,
-  `consume`, `for_each_cell_overlapping_circle`, `rebuild_row_bitset`,
-  `resync_active_from_density`, `mark_all_tiles_dirty`,
-  `quantize_dirty_tiles_into`, `GRASS_TILE_SIZE`, `GRASS_EQ_EPS`.
+- `src/grass.rs` → `GrassGrid` (`density: Vec<AtomicU8>`,
+  `tile_active`/`tile_active_next`/`tile_dirty: Vec<AtomicU64>`, `pyramid:
+  GrassPyramid`, `scatter_params: ScatterParams`, `propagation:
+  GrassPropagation`, `world_seed`, `scatter_tick`); `dget`/`dset`/`dget_u8`/
+  `density_u8_snapshot` (density accessors); `encode_density`/`decode_density`;
+  `compute_propagation` (selector dispatcher); `compute_propagation_scatter`
+  (LIVE stochastic u8 kernel); `compute_propagation_blur` (retained Gaussian
+  path); `GrassPropagation` enum `{Scatter, Blur}`; `ScatterParams` (6-field
+  live-tunable scatter parameters); `DiscTable` (precomputed round-disc spread
+  target table, 3 radial bands); `GrassPyramid` (`level_dims`, `levels`,
+  `refresh`, `viewport_window`, `sample_clamped`); `refresh_pyramid`; `consume`;
+  `bilinear_sample`; `for_each_cell_overlapping_circle`; `rebuild_row_bitset`;
+  `resync_active_from_density`; `mark_all_tiles_dirty`; `quantize_dirty_tiles_into`;
+  `GRASS_TILE_SIZE`; `GRASS_EQ_EPS`.
+- `src/rng.rs` → `grass_hash_u64` / `grass_unit` (stateless SplitMix64-finalizer
+  hash RNG for scatter — keyed on `(world_seed, cell_id, tick, salt)`, never
+  touches `SimRng`).
 - `src/grid.rs` → `SpatialGrid` (carries `dims: WorldDims`), `cell_of`
   (instance method: clamp walled / `rem_euclid` toroidal), `rebuild`,
   `for_each_in_radius` (wrap-aware cell fold).
@@ -494,6 +566,12 @@ is packed into the snapshot for the renderer (2b draws the ring); see
   `SPLIT_GIFT_MAX_DEFAULT = 30.0`, `SPLIT_JITTER_DEFAULT = 1.0`,
   `REPULSION_MAX = 0.1`, `GRASS_INITIAL_SEED_COUNT_DEFAULT = 8000`,
   `FULL_GRASS_ON_INIT_DEFAULT = false`,
+  `GRASS_BITES_PER_BLOCK = 2` (constant; 128 u8 per bite at `GRASS_MAX = 1.0`),
+  `GRASS_PYRAMID_MAX_LEVELS = 16`, `GRASS_SPREAD_RADIUS = 3`,
+  `GRASS_DECAY_PCT_DEFAULT`, `GRASS_DECAY_AMOUNT_DEFAULT`,
+  `GRASS_SPREAD_PCT_DEFAULT`, `GRASS_SPREAD_AMOUNT_DEFAULT`,
+  `GRASS_SPREAD_RING1_PCT_DEFAULT`, `GRASS_SPREAD_RING2_PCT_DEFAULT`,
+  `GRASS_SPREAD_RING3_PCT_DEFAULT`,
   `SPECIES_MODE_DEFAULT = false`, `CrossoverMode` enum + `CROSSOVER_MODE_DEFAULT =
   FiftyFifty`, `NN_CREATURE_SECTORS_SPECIES = 16`,
   `STARTING_SPECIES_COUNT_DEFAULT = 10`, `STARTING_SPECIES_MEMBER_COUNT_DEFAULT = 10`,

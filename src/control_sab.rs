@@ -104,6 +104,18 @@ pub const CTRL_SPECIES_TABLE_EPOCH: usize = 112;
 /// Length of the species-table JSON in bytes.
 pub const CTRL_SPECIES_TABLE_LEN: usize = 113;
 
+/// v2.0.3 Stream 2b: camera lane — world-space center X, carried as f32::to_bits.
+/// Main writes each RAF; worker reads in write_snapshot to compute the clipmap window.
+pub const CTRL_CAMERA_CX_BITS: usize = 120;
+/// v2.0.3 Stream 2b: camera lane — world-space center Y, carried as f32::to_bits.
+pub const CTRL_CAMERA_CY_BITS: usize = 121;
+/// v2.0.3 Stream 2b: camera lane — zoom (px/world-unit), carried as f32::to_bits.
+pub const CTRL_CAMERA_ZOOM_BITS: usize = 122;
+/// v2.0.3 Stream 2b: camera lane — viewport width in CSS pixels (u32).
+pub const CTRL_CAMERA_VIEWPORT_W: usize = 123;
+/// v2.0.3 Stream 2b: camera lane — viewport height in CSS pixels (u32).
+pub const CTRL_CAMERA_VIEWPORT_H: usize = 124;
+
 /// Length of the leading i32 region in i32 slots. Byte buffers start
 /// at `CTRL_I32_REGION_LEN * 4`.
 pub const CTRL_I32_REGION_LEN: usize = 256;
@@ -153,4 +165,8 @@ const _: () = assert!(
 const _: () = assert!(
     CTRL_I32_REGION_LEN * 4 <= INSPECT_RESP_OFFSET,
     "i32 region must end before the inspect-response byte buffer starts",
+);
+const _: () = assert!(
+    CTRL_CAMERA_VIEWPORT_H < CTRL_I32_REGION_LEN,
+    "camera lanes must fit within the i32 region",
 );

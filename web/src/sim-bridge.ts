@@ -57,6 +57,15 @@ import {
   SPECIES_TABLE_CAP,
   SPECIES_TABLE_OFFSET,
 } from "./generated/control-sab";
+// v2.0.3 Stream 2b: re-export camera lane constants so worker + main can import
+// them from sim-bridge without going through the generated file directly.
+export {
+  CTRL_CAMERA_CX_BITS,
+  CTRL_CAMERA_CY_BITS,
+  CTRL_CAMERA_ZOOM_BITS,
+  CTRL_CAMERA_VIEWPORT_W,
+  CTRL_CAMERA_VIEWPORT_H,
+} from "./generated/control-sab";
 import { SLIDER_INDEX } from "./generated/slider-ids";
 
 // Re-export hot SAB constants for the snapshot read path in main.ts.
@@ -98,8 +107,9 @@ export const MAX_POP_FOR_SIM = 32_000;
 export const CREATURE_STRIDE = 8;
 
 /**
- * Bytes per snapshot stats header — 20 bytes of stats + 12 bytes of padding
- * to 32-byte-align the creature SoA that follows.
+ * Bytes per snapshot stats header — v2.0.3 Stream 2b: bumped 32 → 64.
+ * Adds 32 bytes of window-metadata fields at [32..64) while keeping the
+ * creature SoA 64-byte aligned (64 is a multiple of the 32B stride).
  *
  * Stats layout (LE):
  *   off  0: `tick`         u32
@@ -107,11 +117,24 @@ export const CREATURE_STRIDE = 8;
  *   off  8: `world_ended`  u32 (0/1)
  *   off 12: `tps_bits`     u32 (= `f32::to_bits(tps)`)
  *   off 16: `jank_count`   u32
- *   off 20..32: padding (do NOT trim — creature SoA stride is 32B and
- *               `new Float32Array(buf, offset, len)` requires `offset` to be
- *               element-stride-aligned; Chrome/Firefox enforce this).
+ *   off 20..32: reserved / padding (unchanged)
+ *   off 32: `mip_level`    u32
+ *   off 36: `win_origin_x` u32
+ *   off 40: `win_origin_y` u32
+ *   off 44: `win_w`        u32
+ *   off 48: `win_h`        u32
+ *   off 52: `tex_dim_w`    u32
+ *   off 56: `tex_dim_h`    u32
+ *   off 60: `wrap_mode`    u32  (0 = clamp/walled, 1 = wrap/torus)
  */
-export const SNAPSHOT_HEADER_BYTES = 32;
+export const SNAPSHOT_HEADER_BYTES = 64;
+
+/**
+ * v2.0.3 Stream 2b: clipmap budget axis (cells per axis). The worker publishes
+ * at most `GRASS_LOD_BUDGET_AXIS²` bytes per slot grass region. At the default
+ * grass_dim = 1920 (< 2048) the window equals the full field.
+ */
+export const GRASS_LOD_BUDGET_AXIS = 2048;
 
 /** Bytes per creature SoA region in one snapshot slot. UNCHANGED in v2.0. */
 export const CREATURE_SOA_BYTES = MAX_POP_FOR_SIM * CREATURE_STRIDE * 4;
@@ -120,38 +143,68 @@ export const CREATURE_SOA_BYTES = MAX_POP_FOR_SIM * CREATURE_STRIDE * 4;
  * Runtime snapshot-slot geometry.
  *
  * v2.0 Wave 1a: the world is runtime-sized, so the grass region byte length
- * (and therefore the slot/buffer totals) is no longer a compile-time
- * constant. The grass region is now **u8** (one byte per cell, quantized
- * Rust-side in `quantize_grass_into`) of `grass_cell_count` bytes — NOT the
- * old f32 `921_600 × 4`. The renderer uploads it as `R8`.
+ * (and therefore the slot/buffer totals) is no longer a compile-time constant.
+ *
+ * v2.0.3 Stream 2b: the grass region is now a **clipmap window** of at most
+ * `GRASS_LOD_BUDGET_AXIS²` bytes. At default grass_dim=1920 (< 2048) the
+ * window equals the full field and the slot size is byte-identical to the
+ * pre-2b layout. For larger worlds the slot grass region is capped at
+ * `budget_axis²`. The ACTUAL window dims for a given tick are in the
+ * window metadata (header bytes [32..64)).
+ *
+ * v2.0.3 Stream 2d: the slot now also carries a biome window (mode-downsampled,
+ * same allocation size as the grass region) appended immediately after the
+ * grass region. The biome window uses the same UV transform as the grass window.
  *
  * The single source of truth is the `grass_dim` reported in `boot_ready`
- * (mirrored from `WorldHandle.grass_dim`); `grass_cell_count = grass_dim²`.
- * Every per-frame view length and slot offset is derived from a `SlotLayout`
- * built once at boot from that value. Getting this wrong silently
- * over/under-runs the SAB slot, so it lives in ONE place.
+ * (mirrored from `WorldHandle.grass_dim`). Getting this wrong silently
+ * over/under-runs the SAB slot, so the geometry lives in ONE place.
  */
 export interface SlotLayout {
   /** Grass cells per axis (`grass_dim`). */
   grassDim: number;
-  /** Grass cells per slot (`grass_dim²`); === u8 grass-region byte length. */
+  /**
+   * Full grass cells per slot (`grass_dim²`). Kept for reference and for
+   * the biome SAB sizing; NOT the grass-region byte count since 2b.
+   */
   grassCellCount: number;
-  /** Header + creatures + grass, in bytes. */
+  /**
+   * Slot grass region byte count = `min(grassDim, GRASS_LOD_BUDGET_AXIS)²`.
+   * At default scale equals `grassCellCount`. This is the ALLOCATION size;
+   * use window metadata (readWindowMetadata) for the actual window dims.
+   */
+  grassRegionBytes: number;
+  /**
+   * v2.0.3 Stream 2d: biome window region byte count = same as grassRegionBytes.
+   * The actual written bytes per tick are win_w × win_h (from window metadata).
+   * The biome window is appended immediately after the grass region in the slot.
+   */
+  biomeWinBytes: number;
+  /** Header + creatures + grass + biome_win, in bytes. */
   slotBytes: number;
 }
 
 /**
- * Build the runtime slot geometry from the boot-time `grass_dim`. The grass
- * region is `grass_dim²` u8 bytes (one per cell); the creature region and
- * header are world-size-independent.
+ * Build the runtime slot geometry from the boot-time `grass_dim`.
+ *
+ * v2.0.3 Stream 2b: grass region bytes = `min(grassDim, GRASS_LOD_BUDGET_AXIS)²`
+ * so the slot can hold the largest possible window. At default scale (1920 < 2048)
+ * this equals `grassDim²` — byte-identical to the pre-2b layout.
+ *
+ * v2.0.3 Stream 2d: biome window = same allocation as grass region, appended after.
  */
 export function makeSlotLayout(grassDim: number): SlotLayout {
   const grassCellCount = grassDim * grassDim;
+  const winAxis = Math.min(grassDim, GRASS_LOD_BUDGET_AXIS);
+  const grassRegionBytes = winAxis * winAxis;
+  // v2.0.3 Stream 2d: biome window allocation = same budget as grass.
+  const biomeWinBytes = grassRegionBytes;
   return {
     grassDim,
     grassCellCount,
-    // u8 grass: 1 byte per cell (no ×4 — that was the f32 era).
-    slotBytes: SNAPSHOT_HEADER_BYTES + CREATURE_SOA_BYTES + grassCellCount,
+    grassRegionBytes,
+    biomeWinBytes,
+    slotBytes: SNAPSHOT_HEADER_BYTES + CREATURE_SOA_BYTES + grassRegionBytes + biomeWinBytes,
   };
 }
 
@@ -168,6 +221,62 @@ export function creatureSoAOffset(layout: SlotLayout, slot: 0 | 1): number {
 /** Byte offset of the u8 grass region within snapshot slot `slot`. */
 export function grassOffset(layout: SlotLayout, slot: 0 | 1): number {
   return slotOffset(layout, slot) + SNAPSHOT_HEADER_BYTES + CREATURE_SOA_BYTES;
+}
+
+/**
+ * v2.0.3 Stream 2d: byte offset of the u8 biome window within snapshot slot `slot`.
+ * The biome window immediately follows the grass region. Same allocation size.
+ * Actual written bytes are win_w × win_h per tick (from window metadata).
+ */
+export function biomeWinOffset(layout: SlotLayout, slot: 0 | 1): number {
+  return grassOffset(layout, slot) + layout.grassRegionBytes;
+}
+
+// ---------------------------------------------------------------------------
+// v2.0.3 Stream 2b — Window metadata
+// ---------------------------------------------------------------------------
+
+/**
+ * Window metadata packed into snapshot header bytes [32..64) by the Rust worker.
+ * Describes the clipmap window written into the slot's grass region.
+ */
+export interface WindowMetadata {
+  /** Pyramid LOD level (0 = full resolution). */
+  mipLevel: number;
+  /** Window origin X in level-k cells. */
+  winOriginX: number;
+  /** Window origin Y in level-k cells. */
+  winOriginY: number;
+  /** Window width in level-k cells. */
+  winW: number;
+  /** Window height in level-k cells. */
+  winH: number;
+  /** Texture upload width (= winW for now). */
+  texDimW: number;
+  /** Texture upload height (= winH for now). */
+  texDimH: number;
+  /** 0 = clamp/walled, 1 = wrap/torus. */
+  wrapMode: number;
+}
+
+/**
+ * Read the window metadata from the snapshot header of `slot`.
+ * `view` is a DataView over the entire snapshot buffer (wasm memory);
+ * `slotByteBase` is the byte offset of the slot start within `view`
+ * (i.e. `snapshotBaseOffset + slotOffset(layout, slot)`).
+ */
+export function readWindowMetadata(view: DataView, slotByteBase: number): WindowMetadata {
+  const base = slotByteBase + 32; // window metadata starts at header offset 32
+  return {
+    mipLevel:    view.getUint32(base +  0, true),
+    winOriginX:  view.getUint32(base +  4, true),
+    winOriginY:  view.getUint32(base +  8, true),
+    winW:        view.getUint32(base + 12, true),
+    winH:        view.getUint32(base + 16, true),
+    texDimW:     view.getUint32(base + 20, true),
+    texDimH:     view.getUint32(base + 24, true),
+    wrapMode:    view.getUint32(base + 28, true),
+  };
 }
 
 // ---------------------------------------------------------------------------

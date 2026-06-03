@@ -3,13 +3,17 @@
 #![allow(clippy::needless_range_loop)]
 
 pub(crate) mod brain;
-pub(crate) mod constants;
+// pub(crate) → pub for grass, constants, rng: needed by the native criterion
+// benchmark (benches/grass_scatter.rs). The types within were already `pub`;
+// only the module visibility changes. No API surface expands beyond what was
+// visible inside the crate. `world` and `profiler` stay pub(crate).
+pub mod constants;
 pub mod control_sab;
 pub(crate) mod creature;
-pub(crate) mod grass;
+pub mod grass;
 pub(crate) mod grid;
 pub(crate) mod profiler;
-pub(crate) mod rng;
+pub mod rng;
 pub(crate) mod world;
 
 mod wasm_api;
