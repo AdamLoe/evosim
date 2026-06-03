@@ -219,9 +219,9 @@
   render LOD — the snapshot worker extracts a clipmap window at the appropriate
   mip level; (2) snapshot windowing — only the visible region at that level is
   published per slot.
-- **Why**: At `grass_dim` > 2048 a full-resolution copy would exceed the
+- **Why**: At `grass_dim` > 4096 a full-resolution copy would exceed the
   budget; even at the default 1920² the copy is ~3.7 MB per tick. A pyramid
-  lets the snapshot be both bandwidth-bounded (`GRASS_LOD_BUDGET_AXIS = 2048`
+  lets the snapshot be both bandwidth-bounded (`GRASS_LOD_BUDGET_AXIS = 4096`
   cells per axis) and LOD-correct at any zoom. Mean downsampling (box filter)
   is the correct aggregate for a density field — no aliasing from nearest.
 - **Applies to**: `architecture/render-pipeline.md`,
@@ -230,41 +230,78 @@
   (pyramid field, step-7b refresh); `src/wasm_api.rs → write_snapshot`
   (LOD level + window extraction via `pyramid.viewport_window`).
 
-### LOD level formula and budget constants
+### LOD budget = 4096, single-sourced via gen_bindings (v2.0.4 S1)
 
-- **Decision**: `GRASS_LOD_BUDGET_AXIS = 2048` cells per axis; margin factor
-  `GRASS_LOD_MARGIN_FACTOR = 1.5×` (the published window covers the visible
-  viewport × 1.5, centered on the camera). LOD level =
-  `floor(log2(max(1.0, visible_cell_span / GRASS_LOD_BUDGET_AXIS)))`, where
-  `visible_cell_span = (world_size / cam_zoom) / GRASS_CELL_SIZE`. The `max(1.0)`
-  pre-clamp ensures `log2` is never called on a value < 1.0 (which would give
-  a negative level). Level is then clamped to `[0, max_level]`.
-- **Why**: The budget axis of 2048 is >= `grass_dim` at the default world size
-  (1920 < 2048), so the default-scale window equals the full field and output
-  is byte-identical to the pre-pyramid path — zero regression at the shipped
-  default. The 1.5× margin means a full-viewport pan in any direction stays
-  covered for at least one tick without a new window being needed.
-- **Tradeoffs**: The square-viewport approximation (vis_cells_x == vis_cells_y)
-  means portrait/landscape viewports may over-request slightly on the narrow
-  axis. Acceptable given the margin.
+- **Decision**: `GRASS_LOD_BUDGET_AXIS = 4096` cells per axis (raised from
+  2048). This is the **LOD switch threshold** (`level = floor(log2(span/4096))`),
+  the **window/texture clamp ceiling**, and the **snapshot slot sizer**
+  (grass + biome region each `min(grass_dim, 4096)²` bytes — ~4× the 2048-budget
+  at `grass_dim > 2048`). It is **single-sourced in Rust** (`src/wasm_api.rs`)
+  and emitted to TS via `cargo run --bin gen-bindings` →
+  `web/src/generated/lod-constants.ts`, covered by the `bindings_in_sync` test.
+  Margin factor `GRASS_LOD_MARGIN_FACTOR = 1.5×` is unchanged.
+- **Why**: The 2048 budget downsampled "a layer too early" for worlds past ~2048
+  cells/axis (the default 1920² was fine but any non-default zoom-out or larger
+  grass_dim crossed the boundary). At 4096 full-resolution holds to ~16.7M cells,
+  covering every practical world size. Cost: ~4× slot grass bytes ≈ 16 MB at
+  grass_dim=4096 + correspondingly larger `texSubImage2D` upload vs the old 2048
+  budget. **`bindings_in_sync` fails if Rust and TS drift.**
 - **Applies to**: `architecture/render-pipeline.md`,
   `architecture/shared-memory-and-protocol.md`.
-- **Code anchors**: `src/wasm_api.rs` (`GRASS_LOD_BUDGET_AXIS`,
-  `GRASS_LOD_MARGIN_FACTOR`, `write_snapshot` LOD computation block).
-- **Revisit when**: viewport aspect ratio becomes significant (tall/wide worlds
-  benefit from separate x/y window dimensions).
+- **Code anchors**: `src/wasm_api.rs → GRASS_LOD_BUDGET_AXIS`;
+  `web/src/generated/lod-constants.ts` (generated);
+  `web/src/sim-bridge.ts → GRASS_LOD_BUDGET_AXIS` (re-exported from generated);
+  `src/bin/gen_bindings.rs` (codegen + drift test).
+- **Revisit when**: memory footprint of the 4096² slot becomes a concern at
+  very large grass_dim values, or the budget needs to be dynamically adjusted
+  per zoom level.
 
-### Grass and biome textures are fixed 2048² R8; per-frame texSubImage2D of the window
+### lod_bias: "nudge within budget" LOD fine-tuning (v2.0.4 S1)
+
+- **Decision**: `lod_bias` (slider idx 60, live f32, default 0.0) subtracts from
+  the computed float mip level before flooring, allowing finer-detail rendering.
+  It is clamped ≥ 0 (no coarsening). **Semantic constraint**: biasing finer than
+  the budget can hold causes the window to clamp at `GRASS_LOD_BUDGET_AXIS` and
+  **crop viewport edges**. The bias is therefore a "nudge within budget," not an
+  independent resolution override. The user-facing note in the DevPanel explains
+  this edge-crop behavior.
+- **Why**: Keeps the LOD formula deterministic (no per-session budget changes)
+  while giving the user a live knob to trade edge coverage for center detail.
+  Default 0.0 is the FEEL-TUNE point (the lead should confirm it is the right
+  default for typical use).
+- **Applies to**: `architecture/render-pipeline.md`.
+- **Code anchors**: `src/wasm_api.rs → apply_lod_bias`, `write_snapshot`
+  (the `biased_level_f` computation).
+
+### Aspect-ratio fix: vis_cells_y from viewport_h, not vis_cells_x (v2.0.4 S1)
+
+- **Decision**: `vis_cells_y` is now derived from `viewport_h` independently:
+  `visible_cell_span_y = visible_cell_span_x × (viewport_h / viewport_w)`.
+  Previously `vis_cells_y = vis_cells_x` assumed a square viewport.
+- **Why**: Non-square viewports produced a mis-sized vertical window — under the
+  old code a 1280×720 viewport produced a square window sized for the horizontal
+  span, cropping the bottom. The fix is aspect-correct.
+- **Tradeoffs**: The full-field invariant (`win_w = grass_dim`) holds for the
+  **horizontal** direction only; `win_h` is correctly aspect-matched. E2E test
+  `grass-lod-smoke.spec.ts` was updated to assert the aspect-correct values
+  (not the old square-window values which encoded the pre-fix bug).
+- **Applies to**: `architecture/render-pipeline.md`.
+- **Code anchors**: `src/wasm_api.rs → write_snapshot`
+  (the `vis_cells_y` derivation via the `aspect` variable);
+  `web/tests/e2e/grass-lod-smoke.spec.ts` (updated assertion).
+
+### Grass and biome textures are fixed budget² R8; per-frame texSubImage2D of the window
 
 - **Decision**: Both the grass and biome textures are allocated once at
-  `GRASS_LOD_BUDGET_AXIS² = 2048×2048` (R8, `UNSIGNED_BYTE`). Per frame,
+  `GRASS_LOD_BUDGET_AXIS² = 4096×4096` (R8, `UNSIGNED_BYTE`). Per frame,
   `texSubImage2D` uploads only the `win_w × win_h` window bytes into the `(0,0)`
   corner of each texture (subarray-guarded). `NEAREST` filtering is used for
   both min and mag (trilinear is reserved via the `u_lod_blend` uniform, always
   `0.0` now). UV transform uniforms map the world-space quad into the window
-  sub-region: `u_uv_scale = world_size / (GRASS_CELL_SIZE * 2^mipLevel * BUDGET_AXIS)`,
-  `u_uv_offset = -vec2(winOriginX, winOriginY) / BUDGET_AXIS`. At default
-  scale (mip=0, origin=(0,0)) this reduces to identity — no behavior change.
+  sub-region: `u_uv_scale = world_size / (grass_cell_size * 2^mipLevel * BUDGET_AXIS)`,
+  `u_uv_offset = -vec2(winOriginX, winOriginY) / BUDGET_AXIS`. `grass_cell_size`
+  comes from `boot_ready` (not hard-coded 5.0) so non-default `grass_size`
+  settings render correctly.
 - **Why**: A fixed allocation avoids per-frame `texImage2D` resize overhead.
   Uploading only the window avoids uploading the entire budget² texture when the
   window is smaller. Nearest-mip first keeps the implementation simple; switching
@@ -344,13 +381,14 @@
 ### Default-scale window equals the full field (byte-identical to pre-LOD path)
 
 - **Decision**: The LOD and window logic is designed so that at the shipping
-  default (world_size=9600, zoom=1.0, grass_dim=1920, GRASS_CELL_SIZE=5.0):
+  default (world_size=9600, zoom=1.0, grass_dim=1920, grass_cell_size=5.0,
+  `GRASS_LOD_BUDGET_AXIS=4096`):
   mip_level=0, window=(0,0,1920,1920), win_w×win_h = 1920² = grass_cell_count.
   The slot grass bytes are byte-identical to the pre-pyramid path.
 - **Why**: Zero-regression guarantee at the default scale means the new code
   cannot silently introduce a rendering difference for the most common case.
   The design invariant also validates the LOD formula: the `max(1.0)` pre-clamp
-  before `log2` is what keeps `level=0` when `visible_cell_span / BUDGET_AXIS ≈ 0.9375 < 1.0`.
+  before `log2` is what keeps `level=0` when `visible_cell_span / BUDGET_AXIS ≈ 0.4688 < 1.0`.
 - **Applies to**: `architecture/render-pipeline.md`.
 - **Code anchors**: `src/wasm_api.rs → write_snapshot` (the DEFAULT-SCALE
   INVARIANT comment block).

@@ -886,25 +886,114 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   `GrassGrid::refresh_pyramid`;
   `src/constants.rs → GRASS_PYRAMID_MAX_LEVELS`.
 
-### Grass sensing: 1/d² proximity sector scan retained; mip-pyramid NN sensing not implemented (v2.0.3)
+### Far multi-band grass NN sight: GrassBandsFar default ON; single-band toggle kept (v2.0.4 S6)
 
-- **Decision**: Grass NN sensing remains the existing
-  `compute_grass_density_sectors` — a 1/d² weighted bilinear sector scan
-  over the `GRASS_PROXIMITY_RANGE`. `MAX_NN_INPUTS = 48` is unchanged.
-  The 2e mip-sensing NN variant (sensing off pyramid LOD levels) was
-  **not implemented**.
-- **Why**: The pyramid is available and would allow coarser-grid sensing
-  at low computational cost, but the 2e variant required changes to the
-  NN input layout (new slot group, ABI implications) without a clear
-  improvement signal from the current sim. Shipping without it keeps the
-  NN input surface stable and avoids discarding all current brains on
-  upgrade. The pyramid remains available for a future lead call.
+- **Decision**: Grass NN sensing now includes a second group —
+  `NnInputGroup::GrassBandsFar` (8 sectors at `GRASS_FAR_SIGHT_RADIUS = 160u`,
+  read at `GRASS_FAR_MIP_LEVEL = 3` from `GrassPyramid::sample_clamped`).
+  This is **default ON** via the `grass_multisight` construction slider (idx 61,
+  default true). Both the multi-band and single-band layouts stay compiled;
+  the dev-panel toggle lets the user A/B them. The A/B is a regression guard,
+  not a ship gate: multi-band was confirmed not-worse than single-band.
+- **Why**: O(1) pyramid taps cost nothing at mip level 3 (one sample per sector).
+  Creatures sensing grass at 160u radius can navigate toward distant patches
+  before local exhaustion. Shipping default ON keeps all born creatures on the
+  same layout as the rest of the world; the toggle is for the A/B and debugging.
+- **Constraint**: the walled+species combination hits 51 real → 56 padded inputs,
+  exceeding `MAX_NN_INPUTS = 48`. The layout **automatically falls back** to
+  single-band for that configuration; documented in `NnInputLayout::for_settings`.
 - **Applies to**: `architecture/simulation-core.md`.
-- **Code anchors**: `src/world/proximity.rs → compute_grass_density_sectors`;
-  `src/constants.rs → MAX_NN_INPUTS`, `GRASS_PROXIMITY_RANGE`.
-- **Revisit when**: sensing range or LOD becomes a meaningful perf
-  bottleneck, or a mip-sensing design is benchmarked and shows measurable
-  NN quality gain.
+- **Code anchors**: `src/world/nn.rs → NnInputGroup::GrassBandsFar`,
+  `NnInputLayout::for_settings`; `src/world/proximity.rs →
+  compute_grass_far_band_sectors`; `src/constants.rs → GRASS_FAR_SIGHT_RADIUS`,
+  `GRASS_FAR_MIP_LEVEL`.
+- **Revisit when**: band count, radii, or mip level need retuning; or the
+  MAX_NN_INPUTS ceiling becomes a bottleneck for future input groups.
+
+### Fused RNG for scatter kernel (grass_hash_fused_4) (v2.0.4 S3)
+
+- **Decision**: The scatter kernel replaces 4 separate `grass_hash_u64` calls
+  (salts 1–4) with `grass_hash_fused_4` (`src/rng.rs`): 2 `grass_hash_u64`
+  words, bit-sliced into non-overlapping windows for decay/spread/band/pick.
+  The property "grass never perturbs `SimRng`" is preserved; distribution
+  statistics match within tolerance (tested in `src/grass_fused_rng_tests.rs`).
+- **Why**: Attribution bench (S0) measured RNG as the dominant per-cell cost at
+  dense fill (3.05 ns/cell, 47% of 6.42 ns/cell total). Fusing to 2 calls saves
+  ~0.86 ns/cell at dense fill. Non-overlapping bit windows avoid cross-salt
+  correlation while sharing the two-hash work.
+- **Applies to**: `architecture/simulation-core.md`.
+- **Code anchors**: `src/rng.rs → grass_hash_fused_4`; `src/grass.rs →
+  compute_propagation_scatter` (the 2-hash dispatch replacing the 4-call path).
+
+### Density-weighted ("fertility") spread: variant A, amount ∝ source (v2.0.4 S4)
+
+- **Decision**: The scatter spread amount is now **proportional to the source
+  cell's density**: `add_byte = (spread_byte × s + 127) / 255` where `s` is the
+  raw u8 source value. Spread *probability* (`spread_pct`) is unchanged, keeping
+  `p` constant (geometric-skip-compatible if that ships). This is **variant A**
+  (variant B — probability ∝ density — was rejected because it makes `p` per-cell,
+  forcing rejection sampling on top of the walk with no observed benefit over A).
+  `GRASS_DECAY_PCT_DEFAULT` is raised **0.02 → 0.04**: the self-reinforcing clumps
+  that density weighting produces refill their centers, so decay headroom improves
+  and a higher decay rate produces living-noise without global collapse.
+- **Why**: Denser source cells push harder → self-reinforcing patch centers →
+  tighter, more organic-looking clumps. The persistence invariant (plains
+  super-critical, water sub-critical at shoreline) is preserved (tested in
+  `src/grass_fertility_tests.rs`). The 0.04 decay default is **feel-tunable** —
+  the lead should confirm it reads well in the browser.
+- **Applies to**: `architecture/simulation-core.md`.
+- **Code anchors**: `src/grass.rs → compute_propagation_scatter`
+  (the `(spread_byte * s + 127) / 255` add_byte line);
+  `src/constants.rs → GRASS_DECAY_PCT_DEFAULT`.
+
+### grass_size slider: configurable cell size as perf lever (v2.0.4 S2)
+
+- **Decision**: `GRASS_CELL_SIZE` is no longer compile-time only — it is also
+  a **construction slider** (`grass_size`, idx 62, range 5–20u, step 1, default
+  5.0). The value flows via `WorldDims::from_world_size_with_cell_size`; changing
+  it resizes `grass_dim`, `grass_cell_count`, `capacity[]`, the biome grid, and
+  the snapshot slot. Restart/full-world-rebuild scoped.
+- **Why**: Cell count scales ~1/size², so a larger cell is the bluntest available
+  perf lever — reducing grass_step work without architectural change. It is the
+  principled form of "use less grass" and pairs with the LOD/scale resolution theme.
+- **Tradeoffs**: `LUT_RADIUS = 4` (in `src/world/proximity.rs`) is pinned to the
+  5u default — a safe over-approximation across the full 5–20u range. The grass
+  `bilinear_sample` + circle-overlap uses the runtime `grass_cell_size`; so do
+  `biome.rs`, `nn.rs` BiomeSampler, and the `render-gl.ts` UV transform (all
+  previously hard-coded 5.0).
+- **Applies to**: `architecture/simulation-core.md`, `architecture/render-pipeline.md`.
+- **Code anchors**: `src/constants.rs → WorldDims::from_world_size_with_cell_size`,
+  `GRASS_CELL_SIZE_DEFAULT`; `web/src/render-gl.ts → renderWorldImpl`
+  (`grass_cell_size` param from `boot_ready`).
+- **Revisit when**: `LUT_RADIUS` needs retuning for cell sizes > 20u, or the
+  sim's proximity semantics change to depend on absolute cell size.
+
+### Geometric-skip (C4) dropped after attribution bench shows net harm (v2.0.4 S5 drop)
+
+- **Decision**: C4 (geometric-skip spread sampler) and C5 (rare-event spread
+  tuning) were **dropped** and will not ship. The S0 attribution bench
+  (`benches/grass_attribution.rs`, 512², 256 tiles) measured:
+  - **RNG is dominant at dense fill**: 4-hash adds 3.05 ns/cell = 47% of
+    6.42 ns/cell total; freeze floor 3.08 ns/cell (48%) is irreducible O(tile).
+  - **Geometric-skip is net-harmful**: +0.49 ns/cell at 6.25% fill and
+    **+18.7 ns/cell at ~90% fill**. The compact-list build is O(grassy) and
+    the freeze+decay O(tile) floor is untouched; the cheap spread-gate-reducer
+    form always loses.
+  - The only path where skip pays is restructuring the freeze loop around an
+    event list — the full event-sampling refactor in
+    [`perf-optimization-ideas.md`](../plans/perf-optimization-ideas.md) §3
+    — which is an **explicit non-goal** for this wave.
+  - **C3 (fused RNG)** was vindicated and shipped (see above).
+- **Why**: The measured data contradicts the theoretical gain because the
+  freeze+decay O(tile) floor is irreducible. Skip removes only the spread-gate
+  hash; it cannot remove the freeze read of every cell.
+- **Applies to**: `architecture/simulation-core.md`;
+  `perf-optimization-ideas.md §3` (S0 verdict annotates #3 with a measured
+  verdict: event-sampling is the prerequisite, not skip alone).
+- **Code anchors**: `benches/grass_attribution.rs` (the attribution bench);
+  `docs/plans/v2.0.4-s0-attribution.md` (the bench findings doc).
+- **Revisit when**: the event-sampling refactor is in scope, OR a different
+  architecture changes the freeze floor.
 
 ### Grass spreads as a disc via separable blur + 8-neighbour max; active-tile frontier (v2.0.1)
 

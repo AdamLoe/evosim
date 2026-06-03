@@ -12,15 +12,28 @@ sampling an **R8 biome-id** texture drawn UNDER the grass, and one
 thread, owns no wasm handle, and reads the live snapshot SAB slot directly
 via typed arrays — no copy, no postMessage.
 
-Both the grass and biome textures are fixed **2048×2048 R8** allocations
-(`GRASS_LOD_BUDGET_AXIS = 2048`). Each frame the renderer uploads only the
+Both the grass and biome textures are fixed **4096×4096 R8** allocations
+(`GRASS_LOD_BUDGET_AXIS = 4096`, single-sourced in Rust via `gen_bindings` →
+`web/src/generated/lod-constants.ts`). Each frame the renderer uploads only the
 sim-chosen clipmap window (`win_w × win_h` bytes) into the `(0, 0)` corner
 via `texSubImage2D`, then applies a UV transform (`u_uv_scale`/`u_uv_offset`)
 to map the world-space quad into that window. The sim worker selects the
 pyramid LOD level and window origin and publishes them in the snapshot header
 (bytes [32..64)); the renderer reads them as `WindowMetadata` each frame. At
-the default scale (`grass_dim = 1920 < 2048`) the window equals the full
+the default scale (`grass_dim = 1920 < 4096`) the window equals the full
 field and the upload is byte-identical to a full-field path.
+
+The **`lod_bias`** slider (idx 60, live f32, default 0.0) subtracts from the
+computed mip level for finer detail. It is clamped ≥ 0 before application. If
+the bias requests a level finer than the budget can hold, the window clamps at
+`GRASS_LOD_BUDGET_AXIS` and **crops viewport edges** — it is a "nudge within
+budget," not an independent resolution override.
+
+**Aspect-ratio fix (v2.0.4 S1):** `vis_cells_y` is now derived from `viewport_h`
+independently via `visible_cell_span_y = visible_cell_span_x × (viewport_h /
+viewport_w)`. Previously `vis_cells_y = vis_cells_x` assumed a square viewport.
+The full-field invariant holds for `win_w` (horizontal) only; `win_h` is correctly
+aspect-matched.
 
 ## What it owns
 
@@ -40,6 +53,10 @@ field and the upload is byte-identical to a full-field path.
   `frame.render_world.grass`, `frame.render_world.creatures` spans.
 - The camera helpers (`makeCamera`, `clampCamera`, `worldToScreen`,
   `PX_PER_SIZE`) and pointer-driven pan/zoom controls.
+- The `grass_cell_size` parameter in the UV transform (`cellSizeL =
+  grass_cell_size × 2^mipLevel`). This value comes from `boot_ready` so the
+  renderer correctly handles non-default `grass_size` settings without
+  hard-coding 5.0.
 - The highlight-ring decode: per-frame extraction of stable creature ids
   from the SAB's interleaved id_lo/id_hi u32 pair via a `Uint32Array`
   view over the same backing buffer.
@@ -350,15 +367,16 @@ fit in the body-pack loop.
 
 ## Grass and biome textures
 
-Both the grass density and biome layers share a fixed **2048×2048 R8
-texture** allocated once in `initRenderer` (`GRASS_LOD_BUDGET_AXIS = 2048`).
-The texture is never resized; only the window sub-region changes per frame.
+Both the grass density and biome layers share a fixed **4096×4096 R8
+texture** allocated once in `initRenderer` (`GRASS_LOD_BUDGET_AXIS = 4096`,
+generated from Rust). The texture is never resized; only the window sub-region
+changes per frame.
 
 **Grass.** The snapshot grass region is a u8 clipmap window:
-`min(grass_dim, 2048)²` bytes per slot, carrying exactly `win_w × win_h`
+`min(grass_dim, 4096)²` bytes per slot, carrying exactly `win_w × win_h`
 meaningful bytes at the sim-chosen LOD level. The renderer calls
 `texSubImage2D` each painted frame to upload only the `win_w × win_h`
-window into the `(0, 0)` corner of the 2048² texture (subarray-guarded to
+window into the `(0, 0)` corner of the 4096² texture (subarray-guarded to
 guard against `UNPACK_ROW_LENGTH` latent footguns). `UNPACK_ALIGNMENT` is
 set to 1 at init; R8 is a normalized unorm format so the shader's
 `texture(...).r` returns 0..1 with no shader rescale.
@@ -372,24 +390,25 @@ renders as a flat color.
 
 **LOD level.** The sim's Rust worker computes the pyramid level and window
 origin each tick (`write_snapshot` reads the camera SAB lanes and publishes
-the window via `budget_axis = 2048`, margin 1.5×,
-`level = floor(log2(visible_cell_span / budget_axis))`). At default scale
-(`grass_dim = 1920`) the window equals the full field and the upload is
-byte-identical to a full-field path (1920² bytes ≈ 3.7 MB). The LOD level
-is carried in `windowMeta.mipLevel` (snapshot header bytes [32..36)).
+the window via `budget_axis = 4096`, margin 1.5×,
+`level = floor(log2(visible_cell_span / budget_axis))`). After computing the
+float level, `lod_bias` (clamped ≥ 0) is subtracted to allow finer-detail
+nudging. At default scale (`grass_dim = 1920`) the window equals the full
+field and the upload is byte-identical to a full-field path (1920² bytes ≈
+3.7 MB). The LOD level is carried in `windowMeta.mipLevel` (snapshot header
+bytes [32..36)).
 
 **UV transform.** Both grass and biome programs receive the same two uniforms
-to map the world-space quad UV into the window sub-region of the 2048² texture:
+to map the world-space quad UV into the window sub-region of the 4096² texture.
+`grass_cell_size` (from `boot_ready`) is used instead of a hard-coded 5.0:
 
 ```
-u_uv_scale  = world_size / (GRASS_CELL_SIZE × 2^mipLevel × BUDGET_AXIS)
+u_uv_scale  = world_size / (grass_cell_size × 2^mipLevel × BUDGET_AXIS)
 u_uv_offset = -vec2(winOriginX, winOriginY) / BUDGET_AXIS
 ```
 
-At default scale (mip=0, origin=(0,0), win=1920):
-`scale = 9600 / (5 × 1 × 2048) ≈ 0.9375` and `offset = (0,0)`,
-giving `v_uv ∈ [0, 0.9375]` — exactly the 1920 data pixels in the 2048
-texture. This collapses to the identity mapping at default scale.
+At default scale (mip=0, origin=(0,0), win=1920, grass_cell_size=5.0):
+`scale = 9600 / (5 × 1 × 4096) ≈ 0.46875` and `offset = (0,0)`.
 `u_lod_blend` is reserved for future trilinear blending and is always `0.0`.
 
 **Toroidal tiling on zoom-out.** When `wrap_world` is on and the camera

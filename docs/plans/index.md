@@ -59,15 +59,16 @@ the plan itself.
 
 ## Active plans
 
-- [`v2.0.4-grass-tuning-perf.md`](v2.0.4-grass-tuning-perf.md) — **Active wave, ready
-  for orchestration.** LOD config (budget=4096 + `lod_bias` + aspect fix),
-  `grass_size` slider, per-cell scatter perf (alloc/instrumentation/RNG-fusion/
-  geometric-skip), density-weighted "fertility" spread, far-grass multi-band NN
-  sight. Decisions resolved; carries the **execution hub** (S0 recon-first +
-  fallback, 7 streams, DAG, gates, worktree map).
+- [`v2.0.4-closeout.md`](v2.0.4-closeout.md) — **Lead handoff / review surface** for
+  v2.0.4. Code-complete + fully gated green (both feature sets, e2e 11/11); durable
+  facts migrated. Headlines the **ratification items** (decay 0.04, lod_bias default,
+  far-band radii, grass_size range, LUT_RADIUS over-approx, threaded non-reproducibility)
+  + the S5/geometric-skip drop rationale. **Review — start here.**
 - [`perf-optimization-ideas.md`](perf-optimization-ideas.md) — **long-lived** perf
-  backlog (cadence/visibility gating, event-sampling, mip-skip throttle, far NN
-  sight, deterministic-scatter). Menu of deferred ideas; never deleted.
+  backlog (cadence/visibility gating, event-sampling, mip-skip throttle,
+  deterministic-scatter). Menu of deferred ideas; never deleted. §3
+  (event-sampling) is now annotated with the S0 measured verdict: geometric-skip
+  alone is net-harmful; event-sampling is the prerequisite.
 - [`grass-perf-closeout.md`](grass-perf-closeout.md) — **Lead handoff / review surface**
   for the grass-perf effort. Code-complete + fully gated green (both feature sets, e2e
   11/11); durable facts migrated. Headlines the **ratification items** (threaded run-to-run
@@ -79,6 +80,12 @@ the plan itself.
 - [`grass-perf-recon.md`](grass-perf-recon.md) · [`grass-perf-recon-stage2.md`](grass-perf-recon-stage2.md)
   · [`grass-stage3-review.md`](grass-stage3-review.md) — recon maps (Stage 1 / Stage 2) +
   the Stage-3 code review & perf numbers. Scratch; delete with the effort.
+- [`v2.0.4-grass-tuning-perf.md`](v2.0.4-grass-tuning-perf.md) — **Shipped** — v2.0.4
+  execution hub (LOD config, scatter perf, fertility, far NN sight, grass_size slider, S5
+  drop). Durable facts migrated to `architecture/` + `decisions/`; `okay_to_delete: true`.
+  Review surface: `v2.0.4-closeout.md`. The S0 recon scratch
+  ([`v2.0.4-s0-attribution.md`](v2.0.4-s0-attribution.md)) is also deletable with
+  the effort.
 - [`v2.0.2-grass-scatter.md`](v2.0.2-grass-scatter.md) — Stage-1 design spec (stochastic u8
   scatter). **Shipped** — durable facts migrated to `architecture/` + `decisions/`;
   `okay_to_delete: true`.

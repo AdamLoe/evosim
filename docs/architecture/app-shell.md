@@ -158,13 +158,30 @@ edits — re-opening Settings shows them still dirty.
 `set_slider` and persist, but only shape the *next* world:
 `founder_count`, `energy_max`, `grass_initial_seed_count`, (v2.0
 Wave 1a) the world-shape knobs `world_size`, `world_seed`, `wrap_world`,
-and (v2.0 Wave 3b) the species-construction knobs `species_mode`,
+(v2.0 Wave 3b) the species-construction knobs `species_mode`,
 `crossover_mode`, `starting_species_count`,
-`starting_species_member_count`, `starting_species_member_variance`.
+`starting_species_member_count`, `starting_species_member_variance`,
+and (v2.0.4 S2/S6) `grass_size` and `grass_multisight`.
 Labelled `(next world)` via the CSS rule
 `.devpanel-row label.next-world::after`. Apply/Restart fires the
 construction-only toast. **`full_grass_on_init` was removed** from the UI
 + the persisted blob in Wave 1c (boot passes the Rust default `false`).
+
+**v2.0.4 DevPanel additions (Grass section):**
+- **`lod_bias`** (slider idx 60, live f32, default 0.0): subtracts from the
+  computed LOD mip level for finer-detail rendering. Live-apply (no restart).
+  Shows in the Grass section.
+- **`grass_multisight`** (slider idx 61, bool construction, default true):
+  enables the `GrassBandsFar` 8-slot far NN input group (8 sectors at
+  radius 160u, mip level 3). **Construction-only / restart-scoped** — changes
+  the NN topology. Automatically falls back to single-band when walled+species
+  mode would exceed `MAX_NN_INPUTS = 48` (shown as a capability note, not an
+  error).
+- **`grass_size`** (slider idx 62, f32 construction, range 5–20u, step 1,
+  default 5.0): grass cell size in world-units. **Construction-only /
+  restart-scoped** — resizes the grass field, biome grid, capacity arrays,
+  and snapshot slot. Larger cells = fewer cells = directly less `grass_step`
+  work (cell count scales ~1/size²). The bluntest available perf lever.
 
 The new **World** Settings section also hosts two *live* (apply-to-running-
 world) sliders: `water_movement_penalty` / `desert_movement_penalty`
@@ -253,15 +270,21 @@ getEnergyMax()                     → number
 getFounderCount()                  → number
 getFullGrassOnInit()               → boolean   // always false in v2.0 (knob removed)
 getWorldSize()                     → number    // v2.0 Wave 1a
-getWrapWorld()                     → boolean    // v2.0 Wave 1a
-getWorldSeed()                     → number     // v2.0 Wave 1a (0 ⇒ "auto")
+getWrapWorld()                     → boolean   // v2.0 Wave 1a
+getWorldSeed()                     → number    // v2.0 Wave 1a (0 ⇒ "auto")
 getSpeciesMode()                   → boolean   // v2.0 Wave 3b
 getCrossoverMode()                 → number    // v2.0 Wave 3b (0=average, 1=fifty_fifty)
 getStartingSpeciesCount()          → number    // v2.0 Wave 3b
 getStartingSpeciesMemberCount()    → number    // v2.0 Wave 3b
 getStartingSpeciesMemberVariance() → number    // v2.0 Wave 3b
+getGrassMultisight()               → boolean   // v2.0.4 S6 (construction; governs GrassBandsFar)
+getGrassSize()                     → number    // v2.0.4 S2 (construction; grass_cell_size)
 currentSliderState()               → Record<string, number>
 ```
+
+`grass_multisight` and `grass_size` are construction-only: they are read at boot
+and passed as slider values during construction. `lod_bias` is live and flows
+through `currentSliderState()` like any staged widget.
 
 `currentSliderState()` snapshots the in-memory widget value for every
 registered staged widget; the worker applies it via `set_slider` after
@@ -363,7 +386,10 @@ window.
   added the species keys (`speciesMode`, `crossoverMode`,
   `startingSpeciesCount`, `startingSpeciesMemberCount`,
   `startingSpeciesMemberVariance`, `matingCooldownTicks`) the same way —
-  a MINOR bump (1 → 2).
+  a MINOR bump (1 → 2). **v2.0.4** added `lodBias` (default 0.0),
+  `grassMultisight` (default true), and `grassSize` (default 5.0) as
+  additive keys — MINOR bump (2 → 3 for `lodBias`/`grassMultisight`,
+  3 → 4 for `grassSize`).
 
 On persist the live copy always restamps `vMajor`/`vMinor` to the current
 values.

@@ -7,7 +7,9 @@ the main ↔ sim-worker boundary.
 
 A `controlSab` (≈30 KB), the wasm-memory-resident snapshot region (runtime-sized;
 at the 9600u default ≈ 2 × (≈1 MB creatures + 3.69 MB u8 grass window + 3.69 MB u8 biome window)
-≈ 17 MB), and the dedicated wasm-memory `biomeSab` (`grass_cell_count` u8 ≈ 3.69 MB at default) —
+≈ 17 MB — grass/biome regions are now `min(grass_dim, 4096)²` each, so with the
+v2.0.4 budget=4096 the slot allocation is ~4× larger than the v2.0.3 2048-budget
+at grass_dim > 2048), and the dedicated wasm-memory `biomeSab` (`grass_cell_count` u8 ≈ 3.69 MB at default) —
 plus a one-shot `boot` message in each direction.
 All main↔worker control is on SAB; the only postMessage payloads are
 the `boot` handshake and its `boot_ready` reply. Every other control
@@ -163,8 +165,8 @@ the user drags).
 | `20..32` | 12 | Padding (unchanged — aligns creature SoA to 32 B). |
 | `32..64` | 32 | Window metadata — 8 × u32 LE: `mip_level`, `win_origin_x`, `win_origin_y`, `win_w`, `win_h`, `tex_dim_w`, `tex_dim_h`, `wrap_mode` (0 = clamp/walled, 1 = wrap/torus). |
 | `64..(64 + MAX_POP_FOR_SIM*32)` | `MAX_POP_FOR_SIM × 32` | Creature SoA at stride 32 bytes. **World-size independent.** |
-| grass region | `min(grass_dim, 2048)²` | Clipmap grass window — u8 density bytes. `win_w × win_h` bytes are meaningful per tick; remaining allocation is zero-initialised. At default `grass_dim = 1920` the full field is written. |
-| biome window | `min(grass_dim, 2048)²` | Clipmap biome window — u8 `Biome` tags, MODE-downsampled from the static biome grid at `mip_level`. Same `win_w × win_h` extent and UV transform as the grass window. Appended immediately after the grass region. |
+| grass region | `min(grass_dim, 4096)²` | Clipmap grass window — u8 density bytes. `win_w × win_h` bytes are meaningful per tick; remaining allocation is zero-initialised. At default `grass_dim = 1920` the full field is written. Sized from `GRASS_LOD_BUDGET_AXIS = 4096` (generated from Rust → `lod-constants.ts`). |
+| biome window | `min(grass_dim, 4096)²` | Clipmap biome window — u8 `Biome` tags, MODE-downsampled from the static biome grid at `mip_level`. Same `win_w × win_h` extent and UV transform as the grass window. Appended immediately after the grass region. |
 
 `SNAPSHOT_HEADER_BYTES = 64` (Rust + TS constants are kept in sync).
 `tps_bits` is `f32::to_bits` round-tripped via `DataView.getFloat32(byteOffset+12, true)`.
@@ -176,18 +178,20 @@ region are compile-time constants. Two double-buffered slots; nothing resizes af
 **Clipmap window.** `write_snapshot` (called by the TS worker each tick) receives the
 camera parameters (`cam_cx`, `cam_cy`, `cam_zoom`, `viewport_w`, `viewport_h`) read by
 the worker from the camera SAB lanes (`CTRL_CAMERA_CX_BITS` … `CTRL_CAMERA_VIEWPORT_H`).
-It computes the LOD level as `floor(log2(max(1.0, visible_cell_span / 2048)))` and the
-window origin/size with a 1.5× margin factor, then extracts the window via
-`pyramid.viewport_window` into the grass region and MODE-downsamples the static biome
-grid into the biome window region. At default scale (`world_size = 9600`, `zoom = 1`,
-`grass_dim = 1920`) the result is `mip_level = 0`, `win = (0, 0, 1920, 1920)` — the full
-field, byte-identical to the pre-pyramid layout.
+It computes the LOD level as `floor(log2(max(1.0, visible_cell_span / 4096)))`,
+applies the `lod_bias` nudge (subtracts, clamps ≥ 0), and computes the window
+origin/size with a 1.5× margin factor and an **aspect-correct** height (derived from
+`viewport_h / viewport_w`). It then extracts the window via `pyramid.viewport_window`
+into the grass region and MODE-downsamples the static biome grid into the biome window
+region. At default scale (`world_size = 9600`, `zoom = 1`, `grass_dim = 1920`) the
+result is `mip_level = 0`, `win = (0, 0, 1920, 1920)` — the full field, byte-identical
+to the pre-pyramid layout.
 
 The TS side calls `readWindowMetadata(view, slotByteBase)` (from `sim-bridge.ts`) to
 retrieve the window geometry, then uploads `win_w × win_h` bytes via `texSubImage2D`
 (sub-array guarded). The UV transform in the renderer is
-`u_uv_scale = world_size / (GRASS_CELL_SIZE × 2^L × 2048)`,
-`u_uv_offset = -winOrigin / 2048`; at default scale both reduce to identity.
+`u_uv_scale = world_size / (grass_cell_size × 2^L × 4096)`,
+`u_uv_offset = -winOrigin / 4096`; at default scale both reduce to a fixed scale.
 
 **Known limitation:** toroidal wrap-seam. When `wrap_world = true` and the camera is
 near the world wrap edge at non-default zoom (`grass_dim > 2048`), the window origin
@@ -208,12 +212,14 @@ worker's lifetime; never written again after boot.
 The old constant-equality guard (`GRASS_CELL_COUNT` Rust ↔ TS) is replaced by a
 *computed* one keyed on `grass_dim` from `boot_ready`. Three derived sizes must
 be consistent:
-- `grassRegionBytes` (slot grass window allocation) = `biomeWinBytes` (slot biome window allocation) = `min(grass_dim, 2048)²`
+- `grassRegionBytes` (slot grass window allocation) = `biomeWinBytes` (slot biome window allocation) = `min(grass_dim, 4096)²`
 - `biome_buf_byte_len` (the separate `biomeSab`) = `grass_cell_count` = `grass_dim²`
 
-At default scale (`grass_dim = 1920 < 2048`) all three equal `grass_dim²`.
+At default scale (`grass_dim = 1920 < 4096`) all three equal `grass_dim²`.
 The TS side must size all three views from the boot-time `grass_dim` it receives,
-never a hardcoded constant.
+never a hardcoded constant. The `GRASS_LOD_BUDGET_AXIS = 4096` value is
+generated from Rust into `web/src/generated/lod-constants.ts` by `gen_bindings`
+and covered by the `bindings_in_sync` test.
 
 ## Creature SoA (per-creature, 32 bytes)
 
@@ -326,12 +332,14 @@ if it advanced, the bytes are guaranteed to be coherent.
 - `SLIDER_NAMES` + control-SAB layout — Rust `src/wasm_api.rs` +
   `src/control_sab.rs` ↔ TS `web/src/generated/`. Rust unit test
   `bindings_in_sync` fails CI on drift; fix by running
-  `cargo run --bin gen-bindings`. Current state: `SLIDER_COUNT = 60`
-  (indices 0–59), `SLIDER_BUCKET_BASE = 30`. Indices 54–59 are the 6 live
+  `cargo run --bin gen-bindings`. Current state: **`SLIDER_COUNT = 63`**
+  (indices 0–62), `SLIDER_BUCKET_BASE = 30`. Indices 54–59 are the 6 live
   grass scatter sliders (`grass_decay_pct`, `grass_decay_amount`,
   `grass_spread_pct`, `grass_spread_amount`, `grass_spread_ring1_pct`,
-  `grass_spread_ring2_pct`). The slider region `[16, 76)` still ends below the
-  inspect block (slot 80), so the control-SAB byte offsets are unchanged.
+  `grass_spread_ring2_pct`). Indices 60–62 are the v2.0.4 knobs:
+  `lod_bias` (60, live f32), `grass_multisight` (61, bool construction),
+  `grass_size` (62, f32 construction). The slider region `[16, 79)` ends
+  below the inspect block (slot 80), so **no control-SAB byte-slot shift**.
 - Camera lanes (`CTRL_CAMERA_CX_BITS` … `CTRL_CAMERA_VIEWPORT_H`, slots 120–124)
   — defined in `src/control_sab.rs`; re-exported from `web/src/sim-bridge.ts`.
   Main writes all five each RAF; the worker reads them in `write_snapshot` and

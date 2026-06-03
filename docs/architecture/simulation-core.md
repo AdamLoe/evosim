@@ -15,22 +15,29 @@ runs one tick by sequentially executing the numbered phases below.
 
 ### Runtime world sizing + wrap (v2.0 Wave 1a)
 
-The world is **runtime-sized**. `world_size` (default **9600u**) and
-`wrap_world` (default **true** = toroidal) are construction settings on
-`DevSliders`. At construction `WorldDims::from_world_size(world_size,
-wrap_world)` computes and caches the per-axis dims used everywhere:
+The world is **runtime-sized**. `world_size` (default **9600u**),
+`wrap_world` (default **true** = toroidal), and `grass_cell_size` (default
+**5.0u**, construction-only slider 62) are construction settings on `DevSliders`.
+At construction `WorldDims::from_world_size_with_cell_size(world_size,
+wrap_world, grass_cell_size)` computes and caches the per-axis dims:
 
-- `grass_dim = round(world_size / GRASS_CELL_SIZE)` — **5u** grass cells →
-  **1920** cells/axis at 9600u; `grass_cell_count = grass_dim²` = 3_686_400.
+- `grass_dim = round(world_size / grass_cell_size)` — at the default
+  5.0u cell size this is **1920** cells/axis at 9600u; `grass_cell_count =
+  grass_dim²` = 3_686_400. The **`grass_size` slider** (idx 62; range 5–20u,
+  step 1, default 5.0) changes this at construction: larger cells → fewer
+  cells, directly less `grass_step` work (cell count scales ~1/size²). It
+  flows through `WorldDims::from_world_size_with_cell_size` and resizes the
+  grass field, biome grid, capacity arrays, and snapshot slot — a full world
+  rebuild (restart/apply-scoped).
 - `hash_dim = ceil(world_size / HASH_CELL)` — **10u** spatial-hash cells →
   **960** cells/axis at 9600u. (Bumped 2.5u→10u: the world grew 64× in area at
   the same creature counts, so coarser cells keep the per-tick `hash_dim²`
   rebuild cheap. Flagged for later profiler measurement.)
 
-`World` carries `dims: WorldDims` and a numeric `world_seed: u32` (separate from
-the string/XxHash64 RNG seed; Wave 1b uses it for biome gen). Every
-bounds/clamp/wrap/spawn site reads `self.dims` / `World::world_size()` instead of
-a compile-time constant.
+`World` carries `dims: WorldDims` (which now includes `grass_cell_size`) and a
+numeric `world_seed: u32` (separate from the string/XxHash64 RNG seed; Wave 1b
+uses it for biome gen). Every bounds/clamp/wrap/spawn site reads `self.dims` /
+`World::world_size()` instead of a compile-time constant.
 
 **Wrap-awareness** (gated on `dims.wrap_world`): position/movement step,
 `SpatialGrid` rebuild + neighbor queries (toroidal cell-index fold), creature &
@@ -200,21 +207,34 @@ with `diet` + `body_size` (Wave 2).
 
   - **`GrassPropagation::Scatter`** (the LIVE path, set at `World` boot):
     stochastic u8 scatter. Per tick, over the active-tile set (rayon-parallel),
-    each worker (1) freezes its tile's source bytes locally, (2) for each
-    non-zero source cell rolls a **decay** event (prob `decay_pct`, subtract
+    each worker (1) freezes its tile's source bytes into a **stack scratch
+    buffer** (`[u8; GRASS_TILE_SIZE²]` — no per-tile heap allocation); (2) for
+    each non-zero source cell rolls a **decay** event (prob `decay_pct`, subtract
     `decay_amount` u8, floored at 0) and a **spread** event (prob `spread_pct`,
     add `spread_amount` u8 to a disc-table target, clamped to the target's
-    biome-cap byte). The spread target is picked from a precomputed round disc
-    (`DiscTable`, `GRASS_SPREAD_RADIUS = 3` cells): a radial band is chosen by
-    the ring-weight cumulative distribution (ring1/ring2/ring3), then a uniform
-    offset within that band — so the angular distribution is isotropic.
-    Cross-tile writes are lossy relaxed RMW (`scatter_add`/`scatter_sub`);
-    concurrent collisions clobber one update wholesale — accepted noise.
-    No spontaneous spawn; a dead cell is never a spread source.
-    The per-cell hash RNG is `grass_unit(world_seed, cell, tick, salt)` — a
-    stateless SplitMix64-finalizer hash over those four keys — and **never
-    touches `SimRng`**. This keeps grass rolls order-independent, lock-free, and
-    isolated from the creature RNG stream. Measured ~34× faster than blur.
+    biome-cap byte). **Spread amount is density-weighted (fertility, v2.0.4 S4)**:
+    `add_byte = (spread_byte × s + 127) / 255` where `s` is the source cell's raw
+    u8 value — denser source cells push harder, producing tighter self-reinforcing
+    clumps while the spread *probability* stays constant (geometric-skip-compatible
+    if that ever ships). `GRASS_DECAY_PCT_DEFAULT` is **0.04** (raised from 0.02
+    — the clumping from density-weighted spread provides decay headroom, so a
+    higher decay rate produces living-noise without global collapse). The spread
+    target is picked from a precomputed round disc (`DiscTable`,
+    `GRASS_SPREAD_RADIUS = 3` cells): a radial band is chosen by the ring-weight
+    cumulative distribution (ring1/ring2/ring3), then a uniform offset within that
+    band — so the angular distribution is isotropic. Cross-tile writes are lossy
+    relaxed RMW (`scatter_add`/`scatter_sub`); concurrent collisions clobber one
+    update wholesale — accepted noise. No spontaneous spawn; a dead cell is never a
+    spread source.
+    The per-cell hash RNG uses **`grass_hash_fused_4`** (src/rng.rs) — two
+    `grass_hash_u64` words from which decay/spread/band/pick are bit-sliced from
+    non-overlapping windows, replacing four separate hash calls while preserving
+    statistical properties. The hash function is a stateless SplitMix64-finalizer
+    keyed on `(world_seed, cell, tick)` and **never touches `SimRng`**. In-tile
+    profiling clocks/atomics are gated behind a `profile_scatter` flag (default
+    off) wired from `World::step` via `grass.set_profile_scatter(self.profile.enabled())`
+    — this eliminates rayon false-sharing in the hot loop when profiling is off.
+    Measured ~34× faster than blur.
 
   - **`GrassPropagation::Blur`** (retained, not deleted): the original
     deterministic separable-Gaussian path — two-pass `[1,2,1]/4` horizontal
@@ -243,6 +263,9 @@ with `diet` + `body_size` (Wave 2).
   `grass_decay_pct` (54), `grass_decay_amount` (55), `grass_spread_pct` (56),
   `grass_spread_amount` (57), `grass_spread_ring1_pct` (58),
   `grass_spread_ring2_pct` (59); ring3 weight is implicit (`max(0, 1−r1−r2)`).
+  Three additional construction-scoped grass knobs: `lod_bias` (60), `grass_multisight`
+  (61), `grass_size` (62) — see NN topology section for `grass_multisight` and the
+  runtime world sizing section for `grass_size`.
 
   **Determinism.** Single-threaded runs are deterministic (same seed → same
   output). Under `--features threads` (and in the live wasm sim, which is always
@@ -321,13 +344,19 @@ added — `water_movement_penalty` (**21**, default 0.8) and
 0=average/1=fifty_fifty, construction), `starting_species_count` (26),
 `starting_species_member_count` (27), `starting_species_member_variance` (28,
 inert in W3), `mating_cooldown_ticks` (29, live, default 200) — so
-`SLIDER_BUCKET_BASE` shifts 24→**30** and `SLIDER_COUNT = 54`. The slider region
-`[16, 70)` stays below the inspect block (slot 80), so **no control-SAB byte-slot
-shift** this wave. Regenerate `web/src/generated/slider-ids.ts` via `cargo run
---bin gen-bindings` (the `bindings_in_sync` test guards it). `species_mode` +
+`SLIDER_BUCKET_BASE` shifts 24→**30** and `SLIDER_COUNT = 54`. `species_mode` +
 `crossover_mode` + the three `starting_species_*` settings also ride the explicit
 construction call (`newWithFounderCount`) since they shape the world topology +
 seeding at construction; `mating_cooldown_ticks` is live.
+
+**v2.0.4 slider changes (S1/S2/S6):** three new sliders — `lod_bias` (**60**,
+live f32, default 0.0; subtracts from computed LOD mip level for finer detail),
+`grass_multisight` (**61**, bool construction, default true; enables `GrassBandsFar`
+8-slot far NN input group), `grass_size` (**62**, f32 construction, range 5–20u,
+default 5.0; cell size in world-units) — making **`SLIDER_COUNT = 63`**. The
+slider region `[16, 79)` still ends below the inspect block (slot 80), so **no
+control-SAB byte-slot shift**. Regenerate `web/src/generated/slider-ids.ts` via
+`cargo run --bin gen-bindings` (the `bindings_in_sync` test guards it).
 
 ## Tick step order
 
@@ -375,49 +404,65 @@ checks in `NnTopology::with_input_width`, which replaced the old compile-time
 `MAX_NN_INPUTS`-sized buffer; only the active `width()` lanes are populated.
 
 The **active layout** is driven by construction settings
-(`NnInputLayout::for_settings(wrap_world, species_mode)`, v2.0 Wave 3a): the
-`ReservedPredator` group is **dropped**, `WallProximity` (4 slots) is present
-**only when `wrap_world == false`**, the two biome groups — `BiomeDir` (4:
-N/S/E/W) + `CurrCellPenalty` (1) — are **always-on in BOTH wrap modes**, and the
-`CreatureSectors` group is **8 in single-pool / 16 in species_mode** (8
-same-species + 8 other-species). The topology's `input_width` is reconciled to
-the layout width at construction (old brains are discarded, no save/load).
+(`NnInputLayout::for_settings(wrap_world, species_mode, grass_multisight)`,
+v2.0.4 S6 adds `grass_multisight`): the `ReservedPredator` group is **dropped**,
+`WallProximity` (4 slots) is present **only when `wrap_world == false`**, the two
+biome groups — `BiomeDir` (4: N/S/E/W) + `CurrCellPenalty` (1) — are **always-on
+in BOTH wrap modes**, the `CreatureSectors` group is **8 in single-pool / 16 in
+species_mode** (8 same-species + 8 other-species), and **`GrassBandsFar`** (8 far
+sectors) is conditionally inserted when `grass_multisight=true` AND the 8 extra
+slots fit within `MAX_NN_INPUTS = 48`. The topology's `input_width` is reconciled
+to the layout width at construction (old brains are discarded, no save/load).
 
-**4-way width table** (always-on block = SelfMemory 8 + GrassSectors 8 + BiomeDir
-4 + CurrCellPenalty 1 + CurrGrass 1 + Bias 1 = 23; + WallProximity 4 when walled;
-+ CreatureSectors 8 or 16):
+**`GrassBandsFar` (v2.0.4 S6):** 8 directional sectors at radius
+`GRASS_FAR_SIGHT_RADIUS = 160u`, sampled at mip level `GRASS_FAR_MIP_LEVEL = 3`
+from `GrassPyramid::sample_clamped` — O(1) per tap regardless of cells under the
+creature. Enabled by default (`grass_multisight=true`, construction-only slider
+61). Coordinates follow the field convention (`rem_euclid` when `wrap_world`,
+clamp/ghost otherwise). **Constraint:** the walled+species combination hits
+51 real → 56 padded inputs, exceeding `MAX_NN_INPUTS = 48`; the layout
+automatically falls back to single-band (without `GrassBandsFar`) for that
+configuration. Both layout variants stay compiled.
 
-| `wrap_world` | `species_mode` | real | pad to |
-|---|---|---|---|
-| on | off | 31 | **32** |
-| off | off | 35 | **40** |
-| on | on | 39 | **40** |
-| off | on | 43 | **48** (the `MAX_NN_INPUTS` ceiling) |
+**4-way width table with `grass_multisight=true`** (always-on block = SelfMemory 8
++ GrassSectors 8 + **GrassBandsFar 8** + BiomeDir 4 + CurrCellPenalty 1 + CurrGrass 1
++ Bias 1 = 31; + WallProximity 4 when walled; + CreatureSectors 8 or 16):
 
-The SIMD-vs-scalar drift guard exercises **all four** compositions (widths
-32/40/48 — width-40 covers both wrap-off/species-off and wrap-on/species-on).
+| `wrap_world` | `species_mode` | `grass_multisight` | real | pad to |
+|---|---|---|---|---|
+| on | off | on | 39 | **40** |
+| off | off | on | 43 | **48** |
+| on | on | on | 47 | **48** (the `MAX_NN_INPUTS` ceiling) |
+| off | on | on | 51 → **fallback off** | — |
 
-Default (wrap **on**, species **off**) — real width 31 → padded 32:
+With `grass_multisight=false` (single-band, ≡ v2.0.3), subtract 8 from each real
+width to get the same widths as before (32/40/40/48).
+
+The SIMD-vs-scalar drift guard exercises all compositions.
+
+Default (wrap **on**, species **off**, `grass_multisight=true`) — real width 39 →
+padded **40**:
 
 | Slot | Group / inputs |
 |---|---|
 | `[0..8)` | `SelfMemory`: hunger, age_frac, prev_vx, prev_vy, is_last_graze, is_last_attack, ticks_since_split_norm, cooldown_ready |
 | `[8..16)` | `CreatureSectors` × 8 world-aligned sectors (range `PROXIMITY_RANGE = 20u`); in `species_mode` this group is **16** (8 same-species + 8 other-species), shifting the groups after it |
 | `[16..24)` | `GrassSectors` × 8 sectors (range `GRASS_PROXIMITY_RANGE = 20u`) |
-| `[24..28)` | `BiomeDir`: movement penalty one cell N/S/E/W (base severity, wrap-aware) |
-| `[28]` | `CurrCellPenalty`: movement penalty under the body |
-| `[29]` | `CurrGrass`: curr_grass_density (under the body) |
-| `[30]` | `Bias` — `1.0` (bias-learning constant) |
-| `[31]` | trailing pad (0.0) — SIMD alignment to 32 |
+| `[24..32)` | `GrassBandsFar` × 8 far sectors (radius `GRASS_FAR_SIGHT_RADIUS = 160u`, mip level `GRASS_FAR_MIP_LEVEL = 3`); present when `grass_multisight=true` and fits within `MAX_NN_INPUTS` |
+| `[32..36)` | `BiomeDir`: movement penalty one cell N/S/E/W (base severity, wrap-aware) |
+| `[36]` | `CurrCellPenalty`: movement penalty under the body |
+| `[37]` | `CurrGrass`: curr_grass_density (under the body) |
+| `[38]` | `Bias` — `1.0` (bias-learning constant) |
+| `[39]` | trailing pad (0.0) — SIMD alignment to 40 |
 
-Walled (wrap **off**) — real width 35 → padded **40** — inserts
-`WallProximity` N/S/E/W (range `WALL_PROXIMITY_RANGE = 50u`) at `[8..12)`,
+Walled (wrap **off**, `grass_multisight=true`) — real width 43 → padded **48** —
+inserts `WallProximity` N/S/E/W (range `WALL_PROXIMITY_RANGE = 50u`) at `[8..12)`,
 shifting `CreatureSectors`→`[12..20)`, `GrassSectors`→`[20..28)`,
-`BiomeDir`→`[28..32)`, `CurrCellPenalty`→`[32]`, `CurrGrass`→`[33]`,
-`Bias`→`[34]`, pad `[35..40)`.
+`GrassBandsFar`→`[28..36)`, `BiomeDir`→`[36..40)`, `CurrCellPenalty`→`[40]`,
+`CurrGrass`→`[41]`, `Bias`→`[42]`, pad `[43..48)`.
 
-Width table (wrap × {on, off}): **wrap on = 26+5 = 31 → pad 32; wrap off =
-30+5 = 35 → pad 40** (the `+5` is the always-on `BiomeDir`+`CurrCellPenalty`).
+Width table (wrap × {on, off}, `grass_multisight=true`): **wrap on = 39 → pad 40;
+wrap off = 43 → pad 48** (the `+5` is the always-on `BiomeDir`+`CurrCellPenalty`).
 The biome inputs are penalties in `[0, 1]`, sampled wrap-aware alongside the
 existing input build (`BiomeSampler` in `src/world/nn.rs`). **v2.0 Wave 2a:
 these biome inputs are GENOME-MODULATED per creature** — the `BiomeDir` +
@@ -506,7 +551,8 @@ is packed into the snapshot for the renderer (2b draws the ring); see
   registry), `placeholder_species_color` (Wave-3 evenly-spread hue).
 - `src/world/nn.rs` → `nn_forward_all_chunks`, `build_nn_input`,
   `NnInputLayout` / `NnInputGroup` (composable input-layout descriptor, incl.
-  the `BiomeDir` + `CurrCellPenalty` groups; `for_settings(wrap, species)`),
+  the `BiomeDir` + `CurrCellPenalty` + `GrassBandsFar` groups;
+  `for_settings(wrap, species, grass_multisight)`),
   `BiomeSampler` (biome NN-input view), `decode_action` / `is_valid_action` /
   `ActionGate` (mode-dependent action[2] gate), `chunk_ranges`, `dynamic_chunks`,
   `PickTimings`.
@@ -517,7 +563,10 @@ is packed into the snapshot for the renderer (2b draws the ring); see
 - `src/world/proximity.rs` → `LUT_RADIUS = 4` / `LUT_DIM`, sector LUT build,
   wall + creature + grass proximity helpers (all wrap-aware via the grid/grass
   `dims`), `compute_creature_proximity_sectors_species` (16-sector same/other
-  block fill for species mode).
+  block fill for species mode), `compute_grass_far_band_sectors` (8-sector far
+  density sample at mip level 3 via `GrassPyramid::sample_clamped`). Note:
+  `LUT_RADIUS = 4` is pinned to the 5u default as a safe over-approximation
+  across the 5–20u `grass_size` range (documented in proximity.rs).
 - `src/brain.rs` → `Brain`, `Brain::founder`, `Brain::forward`,
   `Brain::child_from` (asexual), `Brain::child_from_crossover_with_sigma`
   (sexual per-weight crossover then bucket mutation), `NnTopology` (runtime
@@ -540,16 +589,21 @@ is packed into the snapshot for the renderer (2b draws the ring); see
   `GRASS_TILE_SIZE`; `GRASS_EQ_EPS`.
 - `src/rng.rs` → `grass_hash_u64` / `grass_unit` (stateless SplitMix64-finalizer
   hash RNG for scatter — keyed on `(world_seed, cell_id, tick, salt)`, never
-  touches `SimRng`).
+  touches `SimRng`); `grass_hash_fused_4` (computes 2 `grass_hash_u64` words and
+  bit-slices decay/spread/band/pick from non-overlapping windows, replacing 4
+  separate calls — distribution-match tested in `src/grass_fused_rng_tests.rs`).
 - `src/grid.rs` → `SpatialGrid` (carries `dims: WorldDims`), `cell_of`
   (instance method: clamp walled / `rem_euclid` toroidal), `rebuild`,
   `for_each_in_radius` (wrap-aware cell fold).
 - `src/constants.rs` → `WorldDims` (runtime `world_size` / `grass_dim` /
-  `grass_cell_count` / `hash_dim`; replaces the old compile-time `WORLD_SIZE` /
-  `GRASS_GRID_DIM` / `GRASS_CELL_COUNT` / `HASH_DIM` constants),
+  `grass_cell_count` / `hash_dim` / `grass_cell_size`; replaces the old compile-time
+  constants), `WorldDims::from_world_size_with_cell_size` (construction entry point
+  used for the `grass_size` slider),
   `WORLD_SIZE_DEFAULT = 9600`, `WRAP_WORLD_DEFAULT = true`,
-  `GRASS_CELL_SIZE = 5.0`, `HASH_CELL = 10.0`,
-  `GRASS_PROXIMITY_RANGE = 20.0`, `Biome` enum `{Plains=0, Water=1, Desert=2}`
+  `GRASS_CELL_SIZE = 5.0`, `GRASS_CELL_SIZE_DEFAULT = 5.0`, `HASH_CELL = 10.0`,
+  `GRASS_PROXIMITY_RANGE = 20.0`,
+  `GRASS_FAR_SIGHT_RADIUS = 160.0`, `GRASS_FAR_MIP_LEVEL = 3`,
+  `Biome` enum `{Plains=0, Water=1, Desert=2}`
   (u8; generated from `world_seed` in `src/world/biome.rs`),
   the biome movement-penalty balance knobs `K_BIOME_SPEED = 0.6` /
   `K_BIOME_UPKEEP = 0.5` / `K_BIOME_COST = 1.0` + slider defaults
@@ -568,7 +622,7 @@ is packed into the snapshot for the renderer (2b draws the ring); see
   `FULL_GRASS_ON_INIT_DEFAULT = false`,
   `GRASS_BITES_PER_BLOCK = 2` (constant; 128 u8 per bite at `GRASS_MAX = 1.0`),
   `GRASS_PYRAMID_MAX_LEVELS = 16`, `GRASS_SPREAD_RADIUS = 3`,
-  `GRASS_DECAY_PCT_DEFAULT`, `GRASS_DECAY_AMOUNT_DEFAULT`,
+  `GRASS_DECAY_PCT_DEFAULT = 0.04`, `GRASS_DECAY_AMOUNT_DEFAULT`,
   `GRASS_SPREAD_PCT_DEFAULT`, `GRASS_SPREAD_AMOUNT_DEFAULT`,
   `GRASS_SPREAD_RING1_PCT_DEFAULT`, `GRASS_SPREAD_RING2_PCT_DEFAULT`,
   `GRASS_SPREAD_RING3_PCT_DEFAULT`,
@@ -601,8 +655,11 @@ is packed into the snapshot for the renderer (2b draws the ring); see
 - A new chunking constant lands (`MIN_CHUNKS`, `MAX_CHUNKS`, or the
   dynamic formula).
 - The world-sizing model changes (`world_size` / `wrap_world` / `world_seed`
-  defaults, `GRASS_CELL_SIZE` / `HASH_CELL`, or the `WorldDims` derivation) — or
-  any wrap-awareness gap is found between sim math and the renderer mirror.
+  defaults, `GRASS_CELL_SIZE` / `HASH_CELL`, `grass_cell_size` slider, or the
+  `WorldDims` derivation) — or any wrap-awareness gap is found between sim math
+  and the renderer mirror.
+- The NN input group set changes (`GrassBandsFar` radii/mip level, `MAX_NN_INPUTS`
+  ceiling, or the `grass_multisight` fallback logic).
 
 ## Why is it shaped this way
 
