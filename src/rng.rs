@@ -52,6 +52,43 @@ pub fn grass_unit(world_seed: u32, id: u64, tick: u32, salt: u32) -> f32 {
     (bits as f32) / ((1u32 << 24) as f32)
 }
 
+/// v2.0.4 C3: fused-RNG helper — computes TWO hash words for a single cell and
+/// bit-slices them into FOUR independent `[0, 1)` draws, replacing the four
+/// separate `grass_unit` calls (salts 1-4) in the scatter hot loop.
+///
+/// All four draws use 24-bit precision (identical to `grass_unit`); they come
+/// from disjoint bit ranges within two SplitMix64-finalized words:
+///
+/// | Draw        | Source word | Bits   | Formula                          |
+/// |-------------|-------------|--------|----------------------------------|
+/// | `decay`     | word A (s=1)| 63..40 | `(a >> 40) as u32 / 2^24`        |
+/// | `spread`    | word A (s=1)| 39..16 | `((a >> 16) & 0xFF_FFFF) / 2^24` |
+/// | `band`      | word B (s=2)| 63..40 | `(b >> 40) as u32 / 2^24`        |
+/// | `pick`      | word B (s=2)| 39..16 | `((b >> 16) & 0xFF_FFFF) / 2^24` |
+///
+/// SplitMix64's finalizer produces excellent full-word avalanche, so every
+/// 24-bit window is statistically equivalent to independent uniform draws.
+/// The four draws are independent across salts (word A vs B) and within a word
+/// (non-overlapping bit windows). Statistics are identical to the 4-hash path
+/// to within the 24-bit quantization common to both approaches.
+///
+/// INVARIANT: never touches `SimRng`; pure function of key material only.
+#[inline]
+pub fn grass_hash_fused_4(
+    world_seed: u32,
+    id: u64,
+    tick: u32,
+) -> (f32, f32, f32, f32) {
+    const SCALE: f32 = 1.0 / (1u32 << 24) as f32;
+    let a = grass_hash_u64(world_seed, id, tick, 1);
+    let b = grass_hash_u64(world_seed, id, tick, 2);
+    let decay  = ((a >> 40) as u32) as f32 * SCALE;
+    let spread = (((a >> 16) & 0x00FF_FFFF) as u32) as f32 * SCALE;
+    let band   = ((b >> 40) as u32) as f32 * SCALE;
+    let pick   = (((b >> 16) & 0x00FF_FFFF) as u32) as f32 * SCALE;
+    (decay, spread, band, pick)
+}
+
 impl SimRng {
     pub fn from_u64(seed: u64) -> Self {
         Self(Xoshiro256PlusPlus::seed_from_u64(seed))

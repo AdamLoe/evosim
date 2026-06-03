@@ -15,7 +15,7 @@ use crate::constants::{
     GRASS_SPREAD_RING3_PCT_DEFAULT,
 };
 use crate::profiler::clock_now_us_threadsafe;
-use crate::rng::{grass_unit, SimRng};
+use crate::rng::{grass_hash_fused_4, SimRng};
 use core::sync::atomic::AtomicU8;
 #[cfg(feature = "threads")]
 use rayon::prelude::*;
@@ -813,6 +813,13 @@ pub struct GrassGrid {
     /// L0 aliases `density` (not stored here); L1+ owned by the pyramid.
     /// Refreshed each tick in `World::step` after `rebuild_row_bitset()`.
     pub pyramid: GrassPyramid,
+    /// v2.0.4 C2: profiling gate for the scatter kernel. When `false` (the
+    /// common case), all `clock_now_us_threadsafe()` calls and their associated
+    /// atomic `fetch_add`s inside `compute_propagation_scatter` are skipped,
+    /// eliminating false-sharing on the profiling counters across rayon workers.
+    /// Set by `World` before each `compute_propagation` call to match the
+    /// `Profiler::enabled()` state. Defaults to `false`.
+    pub profile_scatter: bool,
 }
 
 /// v2.0.2 Stream 1c: deep-copy a `Vec<AtomicU64>` bitset (Relaxed loads) — the
@@ -874,6 +881,9 @@ impl Clone for GrassGrid {
             // owned level buffers. The freshly-cloned grid's levels are a
             // point-in-time copy; the next refresh will bring them current.
             pyramid: self.pyramid.clone(),
+            // v2.0.4 C2: profiling gate — reset to off in clones; World will
+            // re-set it before the next compute_propagation call.
+            profile_scatter: false,
         }
     }
 }
@@ -967,6 +977,9 @@ impl GrassGrid {
             // v2.0.3 Stream 2a: pyramid — L1+ buffers zeroed; first tick's
             // refresh will populate them from the seeded density field.
             pyramid: GrassPyramid::new(dims.grass_dim),
+            // v2.0.4 C2: profiling gate — off by default; World sets it before
+            // each compute_propagation call to match the Profiler enabled state.
+            profile_scatter: false,
         };
         g.rebuild_row_bitset();
         // Seed the active set from the initial density so the first tick
@@ -1637,10 +1650,25 @@ impl GrassGrid {
         let row_body_self_us = &self.row_body_self_us;
         let row_body_calls = &self.row_body_calls;
 
+        // C2: snapshot the profile-on flag once outside the hot loop so the
+        // clock_now_us_threadsafe() calls (and the atomic fetch_adds they feed)
+        // are completely skipped on the common profiling-off path. The counters
+        // are always reset to zero above, so they remain valid (all-zero) when
+        // profiling is off — the World drain reads them and records 0µs, which
+        // the Profiler no-ops via its own enabled() guard at record_under_root.
+        // GrassGrid doesn't hold the Profiler directly; World sets this flag
+        // before each compute_propagation call via `set_profile_scatter`.
+        let profile_on = self.profile_scatter;
+
         // Process one active tile. Returns nothing; all effects are atomic RMWs on
         // the global density field + atomic set-bits on the frontier/dirty bitsets.
         let tile_body = |t: usize| {
-            let body_self_start = clock_now_us_threadsafe();
+            // C2: only clock at tile entry when profiling is on.
+            let body_self_start = if profile_on {
+                clock_now_us_threadsafe()
+            } else {
+                0
+            };
             let tx = t % tpa;
             let ty = t / tpa;
             let ix0 = tx * GRASS_TILE_SIZE;
@@ -1648,15 +1676,19 @@ impl GrassGrid {
             let ix1 = (ix0 + GRASS_TILE_SIZE).min(dim);
             let iy1 = (iy0 + GRASS_TILE_SIZE).min(dim);
 
-            // (1) FREEZE the tile's source bytes into a transient local buffer so
-            // spread/decay decisions read a stable snapshot (no intra-tile cascade).
+            // (1) C1: FREEZE the tile's source bytes into a STACK buffer (no heap
+            // alloc) so spread/decay decisions read a stable snapshot (no
+            // intra-tile cascade). GRASS_TILE_SIZE×GRASS_TILE_SIZE = 1024 bytes;
+            // edge tiles only fill the tw×th prefix but the full array fits on the
+            // stack cheaply. Zero-init ensures unused slots (s==0) are skipped.
             let tw = ix1 - ix0;
             let th = iy1 - iy0;
-            let mut src: Vec<u8> = Vec::with_capacity(tw * th);
-            for iy in iy0..iy1 {
+            let mut src = [0u8; GRASS_TILE_SIZE * GRASS_TILE_SIZE];
+            for ly in 0..th {
+                let iy = iy0 + ly;
                 let row = iy * dim;
-                for ix in ix0..ix1 {
-                    src.push(d[row + ix].load(Ordering::Relaxed));
+                for lx in 0..tw {
+                    src[ly * GRASS_TILE_SIZE + lx] = d[row + ix0 + lx].load(Ordering::Relaxed);
                 }
             }
 
@@ -1668,7 +1700,7 @@ impl GrassGrid {
                 let iy = iy0 + ly;
                 for lx in 0..tw {
                     let ix = ix0 + lx;
-                    let s = src[ly * tw + lx];
+                    let s = src[ly * GRASS_TILE_SIZE + lx];
                     if s == 0 {
                         continue; // no spontaneous spawn — dead cell stays a source-skip
                     }
@@ -1676,23 +1708,44 @@ impl GrassGrid {
                     let c = iy * dim + ix;
                     let cid = c as u64;
 
-                    // DECAY roll (salt 1).
+                    // C3: fuse all four RNG draws into two hash calls (salts 1+2)
+                    // then bit-slice each 64-bit word into two 24-bit uniforms.
+                    // Behavior contract:
+                    //   decay_u  ← same precision/distribution as grass_unit(*,1)
+                    //   spread_u ← same precision/distribution as grass_unit(*,2)
+                    //   band_u   ← same precision/distribution as grass_unit(*,3)
+                    //   pick_u   ← same precision/distribution as grass_unit(*,4)
+                    // The VALUES differ from the 4-hash path (different bit windows
+                    // within each word) — this is accepted per the C3 spec. The
+                    // STATISTICS (rate, fraction, radial distribution) are unchanged.
+                    let (decay_u, spread_u, band_u, pick_u) =
+                        grass_hash_fused_4(world_seed, cid, tick);
+
+                    // DECAY roll.
                     // Stage-3 fix: gate on decay_byte > 0 so a zero-amount slider
                     // fires NO effect; floor to >=1 only when the effect is active.
                     if decay_byte > 0
-                        && grass_unit(world_seed, cid, tick, 1) < decay_pct
+                        && decay_u < decay_pct
                         && scatter_sub(&d[c], decay_byte.max(1))
                     {
                         tile_touched = true;
                     }
 
-                    // SPREAD roll (salt 2 = gate, salt 3 = band, salt 4 = pick).
+                    // SPREAD roll (gate + band + pick all from fused draws).
                     // Stage-3 fix: gate on spread_byte > 0 so a zero-amount slider
                     // fires NO effect; floor to >=1 only when the effect is active.
-                    if spread_byte > 0 && grass_unit(world_seed, cid, tick, 2) < spread_pct {
-                        let band_roll = grass_unit(world_seed, cid, tick, 3);
-                        let pick_roll = grass_unit(world_seed, cid, tick, 4);
-                        if let Some((dx, dy)) = disc.sample(band_roll, pick_roll) {
+                    //
+                    // S4 variant A — amount ∝ source density:
+                    //   add_byte = spread_byte * (s / 255)
+                    // Denser source cells push harder → self-reinforcing patch
+                    // centres → tighter clumps. The spread PROBABILITY `spread_pct`
+                    // is unchanged (only the add amount scales). Computed in integer
+                    // arithmetic: `(spread_byte as u32 * s as u32 + 127) / 255`,
+                    // then floored to ≥1 (same as the old flat path) so a cell with
+                    // even one byte of grass still contributes a minimal add when
+                    // the effect fires.
+                    if spread_byte > 0 && spread_u < spread_pct {
+                        if let Some((dx, dy)) = disc.sample(band_u, pick_u) {
                             // Resolve the target cell (wrap or walled bounds).
                             let txi = ix as i64 + dx as i64;
                             let tyi = iy as i64 + dy as i64;
@@ -1707,8 +1760,15 @@ impl GrassGrid {
                             if gx >= 0 {
                                 let tcell = gy as usize * dim + gx as usize;
                                 let cap_byte = encode_density(cap[tcell]);
+                                // S4: density-scaled add (variant A). Scales the add
+                                // amount by the source cell's byte fraction (s/255).
+                                // Floor to 1 once the effect is active (same as
+                                // the old path) so very sparse cells still spread.
+                                let density_add_byte = ((spread_byte as u32 * s as u32 + 127)
+                                    / 255)
+                                    .max(1) as u8;
                                 if cap_byte > 0
-                                    && scatter_add(&d[tcell], spread_byte.max(1), cap_byte)
+                                    && scatter_add(&d[tcell], density_add_byte, cap_byte)
                                 {
                                     // Target may be in a NEIGHBOUR tile: activate +
                                     // dirty it atomically (cross-tile safe).
@@ -1762,45 +1822,73 @@ impl GrassGrid {
                 }
             }
 
-            row_body_self_us.fetch_add(
-                clock_now_us_threadsafe().saturating_sub(body_self_start),
-                Ordering::Relaxed,
-            );
-            row_body_calls.fetch_add(1, Ordering::Relaxed);
+            // C2: only accumulate timers when profiling is on.
+            if profile_on {
+                row_body_self_us.fetch_add(
+                    clock_now_us_threadsafe().saturating_sub(body_self_start),
+                    Ordering::Relaxed,
+                );
+                row_body_calls.fetch_add(1, Ordering::Relaxed);
+            }
         };
 
         #[cfg(feature = "threads")]
         {
-            let par_start = clock_now_us_threadsafe();
+            // C2: only clock the outer par dispatch when profiling is on.
+            let par_start = if profile_on {
+                clock_now_us_threadsafe()
+            } else {
+                0
+            };
             let row_body_us = &self.row_body_us;
             active_list.par_iter().for_each(|&t| {
-                let body_start = clock_now_us_threadsafe();
+                // C2: only clock each tile body when profiling is on.
+                let body_start = if profile_on {
+                    clock_now_us_threadsafe()
+                } else {
+                    0
+                };
                 tile_body(t as usize);
-                row_body_us.fetch_add(
-                    clock_now_us_threadsafe().saturating_sub(body_start),
+                if profile_on {
+                    row_body_us.fetch_add(
+                        clock_now_us_threadsafe().saturating_sub(body_start),
+                        Ordering::Relaxed,
+                    );
+                }
+            });
+            if profile_on {
+                self.par_chunks_us.store(
+                    clock_now_us_threadsafe().saturating_sub(par_start),
                     Ordering::Relaxed,
                 );
-            });
-            self.par_chunks_us.store(
-                clock_now_us_threadsafe().saturating_sub(par_start),
-                Ordering::Relaxed,
-            );
+            }
         }
         #[cfg(not(feature = "threads"))]
         {
-            let seq_start = clock_now_us_threadsafe();
-            let body_start = clock_now_us_threadsafe();
+            // C2: only clock the sequential dispatch when profiling is on.
+            let seq_start = if profile_on {
+                clock_now_us_threadsafe()
+            } else {
+                0
+            };
+            let body_start = if profile_on {
+                clock_now_us_threadsafe()
+            } else {
+                0
+            };
             for &t in active_list.iter() {
                 tile_body(t as usize);
             }
-            self.row_body_us.store(
-                clock_now_us_threadsafe().saturating_sub(body_start),
-                Ordering::Relaxed,
-            );
-            self.chunks_mut_us.store(
-                clock_now_us_threadsafe().saturating_sub(seq_start),
-                Ordering::Relaxed,
-            );
+            if profile_on {
+                self.row_body_us.store(
+                    clock_now_us_threadsafe().saturating_sub(body_start),
+                    Ordering::Relaxed,
+                );
+                self.chunks_mut_us.store(
+                    clock_now_us_threadsafe().saturating_sub(seq_start),
+                    Ordering::Relaxed,
+                );
+            }
         }
 
         // Swap the freshly-built next-tick active set into place. `tile_class` is
@@ -1899,6 +1987,18 @@ impl GrassGrid {
                 ring3.max(0.0),
             );
         }
+    }
+
+    /// v2.0.4 C2: enable or disable profiling clock calls inside the scatter
+    /// kernel. Call with `Profiler::enabled()` before each `compute_propagation`
+    /// to gate the per-tile `clock_now_us_threadsafe()` + atomic `fetch_add`s.
+    /// When `false` (default), all timing atomics stay at the zero written by the
+    /// reset at the top of `compute_propagation_scatter`; the World drain then
+    /// records 0µs, which `Profiler::record_under_root` silently drops when the
+    /// profiler is disabled anyway.
+    #[inline]
+    pub fn set_profile_scatter(&mut self, on: bool) {
+        self.profile_scatter = on;
     }
 
     /// Bilinear sample at continuous world position `(x, y)`.
@@ -2122,6 +2222,8 @@ mod tests {
             row_body_calls: AtomicU64::new(0),
             dispatch_calls: AtomicU64::new(0),
             pyramid: GrassPyramid::new(TEST_DIMS.grass_dim),
+            // v2.0.4 C2: profiling gate — off by default.
+            profile_scatter: false,
         };
         g.rebuild_row_bitset();
         g.resync_active_from_density();
@@ -2520,3 +2622,17 @@ mod grass_pyramid_tests;
 #[cfg(test)]
 #[path = "grass_scatter_tests.rs"]
 mod grass_scatter_tests;
+
+// v2.0.4 C3: fused-RNG distribution-match tests — verifies that the two-hash
+// bit-slice approach preserves decay/spread/band/pick statistics vs the
+// legacy 4-separate-hash path, and that grass never touches SimRng.
+#[cfg(test)]
+#[path = "grass_fused_rng_tests.rs"]
+mod grass_fused_rng_tests;
+
+// v2.0.4 S4: fertility (density-weighted spread + clumping) tests.
+// Verifies amount∝density behaviour, persistence invariant (plains super-
+// critical, water sub-critical), and net-growth sanity at the raised decay_pct.
+#[cfg(test)]
+#[path = "grass_fertility_tests.rs"]
+mod grass_fertility_tests;
