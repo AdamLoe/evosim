@@ -1734,6 +1734,16 @@ impl GrassGrid {
                     // SPREAD roll (gate + band + pick all from fused draws).
                     // Stage-3 fix: gate on spread_byte > 0 so a zero-amount slider
                     // fires NO effect; floor to >=1 only when the effect is active.
+                    //
+                    // S4 variant A — amount ∝ source density:
+                    //   add_byte = spread_byte * (s / 255)
+                    // Denser source cells push harder → self-reinforcing patch
+                    // centres → tighter clumps. The spread PROBABILITY `spread_pct`
+                    // is unchanged (only the add amount scales). Computed in integer
+                    // arithmetic: `(spread_byte as u32 * s as u32 + 127) / 255`,
+                    // then floored to ≥1 (same as the old flat path) so a cell with
+                    // even one byte of grass still contributes a minimal add when
+                    // the effect fires.
                     if spread_byte > 0 && spread_u < spread_pct {
                         if let Some((dx, dy)) = disc.sample(band_u, pick_u) {
                             // Resolve the target cell (wrap or walled bounds).
@@ -1750,8 +1760,15 @@ impl GrassGrid {
                             if gx >= 0 {
                                 let tcell = gy as usize * dim + gx as usize;
                                 let cap_byte = encode_density(cap[tcell]);
+                                // S4: density-scaled add (variant A). Scales the add
+                                // amount by the source cell's byte fraction (s/255).
+                                // Floor to 1 once the effect is active (same as
+                                // the old path) so very sparse cells still spread.
+                                let density_add_byte = ((spread_byte as u32 * s as u32 + 127)
+                                    / 255)
+                                    .max(1) as u8;
                                 if cap_byte > 0
-                                    && scatter_add(&d[tcell], spread_byte.max(1), cap_byte)
+                                    && scatter_add(&d[tcell], density_add_byte, cap_byte)
                                 {
                                     // Target may be in a NEIGHBOUR tile: activate +
                                     // dirty it atomically (cross-tile safe).
@@ -2612,3 +2629,10 @@ mod grass_scatter_tests;
 #[cfg(test)]
 #[path = "grass_fused_rng_tests.rs"]
 mod grass_fused_rng_tests;
+
+// v2.0.4 S4: fertility (density-weighted spread + clumping) tests.
+// Verifies amount∝density behaviour, persistence invariant (plains super-
+// critical, water sub-critical), and net-growth sanity at the raised decay_pct.
+#[cfg(test)]
+#[path = "grass_fertility_tests.rs"]
+mod grass_fertility_tests;

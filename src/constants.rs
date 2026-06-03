@@ -268,7 +268,12 @@ pub const FULL_GRASS_ON_INIT_DEFAULT: bool = false;
 // sub-critical (cap 0.04 = u8 level 10 throttles reinforcement → thin shoreline).
 //
 /// Per-tick probability a grass cell rolls a decay event.
-pub const GRASS_DECAY_PCT_DEFAULT: f32 = 0.02;
+/// S4 tuning: raised 0.02 → 0.04. With amount∝density (variant A), dense patch
+/// centres reinforce themselves via ring-1-dominant spread (RING1_PCT=0.70), so
+/// the field can sustain more living-noise without global monotonic collapse.
+/// This value is FEEL-TUNABLE — the persistence invariant (plains super-critical,
+/// water sub-critical) is the guard, not the exact number. Adjust freely.
+pub const GRASS_DECAY_PCT_DEFAULT: f32 = 0.04;
 /// Density subtracted (f32 grass-amount domain) on a decay event; floored at 0.
 /// 1/255 ≈ 0.0039 is the u8 quantization floor; this is ~2 bytes so decay is
 /// always visible (never stalls sub-quantum).
