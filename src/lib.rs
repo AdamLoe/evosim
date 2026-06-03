@@ -20,6 +20,11 @@ mod wasm_api;
 
 pub use wasm_api::*;
 
+// v2.0.4 S1: LOD config math tests (budget=4096, lod_bias, aspect-ratio fix).
+#[cfg(test)]
+#[path = "wasm_lod_config_tests.rs"]
+mod wasm_lod_config_tests;
+
 // Threads: re-export `init_thread_pool` so wasm-bindgen emits an
 // `initThreadPool(num_threads: number) => Promise<void>` JS export.
 // JS must `await initThreadPool(navigator.hardwareConcurrency)` before

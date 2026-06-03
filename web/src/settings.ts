@@ -30,7 +30,9 @@ const SCHEMA_MAJOR = 2;
 // v2.0.2 Stream 1d: added six scatter kernel live-tuning sliders — all new
 // additive keys with defaults → MINOR bump 2 → 3. Existing v2 blobs keep their
 // values and merge the new keys from DEFAULTS.
-const SCHEMA_MINOR = 3;
+// v2.0.4 S1: added `lodBias` (render-side LOD nudge knob) — new additive key
+// with default 0.0 → MINOR bump 3 → 4. Existing v2 blobs keep their values.
+const SCHEMA_MINOR = 4;
 
 /** v1.12: one row of the 8-row mutation policy table. Mirrors the Rust
  * `Bucket` struct (`src/brain.rs`). `weight` is any non-negative float;
@@ -170,6 +172,10 @@ export interface Settings {
   grassSpreadAmount: number;
   grassSpreadRing1Pct: number;
   grassSpreadRing2Pct: number;
+  // v2.0.4 S1: render-side LOD nudge knob. Subtracts from the computed mip
+  // level in write_snapshot — positive values pick a finer pyramid level.
+  // Default 0.0 (no bias). Biasing finer than the budget can hold crops edges.
+  lodBias: number;
 }
 
 export const DEFAULTS: Settings = {
@@ -241,6 +247,8 @@ export const DEFAULTS: Settings = {
   grassSpreadAmount: 0.05,
   grassSpreadRing1Pct: 0.70,
   grassSpreadRing2Pct: 0.22,
+  // v2.0.4 S1: LOD bias. Default 0.0 (no bias = computed level is used as-is).
+  lodBias: 0.0,
 };
 
 const KNOWN_KEYS = new Set<string>(Object.keys(DEFAULTS));

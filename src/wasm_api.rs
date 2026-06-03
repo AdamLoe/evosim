@@ -120,6 +120,9 @@ pub const SLIDER_NAMES: &[&str] = &[
     "grass_spread_amount",    // 57 f32 — density added to spread target
     "grass_spread_ring1_pct", // 58 f32 — ring-1 disc-band weight
     "grass_spread_ring2_pct", // 59 f32 — ring-2 disc-band weight
+    // v2.0.4 S1: render-side LOD knob. APPEND-ONLY — existing indices stable.
+    "lod_bias", // 60 f32 — subtracted from computed mip level (finer detail)
+                //    nudge-within-budget: biasing finer than budget crops edges.
 ];
 
 /// First mutation-bucket slider slot. v2.0 Wave 3a (shifted from 24 to 30 after
@@ -175,10 +178,14 @@ pub const SNAPSHOT_CREATURE_STRIDE: usize = 32;
 /// independent — sized by `MAX_POP_FOR_SIM`).
 pub const SNAPSHOT_CREATURE_BYTES: usize = MAX_POP_FOR_SIM * SNAPSHOT_CREATURE_STRIDE;
 
-/// v2.0.3 Stream 2b: clipmap budget axis in cells. The worker publishes at most
+/// v2.0.4 S1: clipmap budget axis in cells. The worker publishes at most
 /// `GRASS_LOD_BUDGET_AXIS × GRASS_LOD_BUDGET_AXIS` grass bytes per slot.
-/// At the default grass_dim = 1920 (< 2048) this equals the full field.
-pub const GRASS_LOD_BUDGET_AXIS: usize = 2048;
+/// Raised 2048 → 4096: full-res holds to ~16.7M cells/axis; costs ≈ 16 MB
+/// per slot grass region at max scale.
+/// Single source of truth: this Rust constant is emitted to TS via
+/// `src/bin/gen_bindings.rs` → `web/src/generated/lod-constants.ts`.
+/// `sim-bridge.ts` imports from the generated file — do NOT hard-code 4096 there.
+pub const GRASS_LOD_BUDGET_AXIS: usize = 4096;
 
 /// v2.0.3 Stream 2b: pan margin factor. The published window covers the
 /// visible viewport × GRASS_LOD_MARGIN_FACTOR (centered). A full-viewport pan
@@ -271,6 +278,15 @@ pub struct WorldHandle {
     last_tick_end_ms: Option<f64>,
     /// Count of ticks whose wall-clock duration exceeded JANK_BUDGET_MS.
     jank_count: u32,
+    /// v2.0.4 S1: LOD bias — subtracted from the computed mip level so the
+    /// renderer picks a finer pyramid level than the budget-threshold formula
+    /// alone would choose. Clamped to [0, max_level] after subtraction so it
+    /// can never produce a negative level. Default 0.0 (no bias).
+    ///
+    /// WARNING: biasing finer than the budget can sustain causes the window
+    /// to clamp at the GRASS_LOD_BUDGET_AXIS ceiling, cropping viewport edges.
+    /// This knob is a "nudge within budget," not an independent resolution control.
+    lod_bias: f32,
 }
 
 #[wasm_bindgen]
@@ -315,6 +331,7 @@ impl WorldHandle {
             tick_intervals_ms: std::collections::VecDeque::new(),
             last_tick_end_ms: None,
             jank_count: 0,
+            lod_bias: 0.0,
         }
     }
 
@@ -642,38 +659,56 @@ impl WorldHandle {
         let slot_idx = (slot as usize) & 1;
         let slot_base = slot_idx * slot_bytes;
 
-        // ── v2.0.3 Stream 2b: Compute clipmap window from camera params ─────
+        // ── v2.0.4 S1 / v2.0.3 Stream 2b: Compute clipmap window from camera params ─
         //
         // LOD formula: level = floor(log2(max(1.0, visible_cell_span / budget_axis)))
         //   clamped to [0, max_level].
-        // visible_cell_span = (world_size / cam_zoom) / GRASS_CELL_SIZE
+        // visible_cell_span_x = (world_size / cam_zoom) / GRASS_CELL_SIZE
+        //   (span in the horizontal direction; see also vis_cells_y for vertical).
         //
         // Default scale (world_size=9600, zoom=1.0, GRASS_CELL_SIZE=5.0):
-        //   visible_cell_span = (9600 / 1.0) / 5.0 = 1920
-        //   ratio = 1920 / 2048 ≈ 0.9375  (< 1.0)
-        //   .max(1.0) clamps ratio to 1.0 before log2 → log2(1.0) = 0 → floor(0) = 0
-        //   → full field, byte-identical to pre-2b output.
-        //   (Without the .max(1.0) pre-clamp, log2(0.9375) = -0.09 and floor would
-        //   give -1, not 0 — the pre-clamp is what keeps level=0 at default scale.)
+        //   visible_cell_span_x = (9600 / 1.0) / 5.0 = 1920
+        //   ratio = 1920 / 4096 ≈ 0.469  (< 1.0)
+        //   .max(1.0) clamps ratio to 1.0 → log2(1.0) = 0 → floor(0) = 0
+        //   → full field at default zoom.
+        //
+        // v2.0.4 S1 lod_bias: subtract self.lod_bias from the computed float
+        //   level before floor+clamp so the renderer picks a finer level.
+        //   Clamped to ≥ 0 after bias so we never pick a negative level.
+        //   WARNING: if lod_bias drives level below what the budget can hold,
+        //   the window will clamp at GRASS_LOD_BUDGET_AXIS and crop edges.
         let world_size = self.inner.world_size();
         let safe_zoom = if cam_zoom > 0.0 { cam_zoom } else { 1.0 };
-        let visible_cell_span = (world_size / safe_zoom) / GRASS_CELL_SIZE;
-        let level_f = (visible_cell_span / GRASS_LOD_BUDGET_AXIS as f32)
+        let visible_cell_span_x = (world_size / safe_zoom) / GRASS_CELL_SIZE;
+        let level_f = (visible_cell_span_x / GRASS_LOD_BUDGET_AXIS as f32)
             .max(1.0)
             .log2()
             .floor();
+        // Apply lod_bias (finer detail): subtract, floor, clamp ≥ 0.
+        let biased_level_f = (level_f - self.lod_bias.max(0.0)).max(0.0);
         let max_level = self.inner.grass.pyramid.num_levels().saturating_sub(1);
-        let mip_level = (level_f as usize).min(max_level);
+        let mip_level = (biased_level_f as usize).min(max_level);
 
         // Level dims at chosen mip level.
         let (level_w, level_h) = self.inner.grass.pyramid.level_dim(mip_level);
 
         // Visible region in level-k cells (derived from viewport + zoom + mip scale).
-        // At level k, each cell represents 2^k base cells, so the visible span in
-        // level-k cells is visible_cell_span / 2^k.
+        // At level k, each cell represents 2^k base cells.
+        //
+        // v2.0.4 S1 aspect-ratio fix: derive vis_cells_y from viewport_h
+        // independently (previously vis_cells_y = vis_cells_x which assumed a
+        // square viewport and mis-sized the vertical window on non-square viewports).
+        // The horizontal visible span is world_size/zoom; the vertical span scales
+        // by the viewport aspect (viewport_h / viewport_w), or 1.0 if viewport_w=0.
         let scale = (1usize << mip_level) as f32;
-        let vis_cells_x = (visible_cell_span / scale).ceil() as usize;
-        let vis_cells_y = vis_cells_x; // square viewport approximation; margin below
+        let vis_cells_x = (visible_cell_span_x / scale).ceil() as usize;
+        let aspect = if viewport_w > 0 {
+            viewport_h as f32 / viewport_w as f32
+        } else {
+            1.0
+        };
+        let visible_cell_span_y = visible_cell_span_x * aspect;
+        let vis_cells_y = (visible_cell_span_y / scale).ceil() as usize;
 
         // Window = viewport × GRASS_LOD_MARGIN_FACTOR, clamped to level bounds.
         // The margin ensures that a full-viewport pan stays covered for ≥ 1 tick.
@@ -702,12 +737,13 @@ impl WorldHandle {
         let win_w = raw_win_w.min(level_w);
         let win_h = raw_win_h.min(level_h);
 
-        // DEFAULT-SCALE INVARIANT: at default (zoom=1, world_size=9600, grass_dim=1920):
-        //   mip_level=0, level_dim=(1920,1920), visible_cell_span=1920.
-        //   raw_win_w = ceil(1920 * 1.5) clamped to min(1920, 2048) = 1920.
-        //   origin clamped to [0,0] (viewport centered → half=960, cam_cx≈4800→cx_cells≈960→0).
-        //   win_w=1920, win_h=1920 — full 1920×1920 field.
-        //   slot grass bytes = 1920² = grass_cell_count. Byte-identical to pre-2b.
+        // DEFAULT-SCALE INVARIANT: at default (zoom=1, world_size=9600, grass_dim=1920,
+        //   square 1920×1080 viewport):
+        //   mip_level=0 (budget=4096, span=1920, ratio=0.469<1.0 → level=0).
+        //   visible_cell_span_x=1920, aspect=1080/1920≈0.5625, span_y≈1080.
+        //   raw_win_w = ceil(1920 * 1.5) clamped to min(1920, 4096) = 1920.
+        //   raw_win_h = ceil(1080 * 1.5) = 1620, clamped to min(1920, 4096) = 1620.
+        //   win_w=1920, win_h=1620. Full horizontal field, correct vertical slice.
         _ = grass_dim; // verified via debug_assert below
 
         debug_assert!(
@@ -859,9 +895,8 @@ impl WorldHandle {
             }
         }
 
-        // Suppress unused-variable warning for viewport dimensions (used in future
-        // margin calculation; currently we use square viewport approximation).
-        let _ = (viewport_w, viewport_h);
+        // v2.0.4 S1: viewport_w and viewport_h are now used in the aspect-ratio fix
+        // (vis_cells_y derivation above) — the suppress is no longer needed.
 
         if let (Some(start), Some(c0), Some(c1), Some(g0), Some(g1)) = (
             snap_start,
@@ -1020,6 +1055,14 @@ impl WorldHandle {
         // would have no slot in the snapshot creature region).
         self.inner.sliders.max_population = value.clamp(1, MAX_POP_FOR_SIM as u32);
     }
+    // ── v2.0.4 S1: render-side LOD knob ───────────────────────────────────
+    /// LOD bias — subtracted from the computed mip level in `write_snapshot`.
+    /// Clamped non-negative so negative input is a no-op. Biasing finer than the
+    /// GRASS_LOD_BUDGET_AXIS can hold causes the window to clamp and crop edges.
+    fn apply_lod_bias(&mut self, value: f32) {
+        self.lod_bias = value.max(0.0);
+    }
+
     // ── v2.0.2 Stream 1d: scatter kernel live setters ─────────────────────
     /// Decay probability per tick, clamped [0, 1].
     fn apply_grass_decay_pct(&mut self, value: f32) {
@@ -1135,6 +1178,8 @@ impl WorldHandle {
             57 => self.apply_grass_spread_amount(value),
             58 => self.apply_grass_spread_ring1_pct(value),
             59 => self.apply_grass_spread_ring2_pct(value),
+            // v2.0.4 S1: render-side LOD knob (index 60).
+            60 => self.apply_lod_bias(value),
             _ => {} // out-of-range: silently ignore (forward-compat with newer TS).
         }
     }

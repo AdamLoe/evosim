@@ -67,6 +67,10 @@ export {
   CTRL_CAMERA_VIEWPORT_H,
 } from "./generated/control-sab";
 import { SLIDER_INDEX } from "./generated/slider-ids";
+// v2.0.4 S1: GRASS_LOD_BUDGET_AXIS is now generated from the Rust constant via
+// gen-bindings → lod-constants.ts. Import here and re-export so consumers of
+// sim-bridge get it without touching the generated file directly.
+import { GRASS_LOD_BUDGET_AXIS as GRASS_LOD_BUDGET_AXIS_GENERATED } from "./generated/lod-constants";
 
 // Re-export hot SAB constants for the snapshot read path in main.ts.
 export {
@@ -130,11 +134,13 @@ export const CREATURE_STRIDE = 8;
 export const SNAPSHOT_HEADER_BYTES = 64;
 
 /**
- * v2.0.3 Stream 2b: clipmap budget axis (cells per axis). The worker publishes
- * at most `GRASS_LOD_BUDGET_AXIS²` bytes per slot grass region. At the default
- * grass_dim = 1920 (< 2048) the window equals the full field.
+ * v2.0.4 S1: clipmap budget axis (cells per axis). The worker publishes at most
+ * `GRASS_LOD_BUDGET_AXIS²` bytes per slot grass region. This is the single
+ * source of truth: the value is generated from the Rust constant via
+ * `src/bin/gen_bindings.rs` → `web/src/generated/lod-constants.ts`.
+ * Do NOT edit lod-constants.ts manually; run `cargo run --bin gen-bindings`.
  */
-export const GRASS_LOD_BUDGET_AXIS = 2048;
+export const GRASS_LOD_BUDGET_AXIS = GRASS_LOD_BUDGET_AXIS_GENERATED;
 
 /** Bytes per creature SoA region in one snapshot slot. UNCHANGED in v2.0. */
 export const CREATURE_SOA_BYTES = MAX_POP_FOR_SIM * CREATURE_STRIDE * 4;
