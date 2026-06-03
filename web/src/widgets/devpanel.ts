@@ -603,6 +603,25 @@ export function installDevPanel(getBridge: () => SimBridge): void {
   displaySec.appendChild(makeThemeRow());
   box.appendChild(displaySec);
 
+  // ── Render / LOD (v2.0.4 S1) ──
+  // `lod_bias` is a render-side knob that subtracts from the computed mip level
+  // so the renderer picks a finer pyramid level than the budget-threshold formula
+  // alone would choose. Positive = finer detail. Live-apply (affects next
+  // write_snapshot call); does NOT require a world restart.
+  //
+  // WARNING: biasing finer than the GRASS_LOD_BUDGET_AXIS can sustain causes the
+  // window to clamp at the budget ceiling and crop viewport edges. This is a
+  // "nudge within budget," not an independent resolution control.
+  const lodSec = section("Render / LOD");
+  lodSec.appendChild(makeStagedSlider({
+    label: "LOD bias",
+    simName: "lod_bias",
+    settingKey: "lodBias",
+    min: 0, max: 4, step: 0.25,
+    formatValue: (v) => v.toFixed(2),
+  }));
+  box.appendChild(lodSec);
+
   // ── Energy ──
   const energySec = section("Energy");
 
