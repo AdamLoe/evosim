@@ -122,7 +122,7 @@ pub const SLIDER_NAMES: &[&str] = &[
     "grass_spread_ring2_pct", // 59 f32 — ring-2 disc-band weight
     // v2.0.4 S1: render-side LOD knob. APPEND-ONLY — existing indices stable.
     "lod_bias", // 60 f32 — subtracted from computed mip level (finer detail)
-                //    nudge-within-budget: biasing finer than budget crops edges.
+    //    nudge-within-budget: biasing finer than budget crops edges.
     // v2.0.4 S6: multi-band NN grass sight construction toggle.
     "grass_multisight", // 61 bool (0/non-zero) construction — multi-band grass NN sight
     // v2.0.4 S2: grass cell size construction knob.

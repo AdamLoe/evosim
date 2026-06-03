@@ -58,7 +58,10 @@ mod tests {
     fn budget_4096_world16384_zoom1_is_level0() {
         // span = 16384 / 5.0 = 3276.8
         let level = compute_lod_level(16384.0, 1.0, 0.0, 4);
-        assert_eq!(level, 0, "16384-unit world at zoom=1 must be level 0 with 4096 budget");
+        assert_eq!(
+            level, 0,
+            "16384-unit world at zoom=1 must be level 0 with 4096 budget"
+        );
     }
 
     /// A very large world (20480 units, zoom=1):
@@ -67,7 +70,10 @@ mod tests {
     #[test]
     fn budget_4096_world20480_zoom1_boundary_is_level0() {
         let level = compute_lod_level(20480.0, 1.0, 0.0, 4);
-        assert_eq!(level, 0, "20480 world at zoom=1 should be exactly at the budget boundary → level 0");
+        assert_eq!(
+            level, 0,
+            "20480 world at zoom=1 should be exactly at the budget boundary → level 0"
+        );
     }
 
     /// A world that triggers level 1 with budget 4096:
@@ -88,7 +94,10 @@ mod tests {
     fn budget_4096_span2049_stays_level0() {
         // world = 2049 * 5 = 10245; span = 2049 < 4096 → level 0
         let level = compute_lod_level(10245.0, 1.0, 0.0, 4);
-        assert_eq!(level, 0, "span 2049 should be level 0 with 4096 budget (was level 1 with 2048)");
+        assert_eq!(
+            level, 0,
+            "span 2049 should be level 0 with 4096 budget (was level 1 with 2048)"
+        );
     }
 
     // ── lod_bias tests ────────────────────────────────────────────────────
@@ -150,7 +159,10 @@ mod tests {
         let mip = 0usize;
         let cx = vis_cells(span_x, mip);
         let cy = vis_cells(span_y, mip);
-        assert_eq!(cx, cy, "square viewport must yield equal vis_cells in both axes");
+        assert_eq!(
+            cx, cy,
+            "square viewport must yield equal vis_cells in both axes"
+        );
     }
 
     /// 16:9 viewport (1920×1080 px): vis_cells_y < vis_cells_x.

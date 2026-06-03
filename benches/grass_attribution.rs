@@ -102,9 +102,7 @@ fn active_tiles(g: &GrassGrid) -> Vec<(usize, usize, usize, usize, usize)> {
             let ix1 = (ix0 + GRASS_TILE_SIZE).min(dim);
             let iy1 = (iy0 + GRASS_TILE_SIZE).min(dim);
             // Check if any cell in this tile is grassy.
-            let has_grass = (iy0..iy1).any(|iy| {
-                (ix0..ix1).any(|ix| g.dget_u8(iy * dim + ix) > 0)
-            });
+            let has_grass = (iy0..iy1).any(|iy| (ix0..ix1).any(|ix| g.dget_u8(iy * dim + ix) > 0));
             if has_grass {
                 Some((t, ix0, iy0, ix1, iy1))
             } else {
@@ -117,17 +115,20 @@ fn active_tiles(g: &GrassGrid) -> Vec<(usize, usize, usize, usize, usize)> {
 /// Count total grassy cells across all active tiles (the denominator for ns/cell).
 fn count_grassy_cells(g: &GrassGrid, tiles: &[(usize, usize, usize, usize, usize)]) -> u64 {
     let dim = g.dims.grass_dim;
-    tiles.iter().map(|&(_, ix0, iy0, ix1, iy1)| {
-        let mut n = 0u64;
-        for iy in iy0..iy1 {
-            for ix in ix0..ix1 {
-                if g.dget_u8(iy * dim + ix) > 0 {
-                    n += 1;
+    tiles
+        .iter()
+        .map(|&(_, ix0, iy0, ix1, iy1)| {
+            let mut n = 0u64;
+            for iy in iy0..iy1 {
+                for ix in ix0..ix1 {
+                    if g.dget_u8(iy * dim + ix) > 0 {
+                        n += 1;
+                    }
                 }
             }
-        }
-        n
-    }).sum()
+            n
+        })
+        .sum()
 }
 
 // ── DiscTable (minimal subset — band+pick sampling, mirrors production) ──────
@@ -155,14 +156,32 @@ impl DiscTable {
                 if dist > rf {
                     continue;
                 }
-                let band = if dist <= 1.5 { 0 } else if dist <= 2.5 { 1 } else { 2 };
+                let band = if dist <= 1.5 {
+                    0
+                } else if dist <= 2.5 {
+                    1
+                } else {
+                    2
+                };
                 bands[band].push((dx, dy));
             }
         }
         let raw = [
-            if bands[0].is_empty() { 0.0 } else { ring1.max(0.0) },
-            if bands[1].is_empty() { 0.0 } else { ring2.max(0.0) },
-            if bands[2].is_empty() { 0.0 } else { ring3.max(0.0) },
+            if bands[0].is_empty() {
+                0.0
+            } else {
+                ring1.max(0.0)
+            },
+            if bands[1].is_empty() {
+                0.0
+            } else {
+                ring2.max(0.0)
+            },
+            if bands[2].is_empty() {
+                0.0
+            } else {
+                ring3.max(0.0)
+            },
         ];
         let total: f32 = raw.iter().sum();
         let norm = if total > 0.0 {
@@ -180,7 +199,11 @@ impl DiscTable {
         offsets.extend_from_slice(&bands[0]);
         offsets.extend_from_slice(&bands[1]);
         offsets.extend_from_slice(&bands[2]);
-        Self { offsets, band_end, cum }
+        Self {
+            offsets,
+            band_end,
+            cum,
+        }
     }
 
     #[inline]
@@ -200,7 +223,11 @@ impl DiscTable {
             1 => (self.band_end[0], self.band_end[1]),
             _ => (self.band_end[1], self.band_end[2]),
         };
-        let (lo, hi) = if lo >= hi { (0, self.offsets.len()) } else { (lo, hi) };
+        let (lo, hi) = if lo >= hi {
+            (0, self.offsets.len())
+        } else {
+            (lo, hi)
+        };
         let span = hi - lo;
         let k = ((pick_roll * span as f32) as usize).min(span - 1);
         Some(self.offsets[lo + k])
@@ -245,7 +272,11 @@ impl SharedCounters {
 /// VARIANT 0 — freeze loop only.
 /// Iterates every cell in the tile, loads the AtomicU8, counts grassy cells.
 /// No heap alloc; no RNG; no RMW. Represents the irreducible O(tile) floor.
-fn variant_freeze(density: &[AtomicU8], tiles: &[(usize, usize, usize, usize, usize)], dim: usize) -> u64 {
+fn variant_freeze(
+    density: &[AtomicU8],
+    tiles: &[(usize, usize, usize, usize, usize)],
+    dim: usize,
+) -> u64 {
     let mut grassy = 0u64;
     for &(_, ix0, iy0, ix1, iy1) in tiles {
         for iy in iy0..iy1 {
@@ -262,7 +293,11 @@ fn variant_freeze(density: &[AtomicU8], tiles: &[(usize, usize, usize, usize, us
 }
 
 /// VARIANT 1 — freeze loop + per-tile Vec alloc (mirrors production grass.rs:1655).
-fn variant_freeze_alloc(density: &[AtomicU8], tiles: &[(usize, usize, usize, usize, usize)], dim: usize) -> u64 {
+fn variant_freeze_alloc(
+    density: &[AtomicU8],
+    tiles: &[(usize, usize, usize, usize, usize)],
+    dim: usize,
+) -> u64 {
     let mut grassy = 0u64;
     for &(_, ix0, iy0, ix1, iy1) in tiles {
         let tw = ix1 - ix0;
@@ -284,8 +319,12 @@ fn variant_freeze_alloc(density: &[AtomicU8], tiles: &[(usize, usize, usize, usi
 }
 
 /// VARIANT 2 — freeze + alloc + instrumentation (Instant + fetch_add).
-fn variant_freeze_alloc_instr(density: &[AtomicU8], tiles: &[(usize, usize, usize, usize, usize)], dim: usize,
-    counters: &SharedCounters) -> u64 {
+fn variant_freeze_alloc_instr(
+    density: &[AtomicU8],
+    tiles: &[(usize, usize, usize, usize, usize)],
+    dim: usize,
+    counters: &SharedCounters,
+) -> u64 {
     let mut grassy = 0u64;
     for &(_, ix0, iy0, ix1, iy1) in tiles {
         let t0 = Instant::now();
@@ -303,16 +342,25 @@ fn variant_freeze_alloc_instr(density: &[AtomicU8], tiles: &[(usize, usize, usiz
                 black_box(s);
             }
         }
-        counters.body_self_us.fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
+        counters
+            .body_self_us
+            .fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
         counters.body_calls.fetch_add(1, Ordering::Relaxed);
     }
     grassy
 }
 
 /// VARIANT 3 — freeze + alloc + instr + 4 hashes per grassy cell (production RNG).
-fn variant_rng_4hash(density: &[AtomicU8], tiles: &[(usize, usize, usize, usize, usize)], dim: usize,
-    world_seed: u32, tick: u32, counters: &SharedCounters,
-    decay_pct: f32, spread_pct: f32) -> u64 {
+fn variant_rng_4hash(
+    density: &[AtomicU8],
+    tiles: &[(usize, usize, usize, usize, usize)],
+    dim: usize,
+    world_seed: u32,
+    tick: u32,
+    counters: &SharedCounters,
+    decay_pct: f32,
+    spread_pct: f32,
+) -> u64 {
     let mut grassy = 0u64;
     for &(_, ix0, iy0, ix1, iy1) in tiles {
         let t0 = Instant::now();
@@ -344,7 +392,9 @@ fn variant_rng_4hash(density: &[AtomicU8], tiles: &[(usize, usize, usize, usize,
                 black_box((_decay, _spread, _band, _pick));
             }
         }
-        counters.body_self_us.fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
+        counters
+            .body_self_us
+            .fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
         counters.body_calls.fetch_add(1, Ordering::Relaxed);
     }
     grassy
@@ -352,9 +402,16 @@ fn variant_rng_4hash(density: &[AtomicU8], tiles: &[(usize, usize, usize, usize,
 
 /// VARIANT 4 — freeze + alloc + instr + 1 hash bit-sliced into 4 (fused RNG, C3 candidate).
 /// One grass_hash_u64 call; extract four 16-bit sub-words as uniform [0,1) draws.
-fn variant_rng_1hash(density: &[AtomicU8], tiles: &[(usize, usize, usize, usize, usize)], dim: usize,
-    world_seed: u32, tick: u32, counters: &SharedCounters,
-    decay_pct: f32, spread_pct: f32) -> u64 {
+fn variant_rng_1hash(
+    density: &[AtomicU8],
+    tiles: &[(usize, usize, usize, usize, usize)],
+    dim: usize,
+    world_seed: u32,
+    tick: u32,
+    counters: &SharedCounters,
+    decay_pct: f32,
+    spread_pct: f32,
+) -> u64 {
     let mut grassy = 0u64;
     for &(_, ix0, iy0, ix1, iy1) in tiles {
         let t0 = Instant::now();
@@ -384,14 +441,16 @@ fn variant_rng_1hash(density: &[AtomicU8], tiles: &[(usize, usize, usize, usize,
                 let r1 = (((h >> 16) & 0xFFFF) as f32) * scale16;
                 let r2 = (((h >> 32) & 0xFFFF) as f32) * scale16;
                 let r3 = (((h >> 48) & 0xFFFF) as f32) * scale16;
-                let _decay  = r0 < decay_pct;
+                let _decay = r0 < decay_pct;
                 let _spread = r1 < spread_pct;
-                let _band   = r2;
-                let _pick   = r3;
+                let _band = r2;
+                let _pick = r3;
                 black_box((_decay, _spread, _band, _pick));
             }
         }
-        counters.body_self_us.fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
+        counters
+            .body_self_us
+            .fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
         counters.body_calls.fetch_add(1, Ordering::Relaxed);
     }
     grassy
@@ -400,10 +459,18 @@ fn variant_rng_1hash(density: &[AtomicU8], tiles: &[(usize, usize, usize, usize,
 /// VARIANT 5 — freeze + alloc + instr + 4 hashes + RMW (scatter_add/scatter_sub).
 /// Includes the actual RMW atomics on the density field. No spread-target resolution
 /// (skips the disc sample and tile activation) — isolates RMW cost increment.
-fn variant_rng_4hash_rmw(density: &[AtomicU8], tiles: &[(usize, usize, usize, usize, usize)], dim: usize,
-    world_seed: u32, tick: u32, counters: &SharedCounters,
-    decay_pct: f32, spread_pct: f32,
-    decay_byte: u8, spread_byte: u8) -> u64 {
+fn variant_rng_4hash_rmw(
+    density: &[AtomicU8],
+    tiles: &[(usize, usize, usize, usize, usize)],
+    dim: usize,
+    world_seed: u32,
+    tick: u32,
+    counters: &SharedCounters,
+    decay_pct: f32,
+    spread_pct: f32,
+    decay_byte: u8,
+    spread_byte: u8,
+) -> u64 {
     let cap_byte = 255u8; // all-plains cap
     let mut grassy = 0u64;
     for &(_, ix0, iy0, ix1, iy1) in tiles {
@@ -440,7 +507,9 @@ fn variant_rng_4hash_rmw(density: &[AtomicU8], tiles: &[(usize, usize, usize, us
                 }
             }
         }
-        counters.body_self_us.fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
+        counters
+            .body_self_us
+            .fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
         counters.body_calls.fetch_add(1, Ordering::Relaxed);
     }
     grassy
@@ -450,9 +519,16 @@ fn variant_rng_4hash_rmw(density: &[AtomicU8], tiles: &[(usize, usize, usize, us
 /// Uses a Geometric(spread_pct) gap to skip non-spreading cells.
 /// Decay is still per-cell; only the spread gate is replaced by skip.
 /// Compares against variant_rng_4hash to isolate the skip benefit.
-fn variant_geom_skip(density: &[AtomicU8], tiles: &[(usize, usize, usize, usize, usize)], dim: usize,
-    world_seed: u32, tick: u32, counters: &SharedCounters,
-    decay_pct: f32, spread_pct: f32) -> u64 {
+fn variant_geom_skip(
+    density: &[AtomicU8],
+    tiles: &[(usize, usize, usize, usize, usize)],
+    dim: usize,
+    world_seed: u32,
+    tick: u32,
+    counters: &SharedCounters,
+    decay_pct: f32,
+    spread_pct: f32,
+) -> u64 {
     let mut grassy = 0u64;
     let disc = DiscTable::build();
     let dimi = dim as i64;
@@ -513,7 +589,9 @@ fn variant_geom_skip(density: &[AtomicU8], tiles: &[(usize, usize, usize, usize,
                 idx = idx.saturating_add(gap + 1);
             }
         }
-        counters.body_self_us.fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
+        counters
+            .body_self_us
+            .fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
         counters.body_calls.fetch_add(1, Ordering::Relaxed);
     }
     grassy
@@ -525,62 +603,83 @@ fn variant_geom_skip(density: &[AtomicU8], tiles: &[(usize, usize, usize, usize,
 // AtomicU64::fetch_add on shared counters contend across cores, revealing the
 // false-sharing cost that is invisible to the sequential variants above.
 
-fn variant_rng_4hash_par(density: &[AtomicU8], tiles: &[(usize, usize, usize, usize, usize)],
-    dim: usize, world_seed: u32, tick: u32, counters: &SharedCounters,
-    decay_pct: f32, spread_pct: f32) -> u64 {
-    tiles.par_iter().map(|&(_, ix0, iy0, ix1, iy1)| {
-        let t0 = Instant::now();
-        let tw = ix1 - ix0;
-        let th = iy1 - iy0;
-        let mut src: Vec<u8> = Vec::with_capacity(tw * th);
-        for iy in iy0..iy1 {
-            for ix in ix0..ix1 {
-                src.push(density[iy * dim + ix].load(Ordering::Relaxed));
-            }
-        }
-        let mut grassy = 0u64;
-        for ly in 0..(th) {
-            let iy = iy0 + ly;
-            for lx in 0..(tw) {
-                let ix = ix0 + lx;
-                let s = src[ly * tw + lx];
-                if s == 0 {
-                    continue;
+fn variant_rng_4hash_par(
+    density: &[AtomicU8],
+    tiles: &[(usize, usize, usize, usize, usize)],
+    dim: usize,
+    world_seed: u32,
+    tick: u32,
+    counters: &SharedCounters,
+    decay_pct: f32,
+    spread_pct: f32,
+) -> u64 {
+    tiles
+        .par_iter()
+        .map(|&(_, ix0, iy0, ix1, iy1)| {
+            let t0 = Instant::now();
+            let tw = ix1 - ix0;
+            let th = iy1 - iy0;
+            let mut src: Vec<u8> = Vec::with_capacity(tw * th);
+            for iy in iy0..iy1 {
+                for ix in ix0..ix1 {
+                    src.push(density[iy * dim + ix].load(Ordering::Relaxed));
                 }
-                grassy += 1;
-                let c = iy * dim + ix;
-                let cid = c as u64;
-                let _r1 = grass_unit(world_seed, cid, tick, 1) < decay_pct;
-                let _r2 = grass_unit(world_seed, cid, tick, 2) < spread_pct;
-                let _r3 = grass_unit(world_seed, cid, tick, 3);
-                let _r4 = grass_unit(world_seed, cid, tick, 4);
-                black_box((_r1, _r2, _r3, _r4));
             }
-        }
-        counters.body_self_us.fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
-        counters.body_calls.fetch_add(1, Ordering::Relaxed);
-        grassy
-    }).sum()
+            let mut grassy = 0u64;
+            for ly in 0..(th) {
+                let iy = iy0 + ly;
+                for lx in 0..(tw) {
+                    let ix = ix0 + lx;
+                    let s = src[ly * tw + lx];
+                    if s == 0 {
+                        continue;
+                    }
+                    grassy += 1;
+                    let c = iy * dim + ix;
+                    let cid = c as u64;
+                    let _r1 = grass_unit(world_seed, cid, tick, 1) < decay_pct;
+                    let _r2 = grass_unit(world_seed, cid, tick, 2) < spread_pct;
+                    let _r3 = grass_unit(world_seed, cid, tick, 3);
+                    let _r4 = grass_unit(world_seed, cid, tick, 4);
+                    black_box((_r1, _r2, _r3, _r4));
+                }
+            }
+            counters
+                .body_self_us
+                .fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
+            counters.body_calls.fetch_add(1, Ordering::Relaxed);
+            grassy
+        })
+        .sum()
 }
 
-fn variant_freeze_alloc_instr_par(density: &[AtomicU8], tiles: &[(usize, usize, usize, usize, usize)],
-    dim: usize, counters: &SharedCounters) -> u64 {
-    tiles.par_iter().map(|&(_, ix0, iy0, ix1, iy1)| {
-        let t0 = Instant::now();
-        let tw = ix1 - ix0;
-        let th = iy1 - iy0;
-        let mut src: Vec<u8> = Vec::with_capacity(tw * th);
-        for iy in iy0..iy1 {
-            for ix in ix0..ix1 {
-                src.push(density[iy * dim + ix].load(Ordering::Relaxed));
+fn variant_freeze_alloc_instr_par(
+    density: &[AtomicU8],
+    tiles: &[(usize, usize, usize, usize, usize)],
+    dim: usize,
+    counters: &SharedCounters,
+) -> u64 {
+    tiles
+        .par_iter()
+        .map(|&(_, ix0, iy0, ix1, iy1)| {
+            let t0 = Instant::now();
+            let tw = ix1 - ix0;
+            let th = iy1 - iy0;
+            let mut src: Vec<u8> = Vec::with_capacity(tw * th);
+            for iy in iy0..iy1 {
+                for ix in ix0..ix1 {
+                    src.push(density[iy * dim + ix].load(Ordering::Relaxed));
+                }
             }
-        }
-        let grassy = src.iter().filter(|&&s| s > 0).count() as u64;
-        black_box(grassy);
-        counters.body_self_us.fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
-        counters.body_calls.fetch_add(1, Ordering::Relaxed);
-        grassy
-    }).sum()
+            let grassy = src.iter().filter(|&&s| s > 0).count() as u64;
+            black_box(grassy);
+            counters
+                .body_self_us
+                .fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
+            counters.body_calls.fetch_add(1, Ordering::Relaxed);
+            grassy
+        })
+        .sum()
 }
 
 // ── Benchmark groups ──────────────────────────────────────────────────────────
@@ -590,12 +689,16 @@ fn bench_attribution(c: &mut Criterion) {
     let decay_byte = encode_u8(params.decay_amount);
     let spread_byte = encode_u8(params.spread_amount);
 
-    for (label, seed_count) in &[("frontier_6pct", FRONTIER_SEEDS), ("dense_90pct", DENSE_SEEDS)] {
+    for (label, seed_count) in &[
+        ("frontier_6pct", FRONTIER_SEEDS),
+        ("dense_90pct", DENSE_SEEDS),
+    ] {
         let base = make_grid(*seed_count);
         let dim = base.dims.grass_dim;
         let tiles = active_tiles(&base);
         let grassy_cells = count_grassy_cells(&base, &tiles);
-        let total_cells: u64 = tiles.iter()
+        let total_cells: u64 = tiles
+            .iter()
             .map(|&(_, ix0, iy0, ix1, iy1)| ((ix1 - ix0) * (iy1 - iy0)) as u64)
             .sum();
         eprintln!(
@@ -610,100 +713,159 @@ fn bench_attribution(c: &mut Criterion) {
 
         // ── freeze only (O(tile) floor) ─────────────────────────────────────
         group.bench_function("freeze", |b| {
-            let density: Vec<AtomicU8> = base.density_u8_snapshot()
-                .iter().map(|&v| AtomicU8::new(v)).collect();
-            b.iter(|| {
-                black_box(variant_freeze(&density, &tiles, dim))
-            });
+            let density: Vec<AtomicU8> = base
+                .density_u8_snapshot()
+                .iter()
+                .map(|&v| AtomicU8::new(v))
+                .collect();
+            b.iter(|| black_box(variant_freeze(&density, &tiles, dim)));
         });
 
         // ── freeze + alloc ──────────────────────────────────────────────────
         group.bench_function("freeze_alloc", |b| {
-            let density: Vec<AtomicU8> = base.density_u8_snapshot()
-                .iter().map(|&v| AtomicU8::new(v)).collect();
-            b.iter(|| {
-                black_box(variant_freeze_alloc(&density, &tiles, dim))
-            });
+            let density: Vec<AtomicU8> = base
+                .density_u8_snapshot()
+                .iter()
+                .map(|&v| AtomicU8::new(v))
+                .collect();
+            b.iter(|| black_box(variant_freeze_alloc(&density, &tiles, dim)));
         });
 
         // ── freeze + alloc + instrumentation ───────────────────────────────
         group.bench_function("freeze_alloc_instr", |b| {
-            let density: Vec<AtomicU8> = base.density_u8_snapshot()
-                .iter().map(|&v| AtomicU8::new(v)).collect();
+            let density: Vec<AtomicU8> = base
+                .density_u8_snapshot()
+                .iter()
+                .map(|&v| AtomicU8::new(v))
+                .collect();
             let counters = SharedCounters::new();
-            b.iter(|| {
-                black_box(variant_freeze_alloc_instr(&density, &tiles, dim, &counters))
-            });
+            b.iter(|| black_box(variant_freeze_alloc_instr(&density, &tiles, dim, &counters)));
         });
 
         // ── + 4 hashes per grassy cell ──────────────────────────────────────
         group.bench_function("rng_4hash", |b| {
-            let density: Vec<AtomicU8> = base.density_u8_snapshot()
-                .iter().map(|&v| AtomicU8::new(v)).collect();
+            let density: Vec<AtomicU8> = base
+                .density_u8_snapshot()
+                .iter()
+                .map(|&v| AtomicU8::new(v))
+                .collect();
             let counters = SharedCounters::new();
             b.iter(|| {
                 black_box(variant_rng_4hash(
-                    &density, &tiles, dim, 42, 1, &counters,
-                    params.decay_pct, params.spread_pct))
+                    &density,
+                    &tiles,
+                    dim,
+                    42,
+                    1,
+                    &counters,
+                    params.decay_pct,
+                    params.spread_pct,
+                ))
             });
         });
 
         // ── + 1 hash bit-sliced (fused alternative) ─────────────────────────
         group.bench_function("rng_1hash", |b| {
-            let density: Vec<AtomicU8> = base.density_u8_snapshot()
-                .iter().map(|&v| AtomicU8::new(v)).collect();
+            let density: Vec<AtomicU8> = base
+                .density_u8_snapshot()
+                .iter()
+                .map(|&v| AtomicU8::new(v))
+                .collect();
             let counters = SharedCounters::new();
             b.iter(|| {
                 black_box(variant_rng_1hash(
-                    &density, &tiles, dim, 42, 1, &counters,
-                    params.decay_pct, params.spread_pct))
+                    &density,
+                    &tiles,
+                    dim,
+                    42,
+                    1,
+                    &counters,
+                    params.decay_pct,
+                    params.spread_pct,
+                ))
             });
         });
 
         // ── + RMW (scatter_add/scatter_sub) ─────────────────────────────────
         group.bench_function("rng_4hash_rmw", |b| {
-            let density: Vec<AtomicU8> = base.density_u8_snapshot()
-                .iter().map(|&v| AtomicU8::new(v)).collect();
+            let density: Vec<AtomicU8> = base
+                .density_u8_snapshot()
+                .iter()
+                .map(|&v| AtomicU8::new(v))
+                .collect();
             let counters = SharedCounters::new();
             b.iter(|| {
                 black_box(variant_rng_4hash_rmw(
-                    &density, &tiles, dim, 42, 1, &counters,
-                    params.decay_pct, params.spread_pct,
-                    decay_byte, spread_byte))
+                    &density,
+                    &tiles,
+                    dim,
+                    42,
+                    1,
+                    &counters,
+                    params.decay_pct,
+                    params.spread_pct,
+                    decay_byte,
+                    spread_byte,
+                ))
             });
         });
 
         // ── geometric-skip spread (C4 candidate) ────────────────────────────
         group.bench_function("geom_skip", |b| {
-            let density: Vec<AtomicU8> = base.density_u8_snapshot()
-                .iter().map(|&v| AtomicU8::new(v)).collect();
+            let density: Vec<AtomicU8> = base
+                .density_u8_snapshot()
+                .iter()
+                .map(|&v| AtomicU8::new(v))
+                .collect();
             let counters = SharedCounters::new();
             b.iter(|| {
                 black_box(variant_geom_skip(
-                    &density, &tiles, dim, 42, 1, &counters,
-                    params.decay_pct, params.spread_pct))
+                    &density,
+                    &tiles,
+                    dim,
+                    42,
+                    1,
+                    &counters,
+                    params.decay_pct,
+                    params.spread_pct,
+                ))
             });
         });
 
         // ── par: freeze+alloc+instr (rayon shim — expose false-sharing) ─────
         group.bench_function("par_freeze_alloc_instr", |b| {
-            let density: Vec<AtomicU8> = base.density_u8_snapshot()
-                .iter().map(|&v| AtomicU8::new(v)).collect();
+            let density: Vec<AtomicU8> = base
+                .density_u8_snapshot()
+                .iter()
+                .map(|&v| AtomicU8::new(v))
+                .collect();
             let counters = SharedCounters::new();
             b.iter(|| {
-                black_box(variant_freeze_alloc_instr_par(&density, &tiles, dim, &counters))
+                black_box(variant_freeze_alloc_instr_par(
+                    &density, &tiles, dim, &counters,
+                ))
             });
         });
 
         // ── par: 4-hash (rayon shim — RNG + false-sharing) ──────────────────
         group.bench_function("par_rng_4hash", |b| {
-            let density: Vec<AtomicU8> = base.density_u8_snapshot()
-                .iter().map(|&v| AtomicU8::new(v)).collect();
+            let density: Vec<AtomicU8> = base
+                .density_u8_snapshot()
+                .iter()
+                .map(|&v| AtomicU8::new(v))
+                .collect();
             let counters = SharedCounters::new();
             b.iter(|| {
                 black_box(variant_rng_4hash_par(
-                    &density, &tiles, dim, 42, 1, &counters,
-                    params.decay_pct, params.spread_pct))
+                    &density,
+                    &tiles,
+                    dim,
+                    42,
+                    1,
+                    &counters,
+                    params.decay_pct,
+                    params.spread_pct,
+                ))
             });
         });
 

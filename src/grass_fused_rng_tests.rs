@@ -115,12 +115,14 @@ fn fused_rng_distribution_matches_legacy() {
         assert!(
             (mf - 0.5).abs() < MEAN_TOL,
             "fused {}: mean={:.4} is more than {MEAN_TOL:.4} from 0.5",
-            names[i], mf
+            names[i],
+            mf
         );
         assert!(
             (ml - 0.5).abs() < MEAN_TOL,
             "legacy {}: mean={:.4} is more than {MEAN_TOL:.4} from 0.5",
-            names[i], ml
+            names[i],
+            ml
         );
         // Fused and legacy means must be close (both are uniform; the
         // specific values differ but the distribution is the same).
@@ -128,7 +130,10 @@ fn fused_rng_distribution_matches_legacy() {
         assert!(
             diff < MEAN_TOL,
             "fused vs legacy mean for {}: |{:.4} - {:.4}| = {:.4} > {MEAN_TOL:.4}",
-            names[i], mf, ml, diff
+            names[i],
+            mf,
+            ml,
+            diff
         );
     }
 

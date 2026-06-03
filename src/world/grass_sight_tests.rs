@@ -12,6 +12,7 @@
 //!   (e) fallback: walled + species forces single-band regardless of toggle.
 //!   (f) default constants agree with documented intent.
 
+use crate::constants::WorldDims;
 use crate::constants::{
     GRASS_CELL_SIZE, GRASS_FAR_MIP_LEVEL, GRASS_FAR_SIGHT_RADIUS, GRASS_MAX,
     GRASS_MULTISIGHT_DEFAULT, MAX_NN_INPUTS, SPECIES_MODE_DEFAULT, WRAP_WORLD_DEFAULT,
@@ -20,7 +21,6 @@ use crate::grass::GrassGrid;
 use crate::rng::SimRng;
 use crate::world::nn::{NnInputGroup, NnInputLayout};
 use crate::world::proximity::compute_grass_far_band_sectors;
-use crate::constants::WorldDims;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -40,7 +40,9 @@ fn make_grid(dims: WorldDims, fill: f32) -> GrassGrid {
 fn refresh_pyramid(grass: &mut GrassGrid) {
     // Split-borrow: take density out, refresh pyramid, put it back.
     let density = std::mem::take(&mut grass.density);
-    grass.pyramid.refresh(&density, &grass.tile_active, grass.tiles_per_axis);
+    grass
+        .pyramid
+        .refresh(&density, &grass.tile_active, grass.tiles_per_axis);
     grass.density = density;
 }
 
@@ -167,7 +169,8 @@ fn multisight_layout_wider_when_fits_falls_back_walled_species() {
             if walled_species {
                 // Budget is full; must fall back.
                 assert_eq!(
-                    single.width(), multi.width(),
+                    single.width(),
+                    multi.width(),
                     "walled+species: multi-band should fall back to same width as single-band"
                 );
                 assert!(
@@ -178,7 +181,8 @@ fn multisight_layout_wider_when_fits_falls_back_walled_species() {
                 assert!(
                     multi.width() > single.width(),
                     "wrap={wrap}, species={species}: multi ({}) must be wider than single ({})",
-                    multi.width(), single.width()
+                    multi.width(),
+                    single.width()
                 );
                 assert!(
                     multi.offset_of(NnInputGroup::GrassBandsFar).is_some(),
@@ -253,12 +257,19 @@ fn walled_species_multisight_falls_back_to_single_band() {
     let layout_single = NnInputLayout::for_settings(false, true, false);
     let layout_multi = NnInputLayout::for_settings(false, true, true);
     assert_eq!(
-        layout_single.width(), layout_multi.width(),
+        layout_single.width(),
+        layout_multi.width(),
         "walled+species: multisight must fall back to same width as single-band"
     );
-    assert_eq!(layout_multi.width(), 48, "walled+species: expected padded width 48");
+    assert_eq!(
+        layout_multi.width(),
+        48,
+        "walled+species: expected padded width 48"
+    );
     assert!(
-        layout_multi.offset_of(NnInputGroup::GrassBandsFar).is_none(),
+        layout_multi
+            .offset_of(NnInputGroup::GrassBandsFar)
+            .is_none(),
         "walled+species: GrassBandsFar must be absent (budget full)"
     );
 }
@@ -267,7 +278,10 @@ fn walled_species_multisight_falls_back_to_single_band() {
 
 #[test]
 fn grass_multisight_default_is_on() {
-    assert!(GRASS_MULTISIGHT_DEFAULT, "GRASS_MULTISIGHT_DEFAULT must be true");
+    assert!(
+        GRASS_MULTISIGHT_DEFAULT,
+        "GRASS_MULTISIGHT_DEFAULT must be true"
+    );
 }
 
 /// The default World construction (wrap=true, species=false, multisight=true)
@@ -286,6 +300,7 @@ fn default_layout_includes_far_band() {
     assert!(
         layout.width() <= MAX_NN_INPUTS,
         "default layout width {} must not exceed MAX_NN_INPUTS {}",
-        layout.width(), MAX_NN_INPUTS
+        layout.width(),
+        MAX_NN_INPUTS
     );
 }

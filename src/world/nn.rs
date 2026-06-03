@@ -648,7 +648,7 @@ impl NnInputLayout {
             + creature_sectors               // CreatureSectors (8 or 16)
             + NN_SECTORS                     // GrassSectors (8)
             + NN_BIOME_DIRS                  // BiomeDir (4)
-            + 1 + 1 + 1;                     // CurrCellPenalty + CurrGrass + Bias
+            + 1 + 1 + 1; // CurrCellPenalty + CurrGrass + Bias
         let far_band_fits = base_real + NN_SECTORS <= MAX_NN_INPUTS;
         let include_far_band = grass_multisight && far_band_fits;
 
@@ -1222,7 +1222,11 @@ mod tests {
     fn nn_input_trailing_pad_is_zero() {
         let mut w = World::new("s5b-pad");
         let inp = build_for_founder(&mut w);
-        assert_eq!(w.nn_input_layout.width(), 48, "walled S6 multisight width is 48");
+        assert_eq!(
+            w.nn_input_layout.width(),
+            48,
+            "walled S6 multisight width is 48"
+        );
         for s in 43..48 {
             assert_eq!(inp[s], 0.0, "trailing SIMD pad lane {s} must be 0.0");
         }

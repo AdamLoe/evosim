@@ -74,18 +74,14 @@ pub fn grass_unit(world_seed: u32, id: u64, tick: u32, salt: u32) -> f32 {
 ///
 /// INVARIANT: never touches `SimRng`; pure function of key material only.
 #[inline]
-pub fn grass_hash_fused_4(
-    world_seed: u32,
-    id: u64,
-    tick: u32,
-) -> (f32, f32, f32, f32) {
+pub fn grass_hash_fused_4(world_seed: u32, id: u64, tick: u32) -> (f32, f32, f32, f32) {
     const SCALE: f32 = 1.0 / (1u32 << 24) as f32;
     let a = grass_hash_u64(world_seed, id, tick, 1);
     let b = grass_hash_u64(world_seed, id, tick, 2);
-    let decay  = ((a >> 40) as u32) as f32 * SCALE;
+    let decay = ((a >> 40) as u32) as f32 * SCALE;
     let spread = (((a >> 16) & 0x00FF_FFFF) as u32) as f32 * SCALE;
-    let band   = ((b >> 40) as u32) as f32 * SCALE;
-    let pick   = (((b >> 16) & 0x00FF_FFFF) as u32) as f32 * SCALE;
+    let band = ((b >> 40) as u32) as f32 * SCALE;
+    let pick = (((b >> 16) & 0x00FF_FFFF) as u32) as f32 * SCALE;
     (decay, spread, band, pick)
 }
 

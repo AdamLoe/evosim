@@ -1764,9 +1764,8 @@ impl GrassGrid {
                                 // amount by the source cell's byte fraction (s/255).
                                 // Floor to 1 once the effect is active (same as
                                 // the old path) so very sparse cells still spread.
-                                let density_add_byte = ((spread_byte as u32 * s as u32 + 127)
-                                    / 255)
-                                    .max(1) as u8;
+                                let density_add_byte =
+                                    ((spread_byte as u32 * s as u32 + 127) / 255).max(1) as u8;
                                 if cap_byte > 0
                                     && scatter_add(&d[tcell], density_add_byte, cap_byte)
                                 {

@@ -129,8 +129,14 @@ fn world_genome_population_deterministic_for_same_seed() {
     // as a stable bound.
     #[cfg(feature = "threads")]
     {
-        assert!(!a.is_empty(), "threaded run A must produce a non-empty population");
-        assert!(!b.is_empty(), "threaded run B must produce a non-empty population");
+        assert!(
+            !a.is_empty(),
+            "threaded run A must produce a non-empty population"
+        );
+        assert!(
+            !b.is_empty(),
+            "threaded run B must produce a non-empty population"
+        );
         let delta = (a.len() as isize - b.len() as isize).unsigned_abs();
         assert!(
             delta <= 20,

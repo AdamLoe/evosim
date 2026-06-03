@@ -247,9 +247,18 @@ fn persistence_invariant_plains_and_water() {
     tick_n(&mut g, 300);
 
     // ── Plains check: patch must persist (total > 0, ideally grow) ───────────
-    let plains_total: u64 = g.density_u8_snapshot().iter().enumerate().map(|(i, &b)| {
-        if biome_map[i] == Biome::Plains as u8 { b as u64 } else { 0 }
-    }).sum();
+    let plains_total: u64 = g
+        .density_u8_snapshot()
+        .iter()
+        .enumerate()
+        .map(|(i, &b)| {
+            if biome_map[i] == Biome::Plains as u8 {
+                b as u64
+            } else {
+                0
+            }
+        })
+        .sum();
     assert!(
         plains_total > 0,
         "plains: patch must not collapse to zero at decay_pct={} after 300 ticks",
@@ -277,9 +286,9 @@ fn persistence_invariant_plains_and_water() {
     // the cap invariant, and that the water zone stays far below plains density.
     let water_cap_byte = encode_density(GRASS_CAPACITY_WATER * GRASS_MAX); // = 10
     let plains_cap_byte = encode_density(1.0f32); // = 255
-    // Sub-critical threshold: water cells must stay below 25% of plains cap.
-    // At water cap=10 this is trivially satisfied; the assertion catches any
-    // scenario where water cells somehow reach near-plains density.
+                                                  // Sub-critical threshold: water cells must stay below 25% of plains cap.
+                                                  // At water cap=10 this is trivially satisfied; the assertion catches any
+                                                  // scenario where water cells somehow reach near-plains density.
     let sub_critical_threshold = plains_cap_byte / 4;
 
     for dy in 0..16usize {
@@ -303,7 +312,6 @@ fn persistence_invariant_plains_and_water() {
             );
         }
     }
-
 }
 
 // ── Test (c): net_growth_sanity ─────────────────────────────────────────────

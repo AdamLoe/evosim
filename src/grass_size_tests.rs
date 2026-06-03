@@ -17,11 +17,7 @@ fn cell_count_scales_inverse_square_of_cell_size() {
     let world_size = 1920.0f32; // convenient: 1920 / 5 = 384, 1920 / 10 = 192, etc.
 
     // (cell_size, expected_grass_dim)
-    let cases: &[(f32, usize)] = &[
-        (5.0, 384),
-        (10.0, 192),
-        (20.0, 96),
-    ];
+    let cases: &[(f32, usize)] = &[(5.0, 384), (10.0, 192), (20.0, 96)];
 
     for &(cell_size, expected_dim) in cases {
         let dims = WorldDims::from_world_size_with_cell_size(world_size, true, cell_size);
@@ -52,12 +48,16 @@ fn cell_count_scales_inverse_square_of_cell_size() {
     }
 
     // Verify the 1/size² relationship holds across the three sizes.
-    let dim5  = (world_size / 5.0f32).round() as usize;
+    let dim5 = (world_size / 5.0f32).round() as usize;
     let dim10 = (world_size / 10.0f32).round() as usize;
     let dim20 = (world_size / 20.0f32).round() as usize;
     // dim10 ≈ dim5 / 2, dim20 ≈ dim5 / 4
     assert_eq!(dim10, dim5 / 2, "halving cell size should halve grass_dim");
-    assert_eq!(dim20, dim5 / 4, "quadrupling cell size should quarter grass_dim");
+    assert_eq!(
+        dim20,
+        dim5 / 4,
+        "quadrupling cell size should quarter grass_dim"
+    );
 }
 
 /// World rebuilds cleanly at cell_size=5 (default), 10, and 20:
@@ -123,6 +123,10 @@ fn world_rebuilds_cleanly_at_multiple_cell_sizes() {
 fn default_cell_size_produces_canonical_grid() {
     let dims = WorldDims::from_world_size(WORLD_SIZE_DEFAULT, true);
     assert_eq!(dims.grass_dim, 1920, "default grid must be 1920 cells/axis");
-    assert_eq!(dims.grass_cell_count, 1920 * 1920, "default cell count must be 1920²");
+    assert_eq!(
+        dims.grass_cell_count,
+        1920 * 1920,
+        "default cell count must be 1920²"
+    );
     assert_eq!(dims.grass_cell_size, 5.0, "default cell size must be 5.0");
 }

@@ -495,14 +495,26 @@ pub(crate) fn compute_grass_far_band_sectors(
     //   4=S (180°), 5=SW (225°), 6=W (270°), 7=NW (315°)
     // Unit vectors per sector (dx, dy):
     const DIRS: [(f32, f32); 8] = [
-        (0.0, -1.0),  // N
-        (std::f32::consts::FRAC_1_SQRT_2,  -std::f32::consts::FRAC_1_SQRT_2), // NE
-        (1.0,  0.0),  // E
-        (std::f32::consts::FRAC_1_SQRT_2,   std::f32::consts::FRAC_1_SQRT_2), // SE
-        (0.0,  1.0),  // S
-        (-std::f32::consts::FRAC_1_SQRT_2,  std::f32::consts::FRAC_1_SQRT_2), // SW
-        (-1.0, 0.0),  // W
-        (-std::f32::consts::FRAC_1_SQRT_2, -std::f32::consts::FRAC_1_SQRT_2), // NW
+        (0.0, -1.0), // N
+        (
+            std::f32::consts::FRAC_1_SQRT_2,
+            -std::f32::consts::FRAC_1_SQRT_2,
+        ), // NE
+        (1.0, 0.0),  // E
+        (
+            std::f32::consts::FRAC_1_SQRT_2,
+            std::f32::consts::FRAC_1_SQRT_2,
+        ), // SE
+        (0.0, 1.0),  // S
+        (
+            -std::f32::consts::FRAC_1_SQRT_2,
+            std::f32::consts::FRAC_1_SQRT_2,
+        ), // SW
+        (-1.0, 0.0), // W
+        (
+            -std::f32::consts::FRAC_1_SQRT_2,
+            -std::f32::consts::FRAC_1_SQRT_2,
+        ), // NW
     ];
 
     let r = GRASS_FAR_SIGHT_RADIUS;
@@ -516,7 +528,10 @@ pub(crate) fn compute_grass_far_band_sectors(
         let (sx, sy) = if wrap {
             (wx.rem_euclid(world_size), wy.rem_euclid(world_size))
         } else {
-            (wx.clamp(0.0, world_size - 1e-4), wy.clamp(0.0, world_size - 1e-4))
+            (
+                wx.clamp(0.0, world_size - 1e-4),
+                wy.clamp(0.0, world_size - 1e-4),
+            )
         };
 
         // Convert to integer cell coords in the chosen mip level.

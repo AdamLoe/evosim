@@ -533,7 +533,8 @@ impl World {
         // founder draws.
         let species_mode = sliders.species_mode;
         let grass_multisight = sliders.grass_multisight;
-        let nn_input_layout = self::nn::NnInputLayout::for_settings(dims.wrap_world, species_mode, grass_multisight);
+        let nn_input_layout =
+            self::nn::NnInputLayout::for_settings(dims.wrap_world, species_mode, grass_multisight);
         let nn_topology = if nn_topology.input_width() == nn_input_layout.width() {
             nn_topology
         } else {

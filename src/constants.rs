@@ -587,7 +587,11 @@ impl WorldDims {
     /// Compute runtime dims with an explicit grass cell size. Used by the
     /// `grass_size` construction slider path. `cell_size` is floored at 1.0 to
     /// prevent a zero or negative cell size from producing a degenerate grid.
-    pub fn from_world_size_with_cell_size(world_size: f32, wrap_world: bool, cell_size: f32) -> Self {
+    pub fn from_world_size_with_cell_size(
+        world_size: f32,
+        wrap_world: bool,
+        cell_size: f32,
+    ) -> Self {
         let cs = cell_size.max(1.0);
         // Floor world_size at one grass cell + one hash cell so dims are always ≥ 1.
         let ws = world_size.max(cs.max(HASH_CELL));
