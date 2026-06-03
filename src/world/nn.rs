@@ -495,6 +495,13 @@ pub(crate) enum NnInputGroup {
     WallProximity,
     CreatureSectors,
     GrassSectors,
+    /// v2.0.4 S6: far-band grass density sectors — 8 directional samples from
+    /// the LOD pyramid at GRASS_FAR_MIP_LEVEL (radius ≈ GRASS_FAR_SIGHT_RADIUS).
+    /// Only active when `grass_multisight` is on AND the layout has room
+    /// (walled + species fills the budget; that combination falls back to
+    /// single-band). Placed after `GrassSectors` in canonical order so it
+    /// never shifts the near-band offset.
+    GrassBandsFar,
     /// v2.0 Wave 1b: the movement penalty the creature would pay one cell
     /// N/S/E/W (4 slots, base severity, wrap-aware). Always-on in both wrap
     /// modes.
@@ -509,11 +516,12 @@ pub(crate) enum NnInputGroup {
 impl NnInputGroup {
     /// Canonical group order. The legacy layout activates every group; future
     /// waves choose a subset / wider variants from this same ordering.
-    const ORDER: [NnInputGroup; 9] = [
+    const ORDER: [NnInputGroup; 10] = [
         NnInputGroup::SelfMemory,
         NnInputGroup::WallProximity,
         NnInputGroup::CreatureSectors,
         NnInputGroup::GrassSectors,
+        NnInputGroup::GrassBandsFar,
         NnInputGroup::BiomeDir,
         NnInputGroup::CurrCellPenalty,
         NnInputGroup::ReservedPredator,
@@ -575,7 +583,8 @@ impl NnInputLayout {
         Self { groups, width }
     }
 
-    /// v2.0 active layout, driven by construction settings (wrap + species).
+    /// v2.0 active layout, driven by construction settings (wrap + species +
+    /// grass_multisight).
     ///
     /// Drops the `ReservedPredator` group entirely and includes `WallProximity`
     /// (4 slots) ONLY when the world is walled (`wrap_world == false`). The two
@@ -583,10 +592,17 @@ impl NnInputLayout {
     /// BOTH wrap modes. The `CreatureSectors` group is **8** in single-pool and
     /// **16** in `species_mode` (8 same-species + 8 other-species; v2.0 Wave 3a).
     ///
-    /// Resulting widths (always-on block = SelfMemory 8 + GrassSectors 8 +
-    /// BiomeDir 4 + CurrCellPenalty 1 + CurrGrass 1 + Bias 1 = 23; + WallProximity
-    /// 4 when walled; + CreatureSectors 8 or 16):
+    /// When `grass_multisight` is ON, `GrassBandsFar` (8 slots) is appended
+    /// after `GrassSectors` — BUT only when the total padded width would still
+    /// fit within `MAX_NN_INPUTS` (48). The `walled + species_mode` combination
+    /// already fills the budget (43 real → 48 padded); adding 8 more would
+    /// require 56 → that combination falls back to single-band and this is
+    /// FLAG'd in the module-level doc.
     ///
+    /// Resulting widths (base = SelfMemory 8 + GrassSectors 8 + BiomeDir 4 +
+    /// CurrCellPenalty 1 + CurrGrass 1 + Bias 1 = 23):
+    ///
+    /// Single-band (grass_multisight=false OR walled+species fallback):
     /// | wrap | species | real | pad |
     /// |------|---------|------|-----|
     /// | on   | off     | 31   | 32  |
@@ -594,38 +610,59 @@ impl NnInputLayout {
     /// | on   | on      | 39   | 40  |
     /// | off  | on      | 43   | 48  |
     ///
+    /// Multi-band (grass_multisight=true, GrassBandsFar +8):
+    /// | wrap | species | real | pad | fits? |
+    /// |------|---------|------|-----|-------|
+    /// | on   | off     | 39   | 40  | yes   |
+    /// | off  | off     | 43   | 48  | yes   |
+    /// | on   | on      | 47   | 48  | yes   |
+    /// | off  | on      | 51   | 56  | NO → fallback single-band |
+    ///
     /// Old brains are discarded (no save/load). The topology's `input_width`
     /// must match `width()` — the construction path widens it to suit (see
     /// `World::new_with_sliders_topology`).
-    pub(crate) fn for_settings(wrap_world: bool, species_mode: bool) -> Self {
+    pub(crate) fn for_settings(
+        wrap_world: bool,
+        species_mode: bool,
+        grass_multisight: bool,
+    ) -> Self {
         let creature_sectors = if species_mode {
             NN_CREATURE_SECTORS_SPECIES
         } else {
             NN_SECTORS
         };
-        let mut groups: Vec<(NnInputGroup, usize)> = Vec::with_capacity(8);
+        // Determine whether the far band actually fits. The walled+species combo
+        // already hits MAX_NN_INPUTS; adding 8 more would exceed it. Only enable
+        // the far band when the unpadded width (before GrassBandsFar) + 8 ≤ MAX.
+        let base_real = 8 // SelfMemory
+            + if !wrap_world { 4 } else { 0 } // WallProximity
+            + creature_sectors               // CreatureSectors (8 or 16)
+            + NN_SECTORS                     // GrassSectors (8)
+            + NN_BIOME_DIRS                  // BiomeDir (4)
+            + 1 + 1 + 1;                     // CurrCellPenalty + CurrGrass + Bias
+        let far_band_fits = base_real + NN_SECTORS <= MAX_NN_INPUTS;
+        let include_far_band = grass_multisight && far_band_fits;
+
+        let mut groups: Vec<(NnInputGroup, usize)> = Vec::with_capacity(9);
         groups.push((NnInputGroup::SelfMemory, 8));
         if !wrap_world {
             groups.push((NnInputGroup::WallProximity, 4));
         }
         groups.push((NnInputGroup::CreatureSectors, creature_sectors));
         groups.push((NnInputGroup::GrassSectors, NN_SECTORS));
+        if include_far_band {
+            groups.push((NnInputGroup::GrassBandsFar, NN_SECTORS));
+        }
         groups.push((NnInputGroup::BiomeDir, NN_BIOME_DIRS));
         groups.push((NnInputGroup::CurrCellPenalty, 1));
         groups.push((NnInputGroup::CurrGrass, 1));
         groups.push((NnInputGroup::Bias, 1));
         let layout = Self::from_groups(&groups);
-        // 4-way width table (see doc above).
-        let expected = match (wrap_world, species_mode) {
-            (true, false) => 32,
-            (false, false) => 40,
-            (true, true) => 40,
-            (false, true) => 48,
-        };
-        debug_assert_eq!(
+        debug_assert!(
+            layout.width() <= MAX_NN_INPUTS,
+            "NN input layout width {} exceeds MAX_NN_INPUTS {}",
             layout.width(),
-            expected,
-            "Wave 3a layout (wrap={wrap_world}, species={species_mode}) must pad to {expected}"
+            MAX_NN_INPUTS
         );
         layout
     }
@@ -816,6 +853,13 @@ pub(crate) fn build_nn_input(
     } else {
         0
     };
+
+    // --- far-band grass density sectors (v2.0.4 S6) ---
+    if let Some(o) = layout.offset_of(NnInputGroup::GrassBandsFar) {
+        let mut far_sec = [0.0f32; 8];
+        proximity::compute_grass_far_band_sectors(x, y, grass, &mut far_sec);
+        buf[o..o + NN_SECTORS].copy_from_slice(&far_sec[..NN_SECTORS]);
+    }
 
     // --- biome direction penalties N/S/E/W (one cell away; v2.0 Wave 1b) ---
     // The movement penalty the creature would pay one grass cell in each
@@ -1156,21 +1200,27 @@ mod tests {
         assert!((inp[1] - 0.5).abs() < 1e-5, "age_frac = {}", inp[1]);
     }
 
-    /// v2.0 Wave 1b: the SIMD trailing-pad lanes are always 0.0. The walled
-    /// active layout is now width 40 (biome groups always-on add 5 slots), so
-    /// the real layout ends at slot 35 and lanes 35..40 are pad.
+    /// v2.0.4 S6: the SIMD trailing-pad lanes are always 0.0. The walled
+    /// active layout is now width 48 (Wave 1b biome groups + S6 far-band +8
+    /// grass-sight group, all-on in the default single-pool case), so the real
+    /// layout ends at slot 43 and lanes 43..48 are pad.
+    ///
+    /// Layout: SelfMemory(8) + WallProximity(4) + CreatureSectors(8) +
+    ///   GrassSectors(8) + GrassBandsFar(8) + BiomeDir(4) + CurrCellPenalty(1)
+    ///   + CurrGrass(1) + Bias(1) = 43 real → padded to 48.
     #[test]
     fn nn_input_trailing_pad_is_zero() {
         let mut w = World::new("s5b-pad");
         let inp = build_for_founder(&mut w);
-        assert_eq!(w.nn_input_layout.width(), 40, "walled Wave 1b width is 40");
-        for s in 35..40 {
+        assert_eq!(w.nn_input_layout.width(), 48, "walled S6 multisight width is 48");
+        for s in 43..48 {
             assert_eq!(inp[s], 0.0, "trailing SIMD pad lane {s} must be 0.0");
         }
     }
 
     /// The bias-learning constant lane is always 1.0 (at the layout's Bias
-    /// offset — slot 34 in the walled Wave 1b active layout: 8/4/8/8/4/1/1 = 34).
+    /// offset — slot 42 in the walled S6 multisight layout:
+    /// 8/4/8/8/8/4/1/1 = 42 before pad).
     #[test]
     fn nn_input_bias_is_one() {
         let mut w = World::new("s5b-bias");
@@ -1180,7 +1230,7 @@ mod tests {
             .expect("Bias group must be active");
         let inp = build_for_founder(&mut w);
         assert_eq!(inp[bias_off], 1.0, "bias slot must be 1.0");
-        assert_eq!(bias_off, 34, "walled Wave 1b layout puts Bias at 34");
+        assert_eq!(bias_off, 42, "walled S6 multisight layout puts Bias at 42");
     }
 
     /// Wall-proximity at corner: N≈0.98, W≈0.98 (creature at (1,1), range 50).

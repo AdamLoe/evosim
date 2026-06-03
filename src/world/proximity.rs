@@ -450,6 +450,87 @@ pub(crate) fn compute_grass_density_sectors(
     }
 }
 
+/// v2.0.4 S6: far-band grass sight — sample the LOD pyramid for per-sector
+/// density at the far range (`GRASS_FAR_SIGHT_RADIUS` using `GRASS_FAR_MIP_LEVEL`).
+///
+/// For each of the 8 world-aligned sectors, one pyramid sample is read at the
+/// sector's representative point (the cardinal or diagonal direction at far-band
+/// radius from the creature). The sample uses `GrassPyramid::sample_clamped`
+/// (O(1), integer cell coords in the chosen mip level).
+///
+/// Coord convention (wrap vs clamp):
+///   Toroidal: the world position wraps with `rem_euclid(world_size)` before
+///   converting to mip-level cell coords — identical to `bilinear_sample`'s
+///   wrap handling. This avoids the "negative coord → 0" saturating-cast bug.
+///   Walled:   the world position clamps to `[0, world_size)` before cell
+///   conversion; `sample_clamped` then edge-clamps within the level.
+///
+/// Output: `out[0..8]`, each in `[0, 1]`. The pyramid values are u8 (0=empty,
+/// 255=full); we scale by `1/255` to get the normalized density.
+///
+/// Performance: 8 pyramid taps per creature, each O(1). No AABB walk, no LUT.
+/// The near band still does the full AABB walk (`compute_grass_density_sectors`);
+/// the far band is a lightweight supplement.
+pub(crate) fn compute_grass_far_band_sectors(
+    x: f32,
+    y: f32,
+    grass: &GrassGrid,
+    out: &mut [f32; 8],
+) {
+    use crate::constants::{GRASS_CELL_SIZE, GRASS_FAR_MIP_LEVEL, GRASS_FAR_SIGHT_RADIUS};
+    *out = [0.0f32; 8];
+
+    let wrap = grass.dims.wrap_world;
+    let world_size = grass.dims.world_size;
+    let density = &grass.density;
+    let pyramid = &grass.pyramid;
+
+    // The effective cell size at this mip level (each halving doubles cell size).
+    let mip_cell = GRASS_CELL_SIZE * (1usize << GRASS_FAR_MIP_LEVEL) as f32;
+    let (lw, lh) = pyramid.level_dims[GRASS_FAR_MIP_LEVEL];
+
+    // The 8 sector sample directions (clockwise from N):
+    //   0=N (0°), 1=NE (45°), 2=E (90°), 3=SE (135°),
+    //   4=S (180°), 5=SW (225°), 6=W (270°), 7=NW (315°)
+    // Unit vectors per sector (dx, dy):
+    const DIRS: [(f32, f32); 8] = [
+        (0.0, -1.0),  // N
+        (std::f32::consts::FRAC_1_SQRT_2,  -std::f32::consts::FRAC_1_SQRT_2), // NE
+        (1.0,  0.0),  // E
+        (std::f32::consts::FRAC_1_SQRT_2,   std::f32::consts::FRAC_1_SQRT_2), // SE
+        (0.0,  1.0),  // S
+        (-std::f32::consts::FRAC_1_SQRT_2,  std::f32::consts::FRAC_1_SQRT_2), // SW
+        (-1.0, 0.0),  // W
+        (-std::f32::consts::FRAC_1_SQRT_2, -std::f32::consts::FRAC_1_SQRT_2), // NW
+    ];
+
+    let r = GRASS_FAR_SIGHT_RADIUS;
+
+    for (s, &(dx, dy)) in DIRS.iter().enumerate() {
+        // Sample point in world space.
+        let wx = x + dx * r;
+        let wy = y + dy * r;
+
+        // Apply wrap / clamp convention before converting to mip-level cell.
+        let (sx, sy) = if wrap {
+            (wx.rem_euclid(world_size), wy.rem_euclid(world_size))
+        } else {
+            (wx.clamp(0.0, world_size - 1e-4), wy.clamp(0.0, world_size - 1e-4))
+        };
+
+        // Convert to integer cell coords in the chosen mip level.
+        let cx = (sx / mip_cell) as usize;
+        let cy = (sy / mip_cell) as usize;
+        // Clamp within level bounds (sample_clamped also does this, but being
+        // explicit keeps the coord conversion readable).
+        let cx = cx.min(lw.saturating_sub(1));
+        let cy = cy.min(lh.saturating_sub(1));
+
+        let raw = pyramid.sample_clamped(density, GRASS_FAR_MIP_LEVEL, cx, cy);
+        out[s] = raw as f32 / 255.0;
+    }
+}
+
 /// v2.0 Wave 3a: species-aware creature proximity. Fills `out[0..8]` with the
 /// per-sector intensity of the nearest **same-species** neighbor and `out[8..16]`
 /// with the nearest **other-species** neighbor, using the creature's own

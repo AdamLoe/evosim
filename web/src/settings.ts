@@ -30,7 +30,9 @@ const SCHEMA_MAJOR = 2;
 // v2.0.2 Stream 1d: added six scatter kernel live-tuning sliders — all new
 // additive keys with defaults → MINOR bump 2 → 3. Existing v2 blobs keep their
 // values and merge the new keys from DEFAULTS.
-const SCHEMA_MINOR = 3;
+// v2.0.4 S6: added `grassMultisight` construction toggle → MINOR bump 3 → 4.
+// Existing v2 blobs keep their values and pick up the new key from DEFAULTS.
+const SCHEMA_MINOR = 4;
 
 /** v1.12: one row of the 8-row mutation policy table. Mirrors the Rust
  * `Bucket` struct (`src/brain.rs`). `weight` is any non-negative float;
@@ -170,6 +172,10 @@ export interface Settings {
   grassSpreadAmount: number;
   grassSpreadRing1Pct: number;
   grassSpreadRing2Pct: number;
+  // v2.0.4 S6: construction-only multi-band grass NN sight. ON = near+far band
+  // (16 grass NN inputs); OFF = near band only (8 inputs, legacy). Default ON.
+  // Must match Rust GRASS_MULTISIGHT_DEFAULT (true).
+  grassMultisight: boolean;
 }
 
 export const DEFAULTS: Settings = {
@@ -241,6 +247,8 @@ export const DEFAULTS: Settings = {
   grassSpreadAmount: 0.05,
   grassSpreadRing1Pct: 0.70,
   grassSpreadRing2Pct: 0.22,
+  // v2.0.4 S6: multi-band grass sight. Must match Rust GRASS_MULTISIGHT_DEFAULT (true).
+  grassMultisight: true,
 };
 
 const KNOWN_KEYS = new Set<string>(Object.keys(DEFAULTS));

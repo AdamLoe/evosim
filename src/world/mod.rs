@@ -59,6 +59,12 @@ mod mating_grid_regression_tests;
 #[path = "seeding_tests.rs"]
 mod seeding_tests;
 
+// v2.0.4 S6: multi-band NN grass sight (coord-convention, mip-level mapping,
+// layout width cap, smoke tests), in their own file/module.
+#[cfg(test)]
+#[path = "grass_sight_tests.rs"]
+mod grass_sight_tests;
+
 use self::nn::{chunk_ranges, dynamic_chunks};
 use self::tick::AttackPick;
 use crate::brain::{Brain, MutationPolicy, NnTopology};
@@ -176,6 +182,15 @@ pub struct DevSliders {
     /// v2.0 Wave 3a live: initiator-only post-mating cooldown (ticks). The
     /// initiator pays this after a successful `Mate`; the partner is unaffected.
     pub mating_cooldown_ticks: u32,
+    // ── v2.0.4 S6: multi-band NN grass sight ─────────────────────────────────
+    /// Construction-only: when true the NN input vector includes a second (far)
+    /// grass-density band sampled from the LOD pyramid at mip level
+    /// `GRASS_FAR_MIP_LEVEL` (radius ≈ `GRASS_FAR_SIGHT_RADIUS`). The far band
+    /// adds 8 slots. Default ON. Shapes the *next* world (changes the NN input
+    /// layout, discards old brains). Falls back to single-band automatically
+    /// when walled+species fills the MAX_NN_INPUTS budget — see nn.rs.
+    pub grass_multisight: bool,
+
     // ── v2.0.2 Stream 1d: scatter kernel live-tuning sliders ─────────────────
     // Six parameters for the stochastic u8 scatter propagation kernel. All live
     // (take effect on the next tick). Defaults mirror the Stream 1b working
@@ -233,6 +248,8 @@ impl Default for DevSliders {
             starting_species_member_count: STARTING_SPECIES_MEMBER_COUNT_DEFAULT,
             starting_species_member_variance: STARTING_SPECIES_MEMBER_VARIANCE_DEFAULT,
             mating_cooldown_ticks: MATING_COOLDOWN_TICKS_DEFAULT,
+            // v2.0.4 S6: multi-band grass sight — default ON.
+            grass_multisight: GRASS_MULTISIGHT_DEFAULT,
             // v2.0.2 Stream 1d: scatter kernel defaults — must match the Stream 1b
             // working constants so behavior is byte-identical before sliders move.
             grass_decay_pct: GRASS_DECAY_PCT_DEFAULT,
@@ -501,7 +518,8 @@ impl World {
         // drawn for, so reconcile the topology to the layout width BEFORE
         // founder draws.
         let species_mode = sliders.species_mode;
-        let nn_input_layout = self::nn::NnInputLayout::for_settings(dims.wrap_world, species_mode);
+        let grass_multisight = sliders.grass_multisight;
+        let nn_input_layout = self::nn::NnInputLayout::for_settings(dims.wrap_world, species_mode, grass_multisight);
         let nn_topology = if nn_topology.input_width() == nn_input_layout.width() {
             nn_topology
         } else {

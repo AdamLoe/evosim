@@ -46,6 +46,8 @@ const CONSTRUCTION_ONLY_SLIDERS = new Set<string>([
   "starting_species_count",
   "starting_species_member_count",
   "starting_species_member_variance",
+  // v2.0.4 S6: multi-band grass sight (changes NN layout → restart required).
+  "grass_multisight",
 ]);
 
 const TOAST_CONSTRUCTION =
@@ -110,6 +112,13 @@ export function getStartingSpeciesMemberVariance(): number {
     widgetReaders.get("starting_species_member_variance")?.() ??
     getSettings().startingSpeciesMemberVariance
   );
+}
+
+// v2.0.4 S6: multi-band grass sight accessor for the boot payload.
+export function getGrassMultisight(): boolean {
+  const v = widgetReaders.get("grass_multisight")?.();
+  if (v !== undefined) return v !== 0;
+  return getSettings().grassMultisight;
 }
 
 // ─── Live widget state (drives currentSliderState) ────────────────────────
@@ -726,6 +735,18 @@ export function installDevPanel(getBridge: () => SimBridge): void {
     settingKey: "grassSpreadRing2Pct",
     min: 0, max: 1, step: 0.01,
     formatValue: (v) => v.toFixed(2),
+  }));
+  // v2.0.4 S6: multi-band grass NN sight (construction-only — changes NN layout).
+  // ON  = near band (20u) + far band (~160u via LOD pyramid level 3).
+  // OFF = near band only (legacy single-band, 8 NN inputs).
+  // Falls back to single-band automatically when walled+species mode fills the
+  // MAX_NN_INPUTS budget (no runtime error; the toggle just becomes a no-op in
+  // that combination — see Rust nn.rs `for_settings`).
+  grassSec.appendChild(makeStagedToggle({
+    label: "Multi-band grass sight",
+    simName: "grass_multisight",
+    settingKey: "grassMultisight",
+    nextWorld: true,
   }));
   box.appendChild(grassSec);
 
