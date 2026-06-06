@@ -8,7 +8,7 @@ fresh world — there's no save, no scenario, no goal.
 **[Try it live →](https://adamloe.github.io/evosim/)** (runs entirely in your
 browser — Chrome / Edge / Firefox / Safari, desktop)
 
-![A populated world, ticking](screenshots/demo2.gif)
+![A populated world, ticking](app/assets/demo2.gif)
 
 ## What you're looking at
 
@@ -30,7 +30,7 @@ settings.
 
 The right-rail tabs let you watch and edit the sim while it runs.
 
-![NN editor open over a running world](screenshots/app+nn.png)
+![NN editor open over a running world](app/assets/app+nn.png)
 
 - **Inspector** — click a creature to see its inputs, outputs, age, energy,
   lineage.
@@ -40,7 +40,7 @@ The right-rail tabs let you watch and edit the sim while it runs.
 - **Settings** — every tunable in one place: energy economy, grass growth,
   split rules, curriculum pressure, render options.
 
-![Settings stage with profiler panel](screenshots/app+settings+perf.png)
+![Settings stage with profiler panel](app/assets/app+settings+perf.png)
 
 There's also a profiler panel showing per-phase tick costs, which is mostly
 useful when you're changing the sim and want to know what got slower.
@@ -75,8 +75,8 @@ flowchart TB
     SIM == "write game state to memory buffer" ==> REN
 ```
 
-- **Rust** compiled to WebAssembly via `wasm-pack`, single crate at the repo
-  root. The sim core is regular Rust and runs natively for tests.
+- **Rust** compiled to WebAssembly via `wasm-pack`, a single crate at
+  `app/crates/evosim/`. The sim core is regular Rust and runs natively for tests.
 - **One wasm instance, in a Web Worker.** The main thread holds no wasm. The
   worker writes snapshots into a shared buffer; the renderer reads the freshest
   slot per frame. Slider changes go the other direction as messages.
@@ -120,4 +120,7 @@ in one place.
 
 ## Using an agent or are an agent?
 
-Use the [fresh_chat.md](docs/prompts/fresh-chat.md) prompt. It will efficiently catch up your agent on all of the context of my app and answer any questions or help you with whatever you would like.
+Run the `/fresh-chat` skill (it reads [`docs/index.md`](docs/index.md) and
+[`docs/overview.md`](docs/overview.md), then waits for your task). It will
+efficiently catch your agent up on the app's context and help with whatever you
+need.

@@ -24,6 +24,8 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app
       - name: install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
       - name: install nightly + rust-src (required for wasm atomics / build-std)
@@ -31,7 +33,8 @@ jobs:
           rustup toolchain install nightly --component rust-src
           rustup target add wasm32-unknown-unknown --toolchain nightly
       - name: wasm-pack build (release, threads)
-        run: rustup run nightly wasm-pack build --target web --out-dir web/wasm --release --features threads
+        working-directory: app
+        run: rustup run nightly wasm-pack build crates/evosim --target web --out-dir ../../web/wasm --release --features threads
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -39,10 +42,10 @@ jobs:
         with:
           version: 10
       - name: pnpm install
-        working-directory: web
+        working-directory: app/web
         run: pnpm install --frozen-lockfile
       - name: vite build
-        working-directory: web
+        working-directory: app/web
         # VITE_BASE matches the repo name so assets resolve under
         # https://<user>.github.io/evosim/. Update both this and the README
         # link if the repo is ever renamed.
@@ -50,10 +53,10 @@ jobs:
           VITE_BASE: /evosim/
         run: pnpm build
       - name: add .nojekyll
-        run: touch web/dist/.nojekyll
+        run: touch app/web/dist/.nojekyll
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: web/dist
+          path: app/web/dist
 
   deploy:
     name: deploy to github pages

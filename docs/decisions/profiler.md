@@ -15,9 +15,9 @@
 - **Applies to**: `architecture/profiler.md`,
   `architecture/render-pipeline.md`,
   `architecture/simulation-core.md`.
-- **Code anchors**: `src/profiler.rs → ProfilerInner::roots`,
+- **Code anchors**: `crates/evosim/src/profiler.rs → ProfilerInner::roots`,
   `ProfilerInner::root_order`, `ensure_root`;
-  `web/src/widgets/perf-panel.ts → TREE_ORDER`.
+  `app/web/src/widgets/perf-panel.ts → TREE_ORDER`.
 
 ### No rollups — every row is a real timer pair
 
@@ -29,7 +29,7 @@
   parent measurements give `parent_total - sum(children_total)` as a
   positive "overhead" number you can act on.
 - **Applies to**: `architecture/profiler.md`.
-- **Code anchors**: `src/profiler.rs → SpanGuard` (RAII drop records
+- **Code anchors**: `crates/evosim/src/profiler.rs → SpanGuard` (RAII drop records
   to the node's own ring), `Profiler::record_under_root`.
 
 ### `tick.nn` and `tick.grass_step` are LEAVES in the `tick` tree
@@ -43,7 +43,7 @@
   Two separate trees make the semantic split visible.
 - **Applies to**: `architecture/profiler.md`,
   `architecture/simulation-core.md`.
-- **Code anchors**: `src/world/mod.rs → step` (the
+- **Code anchors**: `crates/evosim/src/world/mod.rs → step` (the
   `tick.grass_step` and `tick.nn` profile_span! call sites + the
   `record_under_root("grass_step", ...)` calls).
 
@@ -59,8 +59,8 @@
   brackets work because the accumulator is summable (commutative).
 - **Applies to**: `architecture/profiler.md`,
   `architecture/simulation-core.md`.
-- **Code anchors**: `src/world/nn_stats.rs → NnStats`
-  (the `tick_*_total_us` parent fields), `src/grass.rs → GrassGrid`
+- **Code anchors**: `crates/evosim/src/world/nn_stats.rs → NnStats`
+  (the `tick_*_total_us` parent fields), `app/crates/evosim/src/grass/mod.rs → GrassGrid`
   (the `par_chunks_us` / `chunks_mut_us` / `row_body_us` /
   `row_body_self_us` fields).
 
@@ -75,13 +75,13 @@
   one is active would be a footgun.
 - **Applies to**: `architecture/profiler.md`,
   `architecture/simulation-core.md`.
-- **Code anchors**: `src/world/mod.rs → step` (the
+- **Code anchors**: `crates/evosim/src/world/mod.rs → step` (the
   `record_under_root("grass_step", "dispatch", par + chunks_mut)`
   call).
 
 ### TS-side `frame` mirror; stitched in by the panel
 
-- **Decision**: `web/src/perf.ts` maintains its own independent
+- **Decision**: `app/web/src/perf.ts` maintains its own independent
   `frame` tree with the same ring-buffer + JSON shape as the Rust
   profiler. The perf panel concatenates the two reports before
   rendering.
@@ -91,7 +91,7 @@
   unify the four trees in display.
 - **Applies to**: `architecture/profiler.md`,
   `architecture/render-pipeline.md`.
-- **Code anchors**: `web/src/perf.ts → span`, `reportJson`,
+- **Code anchors**: `app/web/src/perf.ts → span`, `reportJson`,
   `setProfilerEnabled`.
 
 ### `span("frame")` at the empty stack attaches to the root
@@ -104,7 +104,7 @@
   duplicate `frame.frame` row whose total equals the outer span.
 - **Applies to**: `architecture/profiler.md`,
   `architecture/render-pipeline.md`.
-- **Code anchors**: `web/src/perf.ts → span` (the
+- **Code anchors**: `app/web/src/perf.ts → span` (the
   `stack.length === 0 && name === "frame"` branch).
 
 ### Worker-side `worker.snapshot.write` span is a known dead row
@@ -118,8 +118,8 @@
   receiving side (which would no longer measure the same thing).
 - **Applies to**: `architecture/profiler.md`,
   `architecture/shared-memory-and-protocol.md`.
-- **Code anchors**: `web/src/sim-worker.ts → writeSnapshotToSAB`
-  (the `span("worker.snapshot.write")` call), `web/src/perf.ts`.
+- **Code anchors**: `app/web/src/sim/worker.ts → writeSnapshotToSAB`
+  (the `span("worker.snapshot.write")` call), `app/web/src/perf.ts`.
 - **Revisit when**: a profile pass needs the SAB write cost visible
   somewhere; that's the time to plumb the worker's perf state to main.
 
@@ -145,14 +145,14 @@
   path into a fallback. A new `record_drained` API alongside
   `record_under_root` was rejected because every drain caller is
   paired anyway — splitting the API doubles the surface for no win.
-- **Code anchors**: `src/world/nn_stats.rs → NnStats`,
+- **Code anchors**: `crates/evosim/src/world/nn_stats.rs → NnStats`,
   `record_chunk_subphases`, `record_chunk_lite`;
-  `src/grass.rs → GrassGrid` (`dispatch_calls`, `row_body_calls`);
-  `src/world/mod.rs → step` (the drain into `record_under_root`).
+  `app/crates/evosim/src/grass/mod.rs → GrassGrid` (`dispatch_calls`, `row_body_calls`);
+  `crates/evosim/src/world/mod.rs → step` (the drain into `record_under_root`).
 
 ### JSON adds `total_call_count`; legacy `call_count` retained as sample count
 
-- **Decision**: `profile_report_json` and `web/src/perf.ts::reportJson`
+- **Decision**: `profile_report_json` and `app/web/src/perf.ts::reportJson`
   emit a `total_call_count` field on every node (sum of per-sample
   call counts). The existing `call_count` field keeps its meaning —
   sample count in the ring buffer — so any reader on the old shape
@@ -168,8 +168,8 @@
   `(u32, u32, u32)` — +33% per-sample memory. At
   `SAMPLES_PER_NODE = 4096` × `MAX_NODES = 256` that's ~4 MB worst
   case, acceptable for a runtime-toggleable dev tool.
-- **Code anchors**: `src/profiler.rs → serialize_node`, `Node.samples`
-  (the 3-tuple shape); `web/src/perf.ts → recordSample`,
+- **Code anchors**: `crates/evosim/src/profiler.rs → serialize_node`, `Node.samples`
+  (the 3-tuple shape); `app/web/src/perf.ts → recordSample`,
   `serializeNode`.
 
 ### Panel renders a single `window: X.X s` header above the four trees
@@ -189,7 +189,7 @@
 - **Revisit when**: A tree adopts a non-per-tick sampling rate (the
   single header becomes a lie at that point — switch to per-tree
   headers).
-- **Code anchors**: `web/src/widgets/perf-panel.ts → renderTreesStacked`.
+- **Code anchors**: `app/web/src/widgets/perf-panel.ts → renderTreesStacked`.
 
 ### 1 Hz worker→main poll cadence; profiler default OFF
 
@@ -203,8 +203,8 @@
   four separate request types.
 - **Applies to**: `architecture/profiler.md`,
   `architecture/shared-memory-and-protocol.md`.
-- **Code anchors**: `web/src/widgets/perf-panel.ts → POLL_INTERVAL_MS`,
-  `web/src/sim-worker.ts → handle` (the `request_profile_report`
+- **Code anchors**: `app/web/src/widgets/perf-panel.ts → POLL_INTERVAL_MS`,
+  `app/web/src/sim/worker.ts → handle` (the `request_profile_report`
   arm).
 
 ## See also

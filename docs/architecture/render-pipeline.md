@@ -14,7 +14,7 @@ via typed arrays — no copy, no postMessage.
 
 Both the grass and biome textures are fixed **4096×4096 R8** allocations
 (`GRASS_LOD_BUDGET_AXIS = 4096`, single-sourced in Rust via `gen_bindings` →
-`web/src/generated/lod-constants.ts`). Each frame the renderer uploads only the
+`app/web/src/generated/lod-constants.ts`). Each frame the renderer uploads only the
 sim-chosen clipmap window (`win_w × win_h` bytes) into the `(0, 0)` corner
 via `texSubImage2D`, then applies a UV transform (`u_uv_scale`/`u_uv_offset`)
 to map the world-space quad into that window. The sim worker selects the
@@ -23,22 +23,29 @@ pyramid LOD level and window origin and publishes them in the snapshot header
 the default scale (`grass_dim = 1920 < 4096`) the window equals the full
 field and the upload is byte-identical to a full-field path.
 
-The **`lod_bias`** slider (idx 60, live f32, default 0.0) subtracts from the
-computed mip level for finer detail. It is clamped ≥ 0 before application. If
-the bias requests a level finer than the budget can hold, the window clamps at
-`GRASS_LOD_BUDGET_AXIS` and **crops viewport edges** — it is a "nudge within
-budget," not an independent resolution override.
+**LOD selection in `write_snapshot`** happens in one of two paths keyed on
+`grass_lod_step` (slider idx 63, live, default 0 = Auto):
+- **Auto path** (`grass_lod_step = 0`): auto-formula `floor(log2(visible_span /
+  4096))`, then `lod_bias` (slider idx 60) is subtracted for finer-detail nudging.
+  `lod_bias` is clamped ≥ 0 and is active **only in Auto mode**. If the bias
+  requests finer than the budget, the window clamps at `GRASS_LOD_BUDGET_AXIS`
+  and **crops viewport edges** — a "nudge within budget."
+- **Stepper path** (`grass_lod_step ≥ 1`): forces an absolute mip level
+  (1→L0/Full, 2→L1/Half, 3→L2/Quarter, 4→L3/Eighth, 5→L4/Sixteenth). Overrides
+  the auto formula AND `lod_bias` entirely. No restart required (LIVE setting).
 
-**Aspect-ratio fix (v2.0.4 S1):** `vis_cells_y` is now derived from `viewport_h`
+The **`lod_bias`** slider (idx 60) is therefore an Auto-path-only internal knob
+when the stepper is non-zero.
+
+**Aspect-correct window height:** `vis_cells_y` is derived from `viewport_h`
 independently via `visible_cell_span_y = visible_cell_span_x × (viewport_h /
-viewport_w)`. Previously `vis_cells_y = vis_cells_x` assumed a square viewport.
-The full-field invariant holds for `win_w` (horizontal) only; `win_h` is correctly
-aspect-matched.
+viewport_w)`. The full-field invariant holds for `win_w` (horizontal) only; `win_h`
+is correctly aspect-matched.
 
 ## What it owns
 
 - The GL programs (`disc`, `grass`, `biome`, `frame`), VAOs, instance
-  buffers, the fixed 2048² R8 grass texture, the fixed 2048² R8 biome
+  buffers, the fixed 4096² R8 grass texture, the fixed 4096² R8 biome
   texture, and the instance scratch buffer.
 - JS-side **frustum culling**. Per-creature x/y/radius is read from the
   SoA; off-screen creatures are skipped before they touch the instance
@@ -66,13 +73,13 @@ aspect-matched.
 - **The SAB layout or the snapshot byte stride** — owned by
   [`shared-memory-and-protocol.md`](shared-memory-and-protocol.md). The
   renderer reads `CREATURE_STRIDE` and the slot-offset helpers from
-  `sim-bridge.ts`.
+  `sim/bridge.ts`.
 - **The sim tick rate or any sim mutation** — owned by
   [`worker-runtime.md`](worker-runtime.md). The render rate is just RAF.
 - **The profile-tree shape** — owned by [`profiler.md`](profiler.md).
   The renderer only opens spans by name.
 - **The dev-panel UI, the rail tabs, the inspector** — those live in
-  `web/src/widgets/` and `web/src/rail/` and only border the renderer
+  `app/web/src/widgets/` and `app/web/src/rail/` and only border the renderer
   via the camera + the snapshot views passed into `renderWorld`.
 
 ## Per-frame shape (in `main.ts`)
@@ -106,8 +113,8 @@ RAF callback (wrapped in `span("frame")`):
      // (mode-downsampled, same win_w×win_h as the grass window).
      // windowMeta carries mip_level, win_origin_x/y, win_w/h, tex dims,
      // wrap mode; consumed each frame to drive the UV transform + texSubImage2D.
-     // Also writes camera SAB lanes (cx/cy/zoom as f32-bits at slots 120-122;
-     // viewport_w/h as u32 at slots 123-124) so the worker knows the view.
+     // Also writes camera SAB lanes (cx/cy/zoom as f32-bits at slots 136-138;
+     // viewport_w/h as u32 at slots 139-140) so the worker knows the view.
   8. update top-left status strip (world_seed) + perf-panel status line
 ```
 
@@ -142,38 +149,9 @@ the discoverable surface, the perf widget is for heavy debugging.
 ## Per-creature instance pack
 
 Inside `renderWorld`, the JS frustum cull walks `pop` creatures from the
-Float32Array view in stride-8 chunks. **v2.0 Wave 2a/2b repacked the
-creature lanes** (stride/byte-size unchanged: 8 lanes / 32 B):
-
-```text
-// SoA lane layout (Float32Array view, plus a Uint32Array view over the
-// same backing buffer for the raw-u32 lanes 3/4/5/6):
-//   [0] x (f32)   [1] y (f32)   [2] radius (f32, body_size-derived)
-//   [3] color_u32 (RGBA8 LE, A=255)   [4] id_lo (u32)   [5] id_hi (u32)
-//   [6] packed_u32   [7] pad
-for i in 0..pop:
-  base = i * 8
-  x       = f32[base + 0]
-  y       = f32[base + 1]
-  radius  = f32[base + 2]                 // body_size-driven (genome 0.5..1.5)
-  packed  = u32[base + 3]                 // display color, packed RGBA8
-  r = (packed       ) & 0xFF;  g = (packed >> 8) & 0xFF;  b = (packed >> 16) & 0xFF
-  idLo    = u32[base + 4];  idHi = u32[base + 5];  cid = idHi*2^32 + idLo
-  flags   = u32[base + 6]                 // ring-flash + reserved species_id
-  flashTag   =  flags        & 0x7        // FlashTag 0..5 (src/creature.rs)
-  flashTicks = (flags >> 3)  & 0xF        // 0..FLASH_TICKS(5) countdown
-  // v2.0 Wave 1c: for each wrap offset (see below):
-  //   cull if (x+ox, y+oy) ± (r + margin) is outside the camera viewport
-  //   emit one 8-float instance record into the instance scratch buffer:
-  //     [x, y, radius_px, inner_px, r, g, b, alpha]
-```
-
-The `color_u32` lane **replaces** the old three `color_r/g/b` f32 lanes
-(the action-EMA display color is gone). The Rust side now derives the
-display color from the genome via an HSV mapping (hue ← diet, saturation
-← body_size, value ← max_speed) and packs it RGBA8 little-endian with
-A=255, so the old 125/255 brightness floor was dropped — creatures stay
-legible by construction.
+Float32Array view in stride-8 chunks. Creature instance lanes are decoded
+per [architecture/shared-memory-and-protocol.md → Creature SoA](shared-memory-and-protocol.md);
+the GL pack reads them in `render/gl.ts` → `renderWorldImpl`.
 
 Then one `gl.drawArraysInstanced(TRIANGLE_STRIP, 0, 4, bodyCount)` call
 covers every visible body (including wrapped ghost copies). Bodies are
@@ -181,13 +159,16 @@ filled discs; the `disc` fragment shader switches to an annulus when
 `v_inner_px > 0` (highlight pass), and to a **flat ~1px point** when
 `v_inner_px < 0`.
 
-### v2.0 Wave 1c: survey camera, sub-pixel points, wrap-aware draw
+### Survey camera, sub-pixel points, wrap-aware draw
 
-- **Sub-pixel → flat point.** At survey zoom a body's on-screen radius
-  drops below 1px. When `radiusWorld × PX_PER_SIZE × zoom < 1` the pack
-  emits `radiusPx = 1` and the `inner_px = -1` sentinel; the `disc` FS
-  short-circuits to a flat-color fill (no AA / shading / ring) so faction
-  territory color stays legible when zoomed all the way out.
+- **Sub-pixel → radial-shaded dot.** At survey zoom a body's on-screen
+  radius drops below 1px. When `radiusWorld × PX_PER_SIZE × zoom < 1`
+  (raw radius < `POINT_THRESHOLD_PX = 1.0`) the pack emits `radiusPx = 1`
+  and the `inner_px = -1` sentinel; `DISC_FS` renders a radial gradient
+  (`shade = mix(1.3, 0.6, r)`, bright centre → dark edge, alpha hardcoded 1.0)
+  — no AA, no outline ring. Action-tint blends the dot color toward the active
+  flash action color when `flashTicks > 0` (using existing `packed_u32` data).
+  No halo on bottom-band dots (`HALO_ALPHA_BOTTOM = 0.0`).
 - **Wrap-aware cull + draw.** When `wrap_world` is on and the camera
   frustum straddles a seam (`minX < 0`, `maxX > world_size`, and the y
   equivalents), the pack builds the small per-axis offset set
@@ -201,53 +182,57 @@ filled discs; the `disc` fragment shader switches to an annulus when
   world from one view; `makeCamera` opens at `zoom = 1.0` (≈1500u across
   a typical ~1500px viewport), centered on `world_size / 2`.
 
-## Creature appearance (v1.9.2)
+## Creature appearance
 
-The body fragment shader (`DISC_FS`) keeps its annulus shortcut for
-trait rings and the highlight ring — those produce a flat fill (UI
-elements, not creatures). The filled-body branch (when `inner_px = 0`)
-runs the new shading:
+The body fragment shader (`DISC_FS`) has three LOD-driven branches keyed on
+the `inner_px` sentinel (packed as `v_radii_px.y`):
 
-- **AA edge.** `alpha = 1 - smoothstep(1 - aa, 1, r)` against a per-
-  fragment `aa = fwidth(r) * 1.5`. Soft at low zoom, crisp at high.
-- **Radial shade.** `shade = mix(1.15, 0.85, r)` — 15% brighter at
-  center, 15% darker at the rim. Pure multiplication so the genome
-  display color (v2.0 Wave 2a; was the action-EMA color) stays readable.
-- **Outline ring.** Two `smoothstep`s carve a soft annulus between
-  `u_ring_inner = 0.84` and `u_ring_outer = 0.92`. Stops are constants
-  set once at link time (not theme-owned — thickness doesn't need to
-  be themed). The color is theme-driven via the `--creature-ring`
-  rgba CSS var.
+- **Annulus branch** (`inner_px > 0`): flat-fill for trait rings and highlight
+  rings. These are UI elements, not creature bodies.
+- **Shaded disc branch** (`inner_px = 0`, mid and near band): AA edge +
+  radial shade + soft outline ring. The ring is **zoom-driven**: near zoom
+  (≥ `NEAR_THRESHOLD_PX = 12 px`) → full 4%-wide ring (`0.96..1.0`); mid zoom
+  (`MID_THRESHOLD_PX = 4 px` to `NEAR`) → slim ring (`0.993..1.0`); below mid →
+  ring suppressed.
+- **Radial-shaded dot branch** (`inner_px = -1`, bottom band: raw radius < 1 px):
+  a radial gradient (`shade = mix(1.3, 0.6, r)`, bright centre → dark edge),
+  alpha hardcoded to 1.0, no AA disc and no outline ring. Replaced the old
+  flat single-color fill so faction territories stay legible at survey zoom.
 
-A separate halo program (`HALO_VS` / `HALO_FS`) issues a second
-instanced draw against the SAME body instance buffer through its own
-VAO. The vertex shader scales the quad by 2.0 around the body center
-(a 4.0 corner multiplier in NDC space). Blend mode is
-`(SRC_ALPHA, ONE)` during the draw and restored to
-`(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)` immediately after.
+**Halo (per-instance LOD multiplier).** A separate `HALO_VS`/`HALO_FS` program
+issues a second instanced draw against the SAME body instance buffer. Peak
+halo strength is `readHaloStrength() × 0.6` (global theme alpha × 0.6 weakening).
+Per-instance LOD band multiplier is encoded in `a_color.a` (= `v_color.a`):
+- `HALO_ALPHA_NEAR = 1.0` — near band (full halo).
+- `HALO_ALPHA_MID = 0.4` — mid band (40% strength; shrunk appearance).
+- `HALO_ALPHA_BOTTOM = 0.0` — bottom band (no halo on radial-shaded dots).
+The `HALO_FS` multiplies `v_color.a` into the final alpha, so bottom-band
+instances produce zero output without a separate draw call per band. The
+vertex shader scales the quad 2× around the body centre (4.0 corner multiplier in
+NDC). Blend mode `(SRC_ALPHA, ONE)` during the draw. The rim-light Gaussian is
+`exp(-(r - 0.55)² × 90)`, gated by `outside = smoothstep(0.48, 0.53, r)` and
+`outerFade = 1 - smoothstep(0.80, 1.0, r)`, with glow color mixed 25% toward
+`vec3(0.55, 0.75, 1.0)`. No pulse animation. Halo pass skipped at high pop
+— see threshold in `render/gl.ts` → `renderWorldImpl` (`pop <= ...` guard).
 
-The fragment shader is a **rim-light**, not a cloud: a narrow Gaussian
-band `exp(-(r - 0.55)² · 90)` centered just outside the body silhouette
-(body occupies r ∈ [0, 0.5] of the 2×-scaled quad), gated by an
-`outside = smoothstep(0.48, 0.53, r)` term so the glow doesn't fill the
-body interior, and an `outerFade = 1 - smoothstep(0.80, 1.0, r)` term
-so the discard at r = 1 never reads as a hard ring. The glow color is
-the creature color mixed 25% toward `vec3(0.55, 0.75, 1.0)` so it
-reads as bioluminescent rather than just translucent body color.
-There is no pulse animation — at high pop it presented as flicker.
-Per-frame alpha (peak rim brightness) comes from the
-`--creature-halo` rgba CSS var. The pass is skipped entirely when
-`pop > 8000` (perf hygiene).
+**Action-tint (bottom-band dots).** When a creature in the bottom band has
+`flashTicks > 0` (decoded from `packed_u32` lane 6 — no snapshot layout
+change), the dot color is blended toward the flash tag's action color by
+`tintStrength = (flashTicks / FLASH_TICKS_MAX) × 0.6`. Uses the existing
+`flashTag`/`flashTicks` fields from the creature SoA's `packed_u32`; no additional
+snapshot fields. The tint is applied only to bottom-band (radial-shaded dot)
+instances; mid/near-band creatures express the flash via the separate ring-flash
+annulus pass (unchanged).
 
 **Draw order per frame:** grass → world-bounds frame → halo → trails →
 bodies → highlight ring. Halo runs first so each body paints over its
 own glow; trails run between halo and body so the body's leading edge
 always covers the trail's lead-in pixel.
 
-## Snapshot interpolation (v1.9.2)
+## Snapshot interpolation
 
 The renderer interpolates body positions between sim snapshot flips so
-motion is smooth at any TPS. State is module-level in `render-gl.ts`:
+motion is smooth at any TPS. State is module-level in `render/gl.ts`:
 
 - `prevById: Map<id, {x, y}>` — positions at the previous snapshot.
 - `currById: Map<id, {x, y}>` — positions at the current snapshot.
@@ -278,7 +263,7 @@ Cost: the per-flip Map rebuild is ~1–2 ms at 32 k entries; the per-RAF
 `Map.get` lookup is ~0.5 ms at 32 k. Both maps are reused across flips
 (clear, don't recreate) so the heap doesn't churn.
 
-`resetInterpolation()` is exported from `render-gl.ts` and called by
+`resetInterpolation()` is exported from `render/gl.ts` and called by
 `main.ts → restart()` after `resetStats()`. It clears both maps,
 resets `lastSeenSeq` to `-1`, and stamps `flipTimeMs = now()` so the
 first post-restart frame doesn't lerp from positions in the dead
@@ -289,9 +274,7 @@ worker's last snapshot.
 A thin quad-as-line per moving creature draws from `prev` (one full
 tick ago) to the current interpolated body position. The fragment
 fades alpha from 0 at the back to `v_color.a` at the front, so the
-body looks like it's dragging a comet tail one tick long. The earlier
-`lerp(prev, curr, alpha - 0.4)` start point was dropped — at any
-plausible TPS the resulting segment was sub-pixel. Implementation: a
+body looks like it's dragging a comet tail one tick long. Implementation: a
 dedicated `TRAIL_VS` / `TRAIL_FS` program with its own VAO and
 instance buffer (per-instance: start xy, end xy, color rgba, thickness
 in px). The instance buffer is pre-allocated to the
@@ -299,9 +282,10 @@ in px). The instance buffer is pre-allocated to the
 `max(2, radiusPx · 0.6)` per creature so big creatures get visible
 tails and small ones stay legible at low zoom. Trails are skipped
 when `dx² + dy² < 0.04` (stationary creatures) and the whole pass is
-disabled when `pop > 12000`.
+disabled at high pop — see threshold in `render/gl.ts` → `renderWorldImpl`
+(`enableTrails` guard).
 
-## Action ring-flash pass (v2.0 Wave 2b)
+## Action ring-flash pass
 
 Drawn **on top of the bodies**, inside the body-pack loop. For each
 creature with `flashTicks > 0` (decoded from `packed_u32` lane 6), the
@@ -323,44 +307,24 @@ annulus is not legible.
 **Body-ring LOD.** The outline ring (`u_ring_inner` / `u_ring_outer`
 uniforms) is a per-draw-call zoom-scaled uniform, not per-creature. A
 representative radius (`1.0 × PX_PER_SIZE × zoom`) determines the tier:
-far zoom (`< MID_THRESHOLD_PX`) → ring suppressed (`inner == outer ==
-1.0`); mid zoom (`MID` to `NEAR_THRESHOLD_PX` = 12 px) → slim 1.5%-wide
-ring (`0.985..1.0`); near zoom (`≥ NEAR`) → full 4%-wide ring
+far/bottom zoom (`< MID_THRESHOLD_PX = 4 px`) → ring suppressed (`inner == outer ==
+1.0`); mid zoom (`MID` to `NEAR_THRESHOLD_PX = 12 px`) → slim ~0.7%-wide
+ring (`0.993..1.0`); near zoom (`≥ NEAR`) → full 4%-wide ring
 (`0.96..1.0`). Thresholds are `const` in `renderWorldImpl`.
 
-**FlashTag → color legend** (RGBs owned TS-side in `render-gl.ts`,
-matching the `FlashTag` enum order in `src/creature.rs`):
-
-| tag | name | meaning | color |
-|----:|------|---------|-------|
-| 1 | Born | just born | teal |
-| 2 | Grazed | grazed | green |
-| 3 | Attacked | attacked | yellow |
-| 4 | CreatedChild | created a child (split initiator) | blue |
-| 5 | Killed | killed another creature | red |
-
-Tag 0 (`None`) is never drawn. The action ring-flash is **distinct from
-and coexists with** the inspector selection ring (the yellow highlight
-pass below) — a selected, flashing creature shows both rings at once.
+**Flash tag colors and meanings** are owned by
+[`architecture/simulation-core.md → Action ring-flash (FlashTag)`](simulation-core.md).
 
 ## Highlight pass
 
 Triggered when `highlightMap.size > 0` and `pop > 0`. Builds a
 `Uint32Array` view over the same backing buffer as `creatures` and
-reads `id_lo` / `id_hi` from each creature's 32-byte stride. **v2.0
-Wave 2b moved the id halves to lanes 4/5** (were 6/7):
-
-```ts
-const idView = new Uint32Array(creatures.buffer, creatures.byteOffset,
-                                pop * stride * (creatures.BYTES_PER_ELEMENT / 4));
-const idLo = idView[i*8 + 4];
-const idHi = idView[i*8 + 5];
-const cid  = idHi * 4294967296 + idLo;       // exact in f64 up to 2^53
-const exp  = highlightMap.get(cid);
-if (exp === undefined || nowMs >= exp) continue;
-// emit one ring instance: outer = radiusPx + 4, inner = radiusPx + 2,
-// color (255,200,50) — the distinct yellow selection ring.
-```
+reads `id_lo` / `id_hi` from each creature's 32-byte stride; current
+lane indices in `render/gl.ts` → `renderWorldImpl` (id_lo at lane 4,
+id_hi at lane 5 — see [shared-memory-and-protocol.md → Creature SoA](shared-memory-and-protocol.md)
+for the canonical layout). Emits one ring instance per match: outer =
+radiusPx + 4, inner = radiusPx + 2, color (255, 200, 50) — the distinct
+yellow selection ring.
 
 The pass is rare (≤ 1–2 rings/frame typically) so it does not need to
 fit in the body-pack loop.
@@ -384,9 +348,10 @@ set to 1 at init; R8 is a normalized unorm format so the shader's
 **Biome.** The per-slot biome window (mode-downsampled, same `win_w × win_h`
 as grass) is appended immediately after the grass region in the slot
 (`biomeWinOffset`). It is uploaded the same way — `texSubImage2D` of
-`win_w × win_h` bytes into the `(0, 0)` corner of its own 2048² R8 texture
+`win_w × win_h` bytes into the `(0, 0)` corner of its own 4096² R8 texture
 — every frame. The biome texture uses `NEAREST` filtering so each cell
-renders as a flat color.
+renders as a flat color. For biome semantics (id-to-type mapping), see
+[`architecture/biome.md`](biome.md).
 
 **LOD level.** The sim's Rust worker computes the pyramid level and window
 origin each tick (`write_snapshot` reads the camera SAB lanes and publishes
@@ -416,9 +381,44 @@ frustum extends past a world edge, `renderWorldImpl` issues extra grass
 and biome draw calls with a shifted camera position (the per-axis offset
 set `{-W, 0, +W}` shared with creatures), so both layers tile seamlessly.
 
-**NEAREST mip filter.** Both textures use `gl.NEAREST` for min and mag
-filtering. Trilinear blending is reserved for a future pass (one
-`texParameteri` change enables it when `u_lod_blend` is wired).
+**Texture filters.** The **biome** texture uses `gl.NEAREST` (min + mag) so each
+cell stays a flat color. The **grass** texture uses `gl.LINEAR` (min + mag) to feed
+the grass shader's smoothing path. Every grass knob below is a **live Display
+setting** whose default reproduces the original blocky look exactly (so a fresh
+blob renders identically); the renderer reads `getSettings()` each frame. The
+`GRASS_FS` pipeline is: **smooth the density intensities → ramp them → optionally
+overlay procedural texture**.
+
+*Smoothing (intensity filtering):*
+- **`grassSmoothing`** ("Grass smoothing", 0..1) — blends crisp snapped-texel
+  sampling (0, original) → a **16-tap Catmull-Rom bicubic** upscale (`texBicubic`):
+  smooth curved gradients, no bilinear diamonds, not mushy.
+- **`grassSoftness`** ("Grass softness", 0..1) — an extra 3×3 tent **blur**
+  (`texBlur`) layered on top, radius scaling with the value, for a soft cloud-like
+  field. 0 = none.
+
+*Intensity → look ramp* (maps smoothed density `d` to alpha + color):
+- **`grassDensityFloor`** (0..0.5) — density below this reads empty; the rest
+  rescales up. `d' = clamp((d − floor)/(1 − floor))`.
+- **`grassContrast`** (gamma, 0.3..3, def 1.0 = linear) — `d' = pow(d', contrast)`.
+- **`grassBrightness`** (0.5..2, def 1.0) — peak green multiplier (lushness).
+- Output: **alpha = d' × grassOpacity** (low density = faint, shows terrain),
+  **color = grass-tint × grassBrightness**.
+
+*Procedural texture overlay* (optional, **`grassTexture`** master, default 0 = off):
+- **`grassEdgeErosion`** — coarse fbm multiplied into density (empties stay empty),
+  eroding patch borders into ragged/clumpy shapes.
+- **`grassShadeVariation`** — finer fbm varying blade brightness.
+- **`grassBladeSize`** — fine-noise wavelength in **world units** (patch band 6×).
+
+**The procedural noise is keyed on absolute world position** (`v_world`, passed
+from `GRASS_VS`), **not** texture/clipmap coordinates. This is load-bearing:
+keying on `v_uv × textureSize` made the pattern swim/jump while zooming because the
+clipmap window origin and mip level shift per frame. World-space keying locks it to
+the ground. (The underlying *density* still LOD-pops at mip switches — clipmap
+design, separate from this overlay; pin "Grass resolution" / `grass_lod_step` to a
+fixed level to avoid it.) Per-mip trilinear density blending is still reserved via
+`u_lod_blend` (always `0.0`).
 
 > **Known limitation — toroidal wrap seam.** A clipmap window straddling
 > the world wrap boundary (grass_dim > 2048, non-default zoom, toroidal
@@ -433,29 +433,27 @@ entirely — at high cell counts this is a real perf win.
 
 A second full-screen world-quad drawn **UNDER the grass**, before it, so
 grass density brightens green on top. It samples an **R8 biome-id texture**
-(one u8 `Biome` tag per cell: 0=Plains, 1=Water, 2=Desert) with **NEAREST**
-filtering so each cell is a flat color. The biome data is carried as a
-windowed clipmap in the per-slot biome window (mode-downsampled, same
+with **NEAREST** filtering so each cell is a flat color. The biome data is
+carried as a windowed clipmap in the per-slot biome window (mode-downsampled, same
 `win_w × win_h` as the grass window); the renderer uploads it via
 `texSubImage2D` every painted frame using the same UV transform as grass —
-biome tint therefore tracks the grass window at every LOD level. The
-fragment shader recovers the integer tag (`floor(.r * 255 + 0.5)`) and maps
-it to a flat color:
+biome tint therefore tracks the grass window at every LOD level. For biome
+id-to-color mapping and semantics, see [`architecture/biome.md`](biome.md).
 
-| Biome  | id | color (rgb)        |
-|--------|----|--------------------|
-| Plains | 0  | `74, 106, 58`      |
-| Water  | 1  | `40, 92, 168`      |
-| Desert | 2  | `196, 178, 128`    |
-
-These are **visual-identity defaults** (Wave 1c) — adjust in `BIOME_FS`'s
-`u_plains` / `u_water` / `u_desert` uniforms.
+The fragment alpha is the `u_opacity` uniform (the live **`biomeOpacity`**
+"World opacity" Display setting, default 1.0). The biome quad is the bottom
+layer drawn over the cleared canvas with the standard `SRC_ALPHA,
+ONE_MINUS_SRC_ALPHA` blend, so `biomeOpacity < 1` fades the terrain toward
+the canvas background; grass (with its own `grassOpacity`) still paints
+fully on top.
 
 ### Grass shading
 
-- Texture filter is `NEAREST` (min + mag); trilinear blending is reserved
-  via the `u_lod_blend` uniform (always `0.0`) and can be enabled later by
-  changing one `texParameteri` call.
+- Texture filter is `LINEAR` (min + mag); the `u_detail` path (`grassSmoothing`
+  setting) fades from the snapped-texel (nearest, blocky) look at 0 toward
+  smoothstep-interpolated density + procedural fbm grass texture at 1 (see
+  "Texture filters" above). Per-mip trilinear blending across LOD levels is still
+  separately reserved via `u_lod_blend` (always `0.0`).
 - `u_grass_tint` (vec3) is parsed from the `--grass-tint` CSS var via
   `getComputedStyle` and cached against the previous string so we
   re-parse only on theme swap.
@@ -468,21 +466,21 @@ These are **visual-identity defaults** (Wave 1c) — adjust in `BIOME_FS`'s
 
 ## Code anchors
 
-- `web/src/render-gl.ts` → `renderWorld`, `renderWorldImpl`,
+- `render/gl.ts` → `renderWorld`, `renderWorldImpl`,
   `initRenderer`, `DISC_VS`/`DISC_FS`, `GRASS_VS`/`GRASS_FS`,
   `BIOME_VS`/`BIOME_FS`, `FRAME_VS`/`FRAME_FS`, `FLOATS_PER_INSTANCE`,
   `GRASS_CELL_SIZE`, the wrap-offset ghost-copy loop, `PERMANENT_EXP`,
-  `HIGHLIGHT_FADE_MS`.
-- `web/src/sim-bridge.ts` → `GRASS_LOD_BUDGET_AXIS`, `WindowMetadata`,
+  `HIGHLIGHT_FADE_MS`, the halo-skip and trail-skip pop thresholds.
+- `sim/bridge.ts` → `GRASS_LOD_BUDGET_AXIS`, `WindowMetadata`,
   `readWindowMetadata`, `makeSlotLayout`, `grassOffset`, `biomeWinOffset`,
   `SNAPSHOT_HEADER_BYTES`, `CTRL_CAMERA_CX_BITS`/`CTRL_CAMERA_CY_BITS`/
   `CTRL_CAMERA_ZOOM_BITS`/`CTRL_CAMERA_VIEWPORT_W`/`CTRL_CAMERA_VIEWPORT_H`.
-- `web/src/render.ts` → `Camera`, `PX_PER_SIZE`, `MIN_ZOOM`/`MAX_ZOOM`,
+- `render/scene.ts` → `Camera`, `PX_PER_SIZE`, `MIN_ZOOM`/`MAX_ZOOM`,
   `makeCamera`, `clampCamera`, `worldToScreen`.
-- `web/src/camera.ts` → `attachCameraControls`.
-- `web/src/main.ts` → the RAF `frame` callback, camera SAB lane writes,
+- `render/camera.ts` → `attachCameraControls`.
+- `app/web/src/main.ts` → the RAF `frame` callback, camera SAB lane writes,
   `getLatestWindowMetadata`, and `spawnSimWorker`'s SAB binding.
-- `web/src/rail/highlight.ts` → `highlights` map, TTL semantics.
+- `rail/highlight.ts` → `highlights` map, TTL semantics.
 
 ## Update when
 
@@ -490,11 +488,11 @@ These are **visual-identity defaults** (Wave 1c) — adjust in `BIOME_FS`'s
   pack reads, id extraction offsets all break).
 - The grass/biome texture format changes (the `gl.R8` / `gl.RED` /
   `gl.UNSIGNED_BYTE` triple and the upload path). The texture dimensions
-  are now fixed at `GRASS_LOD_BUDGET_AXIS²` and do not change per boot.
+  are fixed at `GRASS_LOD_BUDGET_AXIS²` and do not change per boot.
 - The clipmap window metadata layout changes (snapshot header bytes
   [32..64); `readWindowMetadata`; the `u_uv_scale`/`u_uv_offset` derivation
   in `renderWorldImpl`; the `GRASS_CELL_SIZE` constant; or the camera SAB
-  lanes at control-SAB slots 120–124).
+  lanes at control-SAB slots **136–140**).
 - A new per-frame span is added (must nest under `frame` to avoid
   orphaning).
 - The id encoding changes (currently raw u32 pair via `f32::from_bits`
@@ -517,7 +515,9 @@ unaccounted RAF overhead is visible.
 ## See also
 
 - [`shared-memory-and-protocol.md`](shared-memory-and-protocol.md)
+- [`simulation-core.md`](simulation-core.md)
+- [`biome.md`](biome.md)
 - [`worker-runtime.md`](worker-runtime.md)
 - [`profiler.md`](profiler.md)
 - [`../decisions/render.md`](../decisions/render.md)
-- [`../agent-context/maintaining-docs.md`](../agent-context/maintaining-docs.md)
+- [Agent-docs authoring rules](~/.claude/agent-docs/v1/rules/authoring-rules.md)

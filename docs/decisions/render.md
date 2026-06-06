@@ -12,7 +12,7 @@
   Instancing collapses N draws to 1. The same program handles
   highlight rings via a separate instance set (inner > 0 → annulus).
 - **Applies to**: `architecture/render-pipeline.md`.
-- **Code anchors**: `web/src/render-gl.ts → renderWorld`,
+- **Code anchors**: `app/web/src/render/gl.ts → renderWorld`,
   `DISC_VS`, `DISC_FS`, `FLOATS_PER_INSTANCE`.
 
 ### JS-side frustum cull and instance pack (zero wasm crossing)
@@ -27,7 +27,7 @@
   GPU upload at typical zooms.
 - **Applies to**: `architecture/render-pipeline.md`,
   `architecture/shared-memory-and-protocol.md`.
-- **Code anchors**: `web/src/render-gl.ts → renderWorldImpl`
+- **Code anchors**: `app/web/src/render/gl.ts → renderWorldImpl`
   (the body-pack loop, the `frame.render_world.creatures` span).
 
 ### Grass texture is R8, not R32F
@@ -35,7 +35,7 @@
 - **Decision**: Grass density quantizes to `u8` Rust-side
   (`(d * 255).clamp(0,255) as u8`) and uploads as `gl.R8` /
   `gl.UNSIGNED_BYTE`.
-- **Why**: One byte per cell instead of four. At the v2.0 default
+- **Why**: One byte per cell instead of four. At the default
   (1920² runtime grid) that's a ~3.7 MB `texImage2D`/`texSubImage2D`
   instead of ~14.7 MB. Quantization loses ~8 bits of density precision;
   visually indistinguishable, well under any visual-fidelity threshold.
@@ -44,8 +44,8 @@
   decision rather than a global one.
 - **Applies to**: `architecture/render-pipeline.md`,
   `architecture/shared-memory-and-protocol.md`.
-- **Code anchors**: `web/src/render-gl.ts → renderWorldImpl`
-  (the `gl.R8` upload), `src/wasm_api.rs → write_snapshot_to`
+- **Code anchors**: `app/web/src/render/gl.ts → renderWorldImpl`
+  (the `gl.R8` upload), `app/crates/evosim/src/wasm_api/mod.rs → write_snapshot_to`
   (the quantize loop).
 
 ### Renderer reads the SAB directly; no postMessage snapshot path
@@ -57,8 +57,8 @@
   the previous postMessage path. SAB views are O(1) per frame.
 - **Applies to**: `architecture/render-pipeline.md`,
   `architecture/shared-memory-and-protocol.md`.
-- **Code anchors**: `web/src/main.ts` (the `frame` body),
-  `web/src/sim-bridge.ts → slotOffset` / `creatureSoAOffset` /
+- **Code anchors**: `app/web/src/main.ts` (the `frame` body),
+  `app/web/src/sim/bridge.ts → slotOffset` / `creatureSoAOffset` /
   `grassOffset`.
 
 ### Outer `frame` span is a real RAII, not a rollup
@@ -74,16 +74,15 @@
   [`profiler.md`](profiler.md)) buys.
 - **Applies to**: `architecture/render-pipeline.md`,
   `architecture/profiler.md`.
-- **Code anchors**: `web/src/perf.ts → span` (the empty-stack `frame`
-  special-case), `web/src/main.ts` (the outer span), `web/src/render-gl.ts`
+- **Code anchors**: `app/web/src/perf.ts → span` (the empty-stack `frame`
+  special-case), `app/web/src/main.ts` (the outer span), `app/web/src/render/gl.ts`
   (the inner spans).
 
 ### Highlight rings decode ids from the SAB id-pair view, not from JSON
 
 - **Decision**: Per frame, build a `Uint32Array` view over the same
   backing buffer as `creatures`, read `id_lo` / `id_hi` from each 32-byte
-  stride (v2.0 Wave 2b: lanes 4 / 5, byte offset `+16` / `+20`, after the
-  render-only repack — were `+24` / `+28`), reassemble via
+  stride (lanes 4 / 5, byte offset `+16` / `+20`), reassemble via
   `idHi * 2^32 + idLo`.
 - **Why**: Highlight map lookups need the stable creature id every
   frame; round-tripping through a JSON inspector reply would be
@@ -94,8 +93,8 @@
   id count.
 - **Applies to**: `architecture/render-pipeline.md`,
   `architecture/shared-memory-and-protocol.md`.
-- **Code anchors**: `web/src/render-gl.ts → renderWorldImpl`
-  (the highlight pass with the `idView` build), `web/src/rail/highlight.ts`.
+- **Code anchors**: `app/web/src/render/gl.ts → renderWorldImpl`
+  (the highlight pass with the `idView` build), `app/web/src/rail/highlight.ts`.
 
 ### Status bar updates every RAF; TPS + FPS rendered into `#status`
 
@@ -122,33 +121,31 @@
   on a single DOM node with no layout impact; the throttle saved
   nothing real. `#perf-tps` in the bottom-left perf widget stays as
   belt-and-suspenders for heavy debugging.
-- **Code anchors**: `web/src/main.ts → frame` (the RAF loop,
+- **Code anchors**: `app/web/src/main.ts → frame` (the RAF loop,
   `framesThisSecond` / `fpsWindowStart` / `lastFps` closure state),
-  `web/src/sim-bridge.ts → readSnapshotHeader` (`header.tps`).
+  `app/web/src/sim/bridge.ts → readSnapshotHeader` (`header.tps`).
 
-### Zoom-out is the v2.0 survey tool: `MIN_ZOOM = 0.04` + min-1px survey points
+### Zoom-out survey: `MIN_ZOOM = 0.04` + min-1px survey points
 
 - **Decision**: Camera zoom clamps to `[MIN_ZOOM = 0.04, MAX_ZOOM]`; center
   clamps to the runtime `[0, world_size]`. Below ~1px on-screen radius a body
   is drawn as a **flat min-1px point** in its display color (the `inner_px =
   -1` sentinel short-circuits `DISC_FS` past disc shading / AA / ring) instead
-  of vanishing. v2.0 lowered the floor from the old `0.5` clamp (tuned for the
-  1200u world) so the whole runtime-sized world frames from one view.
+  of vanishing. The floor is tuned so the whole runtime-sized world frames from
+  one view.
 - **Why**: With editable/large worlds (default 9600u) you need *some* way to
   survey the whole map and see *where the factions are*, not just terrain. A
   minimap / species heatmap is the right long-term answer (v2.1+); zoom-out +
-  1px points is nearly free and good enough for v2.0. The old `0.5` floor
-  existed because below it the 1200u world turned to noise — a non-issue once
-  the point is a bird's-eye survey and bodies clamp to a visible minimum.
-  Center clamp still prevents pan-into-the-void.
+  1px points is nearly free and good enough now. Center clamp still prevents
+  pan-into-the-void.
 - **Applies to**: `architecture/render-pipeline.md`.
-- **Code anchors**: `web/src/render.ts → clampCamera`, `MIN_ZOOM` / `MAX_ZOOM`,
-  `PX_PER_SIZE`; `web/src/render-gl.ts` (the point-size floor + `inner_px = -1`
+- **Code anchors**: `app/web/src/render/scene.ts → clampCamera`, `MIN_ZOOM` / `MAX_ZOOM`,
+  `PX_PER_SIZE`; `app/web/src/render/gl.ts` (the point-size floor + `inner_px = -1`
   branch).
 - **Revisit when**: a real minimap / species heatmap lands and a hard zoom-out
-  floor is no longer the survey mechanism (see `v2-possible-next-steps.md`).
+  floor is no longer the survey mechanism.
 
-### Snapshot carries render-only fields, packed compactly — stride stays 32 B (v2.0)
+### Snapshot carries render-only fields, packed compactly — stride stays 32 B
 
 - **Decision**: The per-creature `Genome` lives in `CreatureSoA` sim-side and
   does **not** ride the snapshot. The snapshot carries only what the renderer
@@ -167,12 +164,12 @@
   avoids it.
 - **Applies to**: `architecture/shared-memory-and-protocol.md`,
   `architecture/render-pipeline.md`.
-- **Code anchors**: `src/wasm_api.rs → write_snapshot_to`, `pack_render_u32`,
-  `genome_color_u32`; `web/src/render-gl.ts` (instance pack + id/ring decode).
+- **Code anchors**: `app/crates/evosim/src/wasm_api/mod.rs → write_snapshot_to`, `pack_render_u32`,
+  `genome_color_u32`; `app/web/src/render/gl.ts` (instance pack + id/ring decode).
 - **Tradeoffs**: Packed encodings are less human-readable in a memory dump; the
   decode lives in the renderer. Worth it for bandwidth + a stable stride guard.
 
-### Action-EMA color deleted; body color = genome hue (single-pool) or species color (mating) (v2.0)
+### Action-EMA color deleted; body color = genome hue (single-pool) or species color (mating)
 
 - **Decision**: The per-creature R/G/B action-EMA color (`color_r/g/b` SoA
   columns + the 3 f32 snapshot lanes) is **removed**. Steady body color is now
@@ -188,10 +185,10 @@
 - **Applies to**: `architecture/render-pipeline.md`,
   `architecture/shared-memory-and-protocol.md`, `decisions/sim.md`
   (the sim-side ring-flash state).
-- **Code anchors**: `src/wasm_api.rs → genome_color_u32`,
-  `src/world/species.rs → SPECIES_PALETTE`.
+- **Code anchors**: `app/crates/evosim/src/wasm_api/mod.rs → genome_color_u32`,
+  `app/crates/evosim/src/world/species.rs → SPECIES_PALETTE`.
 
-### Per-action highlight is a transient 5-tick outer ring-flash (v2.0)
+### Per-action highlight is a transient 5-tick outer ring-flash
 
 - **Decision**: When a creature acts, an outer ring pulses in a tag color for
   ~5 ticks: teal = born, green = grazed, yellow = attacked, blue = created a
@@ -206,8 +203,8 @@
   buffers.
 - **Applies to**: `architecture/render-pipeline.md`,
   `architecture/shared-memory-and-protocol.md`, `decisions/sim.md`.
-- **Code anchors**: `src/creature.rs → FlashTag`, `src/world/tick.rs →
-  flash_decay`, `web/src/render-gl.ts` (the flash pass + `flashScratch`).
+- **Code anchors**: `crates/evosim/src/creature.rs → FlashTag`, `app/crates/evosim/src/world/tick.rs →
+  flash_decay`, `app/web/src/render/gl.ts` (the flash pass + `flashScratch`).
 
 ### Grass uses a u8 box-filter mip pyramid (clipmap) for render LOD and snapshot windowing
 
@@ -226,19 +223,19 @@
   is the correct aggregate for a density field — no aliasing from nearest.
 - **Applies to**: `architecture/render-pipeline.md`,
   `architecture/shared-memory-and-protocol.md`.
-- **Code anchors**: `src/grass.rs → GrassPyramid`, `GrassGrid`
-  (pyramid field, step-7b refresh); `src/wasm_api.rs → write_snapshot`
+- **Code anchors**: `app/crates/evosim/src/grass/mod.rs → GrassPyramid`, `GrassGrid`
+  (pyramid field, step-7b refresh); `app/crates/evosim/src/wasm_api/mod.rs → write_snapshot`
   (LOD level + window extraction via `pyramid.viewport_window`).
 
-### LOD budget = 4096, single-sourced via gen_bindings (v2.0.4 S1)
+### LOD budget = 4096, single-sourced via gen_bindings
 
 - **Decision**: `GRASS_LOD_BUDGET_AXIS = 4096` cells per axis (raised from
   2048). This is the **LOD switch threshold** (`level = floor(log2(span/4096))`),
   the **window/texture clamp ceiling**, and the **snapshot slot sizer**
   (grass + biome region each `min(grass_dim, 4096)²` bytes — ~4× the 2048-budget
-  at `grass_dim > 2048`). It is **single-sourced in Rust** (`src/wasm_api.rs`)
+  at `grass_dim > 2048`). It is **single-sourced in Rust** (`app/crates/evosim/src/wasm_api/mod.rs`)
   and emitted to TS via `cargo run --bin gen-bindings` →
-  `web/src/generated/lod-constants.ts`, covered by the `bindings_in_sync` test.
+  `app/web/src/generated/lod-constants.ts`, covered by the `bindings_in_sync` test.
   Margin factor `GRASS_LOD_MARGIN_FACTOR = 1.5×` is unchanged.
 - **Why**: The 2048 budget downsampled "a layer too early" for worlds past ~2048
   cells/axis (the default 1920² was fine but any non-default zoom-out or larger
@@ -248,15 +245,49 @@
   budget. **`bindings_in_sync` fails if Rust and TS drift.**
 - **Applies to**: `architecture/render-pipeline.md`,
   `architecture/shared-memory-and-protocol.md`.
-- **Code anchors**: `src/wasm_api.rs → GRASS_LOD_BUDGET_AXIS`;
-  `web/src/generated/lod-constants.ts` (generated);
-  `web/src/sim-bridge.ts → GRASS_LOD_BUDGET_AXIS` (re-exported from generated);
-  `src/bin/gen_bindings.rs` (codegen + drift test).
+- **Code anchors**: `app/crates/evosim/src/wasm_api/mod.rs → GRASS_LOD_BUDGET_AXIS`;
+  `app/web/src/generated/lod-constants.ts` (generated);
+  `app/web/src/sim/bridge.ts → GRASS_LOD_BUDGET_AXIS` (re-exported from generated);
+  `app/crates/evosim/src/bin/gen_bindings.rs` (codegen + drift test).
 - **Revisit when**: memory footprint of the 4096² slot becomes a concern at
   very large grass_dim values, or the budget needs to be dynamically adjusted
   per zoom level.
 
-### lod_bias: "nudge within budget" LOD fine-tuning (v2.0.4 S1)
+### grass_lod_step: discrete effective-resolution stepper
+
+- **Decision**: `lod_bias` stays as the internal derived knob; the new
+  `grass_lod_step` setting is the user-facing discrete stepper. The stepper sets
+  absolute mip levels; when non-zero it overrides the auto formula and `lod_bias`
+  entirely. When `grass_lod_step == 0` (Auto), the original formula + `lod_bias`
+  path is unchanged (backward compat).
+- **Setting name**: `grass_lod_step` (Rust slider index 63, TS `grassLodStep`).
+- **Displayed values and Auto mapping** (at default grass_dim=1920, 5u cells):
+  - `Auto` (0): auto-selects from visible-span formula; at default zoom=1 this
+    is L0 (1920 cells, full resolution). `lodBias` still active in Auto mode.
+  - `Full ~1920` (1): force L0 — one step finer than auto at any zoom-out
+    level where auto would pick L1+. Same as auto at default zoom.
+  - `Half ~960` (2): force L1 — 4× fewer cells, intentionally coarse.
+  - `Quarter ~480` (3): force L2 — 16× fewer cells.
+  - `Eighth ~240` (4): force L3 — 64× fewer cells.
+  - `Sixteenth ~120` (5): force L4 — 256× fewer cells.
+- **LIVE setting** — LOD selection happens in `write_snapshot` per-snapshot. No
+  restart required. Exposed as a staged (non-construction-only) DevPanel dropdown.
+- **Why**: The old `lod_bias` could only nudge finer and only worked as an
+  offset against the auto formula — it gave no way to intentionally force a
+  coarse level for performance testing or low-power use. The stepper offers
+  direct absolute level selection. Strategy (b) keeps a single code path in
+  `write_snapshot` (the `lod_step > 0` branch vs the auto branch) and preserves
+  persisted `lodBias` values for existing sessions.
+- **Applies to**: `architecture/render-pipeline.md`.
+- **Code anchors**: `app/crates/evosim/src/wasm_api/mod.rs → apply_lod_step`, `WorldHandle::lod_step`,
+  `write_snapshot` (the `lod_step > 0` branch); `app/web/src/settings.ts → grassLodStep`;
+  `app/web/src/widgets/devpanel.ts` (Render/LOD section dropdown);
+  `crates/evosim/src/wasm_lod_stepper_tests.rs` (12 mapping-assertion tests).
+- **SAB note**: adding slider index 63 pushed SLIDER_COUNT to 64, which required
+  shifting `CTRL_INSPECT_REQ_EPOCH` from 80 → 96 (and all downstream inspect/stats
+  constants +16). The camera slots shifted from 120–124 → 136–140.
+
+### lod_bias: "nudge within budget" LOD fine-tuning
 
 - **Decision**: `lod_bias` (slider idx 60, live f32, default 0.0) subtracts from
   the computed float mip level before flooring, allowing finer-detail rendering.
@@ -270,10 +301,10 @@
   Default 0.0 is the FEEL-TUNE point (the lead should confirm it is the right
   default for typical use).
 - **Applies to**: `architecture/render-pipeline.md`.
-- **Code anchors**: `src/wasm_api.rs → apply_lod_bias`, `write_snapshot`
+- **Code anchors**: `app/crates/evosim/src/wasm_api/mod.rs → apply_lod_bias`, `write_snapshot`
   (the `biased_level_f` computation).
 
-### Aspect-ratio fix: vis_cells_y from viewport_h, not vis_cells_x (v2.0.4 S1)
+### Aspect-ratio fix: vis_cells_y from viewport_h, not vis_cells_x
 
 - **Decision**: `vis_cells_y` is now derived from `viewport_h` independently:
   `visible_cell_span_y = visible_cell_span_x × (viewport_h / viewport_w)`.
@@ -286,9 +317,9 @@
   `grass-lod-smoke.spec.ts` was updated to assert the aspect-correct values
   (not the old square-window values which encoded the pre-fix bug).
 - **Applies to**: `architecture/render-pipeline.md`.
-- **Code anchors**: `src/wasm_api.rs → write_snapshot`
+- **Code anchors**: `app/crates/evosim/src/wasm_api/mod.rs → write_snapshot`
   (the `vis_cells_y` derivation via the `aspect` variable);
-  `web/tests/e2e/grass-lod-smoke.spec.ts` (updated assertion).
+  `app/web/tests/e2e/grass-lod-smoke.spec.ts` (updated assertion).
 
 ### Grass and biome textures are fixed budget² R8; per-frame texSubImage2D of the window
 
@@ -308,45 +339,43 @@
   to trilinear later requires only a `texParameteri` change and making `u_lod_blend`
   non-zero.
 - **Applies to**: `architecture/render-pipeline.md`.
-- **Code anchors**: `web/src/render-gl.ts → initRenderer` (texture allocation,
-  `GRASS_LOD_BUDGET_AXIS`); `web/src/render-gl.ts → renderWorldImpl` (the
+- **Code anchors**: `app/web/src/render/gl.ts → initRenderer` (texture allocation,
+  `GRASS_LOD_BUDGET_AXIS`); `app/web/src/render/gl.ts → renderWorldImpl` (the
   `texSubImage2D` upload + UV uniform writes for both grass and biome programs).
 
-### Biome tint uses a mode-downsampled snapshot biome channel (not a separate mip)
+### Biome tint uses a mode-downsampled snapshot biome channel, fed from a precomputed BiomePyramid
 
-- **Decision**: The biome texture fed to the `BIOME_FS` shader is not a
-  precomputed biome mip pyramid. Instead, `write_snapshot` recomputes a
-  mode-downsampled biome window (the most-frequent biome tag in each
-  `2^mipLevel × 2^mipLevel` block of level-0 cells) on every tick, using the
-  same window parameters as the grass channel. The result is appended to the
-  slot immediately after the grass region (`biome_win_bytes = min(grass_dim,
-  GRASS_LOD_BUDGET_AXIS)²` allocation). The biome UV transform in `BIOME_FS` is
-  identical to `GRASS_VS`, so tint stays locked to the grass window at every LOD
-  level.
-- **Why**: Mode downsampling is correct for a categorical field (unlike mean,
-  which would produce fractional biome ids). Keeping biome as a snapshot channel
-  rather than a separate SAB avoids another buffer, and the biome field is static
-  so the recompute could be precomputed — but that is deferred (noted as a perf
-  TODO in `write_snapshot`). The alternative (a precomputed static biome
-  mode-pyramid struct) is out of scope for the 2d grass-perf effort.
-- **Tradeoffs**: Biome window recomputed every tick even though biome is static;
-  acceptable at current performance. A precomputed biome mode-pyramid would
-  eliminate this work but requires a new struct in `world/mod.rs`.
+- **Decision**: The biome texture fed to the `BIOME_FS` shader is a windowed
+  mode-downsampled biome channel appended to the snapshot slot (same `win_w × win_h`
+  as the grass window, same UV transform). `write_snapshot` copies the correct window
+  from a **precomputed `BiomePyramid`** (built once at world construction) rather than
+  recomputing mode-downsampling per tick. The biome UV transform in `BIOME_FS` is
+  identical to `GRASS_VS`, so tint stays locked to the grass window at every LOD level.
+- **Why**: Mode downsampling is correct for a categorical field (unlike mean, which
+  produces fractional biome ids). Keeping biome as a snapshot channel rather than a
+  separate SAB avoids another buffer. The `BiomePyramid` precompute eliminates the
+  per-tick recompute cost that was 83% of total snapshot write time (11.4 ms out of
+  13.7 ms). See `decisions/sim.md → BiomePyramid precomputed at construction`.
+- **Tradeoffs**: `BiomePyramid` adds memory proportional to `O(grass_cell_count × 4/3)`.
+  Static-only — becomes invalid if biome editing ships (requires rebuild on mutation).
 - **Applies to**: `architecture/render-pipeline.md`,
   `architecture/shared-memory-and-protocol.md`.
-- **Code anchors**: `src/wasm_api.rs → write_snapshot` (biome mode-downsample
-  loop); `web/src/render-gl.ts → renderWorldImpl` (biome channel upload +
-  UV uniforms); `web/src/sim-bridge.ts → biomeWinOffset` / `WindowMetadata`.
+- **Code anchors**: `app/crates/evosim/src/wasm_api/mod.rs → BiomePyramid`, `write_snapshot`
+  (`biome_pyramid.copy_window` call); `app/web/src/render/gl.ts → renderWorldImpl`
+  (biome channel upload + UV uniforms); `app/web/src/sim/bridge.ts → biomeWinOffset` /
+  `WindowMetadata`.
 
 ### Camera SAB lanes carry cx/cy/zoom/viewport to the worker for window computation
 
-- **Decision**: Five control-SAB slots at indices 120–124 carry the current
+- **Decision**: Five control-SAB slots at indices **136–140** carry the current
   camera state from main to the worker each RAF:
-  `CTRL_CAMERA_CX_BITS = 120` (cx as f32 bits),
-  `CTRL_CAMERA_CY_BITS = 121` (cy as f32 bits),
-  `CTRL_CAMERA_ZOOM_BITS = 122` (zoom as f32 bits),
-  `CTRL_CAMERA_VIEWPORT_W = 123` (u32),
-  `CTRL_CAMERA_VIEWPORT_H = 124` (u32).
+  `CTRL_CAMERA_CX_BITS = 136` (cx as f32 bits),
+  `CTRL_CAMERA_CY_BITS = 137` (cy as f32 bits),
+  `CTRL_CAMERA_ZOOM_BITS = 138` (zoom as f32 bits),
+  `CTRL_CAMERA_VIEWPORT_W = 139` (u32),
+  `CTRL_CAMERA_VIEWPORT_H = 140` (u32).
+  (Indices shifted from 120–124 when `grass_lod_step` at slider index 63 pushed
+  `SLIDER_COUNT` to 64, displacing all downstream control-SAB blocks.)
   `main.ts` writes these each RAF (and pre-seeds them at first-tick init to
   `world_size / 2`, `world_size / 2`, zoom `1.0`). The sim worker passes them
   into `write_snapshot` as `cam_cx/cam_cy/cam_zoom/viewport_w/viewport_h`; wasm
@@ -357,9 +386,9 @@
   bits avoids any float-packing issues across the SAB i32 view.
 - **Applies to**: `architecture/shared-memory-and-protocol.md`,
   `architecture/worker-runtime.md`.
-- **Code anchors**: `web/src/generated/control-sab.ts`
-  (`CTRL_CAMERA_CX_BITS`…`CTRL_CAMERA_VIEWPORT_H`); `web/src/main.ts`
-  (RAF write + first-tick init); `src/wasm_api.rs → write_snapshot`
+- **Code anchors**: `app/web/src/generated/control-sab.ts`
+  (`CTRL_CAMERA_CX_BITS`…`CTRL_CAMERA_VIEWPORT_H`); `app/web/src/main.ts`
+  (RAF write + first-tick init); `app/crates/evosim/src/wasm_api/mod.rs → write_snapshot`
   (the five camera parameters).
 
 ### SNAPSHOT_HEADER_BYTES bumped 32→64 to carry window metadata
@@ -373,9 +402,9 @@
   header is the lowest-latency path (same atomic flip as the snapshot data)
   and keeps the contract self-describing.
 - **Applies to**: `architecture/shared-memory-and-protocol.md`.
-- **Code anchors**: `src/wasm_api.rs` (`SNAPSHOT_HEADER_BYTES = 64`,
+- **Code anchors**: `app/crates/evosim/src/wasm_api/mod.rs` (`SNAPSHOT_HEADER_BYTES = 64`,
   the window-metadata write block in `write_snapshot`);
-  `web/src/sim-bridge.ts → readWindowMetadata`, `SNAPSHOT_HEADER_BYTES`,
+  `app/web/src/sim/bridge.ts → readWindowMetadata`, `SNAPSHOT_HEADER_BYTES`,
   `WindowMetadata`.
 
 ### Default-scale window equals the full field (byte-identical to pre-LOD path)
@@ -390,7 +419,7 @@
   The design invariant also validates the LOD formula: the `max(1.0)` pre-clamp
   before `log2` is what keeps `level=0` when `visible_cell_span / BUDGET_AXIS ≈ 0.4688 < 1.0`.
 - **Applies to**: `architecture/render-pipeline.md`.
-- **Code anchors**: `src/wasm_api.rs → write_snapshot` (the DEFAULT-SCALE
+- **Code anchors**: `app/crates/evosim/src/wasm_api/mod.rs → write_snapshot` (the DEFAULT-SCALE
   INVARIANT comment block).
 
 ### Toroidal wrap-seam is a known limitation at grass_dim > 2048
@@ -407,7 +436,7 @@
   a Stage-3 item (the TODO comment in `write_snapshot` marks the exact clamp to
   remove).
 - **Applies to**: `architecture/render-pipeline.md`.
-- **Code anchors**: `src/wasm_api.rs → write_snapshot`
+- **Code anchors**: `app/crates/evosim/src/wasm_api/mod.rs → write_snapshot`
   (the `TODO (Stage-3 wrap-seam)` comment on the `win_origin_x/y` clamp).
 
 ### Biomes render as flat per-cell color under the grass, fed from the snapshot biome channel
@@ -418,7 +447,7 @@
   (Plains/Water/Desert). The texture data comes from the per-slot windowed
   biome channel in the snapshot (mode-downsampled, same `win_w × win_h` as
   the grass window), uploaded via `texSubImage2D` into the `(0,0)` corner of
-  a fixed `GRASS_LOD_BUDGET_AXIS² = 2048²` R8 texture each frame. The UV
+  a fixed `GRASS_LOD_BUDGET_AXIS² = 4096²` R8 texture each frame. The UV
   transform is identical to the grass channel (same `u_uv_scale/u_uv_offset`
   uniforms).
 - **Why**: Feeding biome from the snapshot slot (rather than a separate static
@@ -428,11 +457,46 @@
   a future concern (v2.1+).
 - **Applies to**: `architecture/render-pipeline.md`,
   `architecture/shared-memory-and-protocol.md`.
-- **Code anchors**: `web/src/render-gl.ts → BIOME_VS/BIOME_FS`,
-  `web/src/render-gl.ts → renderWorldImpl` (biome upload + UV uniforms);
-  `src/wasm_api.rs → write_snapshot` (biome mode-downsample into slot).
+- **Code anchors**: `app/web/src/render/gl.ts → BIOME_VS/BIOME_FS`,
+  `app/web/src/render/gl.ts → renderWorldImpl` (biome upload + UV uniforms);
+  `app/crates/evosim/src/wasm_api/mod.rs → write_snapshot` (biome mode-downsample into slot).
 
-### Per-species population graph, fed by the polled species table (v2.0)
+### Creature render redesign: weakened halo, per-LOD halo multiplier, radial-shaded bottom dot, action-tint from existing flash data
+
+- **Decision**: Five targeted changes to `render/gl.ts`, no snapshot/protocol changes:
+  1. **Halo weakened** — global halo alpha scaled ×0.6 in `readHaloStrength()`.
+  2. **Per-LOD halo strength** — `a_color.a` (the alpha lane of the per-instance
+     color, previously unused in the body pass) now carries a per-instance LOD band
+     multiplier: `1.0` (near), `0.4` (mid), `0.0` (bottom). `HALO_FS` multiplies
+     this into the final glow alpha so bottom-band instances produce zero halo output
+     per-instance without a separate draw call per band.
+  3. **Mid-band ring tightened** — mid zoom ring changed from `0.985..1.0` → `0.993..1.0`
+     (slimmer appearance at mid zoom).
+  4. **Bottom-band dot is radial-shaded** — the `inner_px = -1` (sub-pixel creature)
+     branch in `DISC_FS` now renders a radial gradient (`mix(1.3, 0.6, r)`, bright
+     centre → dark edge) instead of a flat single-color fill.
+  5. **Action-tint for bottom-band dots** — when `flashTicks > 0` (from the existing
+     `packed_u32` lane 6, `flashTag` bits 0..3), the dot color is blended toward the
+     action color by `(flashTicks / FLASH_TICKS_MAX) × 0.6`. No snapshot widening —
+     uses `flashTag`/`flashTicks` already decoded in the body-pack loop.
+- **Why**: The halo weakening reduces visual clutter at high pop (strong halos merged
+  into blob at pop > 2000). Per-LOD halo encoding avoids an extra `drawArraysInstanced`
+  call per band. A radial-shaded dot at survey zoom preserves faction territory
+  readability with a low-cost in-shader gradient. Action-tint at the bottom band
+  gives the same "creature just acted" visual signal that ring-flash gives at mid/near
+  zoom, but in the cheaper 1px point at survey zoom. Using existing flash data avoids
+  the S2R-blocked snapshot layout change.
+- **Tradeoffs**: `a_color.a` is repurposed from "body alpha" (always 1.0) to "LOD halo
+  strength multiplier." Body `DISC_FS` branches hardcode alpha to 1.0, so body opacity
+  is unaffected. Action-tint affects only bottom-band (sub-pixel) creatures; mid/near-band
+  creatures express flash via the ring-flash annulus pass.
+- **Applies to**: `architecture/render-pipeline.md`.
+- **Code anchors**: `app/web/src/render/gl.ts → DISC_FS` (radial-shaded dot branch + halo
+  alpha repurposing comment); `app/web/src/render/gl.ts → HALO_FS` (the `v_color.a` LOD
+  multiplier); `app/web/src/render/gl.ts → renderWorldImpl` (the halo ×0.6 line,
+  `HALO_ALPHA_NEAR/MID/BOTTOM` constants, action-tint blend, mid-band ring constants).
+
+### Per-species population graph, fed by the polled species table
 
 - **Decision**: In species mode the population chart (in the bottom perf-box,
   `#chart-pop`) draws **one line per live species**, colored by each species'
@@ -449,9 +513,9 @@
   acceptable because typical runs end with 1–3 surviving species.
 - **Applies to**: `architecture/app-shell.md` (the `#perf-box` pop chart),
   `architecture/shared-memory-and-protocol.md` (the species-table report).
-- **Code anchors**: `src/wasm_api.rs → species_table_json`,
-  `web/src/widgets/perf-panel.ts` (the per-species sampler + draw),
-  `web/src/sim-bridge.ts → latestSpeciesTable`.
+- **Code anchors**: `app/crates/evosim/src/wasm_api/mod.rs → species_table_json`,
+  `app/web/src/widgets/perf-panel.ts` (the per-species sampler + draw),
+  `app/web/src/sim/bridge.ts → latestSpeciesTable`.
 
 ## See also
 

@@ -6,8 +6,8 @@ Decisions that bind more than one architecture doc.
 
 ### `MAX_POP_FOR_SIM` is duplicated in Rust + TS and asserted at boot
 
-- **Decision**: The constant lives in `src/constants.rs` AND
-  `web/src/sim-bridge.ts`. The worker passes the Rust value through
+- **Decision**: The constant lives in `app/crates/evosim/src/constants.rs` AND
+  `app/web/src/sim/bridge.ts`. The worker passes the Rust value through
   `boot_ready.max_pop_for_sim`; main asserts the TS const matches and
   throws on mismatch.
 - **Why**: The SAB region sizes are derived from this constant — they
@@ -20,10 +20,10 @@ Decisions that bind more than one architecture doc.
 - **Applies to**: `architecture/simulation-core.md`,
   `architecture/shared-memory-and-protocol.md`,
   `architecture/worker-runtime.md`.
-- **Code anchors**: `src/constants.rs → MAX_POP_FOR_SIM`,
-  `web/src/sim-bridge.ts → MAX_POP_FOR_SIM`,
-  `src/wasm_api.rs → max_pop_for_sim`,
-  `web/src/main.ts → spawnSimWorker` (the assert).
+- **Code anchors**: `app/crates/evosim/src/constants.rs → MAX_POP_FOR_SIM`,
+  `app/web/src/sim/bridge.ts → MAX_POP_FOR_SIM`,
+  `app/crates/evosim/src/wasm_api/mod.rs → max_pop_for_sim`,
+  `app/web/src/main.ts → spawnSimWorker` (the assert).
 
 ### Snapshot SAB header padded to 32 bytes for stride alignment
 
@@ -35,7 +35,7 @@ Decisions that bind more than one architecture doc.
   the pad to save 12 bytes per slot would break the typed-array
   constructor.
 - **Applies to**: `architecture/shared-memory-and-protocol.md`.
-- **Code anchors**: `web/src/sim-bridge.ts → SNAPSHOT_HEADER_BYTES`.
+- **Code anchors**: `app/web/src/sim/bridge.ts → SNAPSHOT_HEADER_BYTES`.
 
 ### `tps` is round-tripped via `f32::to_bits`, not as JSON or a separate atomic
 
@@ -47,8 +47,8 @@ Decisions that bind more than one architecture doc.
   introduce precision questions.
 - **Applies to**: `architecture/shared-memory-and-protocol.md`,
   `architecture/simulation-core.md`.
-- **Code anchors**: `src/wasm_api.rs → write_snapshot_to`
-  (the `tps().to_bits()` write), `web/src/sim-bridge.ts →
+- **Code anchors**: `app/crates/evosim/src/wasm_api/mod.rs → write_snapshot_to`
+  (the `tps().to_bits()` write), `app/web/src/sim/bridge.ts →
   readSnapshotHeader`.
 
 ### Worker→main poll cadences: 1 Hz for profile, 750 ms for NN stats
@@ -61,8 +61,8 @@ Decisions that bind more than one architecture doc.
   one could collapse them if a unifying poll system arrived.
 - **Applies to**: `architecture/shared-memory-and-protocol.md`,
   `architecture/worker-runtime.md`.
-- **Code anchors**: `web/src/widgets/perf-panel.ts → POLL_INTERVAL_MS`,
-  `web/src/widgets/worker-stats.ts → POLL_INTERVAL_MS`.
+- **Code anchors**: `app/web/src/widgets/perf-panel.ts → POLL_INTERVAL_MS`,
+  `app/web/src/widgets/worker-stats.ts → POLL_INTERVAL_MS`.
 
 ### Every e2e Playwright test forces `targetTPS = 1000` before interacting
 
@@ -108,9 +108,9 @@ Decisions that bind more than one architecture doc.
 - **Applies to**: `architecture/simulation-core.md`,
   `architecture/shared-memory-and-protocol.md`,
   `architecture/render-pipeline.md`.
-- **Code anchors**: `src/wasm_api.rs → creature_at`,
+- **Code anchors**: `app/crates/evosim/src/wasm_api/mod.rs → creature_at`,
   `creature_idx_by_id`, `write_creatures_each` (id_lo/id_hi split),
-  `web/src/render-gl.ts → renderWorldImpl` (the `idView` decode).
+  `app/web/src/render/gl.ts → renderWorldImpl` (the `idView` decode).
 
 ### Sim worker first-paint handshake: tick once + snapshot once before `boot_ready`
 
@@ -122,28 +122,11 @@ Decisions that bind more than one architecture doc.
   flashes empty.
 - **Applies to**: `architecture/worker-runtime.md`,
   `architecture/shared-memory-and-protocol.md`.
-- **Code anchors**: `web/src/sim-worker.ts → handleBoot`.
-
-### Settings tab is stage-then-apply for sim sliders; live-apply for run/display
-
-- **Decision**: Sim sliders (Energy / Grass / Eat / Lifecycle /
-  Curriculum groups) stage edits and reconcile via the Settings tab's
-  Apply / Cancel / Reset footer. Run + Display widgets (`autoRun`,
-  `showProfiler`, `showPopGraph`, `showGrass`, `grassOpacity`) skip
-  staging and apply immediately.
-- **Why**: Sim sliders perturb the running world; users want to set up
-  a batch of changes (e.g. raise mut rate AND lower energy max) and
-  commit them atomically. Display toggles are page-side render flips
-  with no sim cost — staging them would block live preview.
-- **Tradeoffs**: Two interaction tiers means more code than a uniform
-  rule. The carve-out is small and load-bearing for both UX goals.
-- **Applies to**: `architecture/app-shell.md`.
-- **Code anchors**: `web/src/widgets/devpanel.ts → makeStagedSlider`,
-  `makeLiveSlider`, `CONSTRUCTION_ONLY_SLIDERS`.
+- **Code anchors**: `app/web/src/sim/worker.ts → handleBoot`.
 
 ### Rust owns canonical slider defaults; settings.ts mirrors them; drift is asserted at e2e time
 
-- **Decision**: `src/world/mod.rs → DevSliders::default()` is the
+- **Decision**: `app/crates/evosim/src/world/mod.rs → DevSliders::default()` is the
   single source of truth for every slider default. `settings.ts →
   DEFAULTS` mirrors them so localStorage has something to write before
   the worker exists. `WorldHandle::sliders_defaults_json()` exposes
@@ -156,29 +139,10 @@ Decisions that bind more than one architecture doc.
 - **Applies to**: `architecture/simulation-core.md`,
   `architecture/app-shell.md`,
   `architecture/shared-memory-and-protocol.md`.
-- **Code anchors**: `src/world/mod.rs → DevSliders::default`,
-  `src/wasm_api.rs → sliders_defaults_json`,
-  `web/src/settings.ts → DEFAULTS`,
+- **Code anchors**: `app/crates/evosim/src/world/mod.rs → DevSliders::default`,
+  `app/crates/evosim/src/wasm_api/mod.rs → sliders_defaults_json`,
+  `app/web/src/settings.ts → DEFAULTS`,
   `web/tests/e2e/defaults-drift.spec.ts`.
-
-### Construction-only sliders are committed via `set_slider` but only shape the next world
-
-- **Decision**: `founder_count`, `energy_max`,
-  `grass_initial_seed_count`, and `full_grass_on_init` ride the same
-  staged path as live-tunable sliders. Apply persists + pushes them to
-  the worker's `DevSliders`, but the *current* world keeps whatever
-  values it spawned with — a manual restart is needed to see them.
-  The Settings tab fires a toast ("Some changes only take effect on
-  new simulations.") whenever any construction-only knob commits.
-- **Why**: Mid-run construction changes can't safely re-shape the
-  running world (e.g. founder_count is meaningless after pop ≠
-  founder_count). Surfacing the constraint via the toast keeps the
-  user aware without forcing an auto-restart.
-- **Applies to**: `architecture/app-shell.md`,
-  `architecture/shared-memory-and-protocol.md`.
-- **Code anchors**: `web/src/widgets/devpanel.ts →
-  CONSTRUCTION_ONLY_SLIDERS`, `TOAST_CONSTRUCTION`,
-  `applyAll`, `resetAll`.
 
 ### Hammer-restart is allowed; old rayon workers GC with the terminated parent
 
@@ -190,9 +154,9 @@ Decisions that bind more than one architecture doc.
   while the previous bridge's closures keep the SAB rooted, so the
   renderer keeps painting until the new boot lands.
 - **Applies to**: `architecture/worker-runtime.md`.
-- **Code anchors**: `web/src/main.ts → restart`.
+- **Code anchors**: `app/web/src/main.ts → restart`.
 
-### Runtime `world_size` ⇒ computed-dims-equality SAB safety model (v2.0)
+### Runtime `world_size` ⇒ computed-dims-equality SAB safety model
 
 - **Decision**: `world_size` (default 9600u) is a **runtime** construction
   setting, not a compile-time constant. Consequently grass-grid dims
@@ -205,6 +169,8 @@ Decisions that bind more than one architecture doc.
   checks they're byte-equal), and the TS side sizes both views off the reported
   `grass_dim`, never a hardcoded constant. `MAX_POP_FOR_SIM` / `CREATURE_STRIDE`
   stay constant-asserted (the creature region is world-size-independent).
+  The app-shell SAB-view binding side (how `makeSlotLayout` is built from
+  `boot_ready.grass_dim`) is recorded in `decisions/app-shell.md`.
 - **Why**: The user explicitly wants worlds **editable across a wide range**
   from one binary (a tiny fast asexual screensaver up to a grand toroidal
   multi-species map), which forces runtime SAB sizing. Sizing both grass and
@@ -213,16 +179,14 @@ Decisions that bind more than one architecture doc.
   SAB slot, so the boot-time `grass_dim` is the single source of truth (one
   layout object, rebuilt per boot).
 - **Applies to**: `architecture/shared-memory-and-protocol.md`
-  (computed-dims-equality), `architecture/simulation-core.md` (`WorldDims`),
-  `architecture/app-shell.md` (runtime-dims SAB view binding).
-- **Code anchors**: `src/constants.rs → WorldDims::from_world_size`,
-  `src/wasm_api.rs → SnapshotLayout::from_grass_cell_count` (the
-  `grass_bytes == biome_bytes` assert), `boot_ready.grass_dim`,
-  `web/src/main.ts → makeSlotLayout`.
+  (computed-dims-equality), `architecture/simulation-core.md` (`WorldDims`).
+- **Code anchors**: `app/crates/evosim/src/constants.rs → WorldDims::from_world_size`,
+  `app/crates/evosim/src/wasm_api/mod.rs → SnapshotLayout::from_grass_cell_count` (the
+  `grass_bytes == biome_bytes` assert), `boot_ready.grass_dim`.
 - **Revisit when**: a feature needs the world to resize *after* boot (today
   nothing resizes after boot — restart rebuilds the world).
 
-### Two seeds, deliberately: `world_seed` (map) is separate from the sim RNG (run) (v2.0)
+### Two seeds, deliberately: `world_seed` (map) is separate from the sim RNG (run)
 
 - **Decision**: `world_seed` (a u32 construction slider, random default,
   pinnable) drives **biome generation + species seeding only**, via two
@@ -241,27 +205,10 @@ Decisions that bind more than one architecture doc.
 - **Applies to**: `architecture/simulation-core.md` (biome gen + species
   seeding), `architecture/app-shell.md` (the status-strip seed + reroll),
   `decisions/sim.md` (biome / seeding entries).
-- **Code anchors**: `DevSliders.world_seed`, `src/world/biome.rs`
-  (SplitMix64), `src/constants.rs → SEEDING_PRNG_SALT`.
+- **Code anchors**: `DevSliders.world_seed`, `app/crates/evosim/src/world/biome.rs`
+  (SplitMix64), `app/crates/evosim/src/constants.rs → SEEDING_PRNG_SALT`.
 
-### Settings schema is `major.minor`; major resets, minor merges (v2.0)
-
-- **Decision**: The persisted settings blob (key `evosim.settings.v2`) carries
-  a `major.minor` version. On load: a **major** mismatch (or any legacy v1
-  blob) is **discarded** and defaults are used; a **minor** mismatch
-  (additive-only — new keys shipped) keeps the user's values and merges missing
-  keys from `DEFAULTS` (`{...DEFAULTS, ...stored}`). v2.0 bumps the major
-  version (it removes / renames sliders and re-lays-out the control SAB); every
-  ordinary settings change thereafter bumps minor.
-- **Why**: v2.0 renames/removes sliders and changes the control-SAB layout, so
-  old localStorage can't be trusted — a version stamp makes the reset
-  deterministic. And every future settings change gets a cheap non-destructive
-  migration (minor bump) instead of silently carrying stale or missing keys.
-- **Applies to**: `architecture/app-shell.md` (settings schema migration).
-- **Code anchors**: `web/src/settings.ts → SCHEMA_MAJOR` / `SCHEMA_MINOR`, the
-  load merge + unknown-key filter.
-
-### NN input layout is derived from construction settings → SAB/topology implications (v2.0)
+### NN input layout is derived from construction settings → SAB/topology implications
 
 - **Decision**: The NN input width is **runtime/settings-derived**, not a
   compile-time constant. `NnInputLayout::for_settings(wrap_world, species_mode)`
@@ -280,9 +227,9 @@ Decisions that bind more than one architecture doc.
 - **Applies to**: `architecture/simulation-core.md` (the width table + topology),
   `architecture/shared-memory-and-protocol.md` (the `nn_topology` boot payload),
   `decisions/sim.md` (the settings-derived-layout decision).
-- **Code anchors**: `src/world/nn.rs → NnInputLayout`,
-  `src/brain.rs → NnTopology::with_input_width`,
-  `src/constants.rs → MAX_NN_INPUTS = 48`, `src/brain_width_tests.rs`.
+- **Code anchors**: `app/crates/evosim/src/world/nn.rs → NnInputLayout`,
+  `app/crates/evosim/src/brain/mod.rs → NnTopology::with_input_width`,
+  `app/crates/evosim/src/constants.rs → MAX_NN_INPUTS = 48`, `crates/evosim/src/brain_width_tests.rs`.
 
 ## See also
 
@@ -290,5 +237,6 @@ Decisions that bind more than one architecture doc.
 - [`render.md`](render.md)
 - [`profiler.md`](profiler.md)
 - [`build.md`](build.md)
+- [`app-shell.md`](app-shell.md) — app-shell-only decisions (settings schema, staged sliders, SAB-view binding)
 - [`../architecture/simulation-core.md`](../architecture/simulation-core.md)
 - [`../architecture/shared-memory-and-protocol.md`](../architecture/shared-memory-and-protocol.md)

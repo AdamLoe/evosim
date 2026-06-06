@@ -1,32 +1,32 @@
 # Worker runtime
 
-The Web Worker that owns the wasm sim, the rayon pool, both
-SharedArrayBuffers, and the tight synchronous tick loop.
+The Web Worker that owns the wasm sim, the rayon pool, the control
+SharedArrayBuffer, and the tight synchronous tick loop.
 
 ## What it is
 
-A dedicated module worker (`web/src/sim-worker.ts`) spawned once per
-world lifetime by `web/src/main.ts`. It holds the only `WorldHandle`,
-the only rayon pool, both `SharedArrayBuffer`s (`controlSab`,
-`snapshotSab`), and the per-tick loop.
+A dedicated module worker (`app/web/src/sim/worker.ts`) spawned once per
+world lifetime by `app/web/src/main.ts`. It holds the only `WorldHandle`,
+the only rayon pool, the `controlSab` SharedArrayBuffer, and the per-tick
+loop. The snapshot region lives in wasm linear memory (a `Vec<u8>` inside
+`WorldHandle`), not in a separate `snapshotSab` SAB.
 
-v1.10: **all main↔worker control is on SAB.** The only surviving
-`postMessage` path is the one-shot `boot` handshake and the one-shot
-`boot_ready` reply. Every other control signal — sliders, paused,
-target TPS, inspector requests, reset-jank, reset-profile, profile/NN
-report polls — is an `Atomics.store` + epoch bump on the control SAB,
-read at the top of each loop iteration. The loop body is synchronous;
-`Atomics.wait` (not `Atomics.waitAsync`) is the pacing primitive.
+**All main↔worker control is on SAB.** The only surviving `postMessage`
+path is the one-shot `boot` handshake and the one-shot `boot_ready` reply.
+Every other control signal — sliders, paused, target TPS, inspector
+requests, reset-jank, reset-profile, profile/NN report polls — is an
+`Atomics.store` + epoch bump on the control SAB, read at the top of each
+loop iteration. The loop body is synchronous; `Atomics.wait` (not
+`Atomics.waitAsync`) is the pacing primitive.
 
 ## What it owns
 
 - The wasm init + rayon `initThreadPool` boot sequence.
 - The `crossOriginIsolated` re-check.
-- Allocation of the two SABs at boot. `controlSab` is sized by
-  `CONTROL_SAB_BYTES` from
-  [`../../src/control_sab.rs`](../../src/control_sab.rs); `snapshotSab`
-  is `SNAPSHOT_SAB_BYTES` from
-  [`sim-bridge.ts`](../../web/src/sim-bridge.ts).
+- Allocation of `controlSab` at boot: sized by `CONTROL_SAB_BYTES`
+  from [`../../app/crates/evosim/src/control_sab.rs`](../../app/crates/evosim/src/control_sab.rs). The
+  snapshot bytes live in wasm linear memory (`WorldHandle::snapshot_buf`,
+  a `Vec<u8>`); no separate snapshot SAB is allocated.
 - The boot handshake: apply persisted sliders, seed SAB slider /
   paused / target_tps values, run one tick, write one snapshot to slot
   0, post `boot_ready`. Main's first RAF then reads a populated slot.
@@ -51,100 +51,55 @@ read at the top of each loop iteration. The loop body is synchronous;
 - **The SAB byte layout** — owned by
   [`shared-memory-and-protocol.md`](shared-memory-and-protocol.md) and
   the canonical Rust source at
-  [`../../src/control_sab.rs`](../../src/control_sab.rs). The TS
-  mirror at [`web/src/generated/control-sab.ts`](../../web/src/generated/control-sab.ts)
+  [`../../app/crates/evosim/src/control_sab.rs`](../../app/crates/evosim/src/control_sab.rs). The TS
+  mirror at [`app/web/src/generated/control-sab.ts`](../../app/web/src/generated/control-sab.ts)
   is code-generated; a Rust unit test (`bindings_in_sync`) fails CI
   on drift.
 - **The slider name → index table** — canonical list in
-  [`../../src/wasm_api.rs`](../../src/wasm_api.rs) `SLIDER_NAMES`;
+  [`../../app/crates/evosim/src/wasm_api/mod.rs`](../../app/crates/evosim/src/wasm_api/mod.rs) `SLIDER_NAMES`;
   TS mirror in
-  [`web/src/generated/slider-ids.ts`](../../web/src/generated/slider-ids.ts).
+  [`app/web/src/generated/slider-ids.ts`](../../app/web/src/generated/slider-ids.ts).
 - **`World::step`, NN, grass mechanic** — owned by
   [`simulation-core.md`](simulation-core.md). The worker only calls
   `world.step_n(1)`.
 - **The `SimBridge` runtime class** — defined in
-  [`sim-bridge.ts`](../../web/src/sim-bridge.ts) and used by main; the
+  [`app/web/src/sim/bridge.ts`](../../app/web/src/sim/bridge.ts) and used by main; the
   worker only consumes the one `SimMessageBoot` payload + produces
   one `SimReplyBootReady`. After that, the worker reads main's writes
   through SAB.
 
 ## Loop shape
 
-```ts
-function simLoop(): void {
-  let tickIdx = 0;
-  while (world !== null && ctrlI32 !== null) {
-    const iterStart = performance.now();
+See `app/web/src/sim/worker.ts` → `simLoop` for the body.
 
-    // ── sim_worker.read_input_sab ──
-    const readStart = performance.now();
-    readControlSab();   // pause flag, target TPS, sliders (epoch-gated),
-                        // inspect request (epoch-gated), profile-clear,
-                        // reset-jank.
-    record("read_input_sab", performance.now() - readStart);
+Each iteration has three phases — read, tick, write — followed by a
+pacing park:
 
-    if (paused) {
-      // Sync park on the futex. Legal because no postMessage hot path
-      // exists; main wakes us via Atomics.add(CTRL_FUTEX,1) +
-      // Atomics.notify when it writes a slider / unpauses / fires an
-      // inspector request.
-      //
-      // v2: `world.world_ended` is intentionally NOT a park trigger.
-      // Once population hits zero the sim drops into a thin grass-only
-      // tick path (see simulation-core.md) so the canvas keeps filling
-      // while main shows the world-end popup.
-      Atomics.wait(ctrlI32, CTRL_FUTEX, before, Infinity);
-      continue;
-    }
-
-    // ── sim_worker.tick ──
-    const tickStart = performance.now();
-    world.step_n(1);
-    record("tick", performance.now() - tickStart);
-    tickIdx++;
-
-    // ── sim_worker.write_output_sab ──
-    const writeStart = performance.now();
-    writeSnapshotToSAB();                            // always
-    serveInspectRequest();                            // if epoch advanced
-    maybeWriteProfileReport(tickIdx);                 // every N ticks
-    maybeWriteNnStats(tickIdx);                       // every M ticks
-    record("write_output_sab", performance.now() - writeStart);
-
-    // ── Pacing ──
-    const remainingMs = 1000/targetTPS - (performance.now() - iterStart);
-    if (remainingMs > 0.25) {
-      // Sync park; wakes early on Atomics.notify when main writes
-      // sliders / pause / inspect. Burns zero CPU during the park.
-      Atomics.wait(ctrlI32, CTRL_FUTEX, before, remainingMs);
-    }
-    // Over budget? No yield needed — no event loop to feed.
-  }
-}
-```
-
-**Why this shape (v1.10):**
-
-- **No `async`, no `await`.** With every control signal on SAB, there
-  is no `onmessage` macrotask to dispatch in steady state, so the
-  loop never has to yield to the event loop. Synchronous
-  `Atomics.wait` is the pacing primitive — it parks the OS thread,
-  burns zero CPU, and wakes on `Atomics.notify` when main writes any
-  futex-touching SAB op.
-- **One tick per loop iteration.** Batching (`step_n(N)`) would hurt
-  snapshot freshness — the renderer reads the latest snapshot on
-  every RAF, so each tick must publish.
-- **No 1 ms wait floor.** The historical floor existed because
-  `Atomics.waitAsync(0)` returned synchronously without yielding to
-  the event loop, dark-holing every postMessage. With postMessage out
-  of the hot path the failure mode evaporates — when the tick is
-  over its slice we just continue the loop immediately. This
-  uncapped TPS up to `1000 / tick_ms` per the new
-  [`tests/e2e/sim-bridge.spec.ts`](../../web/tests/e2e/sim-bridge.spec.ts).
-- **Slider drain ordering preserved.** SAB reads happen at the *top*
-  of the iteration, so a slider value main wrote at wall-clock T
-  takes effect for tick T+1 deterministically — same property the v1.6
-  postMessage version had.
+- **Read phase** (`readControlSab`): pause flag, target TPS, sliders
+  (epoch-gated on `CTRL_CONTROL_EPOCH`), inspector request (epoch-gated
+  on `CTRL_INSPECT_REQ_EPOCH`), profile-clear, reset-jank.
+- **Pause park**: when paused, `Atomics.wait(..., Infinity)` blocks the OS
+  thread and burns zero CPU. `world.world_ended` is intentionally not a
+  park trigger — once population hits zero the sim drops into a thin
+  grass-only tick path so the canvas keeps filling while main shows the
+  world-end popup.
+- **Tick phase**: `world.step_n(1)`. One tick per iteration; batching
+  would hurt snapshot freshness since the renderer reads the latest
+  snapshot on every RAF.
+- **Write phase**: snapshot (always), inspect response (if epoch advanced),
+  profile report and NN stats (every N ticks each).
+- **Pacing**: `Atomics.wait` for `1000/targetTPS − elapsed` ms when
+  `remainingMs > 0.25`. No floor — when the tick overshoots its slice the
+  loop continues immediately (no event loop to feed). TPS is therefore
+  effectively capped at `1000 / tick_ms`. See
+  [`app/web/tests/e2e/sim-bridge.spec.ts`](../../app/web/tests/e2e/sim-bridge.spec.ts)
+  for regression coverage of uncapped throughput.
+- **Invariant — no `async`, no `await`**: with every control signal on SAB
+  there is no `onmessage` macrotask to dispatch in steady state, so the
+  loop never has to yield to the event loop.
+- **Invariant — slider ordering**: SAB reads happen at the top of the
+  iteration, so a slider value main wrote at wall-clock T takes effect for
+  tick T+1 deterministically.
 
 ## Boot handshake
 
@@ -156,13 +111,17 @@ function simLoop(): void {
 6. Apply every entry in `boot.initial_sliders` via
    `world.set_slider(name, value)` (still uses the name-keyed entry
    for forward compatibility with stale localStorage keys).
-7. Allocate `controlSab` (`CONTROL_SAB_BYTES`) + `snapshotSab`.
+7. Allocate `controlSab` (`CONTROL_SAB_BYTES`). (The snapshot region is
+   already resident in wasm linear memory — `WorldHandle::snapshot_buf` —
+   no separate SAB is needed.)
 8. Seed the control SAB: `CTRL_PAUSED`, `CTRL_TARGET_TPS_BITS`, every
    `CTRL_SLIDERS[i]` lane from `boot.initial_sliders`. Stamp the
    epoch counters so the first loop iteration is a no-op read.
-9. Run one tick + write one snapshot to slot 0.
-10. Post `boot_ready` with both SABs, `max_pop_for_sim()`, and
-    `world.sliders_defaults_json()`.
+9. Run one tick + write one snapshot to slot 0 (into wasm memory).
+10. Post `boot_ready` with the `controlSab`, `wasm_memory` handle,
+    `snapshot_buf_byte_offset`, `snapshot_buf_byte_len`, `max_pop_for_sim()`,
+    and `world.sliders_defaults_json()`. Main builds a typed view directly
+    over `wasm_memory.buffer` at the offset.
 11. Enter `simLoop()`.
 
 Main asserts `reply.max_pop_for_sim === MAX_POP_FOR_SIM` and throws on
@@ -186,7 +145,7 @@ pacing-slice timeout.
 
 ## Restart
 
-Implemented in `main.ts`:
+Implemented in `app/web/src/main.ts` → `restart`:
 
 ```ts
 async function restart(): Promise<void> {
@@ -215,28 +174,29 @@ zero CPU. Main wakes it via `Atomics.notify` on the unpause SAB write.
 
 ## Code anchors
 
-- [`web/src/sim-worker.ts`](../../web/src/sim-worker.ts) →
+- [`app/web/src/sim/worker.ts`](../../app/web/src/sim/worker.ts) →
   `handleBoot`, `readControlSab`, `serveInspectRequest`,
   `maybeWriteProfileReport`, `maybeWriteNnStats`,
-  `writeSnapshotToSAB`, `simLoop`, `TARGET_RAYON_WORKERS`,
-  `PROFILE_REPORT_EVERY_N_TICKS`, `NN_STATS_EVERY_N_TICKS`.
-- [`web/src/sim-bridge.ts`](../../web/src/sim-bridge.ts) →
+  `maybeWriteSpeciesTable`, `writeSnapshotToSAB`, `simLoop`,
+  `TARGET_RAYON_WORKERS`, `PROFILE_REPORT_EVERY_N_TICKS`,
+  `NN_STATS_EVERY_N_TICKS`.
+- [`app/web/src/sim/bridge.ts`](../../app/web/src/sim/bridge.ts) →
   `SimBridge`, `SimBridge.sendBoot`, `SimBridge.attachControlSab`,
   `SimBridge.debouncedSetSlider`, `SimBridge.setPaused`,
   `SimBridge.setTargetTps`, `SimBridge.resetJank`,
   `SimBridge.resetProfile`, `SimBridge.requestInspectAt`,
   `SimBridge.requestInspectId`, `SimBridge.requestProfileReport`,
   `SimBridge.requestNnStats`, `SimBridge.terminate`.
-- [`src/wasm_api.rs`](../../src/wasm_api.rs) → `WorldHandle`,
+- [`app/crates/evosim/src/wasm_api/mod.rs`](../../app/crates/evosim/src/wasm_api/mod.rs) → `WorldHandle`,
   `set_slider`, `set_slider_by_index`, `record_profile_sample`,
   `creature_at`, `creature_idx_by_id`, `creature_inspect_json`,
   `profile_report_json`, `nn_worker_stats_json`, `profile_clear`,
   `reset_jank`, `max_pop_for_sim`, `rayon_current_num_threads`.
-- [`src/control_sab.rs`](../../src/control_sab.rs) → canonical SAB
+- [`app/crates/evosim/src/control_sab.rs`](../../app/crates/evosim/src/control_sab.rs) → canonical SAB
   byte layout. Mirror in
-  [`web/src/generated/control-sab.ts`](../../web/src/generated/control-sab.ts).
-- [`web/tests/e2e/sab-control.spec.ts`](../../web/tests/e2e/sab-control.spec.ts) —
-  regression coverage for the v1.10 transport (sim_worker tree,
+  [`app/web/src/generated/control-sab.ts`](../../app/web/src/generated/control-sab.ts).
+- [`app/web/tests/e2e/sab-control.spec.ts`](../../app/web/tests/e2e/sab-control.spec.ts) —
+  regression coverage for the all-SAB transport (sim_worker tree,
   snapshot tree, nn.build_input.proximity nesting, SAB inspector
   round-trip).
 
@@ -251,11 +211,10 @@ zero CPU. Main wakes it via `Atomics.notify` on the unpause SAB write.
 
 ## Why is it shaped this way
 
-See [`../plans/v1.10-mission.md`](../plans/v1.10-mission.md) for the
-all-SAB control decision and the locked design choices (pacing
-primitive, restart strategy, slider table source-of-truth, response
-buffer sizes). The v1.6/v1.9 reasoning behind `Atomics.waitAsync` +
-the 1 ms floor lives in older decisions docs and is now historical.
+See [`../decisions/sim.md`](../decisions/sim.md) for the all-SAB
+control decision and the locked design choices (pacing primitive,
+restart strategy, slider table source-of-truth, response buffer
+sizes).
 
 ## See also
 
@@ -263,7 +222,6 @@ the 1 ms floor lives in older decisions docs and is now historical.
 - [`simulation-core.md`](simulation-core.md)
 - [`profiler.md`](profiler.md)
 - [`build-and-deploy.md`](build-and-deploy.md)
-- [`../plans/v1.10-mission.md`](../plans/v1.10-mission.md)
 - [`../decisions/sim.md`](../decisions/sim.md)
 - [`../decisions/cross-cutting.md`](../decisions/cross-cutting.md)
 - [`../agent-context/dev-loop.md`](../agent-context/dev-loop.md)

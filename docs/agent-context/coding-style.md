@@ -1,14 +1,14 @@
-# Coding style
+# Coding style — evosim
 
-Rust + TypeScript conventions specific to this repo.
+The universal principles and the generic per-language idioms live in
+`~/.claude/agent-docs/v1/rules/coding-style.md` — read that first. This
+file lists only this app's specific values, named patterns, and footguns.
 
 ## When does this apply
 
-Any time you're writing or editing code in `src/` or `web/`. The
-conventions below catch real footguns the project has tripped over;
-they are not stylistic preferences.
+You're editing Rust in `app/crates/evosim/src/` or TypeScript in `app/web/`.
 
-## Rust
+## Rust specifics
 
 **Do:**
 
@@ -46,7 +46,7 @@ they are not stylistic preferences.
   constants that are *not* slider defaults (e.g. `UPKEEP_BASE`,
   `WORLD_SIZE`) stay bare.
 - Add per-typed wasm-bindgen setters. `set_slider(name, value)` is the
-  sole external mutation entry point — add a `apply_X` helper and a
+  sole external mutation entry point — add an `apply_X` helper and a
   `try_set_slider` arm instead.
 - Call `web_sys::window()` from anything that might run in the sim
   worker (e.g., from `wasm_now_ms`). It returns `None` in a Worker
@@ -58,21 +58,19 @@ they are not stylistic preferences.
   Use a TS-side `span()` instead.
 - Add a `cross_origin_isolated` Rust export. Both sides read it from
   their JS global directly.
-- `git add -A` or `git add .`. Use explicit paths so worktree directories
-  and `.cache/` files don't sneak in.
 
-## TypeScript
+## TypeScript specifics
 
 **Do:**
 
 - Type discriminated unions for any cross-thread message — extend
-  `SimMessage` / `SimReply` in `sim-bridge.ts`. The discriminator field
-  is `kind: "..."`. Handler switches must exhaustively cover every
-  variant.
+  `SimMessage` / `SimReply` in `app/web/src/sim/bridge.ts`. The
+  discriminator field is `kind: "..."`. Handler switches must
+  exhaustively cover every variant.
 - Route every wasm-touching call through `SimBridge`. Main never holds
   a `WorldHandle`. The bridge handles the request_id correlation, the
   TTL, the per-name slider debouncer, and the futex wake.
-- Open spans via `span("frame.X")` from `web/src/perf.ts`. Use the
+- Open spans via `span("frame.X")` from `app/web/src/perf.ts`. Use the
   full dotted prefix that matches the tree position; the panel renders
   by name.
 - Read `crossOriginIsolated` from the current global directly
@@ -81,7 +79,7 @@ they are not stylistic preferences.
   in the worker). Don't round-trip through wasm.
 - Run `pnpm typecheck` + `pnpm build` before committing TS changes. The
   build runs `tsc --noEmit && vite build`.
-- For new persisted settings, add the key to `web/src/settings.ts →
+- For new persisted settings, add the key to `app/web/src/settings.ts →
   Settings` AND `DEFAULTS`. The loader picks only keys present in
   `DEFAULTS`, so a missing key in the type silently drops the value
   on load. The unknown-key filter at the same site is the migration
@@ -91,7 +89,7 @@ they are not stylistic preferences.
 
 - Replace `Atomics.waitAsync` with `Atomics.wait` in the worker loop.
   See [`../decisions/sim.md`](../decisions/sim.md) and the comment in
-  `web/src/sim-worker.ts → simLoop`.
+  `app/web/src/sim/worker.ts → simLoop`.
 - Lower the `timeoutMs` floor in the worker loop below 1 ms.
   `Atomics.waitAsync(.., 0)` returns synchronously and dark-holes
   `onmessage`.
@@ -103,28 +101,13 @@ they are not stylistic preferences.
   restart carries the dragged value.
 - Build a new `Float32Array` over wasm linear memory and keep it
   across ticks — wasm memory can grow and the view detaches. The SAB
-  views in `main.ts → frame` are intentionally rebuilt per RAF.
+  views in `app/web/src/main.ts → frame` are intentionally rebuilt per RAF.
 - Use `BigInt` for creature ids. They come out of wasm as `f64`;
   reassemble u32 pairs via `idHi * 4294967296 + idLo` if you need to
   decode the SAB stride directly.
 - Use `text-transform: uppercase` or all-lowercase labels in user-
   facing UI. Section headers and slider labels are sentence-case
-  ("Energy max", "Show profiler"). The dev panel's earlier
-  `text-transform: uppercase` rule was removed in v1.9; don't
-  re-introduce it.
-
-## Commits
-
-- Conventional commit subjects: `<type>(<scope>): <subject>`. Types
-  in active use here: `feat`, `fix`, `perf`, `refactor`, `chore`,
-  `docs`, `test`, `style`.
-- No `--no-verify`. No `--amend` on a hook failure — make a new
-  commit. If a pre-commit hook fails, the commit did not happen;
-  `--amend` would modify the previous one instead.
-- Add Co-Authored-By trailers for AI-assisted commits as the project's
-  convention.
-- One concept per commit. The sim/render decoupling pass split waves
-  for a reason — each wave has its own bisect surface.
+  ("Energy max", "Show profiler").
 
 ## See also
 

@@ -1,55 +1,42 @@
 # Agent context index
 
-Procedural routing for agents working in this repo.
+Procedural docs: when working on X, do Y, don't do Z.
 
-## When does this apply
+## How to use this folder
 
-Read this after `docs/index.md` and `docs/overview.md` when you are about
-to edit code, run commands, start the app, test, commit, or update docs.
-This file owns routing among the procedural docs; the child docs own the
-actual instructions.
+Load only the procedural doc that matches the situation you're in. Each
+doc opens with a "when does this apply" framing so you can decide
+quickly whether to read it.
 
-## How to use this layer
+Under **agent-docs v1**, the generic workflow discipline lives in the
+global kit (`~/.claude/agent-docs/v1/rules/`); the in-repo docs below
+hold what's specific to **evosim** and link up to the matching global
+rule. App-independent commands and templates are exposed as global
+**skills** (`/fresh-chat`, `/fresh-orchestrator`, `/fix-docs-drift-all`,
+`/check-docs-consistency-some`, `/wrap-up-current-chat`), not as in-repo
+prompt files.
 
-Load only the procedural doc that matches the task. If the task also
-touches a subsystem, load the relevant architecture doc from
-`docs/architecture/index.md` as the static source of truth.
+## Routing
 
-| Situation | Read |
-|---|---|
-| Editing Rust in `src/` or TypeScript in `web/` | [`coding-style.md`](coding-style.md) |
-| Running the app, rebuilding wasm, checking the dev server, hard-reloading | [`dev-loop.md`](dev-loop.md) |
-| Running or adding tests, triaging test failures | [`testing-how-to.md`](testing-how-to.md) |
-| Making a commit, staging files, touching lockfiles/generated outputs/settings | [`repo-rules.md`](repo-rules.md) |
-| Editing docs, shipping a plan, deciding which doc owns a fact | [`maintaining-docs.md`](maintaining-docs.md) |
-| Orchestrating a large multi-stream effort via sub-agents | [`orchestrating.md`](orchestrating.md) |
-| Creating a mission plan | [`../plans/index.md`](../plans/index.md) + [`../plans/template.md`](../plans/template.md) |
-| Updating or shipping a mission plan | [`../plans/index.md`](../plans/index.md) + [`maintaining-docs.md`](maintaining-docs.md) |
+| Situation | Read | Generic rule (global kit) |
+|---|---|---|
+| Editing Rust in `app/crates/evosim/src/` or TypeScript in `app/web/` | [`coding-style.md`](coding-style.md) | `rules/coding-style.md` |
+| Running the app, rebuilding wasm, checking the dev server, hard-reloading | [`dev-loop.md`](dev-loop.md) | — (app-specific) |
+| Running or adding tests, triaging test failures | [`testing-how-to.md`](testing-how-to.md) | — (app-specific) |
+| Git commits, staging, drift gates, things to never do | [`repo-rules.md`](repo-rules.md) | `rules/repo-rules.md` |
+| Updating docs after a code change | [`maintaining-docs.md`](maintaining-docs.md) | `rules/authoring-rules.md` |
+| Orchestrating multi-stream work via sub-agents | [`orchestrating.md`](orchestrating.md) | `rules/orchestrating.md` |
+| Creating, updating, or shipping a plan | [`../plans/index.md`](../plans/index.md) (landing); [`~/.claude/agent-docs/v1/plan-lifecycle.md`](~/.claude/agent-docs/v1/plan-lifecycle.md) (lifecycle) + [`~/.claude/agent-docs/v1/plan-template.md`](~/.claude/agent-docs/v1/plan-template.md) (skeleton); [`maintaining-docs.md`](maintaining-docs.md) | `rules/authoring-rules.md` §workflow |
 
-## Routing rules
-
-- For any `src/` or `web/` edit, read `coding-style.md` before editing.
-- For browser iteration after a Rust change, read both `coding-style.md`
-  and `dev-loop.md`.
-- For test work, read `testing-how-to.md`; if the test describes system
-  coverage rather than command procedure, also read
-  `../architecture/testing.md`.
-- For docs work, read `maintaining-docs.md`; if a command recipe appears
-  in an agent-context doc, keep it in sync with its canonical architecture
-  owner.
-- For plan review or updates, read `../plans/index.md`; ordinary plans
-  use status metadata instead of lifecycle prose at the top. Open
-  `../plans/template.md` only when creating a new plan.
-- For file discovery, use `../repository-layout.md`; this agent-context
-  layer is about workflow, not source-tree inventory.
-- For a multi-stream effort driven via sub-agents (audit → plan →
-  implement → verify → doc-migrate), read `orchestrating.md`; bootstrap
-  such a chat with `../prompts/fresh-orchestrator.md`. A single focused
-  change does not need it.
+For a multi-stream effort driven via sub-agents (audit → plan →
+implement → verify → doc-migrate), bootstrap with the `/fresh-orchestrator`
+skill and read `orchestrating.md`. A single focused change does not need it.
 
 ## See also
 
 - [`../index.md`](../index.md) — global docs router.
+- [`../architecture/index.md`](../architecture/index.md) — the
+  current-state facts these procedural docs reference.
+- [`../_meta/manifest.md`](../_meta/manifest.md) — app slot-data the
+  global rules plug into.
 - [`../ownership.md`](../ownership.md) — ownership map for static facts.
-- [`../overview.md`](../overview.md) — system shape.
-- [`../repository-layout.md`](../repository-layout.md) — file inventory.

@@ -1,119 +1,49 @@
 # Plans
 
-Working mission docs for multi-step changes.
+Working coordination docs for multi-step work on evosim. Plans are
+**not** canonical architecture: once work ships, the relevant architecture
+and decisions docs get updated and the plan is deleted.
 
-**Plans are scratch and get deleted post-ship.** `long_lived: true` is the
-explicit exception, not the norm. Anything in a plan that needs to survive
-launch — current-state architecture, design rationale, invariants —
-**must** live in `architecture/` or `decisions/`. If it's only in a plan,
-treat it as already gone.
+The **lifecycle rules, status-frontmatter spec, and ship-time migration
+workflow are generic** (agent-docs v1) and live in the kit:
+[`~/.claude/agent-docs/v1/plan-lifecycle.md`](~/.claude/agent-docs/v1/plan-lifecycle.md).
+New plans start from the kit skeleton:
+[`~/.claude/agent-docs/v1/plan-template.md`](~/.claude/agent-docs/v1/plan-template.md).
 
-## What belongs here
+## What lives here
 
-Plans are coordination artifacts: scope, waves, checklists, status, and
-open questions for work that has not fully landed. They are not canonical
-architecture or decision references. When code lands, rewrite the owning
-`architecture/` and `decisions/` docs in place so the current-state
-snapshot stays accurate — then the plan can be deleted.
+Active and recently-shipped plans live in this directory alongside this
+landing doc. This index does **not** maintain an inventory of active plans
+(it would rot the moment one is added) — list the directory to see what's
+live:
 
-Do not add lifecycle boilerplate to the top of ordinary plans. This file
-owns the lifecycle rules. Individual plans should carry compact metadata
-at the top, then start the mission content.
-
-Only call out long-lived plan status in prose when the plan is intentionally
-long-lived, for example a roadmap, benchmark campaign, or umbrella project
-that will remain useful after individual implementation waves ship.
-
-## Status Metadata
-
-Start each plan with YAML frontmatter:
-
-```yaml
----
-status: draft | active | blocked | shipped | parked
-owner: user | codex | mixed
-last_updated: YYYY-MM-DD
-okay_to_delete: false
-long_lived: false
-owning_docs:
-  - docs/architecture/<doc>.md
-  - docs/decisions/<doc>.md
----
+```
+ls docs/plans/
 ```
 
-- `status`: current state of the plan.
-- `owner`: who is expected to drive the next update.
-- `last_updated`: date of the latest meaningful plan edit.
-- `okay_to_delete`: `true` only after the owning architecture and decision
-  docs have been updated and the plan has no remaining coordination value.
-  The user decides when to delete it.
-- `long_lived`: `true` only for plans that are meant to stay useful after
-  their first implementation pass.
-- `owning_docs`: docs that must be rewritten in place as the work lands.
+The long-lived plans (frontmatter `long_lived: true`) are:
 
-## Creating A Plan
+- **`perf-optimization-ideas.md`** — a running backlog of performance ideas
+  discussed but not committed. A menu, not a plan. Never deleted.
+- **`v2.0.5-bench-recipe.md`** — the canonical bench recipe used across
+  waves; retained as a long-lived reference.
+- **`open-bugs.md`** — triage list of open or unconfirmed bugs collected
+  during plans-cleanup; never deleted until all items are resolved or moved.
 
-Use [`template.md`](template.md) when creating a new plan. An agent
-reviewing or updating an existing plan usually only needs this index plus
-the plan itself.
+Everything else should reach `shipped + okay_to_delete: true` and be deleted.
 
-## Active plans
+## Routing
 
-- [`v2.0.4-closeout.md`](v2.0.4-closeout.md) — **Lead handoff / review surface** for
-  v2.0.4. Code-complete + fully gated green (both feature sets, e2e 11/11); durable
-  facts migrated. Headlines the **ratification items** (decay 0.04, lod_bias default,
-  far-band radii, grass_size range, LUT_RADIUS over-approx, threaded non-reproducibility)
-  + the S5/geometric-skip drop rationale. **Review — start here.**
-- [`perf-optimization-ideas.md`](perf-optimization-ideas.md) — **long-lived** perf
-  backlog (cadence/visibility gating, event-sampling, mip-skip throttle,
-  deterministic-scatter). Menu of deferred ideas; never deleted. §3
-  (event-sampling) is now annotated with the S0 measured verdict: geometric-skip
-  alone is net-harmful; event-sampling is the prerequisite.
-- [`grass-perf-closeout.md`](grass-perf-closeout.md) — **Lead handoff / review surface**
-  for the grass-perf effort. Code-complete + fully gated green (both feature sets, e2e
-  11/11); durable facts migrated. Headlines the **ratification items** (threaded run-to-run
-  non-reproducibility, blur deletion, feel-tune) + the toroidal wrap-seam limitation.
-  **Review** — start here.
-- [`grass-perf-hub.md`](grass-perf-hub.md) — **Orchestration hub**: the full build-first
-  log, every decision, and the carried-forward debt (each item fixed/confirmed/deferred).
-  **Review** — the detailed record behind the close-out.
-- [`grass-perf-recon.md`](grass-perf-recon.md) · [`grass-perf-recon-stage2.md`](grass-perf-recon-stage2.md)
-  · [`grass-stage3-review.md`](grass-stage3-review.md) — recon maps (Stage 1 / Stage 2) +
-  the Stage-3 code review & perf numbers. Scratch; delete with the effort.
-- [`v2.0.4-grass-tuning-perf.md`](v2.0.4-grass-tuning-perf.md) — **Shipped** — v2.0.4
-  execution hub (LOD config, scatter perf, fertility, far NN sight, grass_size slider, S5
-  drop). Durable facts migrated to `architecture/` + `decisions/`; `okay_to_delete: true`.
-  Review surface: `v2.0.4-closeout.md`. The S0 recon scratch
-  ([`v2.0.4-s0-attribution.md`](v2.0.4-s0-attribution.md)) is also deletable with
-  the effort.
-- [`v2.0.2-grass-scatter.md`](v2.0.2-grass-scatter.md) — Stage-1 design spec (stochastic u8
-  scatter). **Shipped** — durable facts migrated to `architecture/` + `decisions/`;
-  `okay_to_delete: true`.
-- [`v2.0.3-grass-lod-pyramid.md`](v2.0.3-grass-lod-pyramid.md) — Stage-2 design spec (u8 LOD
-  mip pyramid + windowed snapshot). **Shipped** — durable facts migrated; `okay_to_delete: true`.
-- [`v2.0.1-mission.md`](v2.0.1-mission.md) — Patch-wave hub for v2.0.1:
-  triage + fix the problems the lead surfaces against the shipped v2.0.0
-  build. **Draft** — intake open, no streams launched yet.
-- [`v2.0.0-mission.md`](v2.0.0-mission.md) — World, body, species:
-  editable runtime `world_size` (default 8× linear / 64× area),
-  optional toroidal wrap, 3 biomes, evolving body genome, opt-in
-  species + sexual mating mode. **Shipped** on `feat/v2.0.0`; durable
-  facts migrated to `architecture/` + `decisions/`.
-- [`v2.0.0-decisions.md`](v2.0.0-decisions.md) — Companion rationale
-  for v2.0.0: every choice settled in plan drafting, with the
-  alternatives that were rejected. **Shipped**: rationale folded into
-  `decisions/{sim,render,cross-cutting}.md`; `okay_to_delete: true`.
-- [`v2-possible-next-steps.md`](v2-possible-next-steps.md) —
-  **long-lived** backlog for the v2 family: deferred ideas, expected
-  problems, and design directions discussed but not committed (brain
-  inheritance under sexual reproduction, mating cold-start levers,
-  the 1920² optimization pass, survey-scale visibility, dynamic
-  species). Never deleted.
+| Need | Read |
+|---|---|
+| Create a new plan | [`~/.claude/agent-docs/v1/plan-template.md`](~/.claude/agent-docs/v1/plan-template.md) |
+| Plan lifecycle / status-metadata rules | [`~/.claude/agent-docs/v1/plan-lifecycle.md`](~/.claude/agent-docs/v1/plan-lifecycle.md) |
+| The doc-update workflow a shipped plan triggers | [`../agent-context/maintaining-docs.md`](../agent-context/maintaining-docs.md) |
 
 ## See also
 
-- [`template.md`](template.md) — copy-paste skeleton for new plans.
-- [`../index.md`](../index.md) — global docs router.
-- [`../ownership.md`](../ownership.md) — documentation ownership map.
+- [`~/.claude/agent-docs/v1/plan-lifecycle.md`](~/.claude/agent-docs/v1/plan-lifecycle.md)
+  — lifecycle and status metadata (generic).
 - [`../agent-context/maintaining-docs.md`](../agent-context/maintaining-docs.md)
-  — doc update rules when plans ship.
+  — the rules a shipped plan must satisfy.
+- [`../index.md`](../index.md) — global router.

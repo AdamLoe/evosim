@@ -1,0 +1,78 @@
+{
+  "agent_docs_version": "v1",
+  "note": "Ownership map as structured data. LAYER A only: concept -> owner doc (+ allowed referencers). Holds NO code anchors (path -> symbol) -- those are Layer B, they live inside the docs themselves and feed the separate freshness/certification ledger (Layer C). Ownership answers 'who owns this concept'; it does not track code. The prose guidance ('edit the owner; link, don't redefine') is GENERIC and lives in the global authoring-rules. Owner/reference paths are relative to docs/.",
+  "concepts": [
+    {
+      "id": "simulation-core",
+      "summary": "World, CreatureSoA, tick step order, NN topology, grass density field",
+      "owner": "architecture/simulation-core.md",
+      "references": ["architecture/*"]
+    },
+    {
+      "id": "worker-runtime",
+      "summary": "Web Worker spawn/terminate, Atomics.waitAsync pacing, slider drain ordering",
+      "owner": "architecture/worker-runtime.md",
+      "references": ["architecture/simulation-core.md", "architecture/shared-memory-and-protocol.md", "architecture/render-pipeline.md"]
+    },
+    {
+      "id": "shared-memory-and-protocol",
+      "summary": "Every SimMessage / SimReply kind, control + snapshot SAB byte layout, snapshot creature stride, header fields",
+      "owner": "architecture/shared-memory-and-protocol.md",
+      "references": ["architecture/*"]
+    },
+    {
+      "id": "render-pipeline",
+      "summary": "GL renderer, camera, frustum cull, instance pack, highlight ring",
+      "owner": "architecture/render-pipeline.md",
+      "references": ["architecture/shared-memory-and-protocol.md"]
+    },
+    {
+      "id": "app-shell",
+      "summary": "Main-thread DOM layout, right-rail tab routing, Settings stage-then-apply, panel-installer assignment, showProfiler source-of-truth",
+      "owner": "architecture/app-shell.md",
+      "references": ["architecture/*"]
+    },
+    {
+      "id": "profiler",
+      "summary": "The four profiler trees (frame, tick, nn, grass_step) and the no-rollup rule",
+      "owner": "architecture/profiler.md",
+      "references": ["architecture/*"]
+    },
+    {
+      "id": "build-and-deploy",
+      "summary": "wasm-pack incantation, .cargo/config.toml link args, COOP/COEP headers, threaded-bundle invariants",
+      "owner": "architecture/build-and-deploy.md",
+      "references": ["agent-context/dev-loop.md"]
+    },
+    {
+      "id": "testing-gates",
+      "summary": "What test suites exist, what each covers",
+      "owner": "architecture/testing.md",
+      "references": ["agent-context/testing-how-to.md"]
+    },
+    {
+      "id": "cross-cutting-constants",
+      "summary": "The MAX_POP_FOR_SIM constant + cross-language assertion",
+      "owner": "decisions/cross-cutting.md",
+      "references": ["architecture/simulation-core.md", "architecture/shared-memory-and-protocol.md"]
+    },
+    {
+      "id": "agent-context-index",
+      "summary": "Which procedural doc an agent should read for a workflow",
+      "owner": "agent-context/index.md",
+      "references": ["agent-context/*"]
+    },
+    {
+      "id": "species",
+      "summary": "Species registry, N-anchor seeding, sexual Mate + crossover, same-species gate",
+      "owner": "architecture/species.md",
+      "references": ["architecture/*"]
+    },
+    {
+      "id": "biome",
+      "summary": "Biome blob generation, static biome region, movement + NN + grass modulation",
+      "owner": "architecture/biome.md",
+      "references": ["architecture/*"]
+    }
+  ]
+}

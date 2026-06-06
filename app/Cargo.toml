@@ -1,0 +1,29 @@
+# Workspace root for the evosim Rust code. Run all cargo commands from here
+# (`src/`). The single member crate is `crates/evosim`; the TypeScript shell
+# lives next to it at `web/`. `target/` is emitted at `src/target/`.
+#
+# Cargo only honors `[profile.*]` at the workspace root, so the build profiles
+# live here, not in the member crate's manifest.
+[workspace]
+resolver = "2"
+members = ["crates/evosim"]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+# criterion requires panic=unwind (uses catch_unwind internally). Override the
+# bench profile (which inherits release's panic=abort) just for native benches.
+# wasm-pack never uses this profile; it only uses [profile.release] above.
+[profile.bench]
+panic = "unwind"
+
+[profile.dev]
+opt-level = 1
+# panic=abort is required when building --features threads for wasm32.
+# Without it, the dev profile defaults to panic=unwind, the linker silently
+# emits non-shared WebAssembly.Memory, and wasm-bindgen-rayon's
+# postMessage(memory) fails with DataCloneError at boot.
+panic = "abort"

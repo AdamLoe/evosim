@@ -13,6 +13,8 @@ follow the doc's `Why is it shaped this way` link into `decisions/`.
 | Need | Read |
 |---|---|
 | World / SoA / tick model / NN / grass mechanic | [`simulation-core.md`](simulation-core.md) |
+| Species registry, N-anchor seeding, sexual mating + crossover | [`species.md`](species.md) |
+| Biome generation, movement + NN + grass-capacity effects | [`biome.md`](biome.md) |
 | Web Worker lifecycle, boot handshake, pacing | [`worker-runtime.md`](worker-runtime.md) |
 | Every main <-> worker message kind, SAB layout, snapshot stride | [`shared-memory-and-protocol.md`](shared-memory-and-protocol.md) |
 | GL renderer, camera, frustum cull, snapshot read | [`render-pipeline.md`](render-pipeline.md) |
@@ -26,3 +28,4 @@ follow the doc's `Why is it shaped this way` link into `decisions/`.
 - [`../decisions/index.md`](../decisions/index.md)
 - [`../ownership.md`](../ownership.md)
 - [`../agent-context/maintaining-docs.md`](../agent-context/maintaining-docs.md)
+- Global authoring rules: `~/.claude/agent-docs/v1/rules/authoring-rules.md`

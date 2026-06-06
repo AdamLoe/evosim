@@ -68,8 +68,8 @@ parallel breakdown for NN and grass work is owned by
 ## Tech stack at a glance
 
 - **Rust** (stable for native + tests; nightly for wasm w/ atomics) →
-  wasm via `wasm-pack --target web --features threads`. Single crate at
-  repo root.
+  wasm via `wasm-pack --target web --features threads`. Crate at
+  `app/crates/evosim/`.
 - **rayon** + `wasm-bindgen-rayon` for the parallel NN forward + grass
   propagation. Requires COOP/COEP for SharedArrayBuffer.
 - **TypeScript + Vite + plain DOM** for the web shell (no framework).

@@ -16,15 +16,22 @@ jobs:
           targets: wasm32-unknown-unknown
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app
       - name: fmt
+        working-directory: app
         run: cargo fmt --all -- --check
       - name: clippy
+        working-directory: app
         run: cargo clippy --all-targets -- -D warnings
       - name: clippy (threads)
+        working-directory: app
         run: cargo clippy --all-targets --features threads -- -D warnings
       - name: test (native)
+        working-directory: app
         run: cargo test --lib
       - name: test (threads)
+        working-directory: app
         run: cargo test --lib --features threads
       - name: install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
@@ -33,7 +40,8 @@ jobs:
           rustup toolchain install nightly --component rust-src
           rustup target add wasm32-unknown-unknown --toolchain nightly
       - name: wasm-pack build
-        run: rustup run nightly wasm-pack build --target web --out-dir web/wasm --release --features threads
+        working-directory: app
+        run: rustup run nightly wasm-pack build crates/evosim --target web --out-dir ../../web/wasm --release --features threads
 
   web:
     name: web typecheck + build
@@ -45,6 +53,8 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app
       - name: install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
       - name: install nightly + rust-src (required for wasm atomics / build-std)
@@ -52,7 +62,8 @@ jobs:
           rustup toolchain install nightly --component rust-src
           rustup target add wasm32-unknown-unknown --toolchain nightly
       - name: wasm-pack build
-        run: rustup run nightly wasm-pack build --target web --out-dir web/wasm --release --features threads
+        working-directory: app
+        run: rustup run nightly wasm-pack build crates/evosim --target web --out-dir ../../web/wasm --release --features threads
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -60,8 +71,8 @@ jobs:
         with:
           version: 10
       - name: pnpm install
-        working-directory: web
+        working-directory: app/web
         run: pnpm install --frozen-lockfile
       - name: typecheck + build
-        working-directory: web
+        working-directory: app/web
         run: pnpm build

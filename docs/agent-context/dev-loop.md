@@ -8,7 +8,9 @@ Any time you're iterating on a Rust or TS change and want to see it run
 in the browser. The canonical build commands, flags, and threaded-bundle
 invariants live in
 [`../architecture/build-and-deploy.md`](../architecture/build-and-deploy.md);
-this doc is the procedural version for an agent at the keyboard.
+this doc is the procedural version for an agent at the keyboard. It is also the canonical landing for the dev-server workflow (the
+`docs/prompts/dev-server.md` prompt file has been deleted; this doc
+replaces it).
 
 ## The inner loop
 
@@ -16,7 +18,8 @@ this doc is the procedural version for an agent at the keyboard.
    exceptions:
 
    ```bash
-   rustup run nightly wasm-pack build --target web --out-dir web/wasm --dev --features threads
+   # Run from app/ (the workspace root)
+   rustup run nightly wasm-pack build crates/evosim --target web --out-dir ../../web/wasm --dev --features threads
    ```
 
    Verify the bundle is actually threaded:
@@ -45,7 +48,8 @@ this doc is the procedural version for an agent at the keyboard.
    If down:
 
    ```bash
-   cd /web && rm -f /tmp/vite.log && \
+   # From app/ workspace root, cd into web/ for pnpm
+   cd web && rm -f /tmp/vite.log && \
      nohup setsid bash -c 'PATH=$HOME/.local/bin:$PATH pnpm dev --host 0.0.0.0' \
      > /tmp/vite.log 2>&1 < /dev/null &
    disown
@@ -87,11 +91,11 @@ sleep 1
 
 ## What "rebuild wasm" means in different contexts
 
-- **Cargo source changed (anything in `src/`)**: always rebuild.
+- **Cargo source changed (anything in `app/`)**: always rebuild.
 - **`Cargo.toml` changed**: rebuild.
 - **`.cargo/config.toml` changed**: rebuild, and verify both grep checks
   (the link args are what shared-memory hangs off).
-- **Only `web/src/` or `web/index.html` changed**: skip wasm rebuild.
+- **Only `app/web/src/` or `app/web/index.html` changed**: skip wasm rebuild.
   Vite HMR is enough.
 - **Only `docs/` changed**: nothing to rebuild or restart.
 
@@ -120,15 +124,13 @@ If any of these happen, **halt and inspect** rather than retrying:
   isn't reaching the dep tree.
 - The browser console shows `DataCloneError: ...postMessage...
   WebAssembly.Memory` → almost always `panic = "abort"` got dropped
-  from `Cargo.toml`, or the linker emitted non-shared memory.
+  from the workspace `Cargo.toml`, or the linker emitted non-shared memory.
 
 ## See also
 
 - [`index.md`](index.md)
 - [`../architecture/build-and-deploy.md`](../architecture/build-and-deploy.md)
   — the canonical incantation + every flag's purpose.
-- [`../prompts/dev-server.md`](../prompts/dev-server.md) — the
-  starting-from-cold prompt template.
 - [`../architecture/worker-runtime.md`](../architecture/worker-runtime.md)
   — what those two `[sim] ...` log lines mean.
 - [`testing-how-to.md`](testing-how-to.md) — running the gates between

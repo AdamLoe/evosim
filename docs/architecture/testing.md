@@ -11,8 +11,8 @@ Two suites:
    `#[cfg(test)] mod tests` blocks. Cover sim invariants, wasm-bindgen
    surface behaviour, NN forward + decode, grass propagation, slider
    dispatch, snapshot byte layout.
-2. **Playwright e2e** — `cd web && pnpm test:e2e`. One spec file at
-   `web/tests/e2e/sim-bridge.spec.ts` covering the main↔worker control
+2. **Playwright e2e** — `cd app/web && pnpm test:e2e`. One spec file at
+   `app/web/tests/e2e/sim-bridge.spec.ts` covering the main↔worker control
    path: pause, target TPS, slider change, profile toggle, restart.
    Boots Vite via Playwright's `webServer` hook so the suite is one
    command.
@@ -57,32 +57,33 @@ Notable coverage by file:
 
 | File | What it covers |
 |---|---|
-| `src/wasm_api.rs` | `write_snapshot_to_native` layout matches the documented byte stride; `max_pop_for_sim()` mirrors the constant; `creature_at` returns stable ids; `set_slider` dispatch round-trip. |
-| `src/world/mod.rs` | Tick step body, slider effects on world construction, multi-founder spawn placement. |
-| `src/world/tick.rs` | Per-phase invariants — graze energy conservation, eat per-bite math, repulsion clamping, death/birth bookkeeping. |
-| `src/world/nn.rs` | NN input layout, slot offsets, threaded NN matches sequential NN bit-for-bit (when seeded), chunk-range partition invariants. |
-| `src/world/proximity.rs` | Sector LUT correctness, wall proximity edges, grass density bilinear seam wrap. |
-| `src/brain.rs` | Forward-pass shape, Leaky ReLU sign behaviour, mutation produces finite values. |
-| `src/grass.rs` | Density init, in-cell growth, two-pass separable Gaussian propagation (active-tile path equivalence to full-grid reference), dirty-tile quantize correctness, bilinear sample, row-has-density bitset rebuild. See also `src/grass_v201_tests.rs` for the v2.0.1 active-tile + dirty-tile test module. |
-| `src/grid.rs` | `cell_of` boundary clamping, `for_each_in_radius` enumeration. |
-| `src/profiler.rs` | Ring buffer pruning, four-tree minting via `ensure_root`, RAII span correctness. |
+| `app/crates/evosim/src/wasm_api/mod.rs` | `write_snapshot_to_native` layout matches the documented byte stride; `max_pop_for_sim()` mirrors the constant; `creature_at` returns stable ids; `set_slider` dispatch round-trip. |
+| `crates/evosim/src/world/mod.rs` | Tick step body, slider effects on world construction, multi-founder spawn placement. |
+| `crates/evosim/src/world/tick.rs` | Per-phase invariants — graze energy conservation, eat per-bite math, repulsion clamping, death/birth bookkeeping. |
+| `crates/evosim/src/world/nn.rs` | NN input layout, slot offsets, threaded NN matches sequential NN bit-for-bit (when seeded), chunk-range partition invariants. |
+| `crates/evosim/src/world/proximity.rs` | Sector LUT correctness, wall proximity edges, grass density bilinear seam wrap. |
+| `app/crates/evosim/src/brain/mod.rs` | Forward-pass shape, Leaky ReLU sign behaviour, mutation produces finite values. |
+| `app/crates/evosim/src/grass/mod.rs` | Density init, in-cell growth, two-pass separable Gaussian propagation (active-tile path equivalence to full-grid reference), dirty-tile quantize correctness, bilinear sample, row-has-density bitset rebuild. Tests live in the `grass/tests/` subdir. |
+| `crates/evosim/src/grid.rs` | `cell_of` boundary clamping, `for_each_in_radius` enumeration. |
+| `crates/evosim/src/profiler.rs` | Ring buffer pruning, four-tree minting via `ensure_root`, RAII span correctness. |
 
 Determinism gates: `clippy.toml` forbids `HashMap` / `HashSet`
 `iter*` in sim-critical files (non-deterministic order would silently
 make tests flaky); use `BTreeMap` / sorted `Vec` if iteration is needed.
 
-## Playwright e2e (`web/tests/e2e/sim-bridge.spec.ts`)
+## Playwright e2e (`app/web/tests/e2e/sim-bridge.spec.ts`)
 
 Run:
 
 ```bash
-cd web
+# From app/ workspace root
+cd app/web
 pnpm install            # one-time
 pnpm test:e2e
 ```
 
 Playwright boots Vite itself via its `webServer` hook (see
-`web/playwright.config.ts`); a running dev server on `:47821` is
+`app/web/playwright.config.ts`); a running dev server on `:47821` is
 reused (`reuseExistingServer: true`).
 
 Tests:
@@ -106,16 +107,17 @@ test at default TPS=60 passes on a buggy commit; the suite exists
 because that bug class has shipped twice.
 
 This suite is the strongest safety net for the worker's pacing math.
-If you touch `simLoop()` in `web/src/sim-worker.ts`, run it.
+If you touch `simLoop()` in `app/web/src/sim/worker.ts`, run it.
 
 ## Code anchors
 
-- `Cargo.toml` → `[features] threads`.
-- `web/package.json` → `"test:e2e": "playwright test"`.
-- `web/playwright.config.ts` → `webServer`, `reuseExistingServer`.
-- `web/tests/e2e/sim-bridge.spec.ts` → the five smoke tests.
-- `web/tests/README.md` → onboarding instructions (kept in sync with this
-  doc).
+- `crates/evosim/Cargo.toml` → `[features] threads`.
+- `app/web/package.json` → `"test:e2e": "playwright test"`.
+- `app/web/playwright.config.ts` → `webServer`, `reuseExistingServer`.
+- `app/web/tests/e2e/sim-bridge.spec.ts` → the five smoke tests.
+- `app/web/tests/README.md` → onboarding pointer; the authoritative
+  command/coverage list lives here and in
+  [`../agent-context/testing-how-to.md`](../agent-context/testing-how-to.md).
 - `clippy.toml` → `disallowed-methods` for the HashMap/HashSet ban.
 - `.github/workflows/ci.yml` → which gates run on every push.
 
@@ -124,7 +126,7 @@ If you touch `simLoop()` in `web/src/sim-worker.ts`, run it.
 - A new Rust test suite or integration crate is added.
 - The Playwright suite gains, loses, or renames a spec file.
 - The `pnpm test:e2e` command name changes (must stay in sync with
-  `web/tests/README.md` and `web/package.json`).
+  `app/web/tests/README.md` and `app/web/package.json`).
 - The "every test at TPS=1000" rule is relaxed (would need a separate
   doc + reason, because the rule exists to catch a specific bug class).
 - The determinism guard in `clippy.toml` changes scope.

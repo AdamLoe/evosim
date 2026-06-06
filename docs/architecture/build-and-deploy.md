@@ -5,19 +5,21 @@ invariants.
 
 ## What it is
 
-A single Rust crate (`Cargo.toml` at repo root) compiled to wasm via
-`wasm-pack`, with a `threads` feature flag that pulls in `rayon` +
-`wasm-bindgen-rayon`. The web shell (Vite + TS) imports the wasm output
-from `web/wasm/`. The dev server pins port 47821 and sets COOP/COEP so
-`SharedArrayBuffer` is available. Production deploys static `web/dist/`
-to any host that respects `web/public/_headers`.
+A Cargo workspace (`Cargo.toml` at `app/`) with a single member crate
+(`crates/evosim/`) compiled to wasm via `wasm-pack`, with a `threads`
+feature flag that pulls in `rayon` + `wasm-bindgen-rayon`. The web shell
+(Vite + TS) imports the wasm output from `app/web/wasm/`. The dev server pins
+port 47821 and sets COOP/COEP so `SharedArrayBuffer` is available.
+Production deploys static `app/web/dist/` to any host that respects
+`app/web/public/_headers`.
 
 ## What it owns
 
 - The canonical wasm-pack incantation:
 
   ```bash
-  rustup run nightly wasm-pack build --target web --out-dir web/wasm --dev --features threads
+  # Run from app/ (the workspace root)
+  rustup run nightly wasm-pack build crates/evosim --target web --out-dir ../../web/wasm --dev --features threads
   ```
 
 - The `.cargo/config.toml` link args. They are required and live there
@@ -26,22 +28,23 @@ to any host that respects `web/public/_headers`.
   succeed after every build:
 
   ```bash
-  grep -c initThreadPool web/wasm/evosim.js   # → 2 (threaded), 0 (plain)
-  grep -F 'shared:true'  web/wasm/evosim.js   # → 1 hit
+  grep -c initThreadPool app/web/wasm/evosim.js   # → 2 (threaded), 0 (plain)
+  grep -F 'shared:true'  app/web/wasm/evosim.js   # → 1 hit
   ```
 
 - The COOP/COEP headers, set in two places that must stay in sync:
-  `web/vite.config.ts` for dev + preview, `web/public/_headers` for
+  `app/web/vite.config.ts` for dev + preview, `app/web/public/_headers` for
   Cloudflare Pages and any other static host.
 - The `panic = "abort"` setting on both `dev` and `release` profiles —
   required when building `--features threads` for wasm32. Without it,
   the linker silently emits non-shared `WebAssembly.Memory` and
   `wasm-bindgen-rayon`'s `postMessage(memory)` fails with
-  `DataCloneError` at boot.
+  `DataCloneError` at boot. These profiles live in the workspace manifest
+  (`Cargo.toml` at `app/`).
 - The Vite `worker: { format: "es" }` config — `wasm-bindgen-rayon`
   spawns workers via `new URL('./workerHelpers.js', import.meta.url)`;
   Vite must bundle them as ES modules, not the default IIFE.
-- The CSP header in `web/public/_headers` (allows `'wasm-unsafe-eval'`
+- The CSP header in `app/web/public/_headers` (allows `'wasm-unsafe-eval'`
   for wasm instantiation).
 
 ## What it does NOT own
@@ -62,19 +65,22 @@ to any host that respects `web/public/_headers`.
 **Dev wasm build (always use this for running the sim):**
 
 ```bash
-rustup run nightly wasm-pack build --target web --out-dir web/wasm --dev --features threads
+# Run from app/ (the workspace root)
+rustup run nightly wasm-pack build crates/evosim --target web --out-dir ../../web/wasm --dev --features threads
 ```
 
 **Release wasm build (only for perf measurements or shipping):**
 
 ```bash
-rustup run nightly wasm-pack build --target web --out-dir web/wasm --release --features threads
+# Run from app/ (the workspace root)
+rustup run nightly wasm-pack build crates/evosim --target web --out-dir ../../web/wasm --release --features threads
 ```
 
 **Plain (non-threaded) wasm build — `NOT FOR RUNNING THE SIM`:**
 
 ```bash
-wasm-pack build --target web --out-dir web/wasm --dev
+# Run from app/ (the workspace root)
+wasm-pack build crates/evosim --target web --out-dir ../../web/wasm --dev
 ```
 
 The plain build runs the sim ~1/N× speed because the rayon pool never
@@ -86,8 +92,8 @@ this if you're specifically exercising the `cfg(not(feature =
 **Verify the bundle is threaded after every Rust change:**
 
 ```bash
-grep -c initThreadPool web/wasm/evosim.js   # → 2 = threaded, 0 = plain
-grep -F 'shared:true'  web/wasm/evosim.js   # → one hit = shared memory wired
+grep -c initThreadPool app/web/wasm/evosim.js   # → 2 = threaded, 0 = plain
+grep -F 'shared:true'  app/web/wasm/evosim.js   # → one hit = shared memory wired
 ```
 
 **Runtime confirmation (DevTools console):**
@@ -128,11 +134,10 @@ always a COOP/COEP miss or a stale wasm bundle.
 `[unstable] build-std = ["panic_abort", "std"]` is required because
 atomics are not stabilized in the wasm target.
 
-**`+atomics` no longer implies `--shared-memory`** on recent nightlies —
-wasm-ld emits non-shared memory unless told otherwise, and
-`wasm-bindgen-rayon`'s `postMessage(memory)` then fails with
-`DataCloneError` at boot. The explicit `--shared-memory` link arg is
-load-bearing.
+**`+atomics` does not imply `--shared-memory`** — wasm-ld emits
+non-shared memory unless told otherwise, and `wasm-bindgen-rayon`'s
+`postMessage(memory)` then fails with `DataCloneError` at boot. The
+explicit `--shared-memory` link arg is load-bearing.
 
 Native (`x86_64`) builds are unaffected; the `[target.*]` block scopes
 the flags.
@@ -146,11 +151,11 @@ Cross-Origin-Opener-Policy: same-origin
 Cross-Origin-Embedder-Policy: require-corp
 ```
 
-Set in `web/vite.config.ts` for `server` and `preview` blocks, and in
-`web/public/_headers` for static deploy. If either copy drifts, the
+Set in `app/web/vite.config.ts` for `server` and `preview` blocks, and in
+`app/web/public/_headers` for static deploy. If either copy drifts, the
 sim "looks fine" but the rayon pool silently collapses to 1 thread.
 
-`web/public/_headers` also pins a CSP that allows `'wasm-unsafe-eval'`
+`app/web/public/_headers` also pins a CSP that allows `'wasm-unsafe-eval'`
 for wasm instantiation and the standard caching rules for
 `/assets/*` and `/wasm/*`.
 
@@ -159,18 +164,18 @@ for wasm instantiation and the standard caching rules for
 - Port: `47821` (`strictPort: true` — fails hard if held).
 - Host: `0.0.0.0` so WSL2→Windows works.
 - HMR: TS hot-reloads; the `.wasm` is re-fetched on full reload.
-- `web/wasm/` is gitignored and **not** auto-rebuilt by `pnpm dev` —
+- `app/web/wasm/` is gitignored and **not** auto-rebuilt by `pnpm dev` —
   every Rust change requires manual `wasm-pack build ...`.
 
 ## Production deploy
 
-`pnpm build` in `web/` runs `tsc --noEmit && vite build` and emits
-`web/dist/`. Cloudflare Pages reads `web/public/_headers` directly;
+`pnpm build` in `app/web/` runs `tsc --noEmit && vite build` and emits
+`app/web/dist/`. Cloudflare Pages reads `app/web/public/_headers` directly;
 any static host that respects an `_headers` file works.
 
 The release wasm goes through `wasm-opt -O4 --enable-bulk-memory
 --enable-mutable-globals` via
-`package.metadata.wasm-pack.profile.release` in `Cargo.toml`.
+`package.metadata.wasm-pack.profile.release` in `crates/evosim/Cargo.toml`.
 
 ## CI
 
@@ -181,20 +186,21 @@ The release wasm goes through `wasm-opt -O4 --enable-bulk-memory
 - `cargo clippy --all-targets --features threads -- -D warnings`
 - `cargo test --lib`
 - `cargo test --lib --features threads`
-- `rustup run nightly wasm-pack build --target web --out-dir web/wasm --release --features threads`
+- `rustup run nightly wasm-pack build crates/evosim --target web --out-dir ../../web/wasm --release --features threads`
 - (Web job, depends on Rust job) `pnpm typecheck` + `pnpm build`
 
 ## Code anchors
 
-- `Cargo.toml` → `[features] threads`, `[profile.dev] panic = "abort"`,
-  `[profile.release] panic = "abort"`,
+- `Cargo.toml` (workspace, at `app/`) → `[profile.dev] panic = "abort"`,
+  `[profile.release] panic = "abort"`.
+- `crates/evosim/Cargo.toml` → `[features] threads`,
   `[package.metadata.wasm-pack.profile.release]`.
 - `.cargo/config.toml` → `[target.wasm32-unknown-unknown]` rustflags,
   `[unstable] build-std`.
 - `rust-toolchain.toml` → pinned `1.95.0` stable.
-- `web/vite.config.ts` → `crossOriginIsolationHeaders`, port `47821`,
+- `app/web/vite.config.ts` → `crossOriginIsolationHeaders`, port `47821`,
   `worker: { format: "es" }`.
-- `web/public/_headers` → COOP/COEP, CSP, caching rules.
+- `app/web/public/_headers` → COOP/COEP, CSP, caching rules.
 - `.github/workflows/ci.yml` → gate matrix.
 
 ## Update when
@@ -212,7 +218,7 @@ The release wasm goes through `wasm-opt -O4 --enable-bulk-memory
 
 See [`decisions/build.md`](../decisions/build.md) — the
 `--features threads` default rule, the `panic = "abort"` requirement,
-the two-place COOP/COEP duplication, the gitignored `web/wasm/`.
+the two-place COOP/COEP duplication, the gitignored `app/web/wasm/`.
 
 ## See also
 
@@ -220,5 +226,5 @@ the two-place COOP/COEP duplication, the gitignored `web/wasm/`.
 - [`testing.md`](testing.md)
 - [`../decisions/build.md`](../decisions/build.md)
 - [`../agent-context/dev-loop.md`](../agent-context/dev-loop.md)
-- [`../prompts/dev-server.md`](../prompts/dev-server.md)
 - [`../agent-context/maintaining-docs.md`](../agent-context/maintaining-docs.md)
+- [Doc authoring rules](~/.claude/agent-docs/v1/rules/authoring-rules.md)

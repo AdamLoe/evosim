@@ -84,7 +84,7 @@
   in TS without paying the Rust build cost.
 - **Tradeoffs**: New contributors hit "stride mismatch" type errors
   the first time they pull a Rust change without rebuilding. Mitigated
-  by the runtime guard in `render-gl.ts` (`stride !== 8 → throw`) and
+  by the runtime guard in `render/gl.ts` (`stride !== 8 → throw`) and
   the boot handshake assert (`max_pop_for_sim` mismatch → throw with a
   rebuild-wasm message).
 - **Applies to**: `architecture/build-and-deploy.md`,
@@ -130,5 +130,4 @@
 
 - [`../architecture/build-and-deploy.md`](../architecture/build-and-deploy.md)
 - [`../architecture/worker-runtime.md`](../architecture/worker-runtime.md)
-- [`../prompts/dev-server.md`](../prompts/dev-server.md)
 - [`../agent-context/dev-loop.md`](../agent-context/dev-loop.md)
