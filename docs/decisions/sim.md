@@ -338,7 +338,7 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   sector has any hit, further cells whose closeness ceiling is below
   the worst lit sector cannot improve the result. The starburst order
   guarantees we hit the closest cells first, so the early-bail fires
-  quickly in clumps. `HASH_CELL` is 10u and the world is 64× area at the
+  quickly in clumps. `HASH_CELL` is 20u and the world is 64× area at the
   same pop, so creature density is ~64× sparser and a full-range walk is
   cheap either way; the early-bail still pays off in clumps. In species
   mode the scan lights **16** sectors — 8 same-species + 8 other-species
@@ -356,6 +356,25 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 - **Revisit when**: `PROXIMITY_RANGE` or `HASH_CELL` changes by enough
   that the precomputed list needs a different cap, or a future sense
   uses sum-aggregation (where the early-bail invariant doesn't hold).
+
+### Spatial grid rebuilds once per tick
+
+- **Decision**: Rebuild `SpatialGrid` once from start-of-tick positions;
+  movement, repulsion, attack, and species mating reuse that grid and
+  post-movement consumers re-check exact distance against current positions.
+- **Why**: A rebuild sweeps `hash_dim²`, which dominated the serial tick at the
+  sparse default world; coarsening `HASH_CELL` to 20u and removing two
+  movement-time rebuilds reduced grid plus movement cost by about 7.4× in the
+  native tick profile.
+- **Tradeoffs**: A creature can move into interaction range from a bucket the
+  stale grid query does not visit, causing a benign one-tick missed repulsion,
+  attack, or mate opportunity. Exact-distance checks prevent false hits.
+- **Applies to**: `architecture/simulation-core.md`.
+- **Code anchors**: `crates/evosim/src/constants.rs → HASH_CELL`;
+  `crates/evosim/src/world/mod.rs → World::step`;
+  `crates/evosim/src/world/tick.rs → World::apply_movement_and_repulsion`.
+- **Revisit when**: interaction fidelity near bucket boundaries matters more
+  than the two avoided rebuilds, or movement/query ranges change materially.
 
 ### No save/load, no events, no Hall of Fame
 
@@ -871,10 +890,10 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   Each Lk cell is the arithmetic mean of its (up to) 4 in-bounds Lk-1
   parent cells: `(sum + count/2) / count` (round-before-truncate). At the
   default `grass_dim = 1920` this yields ~11 levels before reaching 1×1
-  (well under the `GRASS_PYRAMID_MAX_LEVELS = 16` cap). Refreshed each
-  tick in `World::step` at step 7b — after grass advances, before energy
-  — as a full recompute. Serves render LOD + snapshot windowing; a
-  dirty-subtree partial refresh keyed off `tile_active` is a tracked TODO.
+  (well under the `GRASS_PYRAMID_MAX_LEVELS = 16` cap). L1+ refresh as a
+  full recompute every `GRASS_PYRAMID_REFRESH_PERIOD` ticks in `World::step`
+  at step 7b. Serves render LOD + snapshot windowing and far-grass NN sensing;
+  a dirty-subtree partial refresh keyed off `tile_active` is a tracked TODO.
 - **Why**: The snapshot's write path publishes a **clipmap window** of
   the pyramid (not the whole field) — the LOD level and window are chosen
   to fit a 2048² render budget at any zoom. At default scale (zoom=1,
@@ -886,15 +905,19 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 - **Applies to**: `architecture/simulation-core.md`,
   `architecture/render-pipeline.md`,
   `architecture/shared-memory-and-protocol.md`.
-- **Tradeoffs**: Refresh is a full recompute each tick (O(N×1/3) over all
-  owned levels). Active-set-keyed partial refresh is deferred; see the
+- **Tradeoffs**: Refresh is a full recompute when it runs (O(N×1/3) over all
+  owned levels), amortized across the refresh period. Zoomed-out render and
+  far-grass sensing may lag by at most that period; default zoom render reads
+  live L0. Active-set-keyed partial refresh is deferred; see the
   `TODO(stage3-pyramid-perf)` anchor in `app/crates/evosim/src/grass/mod.rs`.
   Toroidal wrap-seam: a window straddling the world wrap on a toroidal
   world (grass_dim > 2048, non-default zoom) shows the wrong region —
   documented TODO in `GrassPyramid::viewport_window`, not yet fixed.
 - **Code anchors**: `app/crates/evosim/src/grass/mod.rs → GrassPyramid`, `GrassGrid::pyramid`,
   `GrassGrid::refresh_pyramid`;
-  `app/crates/evosim/src/constants.rs → GRASS_PYRAMID_MAX_LEVELS`.
+  `app/crates/evosim/src/constants.rs → GRASS_PYRAMID_MAX_LEVELS`,
+  `GRASS_PYRAMID_REFRESH_PERIOD`;
+  `app/crates/evosim/src/world/mod.rs → World::step`.
 
 ### Far multi-band grass NN sight: GrassBandsFar default ON; single-band toggle kept
 

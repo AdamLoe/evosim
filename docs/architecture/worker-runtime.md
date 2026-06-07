@@ -114,8 +114,11 @@ pacing park:
 7. Allocate `controlSab` (`CONTROL_SAB_BYTES`). (The snapshot region is
    already resident in wasm linear memory — `WorldHandle::snapshot_buf` —
    no separate SAB is needed.)
-8. Seed the control SAB: `CTRL_PAUSED`, `CTRL_TARGET_TPS_BITS`, every
-   `CTRL_SLIDERS[i]` lane from `boot.initial_sliders`. Stamp the
+8. Seed the control SAB: `CTRL_PAUSED`, `CTRL_TARGET_TPS_BITS`, and every
+   `CTRL_SLIDERS[i]` lane from `boot.initial_sliders[name]` with
+   `world.sliders_defaults_json()[name]` as the required fallback. The
+   worker drains every slider lane whenever the control epoch advances, so
+   leaving any lane at zero would reapply zero on the next Apply. Stamp the
    epoch counters so the first loop iteration is a no-op read.
 9. Run one tick + write one snapshot to slot 0 (into wasm memory).
 10. Post `boot_ready` with the `controlSab`, `wasm_memory` handle,

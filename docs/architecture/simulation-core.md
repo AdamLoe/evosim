@@ -8,7 +8,7 @@ the bounds invariant.
 A single-crate Rust simulation compiled to wasm. One `World` owns every
 piece of simulation state: a `CreatureSoA` (each per-creature attribute
 held as its own `Vec`), a `GrassGrid` (runtime-sized density field), a
-`SpatialGrid` (10u cells for neighbour queries), a `SimRng`, the live
+`SpatialGrid` (20u cells for neighbour queries), a `SimRng`, the live
 `DevSliders`, a `Profiler`, an `NnStats` block, and a small set of
 per-tick scratch buffers promoted to long-lived fields. `World::step()`
 runs one tick by sequentially executing the numbered phases below.
@@ -151,12 +151,12 @@ fn step(&mut self) -> bool {
 
     // 1. tick.grid.rebuild      — SpatialGrid::rebuild
     // 2. tick.nn                — chunked Brain::forward (LEAF)
-    // 4. tick.movement          — apply_movement_and_repulsion
+    // 4. tick.movement          — integrate + repulsion + apply
     // 5. tick.graze             — multi-cell density consume
     // 6. tick.attack            — per-bite energy transfer
     // 7. tick.grass_step        — compute_propagation (Scatter or Blur)
     //                             + rebuild_row_bitset (LEAF)
-    // 7b.tick.pyramid_refresh   — GrassGrid::refresh_pyramid (full mip recompute)
+    // 7b.tick.pyramid_refresh   — cadence-gated full mip recompute
     // 8. tick.energy_bookkeeping
     // 9a.(tick.handle_births)   — species_mode only: handle_mating (sexual Mate)
     // 9b.tick.collect_deaths
@@ -169,6 +169,14 @@ fn step(&mut self) -> bool {
 
 `tick.nn` and `tick.grass_step` measure the main sim worker's wall-clock
 wait for the rayon dispatch only. See [`profiler.md`](profiler.md).
+
+The spatial grid is rebuilt once, from start-of-tick positions. Movement,
+repulsion, attack, and species mating reuse that grid; post-movement
+consumers re-check exact distance against current positions. This trades an
+occasional one-tick missed interaction near a bucket boundary for avoiding
+two full `hash_dim²` rebuilds. `tick.movement` is decomposed into
+`tick.movement.integrate`, `tick.movement.repulsion`, and
+`tick.movement.apply`.
 
 ## NN topology (runtime input width → hidden layers → 5)
 
@@ -248,14 +256,22 @@ The snapshot grass write is dirty-tile-incremental via
 `quantize_dirty_tiles_into`.
 
 **`GrassPyramid`**: u8 box-filter mip pyramid (clipmap). L0 aliases the
-live density field; L1+ are owned, mean-downsampled. Refreshed each tick
-at step 7b under `tick.pyramid_refresh`. Serves render LOD + snapshot
-windowing.
+live density field; L1+ are owned, mean-downsampled. L1+ refresh every
+`GRASS_PYRAMID_REFRESH_PERIOD` ticks at step 7b under
+`tick.pyramid_refresh`; the span remains present on skipped ticks so its
+reported cost is amortized. Serves render LOD + snapshot windowing and
+far-grass NN sensing. Zoomed-out render and far sensing can lag by at most
+the refresh period; default zoom render reads live L0.
 
 **Boot seeding**: `grass_clump_count` (default 40) filled discs of radius
 `grass_clump_size` (default 8 cells), disc centres derived deterministically
 from `world_seed` via `grass_hash_u64`. Fallback to uniform-scatter when
 `grass_clump_count = 0`.
+
+Single-pool `founder_count` may seed up to `MAX_POP_FOR_SIM`; founders use a
+Halton sequence for positions and genome-derived colors. The UI exposes up to
+8000 founders, and the live `max_population` cap applies at the first birth
+phase.
 
 **Graze**: per-bite transfer using u8 quantization (`GRASS_BITES_PER_BLOCK`).
 Six live scatter-params sliders (indices 54–59); three construction-scoped

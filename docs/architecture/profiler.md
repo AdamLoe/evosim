@@ -27,10 +27,13 @@ tick                 ← per-tick sim wall-clock (Rust-side)
   tick.grid.rebuild
   tick.nn                       (LEAF — wall-clock wait for rayon)
   tick.movement
+    tick.movement.integrate
+    tick.movement.repulsion
+    tick.movement.apply
   tick.graze
   tick.attack
   tick.grass_step               (LEAF — wall-clock wait for rayon)
-  tick.pyramid_refresh          (mip-pyramid box-filter rebuild)
+  tick.pyramid_refresh          (cadence-amortized mip-pyramid rebuild)
   tick.energy_bookkeeping
   tick.collect_deaths
   tick.handle_births

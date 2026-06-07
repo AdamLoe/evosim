@@ -183,6 +183,11 @@ for them. They reach the next boot via `widgetReaders` /
 `.devpanel-row label.next-world::after`. Apply fires the
 construction-only toast.
 
+`currentSliderState()` also injects the live `max_population` value from
+persisted settings because its control lives in the perf panel rather than
+the staged Settings widgets. This makes the cap effective at boot and gives
+the worker a nonzero value for its slider lane.
+
 **Unexposed sliders:** `grass_in_cell_growth_r` and
 `grass_propagation_rate_k` are not exposed in the Settings UI. They are
 wired to the Blur propagation path; the live sim runs Scatter and ignores

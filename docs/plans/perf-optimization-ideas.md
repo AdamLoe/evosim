@@ -17,9 +17,8 @@ records the idea, when it helps, when it doesn't, and the cost/risk that kept
 it out of the active wave. This is a *menu*, not a plan; promote an entry into
 a versioned plan when it's time to build it. Never deleted.
 
-Near-term actionable perf work lives in the active
-[`v2.0.8-grid-rebuild-perf.md`](v2.0.8-grid-rebuild-perf.md); shipped perf
-decisions are recorded in [`../decisions/perf.md`](../decisions/perf.md).
+Shipped perf decisions, including the grid rebuild and pyramid-cadence
+verdicts, are recorded in [`../decisions/perf.md`](../decisions/perf.md).
 
 ## The core tension
 
@@ -224,6 +223,5 @@ per-cell than the user's machine, so read ratios not absolutes.
 
 ## See also
 
-- [`v2.0.8-grid-rebuild-perf.md`](v2.0.8-grid-rebuild-perf.md) — the active perf wave.
 - [`../decisions/perf.md`](../decisions/perf.md) — shipped perf decisions (scatter attribution, LOD, S2R NO-GO).
 - [`../decisions/render.md`](../decisions/render.md) — shipped scatter + LOD render state.

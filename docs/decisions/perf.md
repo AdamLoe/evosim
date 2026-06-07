@@ -6,6 +6,40 @@ drove the choice — so future optimization passes start from facts, not guesses
 
 ---
 
+### Spatial grid: 20u cells and one rebuild per tick
+
+- **Decision**: Keep `HASH_CELL = 20` and rebuild the spatial grid once at the
+  start of each tick.
+- **Why**: The native tick profile showed three `hash_dim²` rebuilds dominating
+  serial cost in the sparse default world. Coarsening the grid and removing the
+  two movement-time rebuilds reduced combined grid plus movement cost from about
+  2995µs to 404µs per tick (7.4×).
+- **Tradeoffs**: Post-movement interaction queries use stale buckets and can
+  miss an interaction for one tick; exact-distance checks prevent false hits.
+- **Applies to**: `architecture/simulation-core.md`.
+- **Code anchors**: `crates/evosim/src/constants.rs → HASH_CELL`;
+  `crates/evosim/src/world/tick.rs → World::apply_movement_and_repulsion`;
+  `crates/evosim/benches/tick_profile.rs`.
+- **Revisit when**: density, movement range, or interaction fidelity makes the
+  stale-bucket tradeoff unacceptable.
+
+### Grass pyramid refresh is cadence-gated
+
+- **Decision**: Refresh grass-pyramid L1+ every
+  `GRASS_PYRAMID_REFRESH_PERIOD = 4` ticks.
+- **Why**: Full pyramid refresh became a dominant serial cost after the grid
+  work; cadence gating reduced its dense-regime amortized cost from about
+  3675µs to 870µs (4.2×), while default zoom continues to read live L0.
+- **Tradeoffs**: Zoomed-out render and far-grass NN sensing can lag by at most
+  the refresh period.
+- **Applies to**: `architecture/simulation-core.md`,
+  `architecture/render-pipeline.md`.
+- **Code anchors**: `crates/evosim/src/constants.rs → GRASS_PYRAMID_REFRESH_PERIOD`;
+  `crates/evosim/src/world/mod.rs → World::step`;
+  `crates/evosim/benches/tick_profile.rs`.
+- **Revisit when**: stale far-grass sensing is observable or a dirty-subtree
+  refresh makes per-tick freshness cheap.
+
 ### Grass scatter kernel: RNG dominates at dense fill; freeze floor is irreducible
 
 - **Decision**: At dense (~90%) fill the 4-hash RNG cost is 3.05 ns/cell (47% of

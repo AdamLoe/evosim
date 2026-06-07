@@ -176,6 +176,10 @@ the user drags).
 **Runtime sizing.** Only the grass and biome window regions (and thus `slotBytes` /
 `snapshot_buf_byte_len`) are computed at boot from `grass_dim`. The header + creature
 region are compile-time constants. Two double-buffered slots; nothing resizes after boot.
+Each slot is padded to `SNAPSHOT_SLOT_ALIGN = 4` bytes in both Rust
+(`SnapshotLayout::from_grass_cell_count`) and TypeScript (`makeSlotLayout`).
+Without the padding, an odd `grass_dim` makes slot 1's creature `Float32Array`
+start at a non-4-byte-aligned offset.
 
 **Clipmap window.** `write_snapshot` (called by the TS worker each tick) receives the
 camera parameters (`cam_cx`, `cam_cy`, `cam_zoom`, `viewport_w`, `viewport_h`) read by
