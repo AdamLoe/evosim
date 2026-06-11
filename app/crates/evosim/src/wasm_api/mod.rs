@@ -1307,9 +1307,10 @@ impl WorldHandle {
     fn apply_crowding_strength(&mut self, value: f32) {
         self.inner.sliders.crowding_strength = value.max(0.0);
     }
-    /// Radius for crowding neighbour count (world-units). Floored at 0.
+    /// Radius for crowding neighbour count (world-units). Clamped to the
+    /// proximity-query range so the spatial hash remains a tight candidate set.
     fn apply_crowding_radius(&mut self, value: f32) {
-        self.inner.sliders.crowding_radius = value.max(0.0);
+        self.inner.sliders.crowding_radius = value.clamp(0.0, PROXIMITY_RANGE);
     }
     /// Starvation threshold (energy floor). Floored at 0.
     fn apply_starvation_threshold(&mut self, value: f32) {

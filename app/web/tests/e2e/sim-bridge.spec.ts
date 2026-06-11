@@ -36,6 +36,12 @@ async function readTick(page: Page): Promise<number> {
   return m ? Number(m[1]) : NaN;
 }
 
+async function readPopulation(page: Page): Promise<number> {
+  const txt = await readStatus(page);
+  const m = /pop (\d+)/.exec(txt);
+  return m ? Number(m[1]) : NaN;
+}
+
 async function waitForBoot(page: Page): Promise<void> {
   // The status line flips to "seed: … · tick N · pop M …" once boot_ready
   // lands and the first SAB snapshot is read.
@@ -121,6 +127,19 @@ test.afterEach(async ({ page }) => {
     (e) => !/initThreadPool/.test(e) && !/GL Driver Message/.test(e),
   );
   expect(fatal, "no fatal console errors during test").toEqual([]);
+});
+
+test("fresh default world stays alive below the population cap during startup", async ({
+  page,
+}) => {
+  await setTargetTps(page, 1000);
+  await page.waitForTimeout(3000);
+
+  const tick = await readTick(page);
+  const pop = await readPopulation(page);
+  expect(tick, "default world should keep ticking after boot").toBeGreaterThan(50);
+  expect(pop, "default world should still have living creatures").toBeGreaterThan(0);
+  expect(pop, "default world should remain below the default population cap").toBeLessThan(8000);
 });
 
 test("pause + resume — stops and starts the tick counter at high TPS", async ({

@@ -92,7 +92,7 @@ Conventions:
   TPS regime where the `Atomics.waitAsync(0)` regression class
   surfaces. A test at default TPS=60 passes on the buggy commit and
   misses the regression entirely.
-- Read state back via the status bar (`#status` `textContent`:
+- Read state back via the status line (`#perf-status-line` `textContent`:
   `seed: X · tick N · pop P`) or via a downstream observable
   (`#profiler-trees` populated, the dev-panel showing a new value).
 - If you need worker-internal state that no UI exposes, plumb it

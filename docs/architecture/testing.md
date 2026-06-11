@@ -88,6 +88,9 @@ reused (`reuseExistingServer: true`).
 
 Key coverage:
 
+- `sim-bridge.spec.ts` **fresh default world** — boots the default browser-sized
+  world, runs it at high TPS for startup progress, and asserts it remains alive
+  below the default population cap.
 - `sim-bridge.spec.ts` **pause + resume** — clicks `#playpause-btn`, asserts the tick counter
   stops within ~300 ms and resumes on the second click.
 - `sim-bridge.spec.ts` **target TPS** — selects values in `#target-tps-input` and asserts the

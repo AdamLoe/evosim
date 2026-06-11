@@ -132,7 +132,9 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 - **Decision**: Population equilibrium is held by two food-limited mortality
   mechanisms in `energy_bookkeeping`, plus grass-supply limits:
   1. **Crowding upkeep** — extra energy drain proportional to the count of
-     neighbours within `crowding_radius` (`crowding_strength × count`).
+     exact-distance neighbours within `crowding_radius`
+     (`crowding_strength × count`). The spatial grid only bounds candidates;
+     the tick path applies wrap-aware radius filtering.
   2. **Starvation drain** — below `starvation_threshold` energy, an extra
      `starvation_drain_rate` drain fires each tick.
   3. **Grass capacity scale + regrowth rate** — `grass_capacity_scale`
@@ -158,6 +160,9 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   selection, not monotone artifact). Energy-gathered-per-tick is flat (food is
   the constraint) — skill manifests as *living longer on the same budget*.
   Age-at-death is therefore the correct foraging proxy.
+  The browser-sized default world also has a Playwright startup smoke in
+  `app/web/tests/e2e/sim-bridge.spec.ts`: at high TPS after fresh boot, the
+  page remains alive and below the default population cap.
 - **Applies to**: `architecture/simulation-core.md`.
 - **Code anchors**: `app/crates/evosim/src/world/tick.rs → energy_bookkeeping` (crowding + starvation drain);
   `app/crates/evosim/src/world/mod.rs → DevSliders` (six new fields);

@@ -424,9 +424,9 @@ impl World {
         // v2.1 P2: energy cap is constant (genome removed).
         let energy_cap = self.sliders.energy_max;
 
-        // v2.1 P3: crowding mortality — count neighbours within crowding_radius
-        // for each creature and apply extra upkeep proportional to that count.
-        // Reuses the existing spatial-hash (no new O(n²) pass).
+        // Count neighbours within crowding_radius and apply extra upkeep
+        // proportional to that count. The grid only bounds the candidate scan;
+        // this loop does the exact distance check required by SpatialGrid.
         let crowding_strength = self.sliders.crowding_strength;
         let crowding_radius = self.sliders.crowding_radius;
         let starvation_threshold = self.sliders.starvation_threshold;
@@ -437,11 +437,33 @@ impl World {
         let use_crowding = crowding_strength > 0.0 && crowding_radius > 0.0 && n > 1;
         let crowding_counts: Vec<u32> = if use_crowding {
             let mut counts = vec![0u32; n];
+            let xs = &self.creatures.x[..n];
+            let ys = &self.creatures.y[..n];
+            let world_size = self.dims.world_size;
+            let wrap = self.dims.wrap_world;
+            let radius2 = crowding_radius * crowding_radius;
             for i in 0..n {
-                let xi = self.creatures.x[i];
-                let yi = self.creatures.y[i];
+                let xi = xs[i];
+                let yi = ys[i];
                 self.grid.for_each_in_radius(xi, yi, crowding_radius, |j| {
-                    if j != i {
+                    if j == i {
+                        return;
+                    }
+                    let mut dx = xs[j] - xi;
+                    let mut dy = ys[j] - yi;
+                    if wrap {
+                        if dx > world_size * 0.5 {
+                            dx -= world_size;
+                        } else if dx < -world_size * 0.5 {
+                            dx += world_size;
+                        }
+                        if dy > world_size * 0.5 {
+                            dy -= world_size;
+                        } else if dy < -world_size * 0.5 {
+                            dy += world_size;
+                        }
+                    }
+                    if dx * dx + dy * dy <= radius2 {
                         counts[i] += 1;
                     }
                 });
@@ -555,6 +577,82 @@ mod tests {
     }
 
     // ---- perf-2 tests ----
+
+    fn push_test_creature(w: &mut World, x: f32, y: f32) -> usize {
+        use crate::brain::{Brain, NnTopology};
+        use crate::rng::SimRng;
+
+        let id = w.creatures.len() as u64 + 1;
+        let mut rng = SimRng::from_u64(0xC0FFEE + id);
+        let brain = Brain::founder(&mut rng, NnTopology::legacy());
+        w.creatures
+            .push(id, x, y, START_ENERGY_DEFAULT, 0, brain, 0.0, 0)
+    }
+
+    fn assert_near(got: f32, expected: f32) {
+        assert!(
+            (got - expected).abs() < 1e-4,
+            "expected {expected}, got {got}"
+        );
+    }
+
+    #[test]
+    fn crowding_uses_exact_radius_not_candidate_cell_box() {
+        let mut w = World::new_with_sliders(
+            "crowding-exact",
+            DevSliders {
+                world_size: WORLD_SIZE,
+                wrap_world: false,
+                founder_count: 1,
+                crowding_strength: 1.0,
+                crowding_radius: 20.0,
+                starvation_drain_rate: 0.0,
+                ..Default::default()
+            },
+        );
+        w.creatures.x[0] = 100.0;
+        w.creatures.y[0] = 100.0;
+        let j = push_test_creature(&mut w, 119.0, 119.0);
+        w.creatures.energy[0] = w.sliders.energy_max;
+        w.creatures.energy[j] = w.sliders.energy_max;
+        w.grid.rebuild(&w.creatures.x, &w.creatures.y);
+
+        let before = w.creatures.energy.clone();
+        w.energy_bookkeeping();
+
+        let base_upkeep = UPKEEP_BASE + UPKEEP_NN_FIXED + UPKEEP_GUT + w.sliders.mouth_tax;
+        assert_near(w.creatures.energy[0], before[0] - base_upkeep);
+        assert_near(w.creatures.energy[1], before[1] - base_upkeep);
+    }
+
+    #[test]
+    fn crowding_radius_wraps_across_toroidal_seam() {
+        let mut w = World::new_with_sliders(
+            "crowding-wrap",
+            DevSliders {
+                world_size: WORLD_SIZE,
+                wrap_world: true,
+                founder_count: 1,
+                crowding_strength: 1.0,
+                crowding_radius: 20.0,
+                starvation_drain_rate: 0.0,
+                ..Default::default()
+            },
+        );
+        w.creatures.x[0] = 1.0;
+        w.creatures.y[0] = 100.0;
+        let j = push_test_creature(&mut w, WORLD_SIZE - 1.0, 100.0);
+        w.creatures.energy[0] = w.sliders.energy_max;
+        w.creatures.energy[j] = w.sliders.energy_max;
+        w.grid.rebuild(&w.creatures.x, &w.creatures.y);
+
+        let before = w.creatures.energy.clone();
+        w.energy_bookkeeping();
+
+        let base_upkeep = UPKEEP_BASE + UPKEEP_NN_FIXED + UPKEEP_GUT + w.sliders.mouth_tax;
+        assert_near(w.creatures.energy[0], before[0] - base_upkeep - 1.0);
+        assert_near(w.creatures.energy[1], before[1] - base_upkeep - 1.0);
+    }
 
     /// perf-2 test 1: scratch_fx / scratch_fy are zeroed at the start of each tick.
     #[test]

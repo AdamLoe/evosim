@@ -105,7 +105,8 @@ after construction and cannot resize the already-built `WorldDims`.
   random-cull pass after every birth phase that fires only if
   `pop > MAX_POP_FOR_SIM`. Under the food-limited equilibrium defaults this
   backstop effectively never fires; the equilibrium is held by
-  crowding upkeep + starvation drain (see tick step order).
+  crowding upkeep + starvation drain. Crowding uses the spatial grid only as
+  a candidate scan and then applies exact, wrap-aware radius filtering.
 - The deterministic chunking scheme for the parallel NN pass:
   `chunk_count = clamp(pop / 32, MIN_CHUNKS=4, min(MAX_CHUNKS=16, workers))`.
 - Per-creature heritable state: brain weights + lineage `hue` (f32 ∈ [0,1),
@@ -181,7 +182,7 @@ fn step(&mut self) -> bool {
     //                             + rebuild_row_bitset (LEAF)
     // 7b.tick.pyramid_refresh   — cadence-gated full mip recompute
     // 8. tick.energy_bookkeeping — age upkeep + digestion; PLUS:
-    //                             crowding mortality (∝ neighbours in radius)
+    //                             crowding mortality (∝ exact neighbours in radius)
     //                             starvation drain (below energy floor)
     // 9a.(tick.handle_births)   — species_mode only: handle_mating (sexual Mate)
     // 9b.tick.collect_deaths

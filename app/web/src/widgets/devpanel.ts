@@ -1258,7 +1258,7 @@ export function installDevPanel(getBridge: () => SimBridge): void {
     label: "Crowding radius",
     simName: "crowding_radius",
     settingKey: "crowdingRadius",
-    min: 0, max: 60, step: 1,
+    min: 0, max: 20, step: 1,
     formatValue: (v) => v.toFixed(0),
   }));
 
