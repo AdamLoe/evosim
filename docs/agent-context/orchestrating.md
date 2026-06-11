@@ -2,7 +2,7 @@
 
 Generic orchestration discipline (hold the map, delegate by type, dispatch
 block, sequencing, workflow skeleton, what NOT to do) lives in the global
-kit at `~/.claude/agent-docs/v1/rules/orchestrating.md`. Read that first.
+kit at `~/agent-docs/v1/rules/orchestrating.md`. Read that first.
 
 To bootstrap an orchestration chat for this repo, use the
 `/fresh-orchestrator` skill.

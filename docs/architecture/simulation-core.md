@@ -40,8 +40,8 @@ wall-proximity NN inputs are present.
 
 These are now separate subsystems with their own docs:
 
-- **Biome** — blob generation, static biome grid, movement/energy/NN/grass-capacity
-  effects → [`biome.md`](biome.md)
+- **Biome** — blob generation, static biome grid, grass-capacity cap
+  (the only surviving biome effect) → [`biome.md`](biome.md)
 - **Species and sexual mating** — `SpeciesRegistry`, N-anchor seeding, sexual
   `Mate` + crossover, same-species attack gate → [`species.md`](species.md)
 
@@ -57,9 +57,9 @@ for the shape and additions is in `decisions/sim.md`.
 | 18 | `world_size` | construction |
 | 19 | `world_seed` | construction |
 | 20 | `wrap_world` | construction |
-| 21 | `water_movement_penalty` | live |
-| 22 | `desert_movement_penalty` | live |
-| 23 | `trait_mutation_sigma_multiplier` | live |
+| 21 | `_reserved_legacy_water_movement_penalty` | no-op |
+| 22 | `_reserved_legacy_desert_movement_penalty` | no-op |
+| 23 | `_reserved_legacy_trait_mutation_sigma_multiplier` | no-op |
 | 24 | `species_mode` | construction |
 | 25 | `crossover_mode` | construction |
 | 26 | `starting_species_count` | construction |
@@ -75,8 +75,14 @@ for the shape and additions is in `decisions/sim.md`.
 | 64 | `mate_reach_multiplier` | live |
 | 65 | `init_graze_boost` | construction (founder only) |
 | 66 | `init_split_boost` | construction (founder only) |
+| 67 | `crowding_strength` | live |
+| 68 | `crowding_radius` | live |
+| 69 | `starvation_threshold` | live |
+| 70 | `starvation_drain_rate` | live |
+| 71 | `grass_capacity_scale` | live |
+| 72 | `grass_regrowth_rate` | live |
 
-`SLIDER_COUNT = 67`. Authoritative list: `app/crates/evosim/src/wasm_api/mod.rs` →
+`SLIDER_COUNT = 73`. Authoritative list: `app/crates/evosim/src/wasm_api/mod.rs` →
 `SLIDER_NAMES`. `set_slider(name, value)` is the sole mutation entry
 point; bools ride the same path as `0|1`.
 
@@ -95,13 +101,23 @@ after construction and cannot resize the already-built `WorldDims`.
 - The tick step order (see below). Every named phase has a `tick.<name>`
   profile span.
 - The grass mechanic — see Grass section below.
-- The `MAX_POP_FOR_SIM` invariant: `World::handle_births` includes a random
-  cull pass that draws from `self.rng` after every birth phase so
-  `pop ≤ MAX_POP_FOR_SIM` at every tick boundary, deterministically.
+- The `MAX_POP_FOR_SIM` safety backstop: `World::handle_births` includes a
+  random-cull pass after every birth phase that fires only if
+  `pop > MAX_POP_FOR_SIM`. Under the food-limited equilibrium defaults this
+  backstop effectively never fires; the equilibrium is held by
+  crowding upkeep + starvation drain (see tick step order).
 - The deterministic chunking scheme for the parallel NN pass:
   `chunk_count = clamp(pop / 32, MIN_CHUNKS=4, min(MAX_CHUNKS=16, workers))`.
-- Body genome (6 `f32 ∈ [0,1]` traits in `CreatureSoA`; `Genome` in
-  `crates/evosim/src/creature.rs`).
+- Per-creature heritable state: brain weights + lineage `hue` (f32 ∈ [0,1),
+  `CreatureSoA.hue` column). Combat, speed cap, metabolism/upkeep, energy cap,
+  body radius, and graze yield are now **constants** — no per-creature genome
+  trait modulation. See `crates/evosim/src/creature.rs` for the `hue` column;
+  use-site constants are in `crates/evosim/src/constants.rs`.
+- Lineage color: `lineage_color_u32(hue)` in `wasm_api/mod.rs` derives the
+  display color from the heritable `hue` (HSV: hue×360°, sat=0.8, val=0.9).
+  Founders get evenly spaced seed hues; children inherit parent hue with a
+  small Gaussian nudge. Packed into the same RGBA8-LE lane-3 snapshot word
+  (render format unchanged).
 - The action ring-flash (`FlashTag` + `flash_ticks` countdown;
   priority: Killed > CreatedChild > Attacked > Grazed > Born).
 
@@ -130,6 +146,7 @@ WorldHandle::sliders_defaults_json() -> String
 WorldHandle::creature_at(wx, wy, tol) -> Option<f64>
 WorldHandle::creature_idx_by_id(id: f64) -> Option<u32>
 WorldHandle::creature_inspect_json(idx: u32) -> Option<String>
+WorldHandle::creature_nn_inspect_json(idx: u32) -> Option<String>
 WorldHandle::profile_enable(on: bool)
 WorldHandle::profile_clear()
 WorldHandle::profile_report_json() -> String
@@ -139,6 +156,12 @@ WorldHandle::tps / jank_count / tick / population / world_ended / world_size
 max_pop_for_sim() -> u32
 rayon_current_num_threads() -> u32
 ```
+
+`creature_nn_inspect_json` returns a JSON object with the full labeled NN
+input vector (group, label, value per slot) and the current output (vx, vy,
+logits for graze/attack/split_or_mate, chosen action). Implemented via
+`crates/evosim/src/world/nn.rs` → `build_labeled_nn_inspect`. Used by the
+per-creature inspector UI.
 
 ## Tick step order
 
@@ -157,11 +180,14 @@ fn step(&mut self) -> bool {
     // 7. tick.grass_step        — compute_propagation (Scatter or Blur)
     //                             + rebuild_row_bitset (LEAF)
     // 7b.tick.pyramid_refresh   — cadence-gated full mip recompute
-    // 8. tick.energy_bookkeeping
+    // 8. tick.energy_bookkeeping — age upkeep + digestion; PLUS:
+    //                             crowding mortality (∝ neighbours in radius)
+    //                             starvation drain (below energy floor)
     // 9a.(tick.handle_births)   — species_mode only: handle_mating (sexual Mate)
     // 9b.tick.collect_deaths
     //10. tick.handle_births     — single-pool asexual Split
-    //                             RANDOM CULL back to MAX_POP_FOR_SIM
+    //                             RANDOM CULL (backstop only, effectively
+    //                             never fires under food-limited equilibrium)
     //12. tick.color_ema         — ring-flash decay (span name kept)
     //    tick.bookkeeping_tail  — last_action promote, tick++, world-end check
 }
@@ -187,29 +213,39 @@ Input width is a **runtime field** of `NnTopology`. The active width is
 computed by the composable `NnInputLayout` descriptor
 (`NnInputLayout::for_settings(wrap_world, species_mode, grass_multisight)`)
 then fed to the first matmul as `fan_in`. Width must be a multiple of 8
-and `≤ MAX_NN_INPUTS`; see `crates/evosim/src/constants.rs` for the ceiling value.
+and `≤ MAX_NN_INPUTS`; see `crates/evosim/src/constants.rs` for the ceiling value
+(`MAX_NN_INPUTS = 48`).
 
-**Active input groups** (always-on): `SelfMemory` (8), `GrassSectors` (8),
-`BiomeDir` (4), `CurrCellPenalty` (1), `CurrGrass` (1), `Bias` (1).
+**Active input groups** (always-on): `SelfMemory` (8), `CreatureSectors` (8
+single-pool / 16 species mode), `GrassSectors` (8), `CurrBiomeType` (1 —
+raw normalized biome id: Plains=0.0, Water=0.5, Desert=1.0), `CurrGrass` (1),
+`Bias` (1).
 **Conditional groups**: `WallProximity` (4) when `wrap_world = false`;
-`CreatureSectors` (8 single-pool / 16 species mode);
 `GrassBandsFar` (8 far sectors at `GRASS_FAR_SIGHT_RADIUS`, mip level
-`GRASS_FAR_MIP_LEVEL`) when `grass_multisight = true` and it fits within
-`MAX_NN_INPUTS`. The walled+species combination exceeds the ceiling; the
-layout automatically falls back to single-band for that configuration.
+`GRASS_FAR_MIP_LEVEL`) when `grass_multisight = true`. All 8 combinations fit
+within `MAX_NN_INPUTS = 48` — no fallback is needed.
 
-**4-way width table (`grass_multisight=true`):**
+**8-way width table:**
+
+Single-band (`grass_multisight=false`):
 
 | `wrap_world` | `species_mode` | real | pad to |
 |---|---|---|---|
-| on | off | 39 | **40** |
-| off | off | 43 | **48** |
-| on | on | 47 | **48** |
-| off | on | 51 → fallback | — |
+| on | off | 27 | **32** |
+| off | off | 31 | **32** |
+| on | on | 35 | **40** |
+| off | on | 39 | **40** |
 
-With `grass_multisight=false` subtract 8 from each real width.
+Multi-band (`grass_multisight=true`, `GrassBandsFar` +8):
 
-Default (wrap on, species off, `grass_multisight=true`): real 39 → padded **40**.
+| `wrap_world` | `species_mode` | real | pad to |
+|---|---|---|---|
+| on | off | 35 | **40** |
+| off | off | 39 | **40** |
+| on | on | 43 | **48** |
+| off | on | 47 | **48** |
+
+Default (wrap on, species off, `grass_multisight=true`): real 35 → padded **40**.
 
 Outputs: `out[0]=vx`, `out[1]=vy`, `out[2..5]` = action logits for
 `{Graze=0, Attack=1, Split=2}`. In species mode `action[2]` decodes to
@@ -217,9 +253,9 @@ Outputs: `out[0]=vx`, `out[1]=vy`, `out[2..5]` = action logits for
 `species.md`). Hidden layers use Leaky ReLU (slope 0.01). Per-layer
 founder init: He-uniform `r = sqrt(6 / fan_in)` at runtime.
 
-Biome inputs (`BiomeDir` + `CurrCellPenalty`) are **genome-modulated** per
-creature — high-affinity creatures read a lower penalty matching what they
-actually pay. See [`biome.md`](biome.md).
+`CurrBiomeType` is a raw normalized biome id (Plains=0.0, Water=0.5,
+Desert=1.0) — no genome modulation, no penalty. Biomes carry no movement/energy
+effects; the NN input lets the brain learn food avoidance. See [`biome.md`](biome.md).
 
 `GrassBandsFar`: 8 directional sectors at far radius, sampled at mip
 level 3 from `GrassPyramid::sample_clamped` — O(1) per tap regardless of
@@ -274,7 +310,7 @@ from `world_seed` via `grass_hash_u64`. Fallback to uniform-scatter when
 `grass_clump_count = 0`.
 
 Single-pool `founder_count` may seed up to `MAX_POP_FOR_SIM`; founders use a
-Halton sequence for positions and genome-derived colors. The UI exposes up to
+Halton sequence for positions and evenly spaced seed hues. The UI exposes up to
 8000 founders, and the live `max_population` cap applies at the first birth
 phase.
 
@@ -289,20 +325,6 @@ knobs (60–62); two construction-only clump knobs.
 makes grass density **intentionally non-reproducible run-to-run** — an
 accepted perf-vs-reproducibility trade-off. Determinism tests assert exact
 equality only under `#[cfg(not(feature="threads"))]`.
-
-## Body genome
-
-`crates/evosim/src/creature.rs` → `Genome`, `CreatureSoA` (`genome` column)
-
-Each creature carries 6 `f32 ∈ [0,1]` traits: `body_size`, `max_speed`,
-`metabolism`, `diet`, `water_affinity`, `heat_tolerance`. Each is rescaled
-at its use site; a median genome (all 0.5) approximates current constants.
-`water_affinity` and `heat_tolerance` modulate biome penalties — see
-[`biome.md`](biome.md).
-
-Mutation on split: same per-birth bucket as the brain; each trait takes one
-Gaussian nudge then is clamped to `[0,1]`. `trait_mutation_sigma_multiplier`
-(live slider) scales the genome sigma.
 
 ## Action ring-flash (FlashTag)
 
@@ -319,33 +341,36 @@ renderer — see [`shared-memory-and-protocol.md`](shared-memory-and-protocol.md
 
 - `crates/evosim/src/world/mod.rs` → `World`, `DevSliders`, `World::step`, `World::handle_births`
 - `crates/evosim/src/world/tick.rs` → `apply_movement_and_repulsion`, `graze`, `attack`, `energy_bookkeeping`, `collect_deaths`, `flash_decay`
-- `crates/evosim/src/world/nn.rs` → `nn_forward_all_chunks`, `build_nn_input`, `NnInputLayout`, `NnInputGroup`, `BiomeSampler`, `ActionGate`, `decode_action`, `is_valid_action`, `chunk_ranges`, `dynamic_chunks`
+- `crates/evosim/src/world/nn.rs` → `nn_forward_all_chunks`, `build_nn_input`, `build_labeled_nn_inspect`, `NnInputLayout`, `NnInputGroup`, `BiomeSampler`, `ActionGate`, `decode_action`, `is_valid_action`, `chunk_ranges`, `dynamic_chunks`
 - `crates/evosim/src/world/nn_stats.rs` → `NnStats`
 - `crates/evosim/src/world/proximity.rs` → `LUT_RADIUS`, sector LUT build, creature + grass proximity helpers, `compute_creature_proximity_sectors_species`, `compute_grass_far_band_sectors`
 - `app/crates/evosim/src/brain/mod.rs` → `Brain`, `Brain::forward`, `Brain::child_from`, `NnTopology`, `lrelu`
-- `crates/evosim/src/creature.rs` → `CreatureSoA`, `Genome`, `FlashTag`, `Action`
+- `crates/evosim/src/creature.rs` → `CreatureSoA` (`hue` column), `FlashTag`, `Action`
 - `app/crates/evosim/src/grass/mod.rs` → `GrassGrid`, `GrassPropagation`, `ScatterParams`, `DiscTable`, `GrassPyramid`, `compute_propagation`, `consume`
 - `crates/evosim/src/rng.rs` → `SimRng`, `grass_hash_u64`, `grass_hash_fused_4`
 - `crates/evosim/src/grid.rs` → `SpatialGrid`, `cell_of`, `rebuild`, `for_each_in_radius`
-- `crates/evosim/src/constants.rs` → `WorldDims`, `MAX_POP_FOR_SIM`, `GRASS_CELL_SIZE`, `MAX_NN_INPUTS`, `MIN_CHUNKS`, `MAX_CHUNKS`, `GRASS_SPREAD_RADIUS`, `GRASS_BITES_PER_BLOCK_DEFAULT`, `GRASS_PYRAMID_MAX_LEVELS`, [etc — authoritative list in file]
-- `app/crates/evosim/src/wasm_api/mod.rs` → `WorldHandle`, `WorldHandle::set_slider`, `WorldHandle::write_snapshot`, `BiomePyramid`, `max_pop_for_sim`
+- `crates/evosim/src/constants.rs` → `WorldDims`, `MAX_POP_FOR_SIM`, `GRASS_CELL_SIZE`, `MAX_NN_INPUTS`, `MIN_CHUNKS`, `MAX_CHUNKS`, `GRASS_SPREAD_RADIUS`, `GRASS_BITES_PER_BLOCK_DEFAULT`, `GRASS_PYRAMID_MAX_LEVELS`, `CROWDING_STRENGTH_DEFAULT`, `CROWDING_RADIUS_DEFAULT`, `STARVATION_THRESHOLD_DEFAULT`, `STARVATION_DRAIN_RATE_DEFAULT`, `GRASS_CAPACITY_SCALE_DEFAULT`, `GRASS_REGROWTH_RATE_DEFAULT`, [etc — authoritative list in file]
+- `app/crates/evosim/src/wasm_api/mod.rs` → `WorldHandle`, `WorldHandle::set_slider`, `WorldHandle::write_snapshot`, `WorldHandle::creature_nn_inspect_json`, `BiomePyramid`, `lineage_color_u32`, `max_pop_for_sim`
+- `crates/evosim/src/world/equilibrium_tests.rs` — exit-gate test: death-cohort age-at-death trend + steady-state population band
 
 ## Update when
 
 - A new tick phase is added, removed, or reordered (update the step order diagram).
 - The NN topology or input layout changes (update the topology table + code anchors).
-- `MAX_POP_FOR_SIM` changes, or the cull policy moves.
+- `MAX_POP_FOR_SIM` changes, or the cull/backstop policy moves.
+- The equilibrium mechanism changes (crowding, starvation, or grass dynamics).
 - The `WorldHandle` wasm surface gains or loses a method.
 - The `DevSliders` shape changes (update the slider table above).
 - A new chunking constant lands (`MIN_CHUNKS`, `MAX_CHUNKS`, or the dynamic formula).
 - The world-sizing model changes (`world_size`, `wrap_world`, `world_seed`, `grass_cell_size`, `HASH_CELL`, or the `WorldDims` derivation).
-- The NN input group set changes (`GrassBandsFar` radii/mip level, `MAX_NN_INPUTS`, or the `grass_multisight` fallback logic).
+- The NN input group set changes (`GrassBandsFar` radii/mip level, `MAX_NN_INPUTS`).
+- The heritable column set changes (currently: brain weights + `hue`).
 
 ## Why is it shaped this way
 
 See [`decisions/sim.md`](../decisions/sim.md) — SoA-not-AoS choice, the
-structural cull design, deterministic chunking, and the
-single-`set_slider`-entry-point rule.
+backstop cull and food-limited equilibrium design, deterministic chunking,
+pure neuroevolution rationale, and the single-`set_slider`-entry-point rule.
 
 ## See also
 
@@ -357,4 +382,4 @@ single-`set_slider`-entry-point rule.
 - [`../decisions/sim.md`](../decisions/sim.md)
 - [`../decisions/cross-cutting.md`](../decisions/cross-cutting.md)
 - [`../agent-context/maintaining-docs.md`](../agent-context/maintaining-docs.md)
-- Global authoring rules: `~/.claude/agent-docs/v1/rules/authoring-rules.md`
+- Global authoring rules: `~/agent-docs/v1/rules/authoring-rules.md`

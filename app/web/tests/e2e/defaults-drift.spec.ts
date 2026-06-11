@@ -33,14 +33,11 @@ const RUST_TO_SETTINGS: Record<string, keyof typeof DEFAULTS> = {
   founder_count: "founderCount",
   grass_initial_seed_count: "initialGrassSeedCount",
   // v2.0 Wave 1c: `full_grass_on_init` was removed from both the Rust
-  // sliders_defaults_json map and the settings.ts blob. Added world-shape +
-  // biome-penalty sliders below mirror the new Rust DevSliders defaults.
+  // sliders_defaults_json map and the settings.ts blob. Added world-shape
+  // sliders below mirror the new Rust DevSliders defaults.
   world_size: "worldSize",
   world_seed: "worldSeed",
   wrap_world: "wrapWorld",
-  water_movement_penalty: "waterMovementPenalty",
-  desert_movement_penalty: "desertMovementPenalty",
-  trait_mutation_sigma_multiplier: "traitMutationSigmaMultiplier",
   species_mode: "speciesMode",
   crossover_mode: "crossoverMode",
   starting_species_count: "startingSpeciesCount",
@@ -64,6 +61,13 @@ const RUST_TO_SETTINGS: Record<string, keyof typeof DEFAULTS> = {
   mate_reach_multiplier: "mateReachMultiplier",
   init_graze_boost: "initGrazeBoost",
   init_split_boost: "initSplitBoost",
+  // v2.1 P3: food-limited equilibrium knobs (all live sliders).
+  crowding_strength: "crowdingStrength",
+  crowding_radius: "crowdingRadius",
+  starvation_threshold: "starvationThreshold",
+  starvation_drain_rate: "starvationDrainRate",
+  grass_capacity_scale: "grassCapacityScale",
+  grass_regrowth_rate: "grassRegrowthRate",
 };
 
 function settingsValueAsNumber(key: keyof typeof DEFAULTS): number {

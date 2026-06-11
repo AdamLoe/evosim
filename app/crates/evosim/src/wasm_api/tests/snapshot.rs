@@ -4,7 +4,7 @@
 //! `packed_u32` bit packings round-trip. Attached via `#[path]` in `wasm_api.rs`.
 
 use super::super::*;
-use crate::creature::{FlashTag, Genome, FLASH_TICKS};
+use crate::creature::{FlashTag, FLASH_TICKS};
 
 /// The creature region stride + total bytes are unchanged by the repack (only
 /// the *meaning* of the lanes shifted).
@@ -71,11 +71,9 @@ fn snapshot_lane_offsets_match_repack() {
         let y = f32::from_le_bytes(creatures[base + 4..base + 8].try_into().unwrap());
         assert_eq!(x, handle.inner.creatures.x[i], "x lane @0");
         assert_eq!(y, handle.inner.creatures.y[i], "y lane @4");
-        // radius@8 = body_size-derived.
+        // radius@8 = constant body radius (body genome removed in v2.1 P2).
         let radius = f32::from_le_bytes(creatures[base + 8..base + 12].try_into().unwrap());
-        let expected_r = CREATURE_SIZE
-            * BODY_RADIUS_PER_SIZE
-            * handle.inner.creatures.genome[i].body_size_factor();
+        let expected_r = CREATURE_SIZE * BODY_RADIUS_PER_SIZE;
         assert!((radius - expected_r).abs() < 1e-5, "radius lane @8");
         // color_u32@12 — alpha byte is 255.
         let color = u32::from_le_bytes(creatures[base + 12..base + 16].try_into().unwrap());
@@ -171,28 +169,26 @@ fn pack_render_u32_roundtrips() {
     }
 }
 
-/// `genome_color_u32`: a pure grazer (diet=0) skews green; a pure predator
-/// (diet=1) skews red. Alpha is always 255.
+/// v2.1 P2: `lineage_color_u32` — alpha is always 255, and hues that are
+/// 180° apart (0.0 vs 0.5) produce visibly distinct colors.
 #[test]
-fn genome_color_grazer_green_predator_red() {
-    let grazer = Genome {
-        diet: 0.0,
-        body_size: 1.0,
-        max_speed: 1.0,
-        ..Genome::median()
-    };
-    let predator = Genome {
-        diet: 1.0,
-        body_size: 1.0,
-        max_speed: 1.0,
-        ..Genome::median()
-    };
-    let gc = genome_color_u32(&grazer);
-    let pc = genome_color_u32(&predator);
-    let (gr, gg) = (gc & 0xFF, (gc >> 8) & 0xFF);
-    let (pr, pg) = (pc & 0xFF, (pc >> 8) & 0xFF);
-    assert!(gg > gr, "grazer must be greener than red: g={gg} r={gr}");
-    assert!(pr > pg, "predator must be redder than green: r={pr} g={pg}");
-    assert_eq!((gc >> 24) & 0xFF, 0xFF, "alpha 255");
-    assert_eq!((pc >> 24) & 0xFF, 0xFF, "alpha 255");
+fn lineage_color_alpha_is_255_and_hues_differ() {
+    let c0 = lineage_color_u32(0.0);
+    let c1 = lineage_color_u32(0.5);
+    // Alpha byte (bits 24–31) must be 255.
+    assert_eq!((c0 >> 24) & 0xFF, 0xFF, "hue=0.0 alpha must be 255");
+    assert_eq!((c1 >> 24) & 0xFF, 0xFF, "hue=0.5 alpha must be 255");
+    // Opposite hues must produce different RGB values.
+    assert_ne!(
+        c0 & 0x00FF_FFFF,
+        c1 & 0x00FF_FFFF,
+        "opposite hues must differ"
+    );
+    // Wrap: hue=1.0 is equivalent to hue=0.0.
+    let c_wrap = lineage_color_u32(1.0);
+    assert_eq!(
+        c0 & 0x00FF_FFFF,
+        c_wrap & 0x00FF_FFFF,
+        "hue=1.0 must wrap to same color as hue=0.0"
+    );
 }

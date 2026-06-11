@@ -110,16 +110,8 @@ fn spatial_grid_seam_neighbor_only_when_wrap_on() {
         // Add a creature at the right edge.
         let mut rng = SimRng::from_u64(7);
         let b = Brain::founder(&mut rng, NnTopology::legacy());
-        w.creatures.push(
-            1,
-            ws - 2.0,
-            ws * 0.5,
-            100.0,
-            0,
-            b,
-            crate::creature::Genome::median(),
-            0,
-        );
+        w.creatures
+            .push(1, ws - 2.0, ws * 0.5, 100.0, 0, b, 0.0_f32, 0);
         w.grid.rebuild(&w.creatures.x, &w.creatures.y);
 
         let mut found_far = false;

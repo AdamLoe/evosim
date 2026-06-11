@@ -424,7 +424,11 @@ function serveInspectRequest(): void {
 
   let bytesWritten = 0;
   if (idx !== undefined) {
-    const jsonStr = world.creature_inspect_json(idx);
+    // kind=2: NN I/O inspect — call creature_nn_inspect_json instead of
+    // creature_inspect_json. Same SAB response slot, same epoch protocol.
+    const jsonStr = kind === 2
+      ? world.creature_nn_inspect_json(idx)
+      : world.creature_inspect_json(idx);
     if (jsonStr) {
       const encoded = new TextEncoder().encode(jsonStr);
       const len = Math.min(encoded.length, INSPECT_RESP_CAP);
@@ -536,6 +540,14 @@ function simLoop(): void {
     // the sim drops into a thin grass-only path so the canvas keeps filling
     // while main shows the world-end popup. Only an explicit pause parks.
     if (paused) {
+      // v2.1 P1: serve any pending inspect request (including kind=2 NN I/O)
+      // before parking. Without this, a requestNnInspectId (or any inspect
+      // request) issued while paused is silently dropped — the request epoch
+      // advances past lastInspectReqEpoch in readControlSab's next iteration
+      // but serveInspectRequest() lives in the running branch and never fires.
+      // The futex notify from issueInspect wakes this Atomics.wait, so after
+      // serve the loop re-reads control, sees paused still true, and parks again.
+      serveInspectRequest();
       const before = Atomics.load(ctrlI32, CTRL_FUTEX);
       Atomics.wait(ctrlI32, CTRL_FUTEX, before, Infinity);
       continue;

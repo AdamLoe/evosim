@@ -1,10 +1,8 @@
 //! Per-tick step bodies that mutate `World`. All as `impl World` blocks; private to the `crate::world` parent.
 //!
-//! v2.0 Wave 2a: per-creature body genome reintroduced. Body trait reads are
-//! genome-rescaled at each use site (radius, speed cap, move cost, idle upkeep,
-//! graze yield, attack damage). The `Eat` action was renamed to `Attack`. The
-//! biome movement penalty is genome-modulated per creature (water_affinity /
-//! heat_tolerance reduce the water / desert severity).
+//! v2.1 P2: genome removed. All body traits are constant (MOVE_SPEED_MAX,
+//! CREATURE_SIZE * BODY_RADIUS_PER_SIZE, etc.). Biome penalties removed;
+//! only grass capacity cap remains.
 
 use super::World;
 use crate::constants::*;
@@ -55,13 +53,10 @@ impl World {
             }
             let xi = self.creatures.x[i];
             let yi = self.creatures.y[i];
-            // v2.0 Wave 2a: body radius is genome-scaled.
-            let ri =
-                CREATURE_SIZE * BODY_RADIUS_PER_SIZE * self.creatures.genome[i].body_size_factor();
-            // v2.0 Wave 2a: graze yield favors grazers — a pure predator
-            // (diet=1) grazes at half yield; a pure grazer (diet=0) at full.
-            let diet = self.creatures.genome[i].diet;
-            let graze_yield = 1.0 - 0.5 * diet;
+            // v2.1 P2: body radius is constant (genome removed).
+            let ri = CREATURE_SIZE * BODY_RADIUS_PER_SIZE;
+            // v2.1 P2: graze yield is always 1.0 (diet trait removed).
+            let graze_yield = 1.0_f32;
 
             // Phase 1: collect overlapping cell indices (immutable borrow of grass).
             let mut cells = std::mem::take(&mut self.scratch_neighbors);
@@ -101,24 +96,14 @@ impl World {
         {
             crate::profile_span!(&self.profile, "tick.movement.integrate");
             for i in 0..n {
-                // v2.0 Wave 2a: speed cap + move cost are genome-scaled by max_speed.
-                let speed_factor = self.creatures.genome[i].max_speed_factor();
-                let speed_cap = MOVE_SPEED_MAX * speed_factor;
-                // v2.0 Wave 2a: GENOME-modulated biome penalty `p` for the cell the
-                // creature occupies (reduced by its water_affinity / heat_tolerance).
-                // Two of its three effects apply here: a reduced effective speed cap
-                // and a higher move-cost multiplier. (The third — extra upkeep — is
-                // in energy_bookkeeping.)
-                let p = self.movement_penalty_for(i);
-                let eff_speed_cap = speed_cap * (1.0 - K_BIOME_SPEED * p);
-                // Faster creatures pay proportionally more per distance (max_speed
-                // trades raw cap for higher movement cost).
-                let eff_move_mult = move_mult * speed_factor * (1.0 + K_BIOME_COST * p);
+                // v2.1 P2: speed cap is constant (genome and biome penalties removed).
+                let speed_cap = MOVE_SPEED_MAX;
+                let eff_move_mult = move_mult;
                 let vx = self.creatures.vx[i];
                 let vy = self.creatures.vy[i];
                 let mag2 = vx * vx + vy * vy;
-                let (cvx, cvy) = if eff_speed_cap > 0.0 && mag2 > eff_speed_cap * eff_speed_cap {
-                    let s = eff_speed_cap / mag2.sqrt();
+                let (cvx, cvy) = if speed_cap > 0.0 && mag2 > speed_cap * speed_cap {
+                    let s = speed_cap / mag2.sqrt();
                     (vx * s, vy * s)
                 } else {
                     (vx, vy)
@@ -146,10 +131,8 @@ impl World {
         // reach — an accepted approximation (consistent with the already-noisy
         // threaded grass field). Eliminates 2 of the 3 grid rebuilds per tick.
 
-        // v2.0 Wave 2a: body radius is genome-scaled, so the search radius uses
-        // the maximum possible body radius (body_size trait = 1.0 → factor 1.5)
-        // for BOTH creatures to be sure no overlapping pair is missed.
-        let max_body_r = CREATURE_SIZE * BODY_RADIUS_PER_SIZE * 1.5;
+        // v2.1 P2: body radius is constant (genome removed).
+        let max_body_r = CREATURE_SIZE * BODY_RADIUS_PER_SIZE;
         let search = max_body_r + max_body_r;
         let rep_max = self.sliders.repulsion_max;
 
@@ -174,10 +157,8 @@ impl World {
                             neighbors.push(j);
                         }
                     });
-                    // v2.0 Wave 2a: per-creature genome-scaled body radius.
-                    let ri = CREATURE_SIZE
-                        * BODY_RADIUS_PER_SIZE
-                        * self.creatures.genome[i].body_size_factor();
+                    // v2.1 P2: constant body radius.
+                    let ri = CREATURE_SIZE * BODY_RADIUS_PER_SIZE;
                     for &j in &neighbors {
                         let xj = self.creatures.x[j];
                         let yj = self.creatures.y[j];
@@ -198,10 +179,8 @@ impl World {
                             }
                         }
                         let d2 = dx * dx + dy * dy;
-                        // v2.0 Wave 2a: pair sum of genome-scaled radii.
-                        let rj = CREATURE_SIZE
-                            * BODY_RADIUS_PER_SIZE
-                            * self.creatures.genome[j].body_size_factor();
+                        // v2.1 P2: constant body radius.
+                        let rj = CREATURE_SIZE * BODY_RADIUS_PER_SIZE;
                         let rsum = ri + rj;
                         if d2 < rsum * rsum {
                             if d2 > 1e-8 {
@@ -238,14 +217,11 @@ impl World {
         // = 0.1u nudges) is far below the 3u attack reach, and the next consumer
         // (attack) tolerates the sub-unit staleness. Next tick's step-1 rebuild
         // re-syncs from final positions.
-        // Walled: wall-clamp to [ri, world_size-ri]. Toroidal: wrap into
-        // [0, world_size). v2.0 Wave 2a: ri is genome-scaled per creature.
+        // Walled: wall-clamp to [ri, world_size-ri]. Toroidal: wrap into [0, world_size).
         {
             crate::profile_span!(&self.profile, "tick.movement.apply");
+            let ri = CREATURE_SIZE * BODY_RADIUS_PER_SIZE;
             for i in 0..n {
-                let ri = CREATURE_SIZE
-                    * BODY_RADIUS_PER_SIZE
-                    * self.creatures.genome[i].body_size_factor();
                 let lo = ri;
                 let hi = world_size - ri;
                 let px = self.creatures.x[i] + self.scratch_fx[i];
@@ -272,11 +248,8 @@ impl World {
     /// shared victim lanes (`scratch_damage[j]`) happen serially afterward from
     /// a per-attacker `AttackPick` buffer.
     ///
-    /// v2.0 Wave 2a: attack effectiveness is genome-scaled. The transfer is
-    /// `eat_bite_fraction * victim.energy * effectiveness`, where
-    /// `effectiveness = (0.5 + diet) * body_size_factor` of the ATTACKER —
-    /// predator-diet + larger body hit harder. Single-pool: hits any creature
-    /// (W3 adds species gating).
+    /// v2.1 P2: attack transfer is `bite_frac * victim.energy` (genome removed).
+    /// Single-pool: hits any creature (W3 adds species gating).
     pub(crate) fn attack(&mut self) {
         let n = self.creatures.len();
         if n == 0 {
@@ -295,10 +268,8 @@ impl World {
         self.scratch_got_a_bite.fill(false);
         self.scratch_attack_picks.fill(AttackPick::Skip);
 
-        // v2.0 Wave 2a: max reach uses the largest possible body radius for both
-        // attacker and victim (body_size factor ≤ 1.5) so the grid query never
-        // misses an in-reach pair; the exact per-pair radius is checked inside.
-        let max_body_r = CREATURE_SIZE * BODY_RADIUS_PER_SIZE * 1.5;
+        // v2.1 P2: body radius is constant (genome removed).
+        let max_body_r = CREATURE_SIZE * BODY_RADIUS_PER_SIZE;
         let max_range = max_body_r + max_body_r;
         let bite_frac = self.sliders.eat_bite_fraction;
         let world_size = self.dims.world_size;
@@ -308,7 +279,7 @@ impl World {
         let species_mode = self.sliders.species_mode;
 
         // Parallel scan: every per-i body only reads from xs/ys/actions/
-        // cooldowns/energies/genome/species/grid (immutable across threads) and
+        // cooldowns/energies/species/grid (immutable across threads) and
         // writes exclusively to its own `picks[i]` slot.
         {
             let xs = &self.creatures.x[..n];
@@ -316,7 +287,6 @@ impl World {
             let actions = &self.creatures.action_this_tick[..n];
             let cooldowns = &self.creatures.digestion_cooldown[..n];
             let energies = &self.creatures.energy[..n];
-            let genome = &self.creatures.genome[..n];
             let species_ids = &self.creatures.species_id[..n];
             let grid = &self.grid;
             let picks = &mut self.scratch_attack_picks[..n];
@@ -332,7 +302,8 @@ impl World {
                 }
                 let xi = xs[i];
                 let yi = ys[i];
-                let ri = CREATURE_SIZE * BODY_RADIUS_PER_SIZE * genome[i].body_size_factor();
+                // v2.1 P2: constant body radius (genome removed).
+                let ri = CREATURE_SIZE * BODY_RADIUS_PER_SIZE;
                 let self_species = species_ids[i];
                 // First-valid-target attack: bail as soon as we find any
                 // in-reach target. The per-cell iteration starts at `i % K_cell`
@@ -363,19 +334,17 @@ impl World {
                         }
                     }
                     let d2 = dx * dx + dy * dy;
-                    let rj = CREATURE_SIZE * BODY_RADIUS_PER_SIZE * genome[j].body_size_factor();
+                    // v2.1 P2: constant body radius.
+                    let rj = CREATURE_SIZE * BODY_RADIUS_PER_SIZE;
                     let reach = ri + rj;
                     d2 <= reach * reach
                 });
                 *slot = match pick {
                     Some(j) => {
-                        // v2.0 Wave 2a: attack effectiveness scales with the
-                        // attacker's diet (predator) + body size.
-                        let g = &genome[i];
-                        let effectiveness = (0.5 + g.diet) * g.body_size_factor();
+                        // v2.1 P2: transfer is bite_frac * victim energy (genome removed).
                         AttackPick::Hit {
                             j: j as u32,
-                            transfer: bite_frac * energies[j] * effectiveness,
+                            transfer: bite_frac * energies[j],
                         }
                     }
                     None => AttackPick::Miss,
@@ -452,30 +421,60 @@ impl World {
         let up_base = UPKEEP_BASE + UPKEEP_NN_FIXED + UPKEEP_GUT + mouth_tax;
         let mult = self.sliders.upkeep_multiplier;
         let max_age = self.sliders.max_age;
-        // v2.0 Wave 2a: per-creature energy cap scales with body_size (bigger
-        // bodies hold more). Median genome (0.5 → factor 1.0) reproduces the cap.
-        let energy_cap_base = self.sliders.energy_max;
-        for i in 0..self.creatures.len() {
-            // v2.0 Wave 2a: idle upkeep is multiplied by the metabolism trait.
-            let metabolism = self.creatures.genome[i].metabolism_factor();
-            let mut up = up_base * mult * metabolism;
+        // v2.1 P2: energy cap is constant (genome removed).
+        let energy_cap = self.sliders.energy_max;
+
+        // v2.1 P3: crowding mortality — count neighbours within crowding_radius
+        // for each creature and apply extra upkeep proportional to that count.
+        // Reuses the existing spatial-hash (no new O(n²) pass).
+        let crowding_strength = self.sliders.crowding_strength;
+        let crowding_radius = self.sliders.crowding_radius;
+        let starvation_threshold = self.sliders.starvation_threshold;
+        let starvation_drain_rate = self.sliders.starvation_drain_rate;
+
+        // Build per-creature neighbour counts if crowding is active.
+        let n = self.creatures.len();
+        let use_crowding = crowding_strength > 0.0 && crowding_radius > 0.0 && n > 1;
+        let crowding_counts: Vec<u32> = if use_crowding {
+            let mut counts = vec![0u32; n];
+            for i in 0..n {
+                let xi = self.creatures.x[i];
+                let yi = self.creatures.y[i];
+                self.grid.for_each_in_radius(xi, yi, crowding_radius, |j| {
+                    if j != i {
+                        counts[i] += 1;
+                    }
+                });
+            }
+            counts
+        } else {
+            vec![]
+        };
+
+        for i in 0..n {
+            // v2.1 P2: upkeep is up_base * mult (metabolism trait removed).
+            let mut up = up_base * mult;
             let age = self.creatures.age[i];
             if age > max_age {
                 let excess = (age - max_age) as f32;
                 let age_mult = PAST_LIFESPAN_MULT.powf(excess / 1000.0);
                 up *= age_mult.min(1e6);
             }
+            // v2.1 P2: biome upkeep surcharge removed.
 
-            // v2.0 Wave 2a: extra per-tick upkeep for standing in a penalized
-            // biome (the third movement-penalty effect), GENOME-modulated by the
-            // creature's affinity traits. Added AFTER the age-multiplier so the
-            // biome surcharge is a flat additive drain, not amplified by old age.
-            let p = self.movement_penalty_for(i);
-            up += K_BIOME_UPKEEP * p;
+            // v2.1 P3: crowding upkeep.
+            if use_crowding {
+                up += crowding_strength * crowding_counts[i] as f32;
+            }
 
             self.creatures.energy[i] -= up;
-            // v2.0 Wave 2a: body_size-scaled energy cap.
-            let energy_cap = energy_cap_base * self.creatures.genome[i].body_size_factor();
+
+            // v2.1 P3: starvation drain (below threshold, extra drain beyond idle upkeep).
+            if starvation_drain_rate > 0.0 && self.creatures.energy[i] < starvation_threshold {
+                self.creatures.energy[i] -= starvation_drain_rate;
+            }
+
+            // v2.1 P2: constant energy cap.
             if self.creatures.energy[i] > energy_cap {
                 self.creatures.energy[i] = energy_cap;
             }
@@ -490,12 +489,13 @@ impl World {
             }
             self.creatures.age[i] += 1;
         }
+        // Return the crowding_counts storage (drop it).
+        let _ = crowding_counts;
     }
 
-    /// v2.0 Wave 2a: ring-flash decay. Decrements every creature's
-    /// `flash_ticks`; when it reaches 0 the tag clears to `None`. Replaces the
-    /// old action-EMA color update (color now derives from the genome at
-    /// snapshot write; per-action highlight is the ring flash). Runs once per
+    /// Ring-flash decay. Decrements every creature's `flash_ticks`; when it
+    /// reaches 0 the tag clears to `None`. Color now derives from lineage hue
+    /// at snapshot write; per-action highlight is the ring flash. Runs once per
     /// tick in the `tick.color_ema` span (kept the span name for the profiler).
     pub(crate) fn flash_decay(&mut self) {
         let n = self.creatures.len();
@@ -654,9 +654,6 @@ mod tests {
     #[test]
     fn position_clamps_at_wall_edge() {
         let mut w = World::new("d7-wall-clamp");
-        // v2.0 Wave 2a: pin median genome so body radius = 1.0 (factor 1.0),
-        // matching this test's `ri = CREATURE_SIZE * BODY_RADIUS_PER_SIZE` bound.
-        w.creatures.genome[0] = crate::creature::Genome::median();
         w.creatures.x[0] = WORLD_SIZE - 1.0;
         w.creatures.y[0] = WORLD_SIZE * 0.5;
         w.creatures.vx[0] = 5.0; // would cross the right wall
@@ -728,7 +725,7 @@ mod tests {
             START_ENERGY_DEFAULT,
             0,
             b2,
-            crate::creature::Genome::median(),
+            0.0_f32,
             0,
         );
         w.creatures.vx[n_before] = 0.0;
@@ -780,10 +777,7 @@ mod tests {
         };
 
         let mut w = World::new("graze-patch");
-        // v2.0 Wave 2a: median genome (radius 1.0) + pure-grazer diet (full yield).
-        let mut g0 = crate::creature::Genome::median();
-        g0.diet = 0.0;
-        w.creatures.genome[0] = g0;
+        // v2.1 P2: genome removed; diet=constant 1.0 (full yield always).
         // Position creature at cell (30,30) center.
         let cell_ix: usize = 30;
         let cell_iy: usize = 30;
@@ -873,9 +867,7 @@ mod tests {
         use crate::constants::{GRASS_CELL_SIZE, GRASS_ENERGY_PER_BITE_DEFAULT, GRASS_MAX};
 
         let mut w = World::new("graze-cap");
-        let mut g0 = crate::creature::Genome::median();
-        g0.diet = 0.0; // pure grazer → full graze yield (matches pre-genome)
-        w.creatures.genome[0] = g0;
+        // v2.1 P2: genome removed.
         let ix = 2usize;
         let iy = 2usize;
         let cx = (ix as f32 + 0.5) * GRASS_CELL_SIZE;
@@ -912,9 +904,7 @@ mod tests {
 
         let mut w = World::new("graze-live-bites");
         w.sliders.grass_bites_per_block = 4;
-        let mut genome = crate::creature::Genome::median();
-        genome.diet = 0.0;
-        w.creatures.genome[0] = genome;
+        // v2.1 P2: genome removed.
 
         let ix = 5usize;
         let iy = 5usize;
@@ -943,9 +933,7 @@ mod tests {
         use crate::constants::{GRASS_CELL_SIZE, GRASS_ENERGY_PER_BITE_DEFAULT, GRASS_MAX};
 
         let mut w = World::new("graze-const-eff");
-        let mut g0 = crate::creature::Genome::median();
-        g0.diet = 0.0; // pure grazer → full graze yield (matches pre-genome)
-        w.creatures.genome[0] = g0;
+        // v2.1 P2: genome removed.
         let ix = 5usize;
         let iy = 5usize;
         let cx = (ix as f32 + 0.5) * GRASS_CELL_SIZE;
@@ -975,9 +963,7 @@ mod tests {
         };
 
         let mut w = World::new("graze-conserve");
-        let mut g0 = crate::creature::Genome::median();
-        g0.diet = 0.0; // pure grazer → full graze yield (matches pre-genome)
-        w.creatures.genome[0] = g0;
+        // v2.1 P2: genome removed.
         w.grass.fill_density(GRASS_MAX);
 
         let cx = WORLD_SIZE * 0.5;
@@ -1040,10 +1026,8 @@ mod tests {
         );
     }
 
-    /// P3a test: basic bite transfer — adjacent predator/prey, armor=0, eff=1.0, bite_frac=0.5.
-    /// v2.0 Wave 2a: median-genome attacker (diet=0.5, body_size=0.5 → factor
-    /// 1.0) gives effectiveness `(0.5 + 0.5) * 1.0 = 1.0`, reproducing the
-    /// pre-genome transfer (0.5 × 100 × 1.0 = 50).
+    /// P3a test: basic bite transfer — adjacent predator/prey, bite_frac=0.5.
+    /// v2.1 P2: transfer = bite_frac * prey.energy = 0.5 * 100 = 50.
     #[test]
     fn p3a_attack_bite_basic_transfer() {
         use crate::brain::{Brain, NnTopology};
@@ -1052,8 +1036,6 @@ mod tests {
         w.creatures.energy[0] = 100.0;
         w.creatures.digestion_cooldown[0] = 0;
         w.creatures.action_this_tick[0] = Action::Attack;
-        // Pin the attacker's genome to median so effectiveness == 1.0.
-        w.creatures.genome[0] = crate::creature::Genome::median();
         w.sliders.eat_bite_fraction = 0.5;
 
         // Add prey (creature 1) adjacent.
@@ -1061,17 +1043,9 @@ mod tests {
         let prey_brain = Brain::founder(&mut rng, NnTopology::legacy());
         let pred_x = w.creatures.x[0];
         let pred_y = w.creatures.y[0];
-        // Place prey within bite reach (0.0 since bite_reach = 0).
-        w.creatures.push(
-            1,
-            pred_x + 1.5,
-            pred_y,
-            100.0,
-            0,
-            prey_brain,
-            crate::creature::Genome::median(),
-            0,
-        );
+        // Place prey within bite reach.
+        w.creatures
+            .push(1, pred_x + 1.5, pred_y, 100.0, 0, prey_brain, 0.0_f32, 0);
 
         w.grid.rebuild(&w.creatures.x, &w.creatures.y);
 
@@ -1083,7 +1057,7 @@ mod tests {
         let pred_energy_after = w.creatures.energy[0];
         let prey_energy_after = w.creatures.energy[1];
 
-        // transfer = 0.5 * 100.0 * effectiveness(=1.0 at median genome) = 50.0
+        // transfer = 0.5 * 100.0 = 50.0
         let expected_gain = 50.0_f32;
         let prey_loss = prey_energy_before - prey_energy_after;
         let pred_gain = pred_energy_after - pred_energy_before;
@@ -1114,16 +1088,8 @@ mod tests {
         let prey_brain = Brain::founder(&mut rng, NnTopology::legacy());
         let pred_x = w.creatures.x[0];
         let pred_y = w.creatures.y[0];
-        w.creatures.push(
-            1,
-            pred_x + 1.5,
-            pred_y,
-            100.0,
-            0,
-            prey_brain,
-            crate::creature::Genome::median(),
-            0,
-        );
+        w.creatures
+            .push(1, pred_x + 1.5, pred_y, 100.0, 0, prey_brain, 0.0_f32, 0);
 
         w.grid.rebuild(&w.creatures.x, &w.creatures.y);
 

@@ -1,8 +1,7 @@
 //! NN forward pass and action-decode helpers. Both sequential and threaded paths live here.
-//! v2.0 Wave 2a: Action enum is {Graze=0, Attack=1, Split=2} (Eat→Attack rename).
-//! NN_OUTPUTS=5. The biome NN inputs are genome-modulated per creature (a high
-//! water_affinity / heat_tolerance creature reads a lower penalty).
-//! v1.5 S5b: build_nn_input rewritten to 32-input semantic layout; vision deleted.
+//! v2.1 P2: Action enum is {Graze=0, Attack=1, Split=2}. NN_OUTPUTS=5.
+//! BiomeDir(4)+CurrCellPenalty(1) replaced by CurrBiomeType(1); no penalty args.
+//! v1.5 S5b: build_nn_input rewritten to semantic layout; vision deleted.
 
 use super::biome::biome_from_u8;
 use super::proximity;
@@ -14,20 +13,16 @@ use crate::grid::SpatialGrid;
 #[cfg(feature = "threads")]
 use rayon::prelude::*;
 
-/// Read-only view over the static biome grid + the live per-biome severities,
-/// used by `build_nn_input` to compute the biome NN inputs. `Copy` so the
-/// threaded NN pass can hand a cheap value to every chunk. (v2.0 Wave 1b.)
+/// Read-only view over the static biome grid used by `build_nn_input` to
+/// compute the `CurrBiomeType` NN input. `Copy` so the threaded NN pass can
+/// hand a cheap value to every chunk. (v2.1 P2: penalties removed.)
 #[derive(Clone, Copy)]
 pub(crate) struct BiomeSampler<'a> {
     grid: &'a [u8],
     grass_dim: usize,
     world_size: f32,
     wrap: bool,
-    water_penalty: f32,
-    desert_penalty: f32,
-    /// v2.0.4 S2: grass cell size at construction (default 5.0). Used by
-    /// `penalty_at` to convert world coords to cell indices correctly when
-    /// a non-default cell size was chosen.
+    /// v2.0.4 S2: grass cell size at construction (default 5.0).
     grass_cell_size: f32,
 }
 
@@ -37,8 +32,6 @@ impl<'a> BiomeSampler<'a> {
         grass_dim: usize,
         world_size: f32,
         wrap: bool,
-        water_penalty: f32,
-        desert_penalty: f32,
         grass_cell_size: f32,
     ) -> Self {
         Self {
@@ -46,26 +39,14 @@ impl<'a> BiomeSampler<'a> {
             grass_dim,
             world_size,
             wrap,
-            water_penalty,
-            desert_penalty,
             grass_cell_size,
         }
     }
 
-    /// v2.0 Wave 2a: genome-MODULATED movement-penalty severity `p ∈ [0, 1]`
-    /// for the cell under a world position, reduced by the per-creature affinity
-    /// traits. Wrap-aware. Water cells are reduced by `water_affinity`, desert
-    /// cells by `heat_tolerance` (`p *= (1 - trait)`), so a high-affinity
-    /// creature READS the same lower penalty it PAYS in the tick effects. The
-    /// penalty is clamped to [0, 1].
+    /// v2.1 P2: raw normalized biome type for the cell under a world position.
+    /// Plains=0.0, Water=0.5, Desert=1.0. Wrap-aware.
     #[inline]
-    pub(crate) fn penalty_at(
-        &self,
-        x: f32,
-        y: f32,
-        water_affinity: f32,
-        heat_tolerance: f32,
-    ) -> f32 {
+    pub(crate) fn biome_type_at(&self, x: f32, y: f32) -> f32 {
         let dim = self.grass_dim;
         let ws = self.world_size;
         let cs = self.grass_cell_size;
@@ -76,12 +57,11 @@ impl<'a> BiomeSampler<'a> {
         };
         let ix = ((px / cs) as usize).min(dim - 1);
         let iy = ((py / cs) as usize).min(dim - 1);
-        let p = match biome_from_u8(self.grid[iy * dim + ix]) {
-            Biome::Plains => return 0.0,
-            Biome::Water => self.water_penalty * (1.0 - water_affinity),
-            Biome::Desert => self.desert_penalty * (1.0 - heat_tolerance),
-        };
-        p.clamp(0.0, 1.0)
+        match biome_from_u8(self.grid[iy * dim + ix]) {
+            Biome::Plains => 0.0,
+            Biome::Water => 0.5,
+            Biome::Desert => 1.0,
+        }
     }
 }
 
@@ -129,8 +109,6 @@ impl World {
                     self.dims.grass_dim,
                     self.dims.world_size,
                     self.dims.wrap_world,
-                    self.sliders.water_movement_penalty,
-                    self.sliders.desert_movement_penalty,
                     self.dims.grass_cell_size,
                 );
                 let stats_ref = std::sync::Arc::clone(&self.nn_stats);
@@ -252,8 +230,6 @@ impl World {
                 self.dims.grass_dim,
                 self.dims.world_size,
                 self.dims.wrap_world,
-                self.sliders.water_movement_penalty,
-                self.sliders.desert_movement_penalty,
                 self.dims.grass_cell_size,
             );
             for &(lo, hi) in ranges {
@@ -511,12 +487,9 @@ pub(crate) enum NnInputGroup {
     /// single-band). Placed after `GrassSectors` in canonical order so it
     /// never shifts the near-band offset.
     GrassBandsFar,
-    /// v2.0 Wave 1b: the movement penalty the creature would pay one cell
-    /// N/S/E/W (4 slots, base severity, wrap-aware). Always-on in both wrap
-    /// modes.
-    BiomeDir,
-    /// v2.0 Wave 1b: movement penalty under the body (1 slot). Always-on.
-    CurrCellPenalty,
+    /// v2.1 P2: raw normalized biome type under the body (1 slot, always-on).
+    /// Plains=0.0, Water=0.5, Desert=1.0.
+    CurrBiomeType,
     ReservedPredator,
     CurrGrass,
     Bias,
@@ -525,14 +498,13 @@ pub(crate) enum NnInputGroup {
 impl NnInputGroup {
     /// Canonical group order. The legacy layout activates every group; future
     /// waves choose a subset / wider variants from this same ordering.
-    const ORDER: [NnInputGroup; 10] = [
+    const ORDER: [NnInputGroup; 9] = [
         NnInputGroup::SelfMemory,
         NnInputGroup::WallProximity,
         NnInputGroup::CreatureSectors,
         NnInputGroup::GrassSectors,
         NnInputGroup::GrassBandsFar,
-        NnInputGroup::BiomeDir,
-        NnInputGroup::CurrCellPenalty,
+        NnInputGroup::CurrBiomeType,
         NnInputGroup::ReservedPredator,
         NnInputGroup::CurrGrass,
         NnInputGroup::Bias,
@@ -592,44 +564,38 @@ impl NnInputLayout {
         Self { groups, width }
     }
 
-    /// v2.0 active layout, driven by construction settings (wrap + species +
+    /// v2.1 P2 active layout, driven by construction settings (wrap + species +
     /// grass_multisight).
     ///
-    /// Drops the `ReservedPredator` group entirely and includes `WallProximity`
-    /// (4 slots) ONLY when the world is walled (`wrap_world == false`). The two
-    /// biome groups (`BiomeDir` = 4, `CurrCellPenalty` = 1) are always-on in
-    /// BOTH wrap modes. The `CreatureSectors` group is **8** in single-pool and
-    /// **16** in `species_mode` (8 same-species + 8 other-species; v2.0 Wave 3a).
+    /// Drops `ReservedPredator` entirely; includes `WallProximity` (4 slots)
+    /// ONLY when walled (`wrap_world == false`). Replaces the old `BiomeDir`
+    /// (4) + `CurrCellPenalty` (1) pair with a single `CurrBiomeType` (1 slot):
+    /// raw normalized biome id — Plains=0.0, Water=0.5, Desert=1.0.
     ///
+    /// `CreatureSectors` is **8** in single-pool and **16** in `species_mode`.
     /// When `grass_multisight` is ON, `GrassBandsFar` (8 slots) is appended
-    /// after `GrassSectors` — BUT only when the total padded width would still
-    /// fit within `MAX_NN_INPUTS` (48). The `walled + species_mode` combination
-    /// already fills the budget (43 real → 48 padded); adding 8 more would
-    /// require 56 → that combination falls back to single-band and this is
-    /// FLAG'd in the module-level doc.
+    /// after `GrassSectors`; all 8 configurations now fit within MAX_NN_INPUTS.
     ///
-    /// Resulting widths (base = SelfMemory 8 + GrassSectors 8 + BiomeDir 4 +
-    /// CurrCellPenalty 1 + CurrGrass 1 + Bias 1 = 23):
+    /// Width table (base = SelfMemory 8 + GrassSectors 8 + CurrBiomeType 1 +
+    /// CurrGrass 1 + Bias 1 = 19):
     ///
-    /// Single-band (grass_multisight=false OR walled+species fallback):
+    /// Single-band (grass_multisight=false):
     /// | wrap | species | real | pad |
     /// |------|---------|------|-----|
-    /// | on   | off     | 31   | 32  |
-    /// | off  | off     | 35   | 40  |
-    /// | on   | on      | 39   | 40  |
-    /// | off  | on      | 43   | 48  |
+    /// | on   | off     | 27   | 32  |
+    /// | off  | off     | 31   | 32  |
+    /// | on   | on      | 35   | 40  |
+    /// | off  | on      | 39   | 40  |
     ///
     /// Multi-band (grass_multisight=true, GrassBandsFar +8):
-    /// | wrap | species | real | pad | fits? |
-    /// |------|---------|------|-----|-------|
-    /// | on   | off     | 39   | 40  | yes   |
-    /// | off  | off     | 43   | 48  | yes   |
-    /// | on   | on      | 47   | 48  | yes   |
-    /// | off  | on      | 51   | 56  | NO → fallback single-band |
+    /// | wrap | species | real | pad |
+    /// |------|---------|------|-----|
+    /// | on   | off     | 35   | 40  |
+    /// | off  | off     | 39   | 40  |
+    /// | on   | on      | 43   | 48  |
+    /// | off  | on      | 47   | 48  |
     ///
-    /// Old brains are discarded (no save/load). The topology's `input_width`
-    /// must match `width()` — the construction path widens it to suit (see
-    /// `World::new_with_sliders_topology`).
+    /// All 8 combinations fit within MAX_NN_INPUTS=48 (no fallback needed).
     pub(crate) fn for_settings(
         wrap_world: bool,
         species_mode: bool,
@@ -640,19 +606,15 @@ impl NnInputLayout {
         } else {
             NN_SECTORS
         };
-        // Determine whether the far band actually fits. The walled+species combo
-        // already hits MAX_NN_INPUTS; adding 8 more would exceed it. Only enable
-        // the far band when the unpadded width (before GrassBandsFar) + 8 ≤ MAX.
+        // v2.1 P2: all 8 combinations fit; no fallback needed.
         let base_real = 8 // SelfMemory
             + if !wrap_world { 4 } else { 0 } // WallProximity
             + creature_sectors               // CreatureSectors (8 or 16)
             + NN_SECTORS                     // GrassSectors (8)
-            + NN_BIOME_DIRS                  // BiomeDir (4)
-            + 1 + 1 + 1; // CurrCellPenalty + CurrGrass + Bias
-        let far_band_fits = base_real + NN_SECTORS <= MAX_NN_INPUTS;
-        let include_far_band = grass_multisight && far_band_fits;
+            + 1 + 1 + 1; // CurrBiomeType + CurrGrass + Bias
+        let include_far_band = grass_multisight && (base_real + NN_SECTORS <= MAX_NN_INPUTS);
 
-        let mut groups: Vec<(NnInputGroup, usize)> = Vec::with_capacity(9);
+        let mut groups: Vec<(NnInputGroup, usize)> = Vec::with_capacity(8);
         groups.push((NnInputGroup::SelfMemory, 8));
         if !wrap_world {
             groups.push((NnInputGroup::WallProximity, 4));
@@ -662,8 +624,7 @@ impl NnInputLayout {
         if include_far_band {
             groups.push((NnInputGroup::GrassBandsFar, NN_SECTORS));
         }
-        groups.push((NnInputGroup::BiomeDir, NN_BIOME_DIRS));
-        groups.push((NnInputGroup::CurrCellPenalty, 1));
+        groups.push((NnInputGroup::CurrBiomeType, 1));
         groups.push((NnInputGroup::CurrGrass, 1));
         groups.push((NnInputGroup::Bias, 1));
         let layout = Self::from_groups(&groups);
@@ -870,25 +831,9 @@ pub(crate) fn build_nn_input(
         buf[o..o + NN_SECTORS].copy_from_slice(&far_sec[..NN_SECTORS]);
     }
 
-    // --- biome direction penalties N/S/E/W (one cell away; v2.0 Wave 1b) ---
-    // The movement penalty the creature would pay one grass cell in each
-    // cardinal direction. Sector convention matches walls: 0=N (-y), 1=S (+y),
-    // 2=E (+x), 3=W (-x). Wrap-aware sampling lives in `BiomeSampler`.
-    // v2.0 Wave 2a: GENOME-modulated — reduced by this creature's affinity
-    // traits, so it reads the same lower penalty it pays.
-    let wa = creatures.genome[i].water_affinity;
-    let ht = creatures.genome[i].heat_tolerance;
-    if let Some(o) = layout.offset_of(NnInputGroup::BiomeDir) {
-        let step = biome.grass_cell_size;
-        buf[o] = biome.penalty_at(x, y - step, wa, ht); // N
-        buf[o + 1] = biome.penalty_at(x, y + step, wa, ht); // S
-        buf[o + 2] = biome.penalty_at(x + step, y, wa, ht); // E
-        buf[o + 3] = biome.penalty_at(x - step, y, wa, ht); // W
-    }
-
-    // --- current-cell penalty (under the body; v2.0 Wave 1b) ---
-    if let Some(o) = layout.offset_of(NnInputGroup::CurrCellPenalty) {
-        buf[o] = biome.penalty_at(x, y, wa, ht);
+    // --- current biome type (v2.1 P2: single scalar, Plains=0.0/Water=0.5/Desert=1.0) ---
+    if let Some(o) = layout.offset_of(NnInputGroup::CurrBiomeType) {
+        buf[o] = biome.biome_type_at(x, y);
     }
 
     // --- reserved-predator padding (explicit 0.0) ---
@@ -1145,6 +1090,188 @@ pub(crate) fn pick_action_d(
     (vx, vy, action, argmax_pre)
 }
 
+/// One labeled NN input entry: group name, per-slot label, and value.
+/// Serialized to JSON for `creature_nn_inspect_json`.
+#[derive(serde::Serialize)]
+pub(crate) struct LabeledInput {
+    pub group: &'static str,
+    pub label: &'static str,
+    pub value: f32,
+}
+
+/// Compass direction labels for 8-sector groups (N, NE, E, SE, S, SW, W, NW).
+/// Sector order matches the proximity module: 0=N, 1=NE, 2=E, 3=SE, 4=S, 5=SW, 6=W, 7=NW.
+const COMPASS8: [&str; 8] = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+/// Cardinal direction labels for 4-slot WallProximity (order: N, S, E, W — matches
+/// `compute_wall_proximity` return layout in `proximity.rs`).
+const CARDINAL4_WALL: [&str; 4] = ["N", "S", "E", "W"];
+
+/// Build the full labeled NN input vector for creature `i` and run one
+/// `Brain::forward`, returning:
+///   - `inputs`: a `Vec<LabeledInput>` of length `layout.width()` (active lanes
+///     only — pad lanes are omitted from the vec).
+///   - `output_buf`: the raw 5-element forward output `[vx_raw, vy_raw, l0, l1, l2]`.
+///
+/// Used by `creature_nn_inspect_json` in `wasm_api/mod.rs`. Read-only; does NOT
+/// write back to any SoA field.
+///
+/// v2.1 P1 (Stream A): single-creature on-demand inspect. Always uses the world's
+/// live `nn_input_layout` so the group set reflects construction settings exactly.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_labeled_nn_inspect(
+    i: usize,
+    layout: &NnInputLayout,
+    species_mode: bool,
+    creatures: &crate::creature::CreatureSoA,
+    grass: &crate::grass::GrassGrid,
+    grid: &crate::grid::SpatialGrid,
+    sector_lut: &[(u8, u8, f32)],
+    biome: BiomeSampler,
+    energy_max: f32,
+    max_age: u32,
+    world_size: f32,
+) -> (Vec<LabeledInput>, [f32; crate::constants::NN_OUTPUTS]) {
+    // Build the raw input buffer (same path as the tick).
+    let prev_vx = creatures.vx[i];
+    let prev_vy = creatures.vy[i];
+    let mut sector_scratch = [0.0f32; 16];
+    let raw = build_nn_input(
+        i,
+        layout,
+        species_mode,
+        creatures,
+        grass,
+        grid,
+        sector_lut,
+        &mut sector_scratch,
+        biome,
+        prev_vx,
+        prev_vy,
+        energy_max,
+        max_age,
+        world_size,
+        None,
+    );
+
+    // Annotate each active slot with its group + label.
+    let mut inputs: Vec<LabeledInput> = Vec::with_capacity(layout.width());
+
+    for &(group, off, width) in &layout.groups {
+        match group {
+            NnInputGroup::SelfMemory => {
+                const LABELS: [&str; 8] = [
+                    "hunger",
+                    "age_frac",
+                    "prev_vx",
+                    "prev_vy",
+                    "last_graze",
+                    "last_attack",
+                    "ticks_since_split_frac",
+                    "cooldown_ready",
+                ];
+                for k in 0..width {
+                    inputs.push(LabeledInput {
+                        group: "SelfMemory",
+                        label: LABELS[k],
+                        value: raw[off + k],
+                    });
+                }
+            }
+            NnInputGroup::WallProximity => {
+                for k in 0..width {
+                    inputs.push(LabeledInput {
+                        group: "WallProximity",
+                        label: CARDINAL4_WALL[k],
+                        value: raw[off + k],
+                    });
+                }
+            }
+            NnInputGroup::CreatureSectors => {
+                // Single-pool: 8 sectors; species: 16 (8 same + 8 other).
+                if width == 8 {
+                    for k in 0..8 {
+                        inputs.push(LabeledInput {
+                            group: "CreatureSectors",
+                            label: COMPASS8[k],
+                            value: raw[off + k],
+                        });
+                    }
+                } else {
+                    // species mode: 8 same-species, then 8 other-species
+                    for k in 0..8 {
+                        inputs.push(LabeledInput {
+                            group: "CreatureSectors_same",
+                            label: COMPASS8[k],
+                            value: raw[off + k],
+                        });
+                    }
+                    for k in 0..8 {
+                        inputs.push(LabeledInput {
+                            group: "CreatureSectors_other",
+                            label: COMPASS8[k],
+                            value: raw[off + 8 + k],
+                        });
+                    }
+                }
+            }
+            NnInputGroup::GrassSectors => {
+                for k in 0..width {
+                    inputs.push(LabeledInput {
+                        group: "GrassSectors",
+                        label: COMPASS8[k],
+                        value: raw[off + k],
+                    });
+                }
+            }
+            NnInputGroup::GrassBandsFar => {
+                for k in 0..width {
+                    inputs.push(LabeledInput {
+                        group: "GrassBandsFar",
+                        label: COMPASS8[k],
+                        value: raw[off + k],
+                    });
+                }
+            }
+            NnInputGroup::CurrBiomeType => {
+                inputs.push(LabeledInput {
+                    group: "CurrBiomeType",
+                    label: "biome_type",
+                    value: raw[off],
+                });
+            }
+            NnInputGroup::ReservedPredator => {
+                inputs.push(LabeledInput {
+                    group: "ReservedPredator",
+                    label: "reserved",
+                    value: raw[off],
+                });
+            }
+            NnInputGroup::CurrGrass => {
+                inputs.push(LabeledInput {
+                    group: "CurrGrass",
+                    label: "density",
+                    value: raw[off],
+                });
+            }
+            NnInputGroup::Bias => {
+                inputs.push(LabeledInput {
+                    group: "Bias",
+                    label: "bias",
+                    value: raw[off],
+                });
+            }
+        }
+    }
+
+    // Run one forward pass.
+    let mut scratch_a = [0.0f32; crate::constants::NN_MAX_HIDDEN_WIDTH];
+    let mut scratch_b = [0.0f32; crate::constants::NN_MAX_HIDDEN_WIDTH];
+    let mut output_buf = [0.0f32; crate::constants::NN_OUTPUTS];
+    creatures.brains[i].forward(&raw, &mut output_buf, &mut scratch_a, &mut scratch_b, None);
+
+    (inputs, output_buf)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1175,8 +1302,6 @@ mod tests {
             w.dims.grass_dim,
             w.dims.world_size,
             w.dims.wrap_world,
-            w.sliders.water_movement_penalty,
-            w.sliders.desert_movement_penalty,
             w.dims.grass_cell_size,
         );
         build_nn_input(
@@ -1210,31 +1335,30 @@ mod tests {
         assert!((inp[1] - 0.5).abs() < 1e-5, "age_frac = {}", inp[1]);
     }
 
-    /// v2.0.4 S6: the SIMD trailing-pad lanes are always 0.0. The walled
-    /// active layout is now width 48 (Wave 1b biome groups + S6 far-band +8
-    /// grass-sight group, all-on in the default single-pool case), so the real
-    /// layout ends at slot 43 and lanes 43..48 are pad.
+    /// v2.1 P2: the SIMD trailing-pad lanes are always 0.0. The walled
+    /// single-pool multisight layout is now width 40 (CurrBiomeType replaces
+    /// BiomeDir(4)+CurrCellPenalty(1) with a single slot, saving 4 slots).
     ///
     /// Layout: SelfMemory(8) + WallProximity(4) + CreatureSectors(8) +
-    ///   GrassSectors(8) + GrassBandsFar(8) + BiomeDir(4) + CurrCellPenalty(1)
-    ///   + CurrGrass(1) + Bias(1) = 43 real → padded to 48.
+    ///   GrassSectors(8) + GrassBandsFar(8) + CurrBiomeType(1)
+    ///   + CurrGrass(1) + Bias(1) = 39 real → padded to 40.
     #[test]
     fn nn_input_trailing_pad_is_zero() {
         let mut w = World::new("s5b-pad");
         let inp = build_for_founder(&mut w);
         assert_eq!(
             w.nn_input_layout.width(),
-            48,
-            "walled S6 multisight width is 48"
+            40,
+            "walled single-pool multisight width is 40 (v2.1 P2)"
         );
-        for s in 43..48 {
+        for s in 39..40 {
             assert_eq!(inp[s], 0.0, "trailing SIMD pad lane {s} must be 0.0");
         }
     }
 
     /// The bias-learning constant lane is always 1.0 (at the layout's Bias
-    /// offset — slot 42 in the walled S6 multisight layout:
-    /// 8/4/8/8/8/4/1/1 = 42 before pad).
+    /// offset — slot 38 in the walled single-pool multisight layout v2.1 P2:
+    /// 8+4+8+8+8+1+1 = 38 before pad).
     #[test]
     fn nn_input_bias_is_one() {
         let mut w = World::new("s5b-bias");
@@ -1244,7 +1368,10 @@ mod tests {
             .expect("Bias group must be active");
         let inp = build_for_founder(&mut w);
         assert_eq!(inp[bias_off], 1.0, "bias slot must be 1.0");
-        assert_eq!(bias_off, 42, "walled S6 multisight layout puts Bias at 42");
+        assert_eq!(
+            bias_off, 38,
+            "walled single-pool multisight layout puts Bias at 38 (v2.1 P2)"
+        );
     }
 
     /// Wall-proximity at corner: N≈0.98, W≈0.98 (creature at (1,1), range 50).

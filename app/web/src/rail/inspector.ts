@@ -4,6 +4,10 @@
 // the body fields locally (id/pos/color). The rich rows (action, cooldown,
 // age, energy, NN stats, wall_proximity) come from a throttled `inspect_id`
 // async refresh — 250 ms cap, ~4× traffic reduction at 60 RAF.
+//
+// A second throttled fetch — `requestNnInspectId` (kind=2) — fetches
+// the NN I/O JSON and renders the "NN Inputs / NN Outputs" block inside the
+// inspector. Only fires while paused (the NN I/O re-runs forward() on demand).
 
 import {
   CREATURE_STRIDE,
@@ -25,6 +29,32 @@ let state: IS = { kind: "empty" };
 let lastInspectIdRequestSeq = 0;
 let lastInspectReplyMs = 0;
 const INSPECT_ID_REFRESH_INTERVAL_MS = 250;
+
+// Separate throttle for the NN I/O fetch (kind=2 request).
+// Fires only while paused; requests are serialized after the regular inspect.
+let lastNnInspectRequestSeq = 0;
+let lastNnInspectReplyMs = 0;
+const NN_INSPECT_REFRESH_INTERVAL_MS = 500;
+
+// ── NN I/O JSON types ──────────────────────────────────────────────────────
+
+export interface NnInputSlot {
+  group: string;
+  label: string;
+  value: number;
+}
+
+export interface NnOutputs {
+  vx: number;
+  vy: number;
+  logits: [number, number, number];
+  chosen: string;
+}
+
+export interface CreatureNnInspectJson {
+  inputs: NnInputSlot[];
+  outputs: NnOutputs;
+}
 
 interface SoASnapshot {
   creatures: Float32Array;
@@ -138,21 +168,11 @@ function renderInspector(data: CreatureInspectJson): void {
   set("ins-age", `${data.age} / ${data.max_age}`);
   set("ins-energy", `${data.energy.toFixed(1)} (${(data.energy_frac * 100).toFixed(0)}%)`);
   set("ins-cooldown", `${data.cooldown_remaining}`);
-  // v2.0 Wave 2b: genome-modulated biome movement penalty [0,1].
-  set("ins-move-penalty", data.movement_penalty.toFixed(2));
-  // v2.0 Wave 2b: render the 6 genome traits as labeled bars (raw [0,1]).
-  const genome = data.genome;
-  if (genome) {
-    for (const key of GENOME_TRAIT_KEYS) {
-      const v = genome[key];
-      const fill = document.getElementById(`ins-trait-${key}`);
-      if (fill) fill.style.width = `${Math.round(Math.max(0, Math.min(1, v)) * 100)}%`;
-      set(`ins-trait-${key}-v`, v.toFixed(2));
-    }
-  }
+  set("ins-hue", `hue ${data.hue.toFixed(3)}`);
   // v2.0 Wave 3b: species panel — shown only when the JSON carries species
   // data (i.e. species mode; single-pool inspect omits these fields). The
-  // history breadcrumb is Wave 5 — render the (empty) list area, no logic.
+    // history breadcrumb is reserved for lineage display; render the empty list
+    // area without additional logic.
   const speciesBlock = document.getElementById("ins-species-block");
   if (data.species_id !== undefined && data.species_color !== undefined) {
     if (speciesBlock) speciesBlock.style.display = "";
@@ -168,9 +188,7 @@ function renderInspector(data: CreatureInspectJson): void {
     const b255 = (packed >>> 16) & 0xff;
     const swatch = document.getElementById("ins-species-swatch");
     if (swatch) swatch.style.backgroundColor = `rgb(${r255}, ${g255}, ${b255})`;
-    // v2.0 Wave 5: species-history breadcrumb. Always empty in v2.0 (no splits
-    // yet) — render an em-dash placeholder; the area is plumbed for v2.1 to
-    // show the ancestral lineage as "Species-A → Species-D → …".
+    // Species-history breadcrumb. It is currently empty, so render a placeholder.
     const history = data.species_history ?? [];
     set("ins-species-history", history.length === 0 ? "—" : history.join(" → "));
   } else if (speciesBlock) {
@@ -183,15 +201,97 @@ function renderInspector(data: CreatureInspectJson): void {
   set("ins-nn-count", `${data.nn_weight_count}`);
 }
 
-// v2.0 Wave 2a: the evolving 6-trait body genome (raw [0,1]). Field names
-// mirror src/wasm_api.rs creature_inspect_json's "genome" object.
-export interface CreatureGenome {
-  body_size: number;
-  max_speed: number;
-  metabolism: number;
-  diet: number;
-  water_affinity: number;
-  heat_tolerance: number;
+// Render the NN I/O block from creature_nn_inspect_json data.
+// Inputs are rendered generically by iterating `inputs` and grouping by
+// `group` — no hardcoded group set. A later phase may add/remove groups;
+// this renders whatever the Rust side returns.
+function renderNnInspector(data: CreatureNnInspectJson): void {
+  const block = document.getElementById("ins-nn-block");
+  if (!block) return;
+
+  // ── Inputs ──
+  const inputsContainer = document.getElementById("ins-nn-inputs");
+  if (inputsContainer) {
+    // Build a map: group name → list of slots, preserving canonical order.
+    const groupMap = new Map<string, NnInputSlot[]>();
+    for (const slot of data.inputs) {
+      let list = groupMap.get(slot.group);
+      if (!list) { list = []; groupMap.set(slot.group, list); }
+      list.push(slot);
+    }
+
+    // Re-use or rebuild group divs. Wipe and regenerate; NN I/O refreshes
+    // at most 2 Hz so allocation cost is negligible.
+    inputsContainer.innerHTML = "";
+    for (const [groupName, slots] of groupMap) {
+      const groupDiv = document.createElement("div");
+      groupDiv.className = "nn-input-group";
+      const titleDiv = document.createElement("div");
+      titleDiv.className = "nn-input-group-title";
+      titleDiv.textContent = groupName;
+      groupDiv.appendChild(titleDiv);
+
+      for (const slot of slots) {
+        const row = document.createElement("div");
+        row.className = "nn-input-row";
+
+        const labelEl = document.createElement("span");
+        labelEl.className = "nn-input-label";
+        labelEl.title = slot.label;
+        labelEl.textContent = slot.label;
+
+        const barWrap = document.createElement("span");
+        barWrap.className = "nn-input-bar";
+        const barFill = document.createElement("span");
+        barFill.className = "nn-input-bar-fill";
+        // Map value from [-1,1] or [0,1] range to [0,100]%.
+        // Clamp to [0,1] for display — negative values show as 0-width.
+        const pct = Math.round(Math.max(0, Math.min(1, slot.value)) * 100);
+        barFill.style.width = `${pct}%`;
+        barWrap.appendChild(barFill);
+
+        const valEl = document.createElement("span");
+        valEl.className = "nn-input-val";
+        valEl.textContent = slot.value.toFixed(3);
+
+        row.appendChild(labelEl);
+        row.appendChild(barWrap);
+        row.appendChild(valEl);
+        groupDiv.appendChild(row);
+      }
+      inputsContainer.appendChild(groupDiv);
+    }
+  }
+
+  // ── Outputs ──
+  const out = data.outputs;
+  set("ins-nn-vxvy", `${out.vx.toFixed(3)} / ${out.vy.toFixed(3)}`);
+
+  const logitNames = ["graze", "attack", "split"] as const;
+  for (let i = 0; i < logitNames.length; i++) {
+    const name = logitNames[i];
+    const raw = out.logits[i];
+    // Logits can be any real; map via sigmoid for bar display.
+    const pct = Math.round(1 / (1 + Math.exp(-raw)) * 100);
+    const fill = document.getElementById(`ins-nn-logit-${name}-fill`);
+    if (fill) fill.style.width = `${pct}%`;
+    set(`ins-nn-logit-${name}-v`, raw.toFixed(3));
+  }
+
+  const chosenEl = document.getElementById("ins-nn-chosen");
+  if (chosenEl) {
+    chosenEl.textContent = out.chosen;
+    // Highlight the chosen action's logit row.
+    for (const name of logitNames) {
+      const row = document.getElementById(`ins-nn-logit-${name}-v`);
+      if (row) {
+        const isChosen = out.chosen.toLowerCase().startsWith(name);
+        row.classList.toggle("nn-chosen-active", isChosen);
+      }
+    }
+  }
+
+  block.style.display = "";
 }
 
 export interface CreatureInspectJson {
@@ -207,32 +307,19 @@ export interface CreatureInspectJson {
   current_action: string;
   move_speed: number;
   cooldown_remaining: number;
-  // v2.0 Wave 2a: dropped `color_ema`; added the 6 genome traits + the
-  // creature's current genome-modulated biome movement penalty [0,1].
-  genome: CreatureGenome;
-  movement_penalty: number;
+  hue: number;
   wall_proximity: [number, number, number, number];
   nn_weight_count: number;
   // v2.0 Wave 3b: species fields — present only in species mode (the Rust
   // creature_inspect_json omits them in single-pool mode). `species_color` is
   // the RGBA8-packed u32 the renderer paints into color_u32 (r | g<<8 | b<<16 |
   // a<<24). `species_name` is the human label (e.g. "Species-I"). `species_history`
-  // is the breadcrumb — always empty in v2.0 (no splits yet), plumbed for v2.1.
+  // is the breadcrumb, currently empty.
   species_id?: number;
   species_color?: number;
   species_name?: string;
   species_history?: number[];
 }
-
-// Trait display order + labels (label only used in HTML; ids derive from key).
-const GENOME_TRAIT_KEYS: ReadonlyArray<keyof CreatureGenome> = [
-  "body_size",
-  "max_speed",
-  "metabolism",
-  "diet",
-  "water_affinity",
-  "heat_tolerance",
-];
 
 function openInspector(data: CreatureInspectJson, rail: RailState): void {
   if (state.kind === "selected" && state.creatureId !== data.id) {
@@ -250,14 +337,21 @@ function clearSelection(_rail: RailState): void {
     highlights.delete(state.creatureId);
   }
   state = { kind: "empty" };
+  // Hide the NN I/O block when deselecting.
+  const nnBlock = document.getElementById("ins-nn-block");
+  if (nnBlock) nnBlock.style.display = "none";
   // v1.13 Wave 4: notify the rail orchestrator so it hides the Inspector
   // tab button + panel (and falls back to NN if Inspector was active).
   emitVisibility(false);
 }
 
+// exported so main.ts can call it in the paused seq-unchanged RAF branch
+// (the normal pollRail path only runs on new-snapshot frames, so the NN I/O
+// fetch — serialised inside refreshInspector — would never fire while paused).
 export function refreshInspector(
   simBridge: SimBridge,
   rail: RailState,
+  isPaused: boolean,
 ): void {
   if (state.kind !== "selected") return;
   const { creatureId } = state;
@@ -297,6 +391,27 @@ export function refreshInspector(
     } catch {
       /* Malformed — leave panel alone. */
     }
+
+    // NN I/O fetch — serialized inside the regular inspect's then()
+    // so the two requests never race (issueInspect cancels any pending request,
+    // so we must only fire the NN request after the regular one has resolved).
+    // Only fires while paused; skips if the NN throttle hasn't elapsed.
+    if (!isPaused) return;
+    const nowNn = performance.now();
+    if (nowNn - lastNnInspectReplyMs < NN_INSPECT_REFRESH_INTERVAL_MS) return;
+    const myNnSeq = ++lastNnInspectRequestSeq;
+    void simBridge.requestNnInspectId(creatureId).then((nnJsonStr) => {
+      if (myNnSeq !== lastNnInspectRequestSeq) return;
+      if (state.kind !== "selected" || state.creatureId !== creatureId) return;
+      if (nnJsonStr === null) return;
+      try {
+        const nnData: CreatureNnInspectJson = JSON.parse(nnJsonStr);
+        renderNnInspector(nnData);
+        lastNnInspectReplyMs = performance.now();
+      } catch {
+        /* Malformed — leave NN block alone. */
+      }
+    });
   });
 }
 
@@ -352,6 +467,7 @@ export function installCanvasClickHandler(
         renderInspectorSoA(latestSoA, idx, id);
         set("ins-action", "…");
         lastInspectReplyMs = 0;
+        lastNnInspectReplyMs = 0;
         // v1.9.1: force the rail open so the Inspector tab is actually
         // visible — a creature click on the canvas while the rail is
         // collapsed would otherwise silently switch to a hidden tab.
@@ -405,4 +521,54 @@ export function installCanvasClickHandler(
 
 export function resetInspectorSelection(rail: RailState): void {
   clearSelection(rail);
+}
+
+// E2E helper: install a window.__evosimE2E.selectFirstCreature() helper that
+// directly selects the first creature in the latest SoA snapshot.  This lets
+// headless e2e tests reliably select a creature without having to locate one by
+// screen position (the default 9600×9600 world is too sparse for a blind click).
+// The hook is *always* installed but is a no-op when latestSoA is null (i.e.
+// before the first snapshot arrives).  It does NOT fire a requestInspectId — the
+// test's own poll loop triggers the periodic refreshInspector path which issues
+// that request when state.kind === "selected".  The function returns true when a
+// creature was found and selected, false otherwise.
+export function installInspectorE2EHook(
+  rail: RailState,
+  simBridge: SimBridge,
+): void {
+  const ns = (
+    (window as unknown as { __evosimE2E?: Record<string, unknown> }).__evosimE2E ??
+    ((window as unknown as { __evosimE2E: Record<string, unknown> }).__evosimE2E = {})
+  );
+  ns["selectFirstCreature"] = (): boolean => {
+    if (!latestSoA || latestSoA.pop === 0) return false;
+    const idx = 0;
+    const id = idAt(latestSoA, idx);
+    if (state.kind === "selected" && state.creatureId !== id) {
+      highlights.delete(state.creatureId);
+    }
+    state = { kind: "selected", creatureId: id };
+    highlights.set(id, HIGHLIGHT_PERMANENT);
+    renderInspectorSoA(latestSoA, idx, id);
+    set("ins-action", "…");
+    lastInspectReplyMs = 0;
+    lastNnInspectReplyMs = 0;
+    setRailOpen(true);
+    emitVisibility(true);
+    rail.switchTab("inspector");
+    // Fire the initial inspect request immediately so the inspector body
+    // populates without waiting for the next refreshInspector RAF cycle.
+    const mySeq = ++lastInspectIdRequestSeq;
+    void simBridge.requestInspectId(id).then((jsonStr) => {
+      if (mySeq !== lastInspectIdRequestSeq) return;
+      if (state.kind !== "selected" || state.creatureId !== id) return;
+      if (jsonStr === null) return;
+      try {
+        const data: CreatureInspectJson = JSON.parse(jsonStr);
+        renderInspector(data);
+        lastInspectReplyMs = performance.now();
+      } catch { /* leave SoA paint */ }
+    });
+    return true;
+  };
 }

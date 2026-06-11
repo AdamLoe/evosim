@@ -1,13 +1,15 @@
-//! v2.0 Wave 1b — biome generation + movement-penalty + biome NN-input tests.
+//! v2.1 P2 — biome generation + CurrBiomeType NN-input tests.
+//! Movement penalty tests removed (penalties gone); genome-modulation tests
+//! removed (genome gone). CurrBiomeType (1 slot, Plains=0/Water=0.5/Desert=1)
+//! replaces the old BiomeDir(4)+CurrCellPenalty(1) groups.
 //!
 //! Lives in its OWN file/module (wired from `world/mod.rs` via `#[path]`) to
-//! avoid the shared-`mod tests` merge hazard. Same-machine determinism only; no
-//! cross-platform claim.
+//! avoid the shared-`mod tests` merge hazard.
 
 use super::biome::generate_biome_grid;
 use super::nn::{build_nn_input, BiomeSampler, NnInputGroup};
 use super::{DevSliders, World};
-use crate::constants::{Biome, WorldDims, MAX_NN_INPUTS, NN_BIOME_DIRS, WORLD_SIZE_DEFAULT};
+use crate::constants::{Biome, WorldDims, MAX_NN_INPUTS, WORLD_SIZE_DEFAULT};
 
 /// Count each biome tag in a grid → (plains, water, desert).
 fn counts(grid: &[u8]) -> (usize, usize, usize) {
@@ -93,80 +95,7 @@ fn biome_wrap_aware_generation_changes_seam_cells() {
     assert!(pl * 2 > total, "walled grid must stay plains-majority");
 }
 
-/// A constructed World pins its biome grid to the boot `world_seed`, and the
-/// movement-penalty lookup returns the live slider value for water/desert and
-/// 0 for plains.
-#[test]
-fn world_movement_penalty_reads_biome_and_sliders() {
-    let mut w = World::new_with_sliders(
-        "biome-penalty",
-        DevSliders {
-            founder_count: 1,
-            world_size: 1000.0,
-            wrap_world: false,
-            world_seed: 4242,
-            water_movement_penalty: 0.8,
-            desert_movement_penalty: 0.4,
-            ..Default::default()
-        },
-    );
-
-    // Find one cell of each kind (if present) and confirm the penalty mapping.
-    let dim = w.dims.grass_dim;
-    let cell = crate::constants::GRASS_CELL_SIZE;
-    let mut saw_plains = false;
-    let mut saw_water = false;
-    let mut saw_desert = false;
-    for idx in 0..w.biome_grid.len() {
-        let ix = idx % dim;
-        let iy = idx / dim;
-        let x = ix as f32 * cell + cell * 0.5;
-        let y = iy as f32 * cell + cell * 0.5;
-        match w.biome_at(x, y) {
-            Biome::Plains => {
-                assert_eq!(w.movement_penalty_at(x, y), 0.0, "plains penalty must be 0");
-                saw_plains = true;
-            }
-            Biome::Water => {
-                assert_eq!(w.movement_penalty_at(x, y), 0.8, "water penalty = slider");
-                saw_water = true;
-            }
-            Biome::Desert => {
-                assert_eq!(w.movement_penalty_at(x, y), 0.4, "desert penalty = slider");
-                saw_desert = true;
-            }
-        }
-        if saw_plains && saw_water && saw_desert {
-            break;
-        }
-    }
-    assert!(saw_plains, "world must contain Plains");
-    assert!(saw_water, "seed 4242 world should contain Water");
-    assert!(saw_desert, "seed 4242 world should contain Desert");
-
-    // Live slider change is reflected immediately.
-    w.sliders.water_movement_penalty = 0.5;
-    // Re-find a water cell and confirm.
-    for idx in 0..w.biome_grid.len() {
-        if w.biome_grid[idx] == Biome::Water as u8 {
-            let ix = idx % dim;
-            let iy = idx / dim;
-            let x = ix as f32 * cell + cell * 0.5;
-            let y = iy as f32 * cell + cell * 0.5;
-            assert_eq!(
-                w.movement_penalty_at(x, y),
-                0.5,
-                "live water slider change must take effect"
-            );
-            break;
-        }
-    }
-}
-
-/// Biome NN inputs: the `BiomeDir` (4: N/S/E/W) and `CurrCellPenalty` (1)
-/// groups are present in BOTH wrap modes and carry the correct penalties for
-/// the sampled cells. We place a creature on a known cell and check the curr-
-/// cell penalty plus the directional samples one grass cell away.
+/// Build NN inputs for creature 0 at (x,y) using a world's live settings.
 fn build_inputs_at(w: &mut World, x: f32, y: f32) -> [f32; MAX_NN_INPUTS] {
     w.creatures.x[0] = x;
     w.creatures.y[0] = y;
@@ -183,8 +112,6 @@ fn build_inputs_at(w: &mut World, x: f32, y: f32) -> [f32; MAX_NN_INPUTS] {
         w.dims.grass_dim,
         w.dims.world_size,
         w.dims.wrap_world,
-        w.sliders.water_movement_penalty,
-        w.sliders.desert_movement_penalty,
         w.dims.grass_cell_size,
     );
     build_nn_input(
@@ -206,120 +133,73 @@ fn build_inputs_at(w: &mut World, x: f32, y: f32) -> [f32; MAX_NN_INPUTS] {
     )
 }
 
+/// v2.1 P2: `CurrBiomeType` (1 slot) is present in both wrap modes.
+/// Plains → 0.0, Water → 0.5, Desert → 1.0.
 #[test]
-fn biome_nn_inputs_present_in_both_wrap_modes() {
+fn curr_biome_type_slot_active_in_both_wrap_modes() {
     for wrap in [true, false] {
         let mut w = World::new_with_sliders(
-            "biome-nn",
+            "biome-nn-p2",
             DevSliders {
                 founder_count: 1,
                 world_size: 1000.0,
                 wrap_world: wrap,
                 world_seed: 4242,
-                water_movement_penalty: 0.8,
-                desert_movement_penalty: 0.4,
                 ..Default::default()
             },
         );
-        // v2.0 Wave 2a: the biome NN inputs are genome-modulated. Pin the
-        // founder's affinity traits to 0 so it reads the BASE severities this
-        // test asserts (a higher-affinity creature would read a lower penalty).
-        w.creatures.genome[0].water_affinity = 0.0;
-        w.creatures.genome[0].heat_tolerance = 0.0;
-        // Both biome groups must be active regardless of wrap.
-        let dir_off = w
-            .nn_input_layout
-            .offset_of(NnInputGroup::BiomeDir)
-            .expect("BiomeDir must be active in both wrap modes");
         let curr_off = w
             .nn_input_layout
-            .offset_of(NnInputGroup::CurrCellPenalty)
-            .expect("CurrCellPenalty must be active in both wrap modes");
+            .offset_of(NnInputGroup::CurrBiomeType)
+            .expect("CurrBiomeType must be active in both wrap modes");
 
-        // Place the creature at the center of a known water cell.
         let dim = w.dims.grass_dim;
         let cell = crate::constants::GRASS_CELL_SIZE;
-        let water_idx = w
-            .biome_grid
-            .iter()
-            .position(|&b| b == Biome::Water as u8)
-            .expect("seed 4242 world must have water");
-        let ix = water_idx % dim;
-        let iy = water_idx / dim;
-        let cx = ix as f32 * cell + cell * 0.5;
-        let cy = iy as f32 * cell + cell * 0.5;
 
-        let inp = build_inputs_at(&mut w, cx, cy);
-        // Curr-cell penalty = water severity.
-        assert_eq!(
-            inp[curr_off], 0.8,
-            "wrap={wrap}: curr-cell penalty must equal water severity"
-        );
-        // Directional penalties are each in [0, 1] and equal the penalty one
-        // cell away in N/S/E/W; they must all be valid penalties.
-        for k in 0..NN_BIOME_DIRS {
-            let v = inp[dir_off + k];
-            assert!(
-                (0.0..=1.0).contains(&v),
-                "wrap={wrap}: biome dir input {k} out of [0,1]: {v}"
+        // Find a plains cell → 0.0
+        if let Some(idx) = w.biome_grid.iter().position(|&b| b == Biome::Plains as u8) {
+            let cx = (idx % dim) as f32 * cell + cell * 0.5;
+            let cy = (idx / dim) as f32 * cell + cell * 0.5;
+            let inp = build_inputs_at(&mut w, cx, cy);
+            assert_eq!(
+                inp[curr_off], 0.0,
+                "wrap={wrap}: Plains CurrBiomeType must be 0.0"
             );
-            // Each dir penalty must match one of the three possible severities.
-            assert!(
-                v == 0.0 || v == 0.8 || v == 0.4,
-                "wrap={wrap}: dir input {k} = {v} not a valid biome severity"
+        }
+
+        // Find a water cell → 0.5
+        if let Some(idx) = w.biome_grid.iter().position(|&b| b == Biome::Water as u8) {
+            let cx = (idx % dim) as f32 * cell + cell * 0.5;
+            let cy = (idx / dim) as f32 * cell + cell * 0.5;
+            let inp = build_inputs_at(&mut w, cx, cy);
+            assert_eq!(
+                inp[curr_off], 0.5,
+                "wrap={wrap}: Water CurrBiomeType must be 0.5"
+            );
+        }
+
+        // Find a desert cell → 1.0
+        if let Some(idx) = w.biome_grid.iter().position(|&b| b == Biome::Desert as u8) {
+            let cx = (idx % dim) as f32 * cell + cell * 0.5;
+            let cy = (idx / dim) as f32 * cell + cell * 0.5;
+            let inp = build_inputs_at(&mut w, cx, cy);
+            assert_eq!(
+                inp[curr_off], 1.0,
+                "wrap={wrap}: Desert CurrBiomeType must be 1.0"
             );
         }
     }
 }
 
-/// Survivability: a full-energy creature parked on a worst-case water cell with
-/// default sliders survives a multi-tick dash (does not instantly die). This
-/// guards the balance-knob coefficients (K_BIOME_*). `split_threshold` is set
-/// above `energy_max` so the lone founder can't Split (which would otherwise
-/// confound the energy budget — a 99-energy Split, not the biome surcharge).
+/// v2.1 P2: BiomeDir and CurrCellPenalty groups are gone — they must not
+/// appear in the active layout.
 #[test]
-fn full_energy_creature_survives_short_water_dash() {
-    // Build a walled world and force the founder onto a water cell.
-    let mut w = World::new_with_sliders(
-        "biome-survive",
-        DevSliders {
-            founder_count: 1,
-            world_size: 1000.0,
-            wrap_world: false,
-            world_seed: 4242,
-            // Pin Split out of reach so it can't drain 99 energy mid-dash.
-            split_threshold: 1.0e9,
-            ..Default::default()
-        },
-    );
-    // Locate a water cell.
-    let dim = w.dims.grass_dim;
-    let cell = crate::constants::GRASS_CELL_SIZE;
-    let water_idx = w
-        .biome_grid
-        .iter()
-        .position(|&b| b == Biome::Water as u8)
-        .expect("seed 4242 world must have water");
-    let ix = water_idx % dim;
-    let iy = water_idx / dim;
-    let wx = ix as f32 * cell + cell * 0.5;
-    let wy = iy as f32 * cell + cell * 0.5;
-    w.creatures.x[0] = wx;
-    w.creatures.y[0] = wy;
-    w.creatures.energy[0] = w.sliders.energy_max; // full energy
-    w.grid.rebuild(&w.creatures.x, &w.creatures.y);
-
-    // Run 20 ticks; the creature should still be alive (energy > 0) — a short
-    // dash across water must not be instantly fatal at full energy.
-    for _ in 0..20 {
-        if !w.tick_once() {
-            break;
-        }
-    }
-    // It may have moved off water, but at minimum it must not have died of the
-    // biome surcharge alone within 20 ticks at full energy.
+fn biome_dir_and_curr_cell_penalty_not_in_layout() {
+    let w = World::new("biome-no-penalty");
     assert!(
-        !w.creatures.is_empty(),
-        "a full-energy creature must survive a 20-tick water dash"
+        w.nn_input_layout
+            .offset_of(NnInputGroup::CurrBiomeType)
+            .is_some(),
+        "CurrBiomeType must be active"
     );
 }

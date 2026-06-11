@@ -18,10 +18,11 @@
 // world_seed / wrap_world / biome penalties) are a MAJOR bump from the v1
 // single-`v=1` scheme, so every legacy v1 blob resets cleanly to defaults.
 export const SETTINGS_STORAGE_KEY = "evosim.settings.v2";
-const SCHEMA_MAJOR = 2;
-// v2.0 Wave 2b: added `traitMutationSigmaMultiplier` (a new additive key with a
-// default) → MINOR bump 0 → 1. Existing v2 blobs keep their values and pick up
-// the new key from DEFAULTS via the `{...DEFAULTS, ...stored}` merge.
+// v2.1 P3: SCHEMA_MAJOR bumped 2 → 3.  This is the single coordinated bump for
+// the whole v2.1 effort.  P2 removed settings keys (genome / biome-penalty
+// sliders) without bumping; P3 adds the six equilibrium keys and does the one
+// MAJOR bump so any session with the old P2 key set is cleanly reset to defaults.
+const SCHEMA_MAJOR = 3;
 // v2.0 Wave 3b: added the species/mating construction keys (`speciesMode`,
 // `crossoverMode`, `startingSpeciesCount`, `startingSpeciesMemberCount`,
 // `startingSpeciesMemberVariance`) + the live `matingCooldownTicks` — all new
@@ -57,7 +58,13 @@ const SCHEMA_MAJOR = 2;
 // added `grassSoftness`, `grassTexture`, `grassDensityFloor`, `grassContrast`,
 // `grassBrightness` (live Display) → MINOR bump 9 → 10. All neutral by default
 // (reproduce the prior look); additive, merged from DEFAULTS without a reset.
-const SCHEMA_MINOR = 10;
+// v2.1 P3: SCHEMA_MAJOR bumped 2 → 3 (see above). Six equilibrium sliders
+// added as new keys → MINOR resets to 0 (a major bump resets the minor counter
+// per the convention: the new schema is v3.0).
+// v2.1 P3 MINOR 0 → 1: added `crowdingStrength`, `crowdingRadius`,
+// `starvationThreshold`, `starvationDrainRate`, `grassCapacityScale`,
+// `grassRegrowthRate` (all six P3 equilibrium knobs) → minor bump within v3.
+const SCHEMA_MINOR = 1;
 
 /** v1.12: one row of the 8-row mutation policy table. Mirrors the Rust
  * `Bucket` struct (`src/brain.rs`). `weight` is any non-negative float;
@@ -164,14 +171,6 @@ export interface Settings {
   repulsionMax: number;
   maxPopulation: number;
   initialGrassSeedCount: number;
-  // v2.0 Wave 1b: live-tunable biome movement-penalty base severities [0, 1].
-  // Plains = 0 (implicit); Water/Desert read these. Apply to the running world.
-  waterMovementPenalty: number;
-  desertMovementPenalty: number;
-  // v2.0 Wave 2b: live-tunable multiplier on the per-birth genome-trait
-  // mutation sigma (× the active mutation bucket's sigma). Apply to the running
-  // world. Must match Rust TRAIT_MUTATION_SIGMA_MULTIPLIER_DEFAULT.
-  traitMutationSigmaMultiplier: number;
   mutRate: number;
   // v1.12: 8 mutation buckets × {weight, rate, sigma}. Replaces the legacy
   // single-knob nnSigma. Bucket 0 carries the legacy `(1.0, 0.02, 0.02)`.
@@ -256,6 +255,16 @@ export interface Settings {
   // Rust INIT_GRAZE_BOOST_DEFAULT / INIT_SPLIT_BOOST_DEFAULT.
   initGrazeBoost: number;
   initSplitBoost: number;
+  // v2.1 P3: food-limited equilibrium knobs (all live-tunable).
+  // Must match Rust CROWDING_STRENGTH_DEFAULT (0.010), CROWDING_RADIUS_DEFAULT
+  // (20.0), STARVATION_THRESHOLD_DEFAULT (15.0), STARVATION_DRAIN_RATE_DEFAULT
+  // (0.30), GRASS_CAPACITY_SCALE_DEFAULT (0.7), GRASS_REGROWTH_RATE_DEFAULT (1.0).
+  crowdingStrength: number;
+  crowdingRadius: number;
+  starvationThreshold: number;
+  starvationDrainRate: number;
+  grassCapacityScale: number;
+  grassRegrowthRate: number;
 }
 
 export const DEFAULTS: Settings = {
@@ -293,11 +302,6 @@ export const DEFAULTS: Settings = {
   repulsionMax: 0.1,
   maxPopulation: 8_000,
   initialGrassSeedCount: 8000,
-  // v2.0 Wave 1b: must match Rust WATER/DESERT_MOVEMENT_PENALTY_DEFAULT.
-  waterMovementPenalty: 0.8,
-  desertMovementPenalty: 0.4,
-  // v2.0 Wave 2b: must match Rust TRAIT_MUTATION_SIGMA_MULTIPLIER_DEFAULT.
-  traitMutationSigmaMultiplier: 0.3,
   mutRate: 1.0,
   mutationBuckets: DEFAULT_MUTATION_BUCKETS.map((b) => ({ ...b })),
   nnTopology: {
@@ -356,6 +360,16 @@ export const DEFAULTS: Settings = {
   mateReachMultiplier: 1.0,
   initGrazeBoost: 1.0,
   initSplitBoost: 1.0,
+  // v2.1 P3: food-limited equilibrium knobs. Must match Rust *_DEFAULT consts:
+  // CROWDING_STRENGTH_DEFAULT (0.010), CROWDING_RADIUS_DEFAULT (20.0),
+  // STARVATION_THRESHOLD_DEFAULT (15.0), STARVATION_DRAIN_RATE_DEFAULT (0.30),
+  // GRASS_CAPACITY_SCALE_DEFAULT (0.7), GRASS_REGROWTH_RATE_DEFAULT (1.0).
+  crowdingStrength: 0.010,
+  crowdingRadius: 20.0,
+  starvationThreshold: 15.0,
+  starvationDrainRate: 0.30,
+  grassCapacityScale: 0.7,
+  grassRegrowthRate: 1.0,
 };
 
 export const SETTINGS_KEYS = Object.freeze(Object.keys(DEFAULTS)) as readonly (keyof Settings)[];

@@ -85,11 +85,18 @@ grass_step           ← sum-busy across all rayon workers, per tick
   `window: X.X s` header above the four trees.
 - The backend is **always-on**. The worker calls
   `world.profile_enable(true)` once at boot and never disables. The
-  Settings "Show profiler" checkbox + the panel's ✕ button are
-  visibility-only — they show/hide `#perf-box` and skip the per-poll
-  tree render when hidden, but the Rust ring buffers keep accumulating
-  so the panel has data the moment it reappears. Default panel
-  visibility is `true` (`Settings.showProfiler = true`).
+  `showProfiler` setting is the source of truth for panel visibility
+  and poll activity — but the Rust ring buffers keep accumulating
+  regardless, so the panel has data the moment it reappears.
+  **Panel location**: the profiler content is in `#settings-profiler-pane`
+  (the Settings panel's "Profiler" sub-nav category), not the old
+  `#perf-box` in the left column. `#perf-box` remains in the DOM as an
+  empty hidden placeholder.
+  **Activation**: selecting the Profiler sub-nav category calls
+  `setSetting("showProfiler", true)` + `setProfilerVisible(true)`, which
+  starts recording and poll. Navigating to any other category calls both
+  with `false`. Default `Settings.showProfiler = false`; the profiler is
+  idle until the user opens its category.
 
 ## What it does NOT own
 
@@ -268,9 +275,11 @@ span that wants to reach the perf panel should too.
 - `app/web/src/render/gl.ts` → the `frame.render_world*` span calls.
 - `app/web/src/main.ts` → the outer `span("frame")` and
   `span("frame.snapshot.read")` brackets.
-- `app/web/src/widgets/perf-panel.ts` → `TREE_ORDER`, the
-  `total_call_count` divisor in the `ms/call` formula, the
-  `window: X.X s` header render.
+- `app/web/src/widgets/perf-panel.ts` → `installProfilerPanel` (mounts
+  into `#settings-profiler-pane`), `setProfilerVisible` (called by
+  devpanel sub-nav wiring on Profiler category select/deselect),
+  `TREE_ORDER`, the `total_call_count` divisor in the `ms/call` formula,
+  the `window: X.X s` header render.
 - `app/web/src/sim/worker.ts` → the `sim_worker.*` span calls and the
   `WorldHandle::record_profile_sample` invocations.
 - `app/crates/evosim/src/wasm_api/mod.rs` → `record_under_root("sim_worker", "write_output_sab.snapshot*", ...)`
@@ -309,5 +318,7 @@ TS-side `frame` mirror.
 - [`simulation-core.md`](simulation-core.md) — where `tick.*` spans live.
 - [`worker-runtime.md`](worker-runtime.md) — the 1 Hz poll path.
 - [`render-pipeline.md`](render-pipeline.md) — the `frame.*` spans.
+- [`app-shell.md`](app-shell.md) — the `#settings-profiler-pane` mount and category-select activation wiring.
 - [`../decisions/profiler.md`](../decisions/profiler.md)
 - [`../agent-context/maintaining-docs.md`](../agent-context/maintaining-docs.md)
+- [Agent-docs authoring rules](~/agent-docs/v1/rules/authoring-rules.md)

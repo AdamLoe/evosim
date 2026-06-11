@@ -2,56 +2,65 @@
 
 The main-thread UI structure: how the DOM is laid out, which TS module
 installs into which container, how the right-rail tabs route, and how the
-Settings tab's stage-then-apply machinery works.
+Settings panel's stage-then-apply machinery works.
 
 ## What it is
 
 A two-column shell that wraps the canvas and every non-canvas UI element.
 
 ```
-┌──────────────────────────────────┬──────────────────────┐
-│ top-bar (status + pacing + ⚙)    │ ┌────┬────┬────────┐ │
-│                                  │ │Setn│ NN │ Inspct │ │
-├──────────────────────────────────┤ ├────┴────┴────────┤ │
-│                                  │ │                  │ │
-│ canvas                           │ │ active tab body  │ │
-│                                  │ │                  │ │
-├──────────────────────────────────┤ │                  │ │
-│ perf-box (pop graph + profiler,  │ │                  │ │
-│   optional, ✕)                   │ │                  │ │
-└──────────────────────────────────┴──┴──────────────────┘
-         left column (flex)              right rail
-                                         (fixed 420 px)
+┌──────────────────────────────────┬────────────────────────┐
+│ top-bar: ▶ Restart Auto-restart ⚙│ ┌────────┬───────────┐ │
+│                                  │ │Settings│ Inspector │ │
+├──────────────────────────────────┤ ├────────┴───────────┤ │
+│                                  │ │ ┌──sub-nav──┐ pane │ │
+│ canvas                           │ │ │ Energy    │      │ │
+│                                  │ │ │ Grass     │      │ │
+│                                  │ │ │ Lifecycle │      │ │
+│                                  │ │ │ World     │      │ │
+│                                  │ │ │ Equilib.  │      │ │
+│                                  │ │ │ Display   │      │ │
+│                                  │ │ │ Profiler  │      │ │
+│                                  │ │ │ NN        │      │ │
+└──────────────────────────────────┴──┴───────────┴────────┘
+         left column (flex)               right rail
+                                          (fixed 420 px)
 ```
 
 The DOM tree lives in `app/web/index.html`. The CSS layout uses a top-level
 grid (`#app-shell { grid-template-columns: 1fr var(--rail-w); }`); the
-left column uses a row grid for top-bar / canvas / profiler.
+left column uses a row grid for top-bar / canvas.
 
 ## What it owns
 
 - The top-level DOM structure: `#app-shell` → `#left-col` (`#top-bar`,
-  `#canvas-wrap` with `#aquarium`, `#perf-box`) and `#right-rail`
-  (`#rail-tabs` and the three `.rail-panel` sections).
+  `#canvas-wrap` with `#aquarium`, `#perf-box` as empty placeholder) and
+  `#right-rail` (`#rail-tabs` with Settings and Inspector tabs, and the
+  two `.rail-panel` sections).
 - The CSS palette tokens (`--bg-app`, `--bg-panel`, `--fg`, `--accent`,
   `--accent-dirty`, `--danger`, …) — single source of truth for color in
   `app/web/src/styles.css`.
 - Right-rail tab routing: tab switching, default tab on boot, the
-  switch-on-creature-click rule.
+  switch-on-creature-click rule. Only two tabs exist: Settings and Inspector.
+  NN editor and Profiler are settings categories, not rail tabs.
 - Which TS module installs into which DOM element. Installers run from
-  `main.ts` in the order: dev panel (= Settings tab) → profiler panel
-  → NN tab → Settings button. Installation order matters because
-  the dev panel's "Show profiler" toggle calls into the profiler panel
-  installer's exported visibility setter.
-- The stage-then-apply pattern in the Settings tab: per-row dirty
+  `main.ts` in the order: dev panel → profiler panel → NN tab → top-bar
+  buttons. Installation order matters because the devpanel sub-nav wiring
+  calls `setProfilerVisible` from the profiler panel installer.
+- The stage-then-apply pattern in the Settings panel: per-row dirty
   tracking, Apply / Cancel / Reset semantics, the live-vs-staged
   carve-out, the "construction-only" toast trigger.
+- The Settings panel left sub-nav: eight category buttons (`data-cat`
+  attributes) activate the corresponding `#settings-<cat>-pane`. Sub-nav
+  wiring lives in `devpanel.ts → installDevPanel`. Category row containers
+  are mounted by `categoryBox(id)` helpers.
 - Cross-widget source-of-truth coupling: `showProfiler` is the single
-  state for both the Settings checkbox and the perf-panel ✕ button;
-  flipping either writes the same setting and re-calls
-  `setProfilerVisible()`. Visibility-only — the Rust profiler is
-  always-on (the worker enables it at boot) and the panel keeps polling
-  the bundled report whenever it's visible.
+  source of truth for profiler recording state. Selecting the Profiler
+  sub-nav category calls `setSetting("showProfiler", true)` +
+  `setProfilerVisible(true)` (starts recording + poll); navigating to any
+  other category calls both with `false` (idles). The Rust profiler backend
+  is always-on (the worker enables it at boot); only the panel
+  visibility + poll are gated by `showProfiler`.
 - The rail open/closed toggle: `Settings.railOpen` (default `false`,
   so fresh users start with the rail collapsed) drives
   `#app-shell.rail-collapsed`, which collapses the grid track to `0`
@@ -82,50 +91,57 @@ left column uses a row grid for top-bar / canvas / profiler.
 | Element | Purpose | Installer / consumer |
 |---|---|---|
 | `#app-shell` | Two-column grid. Carries `.rail-collapsed` when the rail is hidden. | CSS-only; class flipped by `main.ts → applyRailOpen`. |
-| `#left-col` | Top-bar + canvas + profiler. | CSS-only. |
-| `#top-bar` | Always-visible pacing + action buttons. | `main.ts → installTopBarButtons` populates: play/pause, Restart (always rerolls seed), auto-restart, perf toggle, settings/NN/inspector rail openers. |
+| `#left-col` | Top-bar + canvas + empty `#perf-box` placeholder. | CSS-only. |
+| `#top-bar` | Always-visible 4-control strip: play/pause, Restart (always rerolls seed), auto-restart, ⚙ settings rail toggle. | `main.ts → installTopBarButtons`. NN opener, Inspector opener, and perf-toggle opener were removed; all three surfaces now live inside the Settings panel or as rail tabs. |
 | `#canvas-wrap > #aquarium` | The WebGL2 sim view. | `render/gl.ts`. |
-| `#perf-box` | Profiler bottom panel (collapsed by default): status line, FPS/TPS chart, population chart (`#chart-pop`), TPS/max-pop selectors, CPU monitor, profile trees. | `widgets/perf-panel.ts → installProfilerPanel`. Visibility driven by `Settings.showProfiler`. In species mode the pop chart draws one line per live species (colored by each species' `color_u32`), fed by the polled `species_table_json` report. Each report tick pushes one sparse `id → count` sample into a 500-deep ring; the draw loop unions all ids seen in-window, breaking polylines across ticks where a species is absent. `restart()` calls `setPanelBridge(newBridge)` + `resetPanelSamples()`. |
-| `#perf-close` | ✕ button that hides the profiler. | Flips `showProfiler` to false; perf-panel reacts. |
+| `#perf-box` | Empty hidden placeholder (kept in DOM for resize-handle compat). The profiler content was relocated to `#settings-profiler-pane`. | DOM-only; `display:none`. |
 | `#right-rail` | Persistent right column, 420 px. | `rail/index.ts → installRail`. |
-| `#rail-tabs` | Three tab buttons: Settings / NN / Inspector (DOM order; Settings is default active). | `rail/index.ts`. |
-| `#rail-settings` | Dev-panel content (`#devpanel-box`) + Apply / Cancel / Reset footer. | `widgets/devpanel.ts → installDevPanel`. |
-| `#rail-nn` | NN topology + mutation-bucket editors + per-layer perf log (`#nn-tab-host`). | `rail/nn-tab.ts → installNnTab`. |
-| `#rail-inspector` | Inspector body or empty-state. | `rail/inspector.ts` reads/writes `#inspector-empty` and `#ins-*` rows inside `#inspector-body`. Shows a packed-color swatch, genome-modulated `movement_penalty`, and 6 genome traits (`#ins-trait-*` bars from `creature_inspect_json`'s `genome` object). A `#ins-species-block` (hidden by default) shows the species name, numeric `species_id`, color swatch, and `#ins-species-history` breadcrumb. The block appears only when the inspect JSON carries species fields (species mode). |
+| `#rail-tabs` | Two tab buttons: Settings / Inspector (DOM order; Settings is default active). The NN tab was removed; NN editor is a Settings sub-nav category. | `rail/index.ts`. |
+| `#rail-settings` | Settings panel: left sub-nav + right category pane area + Apply/Cancel/Reset footer. | `widgets/devpanel.ts → installDevPanel`. |
+| `#rail-settings` sub-nav | Eight `.settings-cat-btn` buttons (`data-cat`: energy, grass, lifecycle, world, equilibrium, display, profiler, nn). Wired in `installDevPanel`; active button + active pane kept in sync. | `widgets/devpanel.ts` sub-nav wiring. |
+| `#settings-<cat>-pane` | One `.settings-pane` per category (e.g. `#settings-energy-pane`). Only the active one is visible. Each `devpanel-<cat>` div inside is the mount for `categoryBox`. | `widgets/devpanel.ts → categoryBox`. |
+| `#devpanel-equilibrium` | Mount for the 6 equilibrium sliders (P3) inside `#settings-equilibrium-pane`. | `widgets/devpanel.ts`. |
+| `#settings-profiler-pane` | Profiler panel — status line, FPS/TPS chart, pop chart, CPU monitor, profile trees. Activated by selecting the Profiler sub-nav category. | `widgets/perf-panel.ts → installProfilerPanel`. |
+| `#settings-nn-pane` | NN topology + mutation-bucket editors (`#nn-tab-host`). | `rail/nn-tab.ts → installNnTab`. |
+| `#rail-inspector` | Inspector body or empty-state. | `rail/inspector.ts` reads/writes `#inspector-empty` and `#ins-*` rows inside `#inspector-body`. Includes `#ins-nn-block` — the per-creature NN I/O block (inputs grouped by compass, outputs: vx/vy, 3 logit bars, highlighted chosen action). Shows a `#ins-species-block` (hidden by default) when inspect JSON carries species fields. |
 | `#toast-host` | Bottom-center transient notice slot. | `toast.ts → showToast`. |
 
 ## Tab routing rules
 
+There are two rail tabs: Settings and Inspector. The NN editor is a category
+inside the Settings panel; the Profiler is also a Settings category.
+
 - **Default tab on boot:** Settings (`activeTab = "settings"` inside
-  `installTabs`). The rail defaults to closed (see `railOpen`), so a
+  `installRail`). The rail defaults to closed (see `railOpen`), so a
   fresh user sees the canvas full-bleed and must open the rail (⚙ / `~`)
   before any tab is visible.
-- **`⚙` Settings button or `~` hotkey** → toggle the rail open/closed.
+- **`⚙` top-bar button or `~` hotkey** → toggle the rail open/closed.
   Routes through `setRailOpen` in `main.ts` so the persisted setting +
   the `.rail-collapsed` class on `#app-shell` stay in sync.
 - **Click a rail tab while the rail is open and that tab is already
   active** → collapses the rail. `installRail` receives a `setRailOpen`
   callback from `main.ts`; the tab click handler compares the incoming
   tab name against `activeTab` and the `Settings.railOpen` flag.
-- **The top-bar Settings / NN / Inspector opener buttons toggle the same
-  way** (`main.ts → toggleRailTab`): if the rail is already open on that
-  tab, a second click calls `setRailOpen(false)`; otherwise it opens
-  the rail and switches to that tab.
 - **Click a rail tab while the rail is closed, or on a different tab** →
   opens the rail and switches to that tab.
 - **Click a creature on canvas** → force the rail open via
   `setRailOpen(true)` AND `rail.switchTab("inspector")` AND populate
-  the inspector body. Applies in both the SoA fast-path and the
-  `inspect_at` fallback.
+  the inspector body (including the `#ins-nn-block` NN I/O rows).
+  Applies in both the SoA fast-path and the `inspect_at` fallback.
+  NN I/O requires the sim to be paused; `requestNnInspectId` issues
+  `CTRL_INSPECT_REQ_KIND=2` and the worker serves it in the PAUSED
+  branch of `simLoop` before parking.
 - **Deselect (click empty world)** → Inspector tab stays active and
   shows the empty-state hint; the user switches away manually.
 - The `~` hotkey is ignored when focus is inside an `<input>` /
   `<textarea>` so typing a tilde in the dev panel doesn't fire the
   toggle.
 
-## Settings tab — stage-then-apply
+## Settings panel — stage-then-apply
 
-Two interaction tiers live inside the same tab:
+The stage-then-apply / live-vs-staged carve-out and apply/cancel/reset
+semantics are **unchanged** by the Settings restructure — only
+navigation layout changed. Two interaction tiers live inside the same panel:
 
 - **Live-apply** (Run + Display groups). Edits hit `setSetting(...)`
   and the apply callback immediately. No dirty tracking. Sliders in
@@ -139,8 +155,8 @@ Two interaction tiers live inside the same tab:
   through `applyTheme`). `grassSmoothing` + `biomeOpacity` are pure render
   settings (no `simName`); the renderer reads `getSettings()` each frame.
 - **Stage-then-apply** (every other group: Energy, Grass, Eat,
-  Lifecycle). Edits update only the in-memory widget value. The
-  Settings tab's footer reconciles staged changes.
+  Lifecycle, Equilibrium). Edits update only the in-memory widget value.
+  The Settings panel footer reconciles staged changes.
 
 Per staged widget, the dev panel keeps `{simName, settingKey,
 readWidget, writeWidget, snapshot, rowEl}`. A row is **dirty** iff
@@ -184,9 +200,9 @@ for them. They reach the next boot via `widgetReaders` /
 construction-only toast.
 
 `currentSliderState()` also injects the live `max_population` value from
-persisted settings because its control lives in the perf panel rather than
-the staged Settings widgets. This makes the cap effective at boot and gives
-the worker a nonzero value for its slider lane.
+persisted settings because its control lives in the Profiler category pane
+rather than the staged Settings widgets. This makes the cap effective at boot
+and gives the worker a nonzero value for its slider lane.
 
 **Unexposed sliders:** `grass_in_cell_growth_r` and
 `grass_propagation_rate_k` are not exposed in the Settings UI. They are
@@ -305,35 +321,37 @@ rationale on the major/minor split.
 ## Code anchors
 
 - `app/web/index.html` → DOM skeleton, all element IDs in the table above.
-- `app/web/src/styles.css` → palette tokens, grid layout, dirty-row accent, toast styling.
-- `app/web/src/main.ts` → `main`, `spawnSimWorker`, `installPacingControls`, `installSettingsButton`, `installRestartButton`, frame loop, camera-lane pre-seed + RAF writes, `makeSlotLayout` binding.
-- `app/web/src/rail/index.ts` → `installRail`, `pollRail`, `RailState`, `switchTab`.
-- `app/web/src/rail/inspector.ts` → click→tab switch, empty-state toggle, SoA fast-path, `inspect_id` throttle.
-- `app/web/src/rail/nn-tab.ts` → `installNnTab`.
-- `app/web/src/widgets/perf-panel.ts` → `installProfilerPanel`, `setProfilerVisible`, pop-graph sampler + species paint.
-- `app/web/src/widgets/devpanel.ts` → Settings tab installer, staged/live tier helpers, dirty tracking, Apply/Cancel/Reset wiring, construction-only toast.
+- `app/web/src/styles.css` → palette tokens, grid layout, sub-nav styles (`.settings-cat-btn`, `.settings-pane`), dirty-row accent, toast styling.
+- `app/web/src/main.ts` → `main`, `spawnSimWorker`, `installTopBarButtons` (4-control top bar), frame loop, camera-lane pre-seed + RAF writes, `makeSlotLayout` binding.
+- `app/web/src/rail/index.ts` → `installRail`, `pollRail`, `RailState`, `switchTab`. `RailTab` = `"inspector" | "settings"` only.
+- `app/web/src/rail/inspector.ts` → click→tab switch, empty-state toggle, SoA fast-path, `inspect_id` throttle, `#ins-nn-block` NN I/O block.
+- `app/web/src/rail/nn-tab.ts` → `installNnTab` (mounts into `#settings-nn-pane → #nn-tab-host`).
+- `app/web/src/widgets/perf-panel.ts` → `installProfilerPanel` (mounts into `#settings-profiler-pane`), `setProfilerVisible`, pop-graph sampler + species paint.
+- `app/web/src/widgets/devpanel.ts` → Settings panel installer, `categoryBox`, sub-nav wiring (category-select → `showProfiler` coupling), staged/live tier helpers, dirty tracking, Apply/Cancel/Reset wiring, construction-only toast.
 - `app/web/src/widgets/worker-stats.ts` → polled NN thread health table.
 - `app/web/src/toast.ts` → `showToast(message, durationMs)`.
 - `app/web/src/settings.ts` → `Settings` interface, `DEFAULTS`, `getSettings` / `setSetting` / `resetSettings`, major/minor schema migration.
-- `app/web/src/sim/bridge.ts` → `CTRL_CAMERA_*` constants, `readWindowMetadata`, `WindowMetadata`, `SlotLayout`, `makeSlotLayout`, `biomeWinOffset`.
+- `app/web/src/sim/bridge.ts` → `CTRL_CAMERA_*` constants, `CTRL_INSPECT_REQ_KIND`, `requestNnInspectId`, `readWindowMetadata`, `WindowMetadata`, `SlotLayout`, `makeSlotLayout`, `biomeWinOffset`.
 - `app/web/src/themes.ts` → `Theme`, `THEMES`, `DEFAULT_THEME_ID`, `applyTheme`, `REQUIRED_TOKENS`.
 - `app/crates/evosim/src/wasm_api/mod.rs` → `WorldHandle::newWithFounderCount` (boot payload arg order + types).
 
 ## Update when
 
 - A new tab is added to the rail (update DOM map + routing rules).
+- A new settings sub-nav category is added (update the DOM map, sub-nav wiring in `devpanel.ts`, and the ASCII diagram above).
 - A new live-apply widget is added (update the live-vs-staged carve-out list).
 - A new construction-only slider is added (update the construction-only set + boot-payload accessors).
 - A widget moves between live and staged tiers.
-- `Settings` interface gains or loses a key (and the corresponding Rust `*_DEFAULT` — also update the Wave D drift-guard fixture in `tests/e2e/defaults-drift.spec.ts`).
+- `Settings` interface gains or loses a key (and the corresponding Rust `*_DEFAULT` — also update the drift-guard fixture in `tests/e2e/defaults-drift.spec.ts`).
 
 ## See also
 
 - [`simulation-core.md`](simulation-core.md) — slider names + their Rust defaults.
-- [`shared-memory-and-protocol.md`](shared-memory-and-protocol.md) — boot payload shape, boot_ready reply, camera lane layout.
+- [`shared-memory-and-protocol.md`](shared-memory-and-protocol.md) — boot payload shape, boot_ready reply, camera lane layout, `CTRL_INSPECT_REQ_KIND` protocol.
 - [`worker-runtime.md`](worker-runtime.md) — boot handshake.
 - [`render-pipeline.md`](render-pipeline.md) — canvas painting, GL programs, camera math.
-- [`profiler.md`](profiler.md) — the panel `#perf-box` renders into.
-- [`../decisions/app-shell.md`](../decisions/app-shell.md) — stage-then-apply rationale, construction-only sliders, settings schema major.minor, world_size SAB binding.
+- [`profiler.md`](profiler.md) — the panel that mounts into `#settings-profiler-pane`.
+- [`../decisions/app-shell.md`](../decisions/app-shell.md) — settings IA rationale, stage-then-apply rationale, construction-only sliders, settings schema major.minor, world_size SAB binding.
 - [`../decisions/cross-cutting.md`](../decisions/cross-cutting.md) — Rust-canonical defaults.
 - [`../agent-context/maintaining-docs.md`](../agent-context/maintaining-docs.md)
+- [Agent-docs authoring rules](~/agent-docs/v1/rules/authoring-rules.md)

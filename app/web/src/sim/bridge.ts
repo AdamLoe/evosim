@@ -628,6 +628,24 @@ export class SimBridge {
     });
   }
 
+  /**
+   * Request the NN I/O inspection JSON for the creature with the given stable id.
+   * Uses kind=2 on the inspect request SAB lane; the worker calls
+   * `creature_nn_inspect_json(idx)` instead of `creature_inspect_json(idx)`.
+   * Same response slot + epoch protocol as the regular inspect path.
+   */
+  requestNnInspectId(id: number): Promise<string | null> {
+    return this.issueInspect((reqEpoch) => {
+      if (!this.ctrlI32) return reqEpoch;
+      const idLo = (id >>> 0) | 0;
+      const idHi = Math.floor(id / 0x1_0000_0000) | 0;
+      Atomics.store(this.ctrlI32, CTRL_INSPECT_REQ_ID_LO, idLo);
+      Atomics.store(this.ctrlI32, CTRL_INSPECT_REQ_ID_HI, idHi);
+      Atomics.store(this.ctrlI32, CTRL_INSPECT_REQ_KIND, 2); // 2 = NN inspect by id
+      return reqEpoch;
+    });
+  }
+
   private issueInspect(writeParams: (reqEpoch: number) => number): Promise<string | null> {
     if (!this.ctrlI32) return Promise.resolve(null);
     // Supersede any pending request — only the latest is delivered.

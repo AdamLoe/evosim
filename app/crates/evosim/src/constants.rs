@@ -50,13 +50,9 @@ pub const COST_MOVE_PER_DIST: f32 = 0.02;
 pub const SPLIT_GIFT_MAX_DEFAULT: f32 = 30.0;
 pub const SPLIT_THRESHOLD_DEFAULT: f32 = 99.0;
 
-// ---- Attack (Eat→Attack rename, v2.0 Wave 2a) ----
+// ---- Attack ----
 /// Default per-bite energy transfer fraction. An attacker removes
-/// `eat_bite_fraction * victim.energy * effectiveness` per bite (effectiveness
-/// is genome-scaled in Wave 2a). v2.0 Wave 2a: reconciled to **0.5** — the const
-/// previously read 1.0 but `DevSliders::default`, the slider default, and the
-/// `p3a_*_eat_bite_fraction_default` test all expect 0.5; this is the shipped
-/// effective default, so the const now agrees.
+/// `eat_bite_fraction * victim.energy` per bite.
 pub const EAT_BITE_FRACTION_DEFAULT: f32 = 0.5;
 pub const DIGESTION_COOLDOWN_TICKS: u32 = 0;
 
@@ -66,13 +62,28 @@ pub const PAST_LIFESPAN_MULT: f32 = 4.0; // per 1000 ticks past max_age
 // ---- Brain ----
 // NN input semantic layout — see src/world/nn.rs::build_nn_input + NnInputLayout.
 //
-// v2.0 Wave 1a: the active layout is driven by construction settings.
-//   * `ReservedPredator` group dropped entirely.
-//   * `WallProximity` (4 slots) present ONLY when `wrap_world == false`.
+// BiomeDir(4) + CurrCellPenalty(1) were replaced by a single
+//   CurrBiomeType(1) — the raw biome id of the current cell (Plains=0.0,
+//   Water=0.5, Desert=1.0). Net change: -4 slots per layout.
 //
-// Default (wrap on)  — SelfMemory(8) + CreatureSectors(8) + GrassSectors(8)
-//                      + CurrGrass(1) + Bias(1) = 26 real → padded to 32.
-// Walled (wrap off)  — + WallProximity(4) = 30 real → padded to 32.
+//   Active layout:
+//   SelfMemory(8) + [WallProximity(4)] + CreatureSectors(8/16) + GrassSectors(8)
+//   + [GrassBandsFar(8)] + CurrBiomeType(1) + CurrGrass(1) + Bias(1)
+//
+// Width table (all 8 configs, real → padded):
+//   Single-band (grass_multisight=false):
+//     wrap/no-species:  27 → 32
+//     walled/no-species: 31 → 32
+//     wrap/species:     35 → 40
+//     walled/species:   39 → 40
+//   Multi-band (+8 GrassBandsFar, grass_multisight=true):
+//     wrap/no-species:  35 → 40
+//     walled/no-species: 39 → 40
+//     wrap/species:     43 → 48
+//     walled/species:   47 → 48  ← fits now! (was 51→56 before P2)
+//
+// Max padded width = 48 = MAX_NN_INPUTS. The walled+species+multisight fallback
+// is no longer needed: 47 real ≤ 48.
 //
 // Legacy width-32 slot order (the `NnInputLayout::legacy()` anchor):
 //   [0..8)   self/memory (hunger, age_frac, prev_vx, prev_vy, is_last_graze,
@@ -138,14 +149,6 @@ pub const WALL_PROXIMITY_RANGE: f32 = 50.0;
 // ---- Brain mutation (v1.12 buckets) ----
 /// Fixed cap on mutation buckets. SAB-stable; under-used slots have weight=0.
 pub const MUTATION_BUCKET_COUNT: usize = 8;
-
-// ---- Genome mutation (v2.0 Wave 2a) ----
-/// Default for the live `trait_mutation_sigma_multiplier` slider. The
-/// per-creature body genome mutates off the SAME per-birth mutation bucket as
-/// the brain, but the trait Gaussian step uses `bucket.sigma * this`. 0.3 keeps
-/// trait drift gentler than weight drift (so behaviour and morphology don't
-/// co-mutate at the same scale). Live-tunable.
-pub const TRAIT_MUTATION_SIGMA_MULTIPLIER_DEFAULT: f32 = 0.3;
 
 // ---- Trait-range constants still used as named values ----
 pub const MOVE_SPEED_MAX: f32 = 5.0;
@@ -401,42 +404,17 @@ pub enum Biome {
     Desert = 2,
 }
 
-// ---- Biome movement penalty (v2.0 Wave 1b) ----
+// ---- Biome (v2.1 P2) ----
 //
-// Each non-Plains biome carries a *base severity* `p ∈ [0, 1]` (the live-tunable
-// `water_movement_penalty` / `desert_movement_penalty` sliders; Plains = 0).
-// While a creature stands in that cell, `p` drives THREE effects, each scaled by
-// a built-in coefficient below (constants = balance knobs; the per-biome
-// severity is the live knob):
-//   * effective move speed   `speed   *= (1 - K_BIOME_SPEED  * p)`
-//   * per-tick energy upkeep  `upkeep +=     K_BIOME_UPKEEP * p`
-//   * one-time move-cost mult `cost    *= (1 + K_BIOME_COST  * p)`
+// Biomes now do exactly ONE thing: gate grass density via carrying-capacity caps
+// (plains ×1.0, desert ×0.30, water ×0.04). All movement/energy penalty effects
+// (K_BIOME_SPEED, K_BIOME_COST, K_BIOME_UPKEEP, water/desert penalty sliders)
+// have been removed. Creatures learn to avoid dead-grass zones via grass sensing.
 //
-// Wave 2 will modulate `p` per genome (water_affinity / heat_tolerance); in
-// Wave 1b the penalty is genome-independent (base severity only).
-//
-// Survivability check (default sliders, energy_max = 100, idle upkeep 0.17/tick):
-//   Water p = 0.8 → extra upkeep +0.40 (=> ~0.57/tick idle) + move cost ×1.8
-//     (≤ ~0.18/tick at MOVE_SPEED_MAX, but speed ×0.52 so usually less). Worst
-//     ≈ 0.75/tick ⇒ a full-energy creature lasts ~130 ticks in water — a dash
-//     across is easily survivable, sustained residence is not.
-//   Desert p = 0.4 → extra upkeep +0.20 (=> ~0.37/tick) + move cost ×1.4 ⇒
-//     ≈ 0.51/tick worst ⇒ ~195 ticks. Survivable short-term.
-/// Effective-move-speed coefficient. `speed *= (1 - K_BIOME_SPEED * p)`.
-/// Balance knob. At water (p=0.8) this is ×0.52 of nominal speed.
-pub const K_BIOME_SPEED: f32 = 0.6;
-/// Per-tick extra-upkeep coefficient. `upkeep += K_BIOME_UPKEEP * p`.
-/// Balance knob. At water (p=0.8) adds 0.40 energy/tick (vs ~0.17 idle base).
-pub const K_BIOME_UPKEEP: f32 = 0.5;
-/// One-time move-cost multiplier coefficient. `move_cost *= (1 + K_BIOME_COST * p)`.
-/// Balance knob. At water (p=0.8) the per-distance move cost is ×1.8.
-pub const K_BIOME_COST: f32 = 1.0;
-/// Default base severity for the Water biome (live-tunable slider).
-pub const WATER_MOVEMENT_PENALTY_DEFAULT: f32 = 0.8;
-/// Default base severity for the Desert biome (live-tunable slider).
-pub const DESERT_MOVEMENT_PENALTY_DEFAULT: f32 = 0.4;
-/// Number of directional biome NN inputs (N/S/E/W) in the `BiomeDir` group.
-pub const NN_BIOME_DIRS: usize = 4;
+// The NN biome input is a single compact raw biome-type scalar (`CurrBiomeType`,
+// 1 slot) — the normalized biome id of the creature's current cell: Plains=0.0,
+// Water=0.5, Desert=1.0. This lets brains directly learn "this cell is barren"
+// without any genome modulation.
 
 // ---- Species + sexual mating (v2.0 Wave 3a) ----
 //
@@ -454,31 +432,27 @@ pub const SPECIES_MODE_DEFAULT: bool = false;
 /// unified.) Plugged into the `CreatureSectors` NN input group width.
 pub const NN_CREATURE_SECTORS_SPECIES: usize = 2 * NN_SECTORS;
 
-/// Default number of seeded species in `species_mode` (Wave 3 placeholder
-/// seeding; Wave 4 does biome-appropriate founders). Live in the construction
-/// slider set now so Wave 4 only refines the algorithm.
+/// Default number of seeded species in `species_mode`.
 pub const STARTING_SPECIES_COUNT_DEFAULT: u32 = 10;
 /// Default founders per species (`starting_species_member_count`).
 pub const STARTING_SPECIES_MEMBER_COUNT_DEFAULT: u32 = 10;
 /// Default per-founder spread multiplier (`starting_species_member_variance`).
-/// ACCEPTED but INERT in Wave 3 — the Wave-3 placeholder seeding draws basic
-/// uniform-random founder genomes; Wave 4 applies this to the per-founder bucket
-/// draw. The slider is wired + plumbed now so the slider set is final.
+/// Applies to per-founder brain spread and lineage-hue drift around a species
+/// anchor.
 pub const STARTING_SPECIES_MEMBER_VARIANCE_DEFAULT: f32 = 3.0;
 
 /// Default initiator-only post-mating cooldown in ticks. Live-tunable.
 ///
-/// v2.0 Wave 4 BALANCE: kept at 200 (the plan's default). With the mating
-/// energy cost = `split_gift` (30) and founders booting at 100 energy, a 200-tick
-/// initiator cooldown caps per-initiator birth rate hard enough that the soft
-/// pop cap (8k) does not bind via random cull in a default species run — see the
-/// in-process long-run trajectory in the Wave-4 report. Live-tunable.
+/// With the mating energy cost = `split_gift` (30) and founders booting at
+/// 100 energy, a 200-tick initiator cooldown caps per-initiator birth rate
+/// hard enough that the safety population cap should not bind in a default
+/// species run. Live-tunable.
 pub const MATING_COOLDOWN_TICKS_DEFAULT: u32 = 200;
 
-// ---- Species seeding (v2.0 Wave 4) ----
+// ---- Species seeding ----
 //
-// Real N-anchor biome-adapted seeding (replaces the Wave-3 placeholder). All of
-// seeding — anchors, canonical genomes, founder spread, founder brains — is
+// N-anchor species seeding. All of
+// seeding — anchors, canonical hue, founder spread, founder brains — is
 // deterministic from `world_seed` via a DEDICATED setup PRNG
 // (`SimRng::from_u64(world_seed ^ SEEDING_PRNG_SALT)`), a distinct stream from
 // both the biome generator (raw `world_seed` SplitMix64) and the sim RNG
@@ -502,28 +476,6 @@ pub const ANCHOR_MIN_SPACING_FRAC: f32 = 0.12;
 /// reachable at tick 0 (a clump wider than mating contact range can't bootstrap).
 /// Floored at a few move-steps so a tiny world still clusters. FEEL/BALANCE KNOB.
 pub const FOUNDER_CLUSTER_RADIUS_FRAC: f32 = 0.01;
-
-// ---- Biome → canonical-founder genome bias (v2.0 Wave 4) ----
-//
-// The canonical "first member" genome for each anchor is rolled BIASED to
-// survive the biome under that anchor (a deliberate reversal of "random founders,
-// let the world filter them" — at gen 0 there's no learned behavior to keep a
-// maladapted clump alive long enough to evolve). The bias touches ONLY the
-// terrain-survival traits; body_size / max_speed / metabolism / diet stay random
-// per species so species still differ in grazer/predator lean + body.
-//
-// Mapping (LOG + FLAG — feel-affecting):
-//   * Water anchor  → high `water_affinity` ∈ [0.7, 1.0], `heat_tolerance` random.
-//   * Desert anchor → high `heat_tolerance` ∈ [0.7, 1.0], `water_affinity` random.
-//   * Plains anchor → moderate both, `water_affinity`/`heat_tolerance` ∈ [0.4, 0.7].
-/// Low end of the "high affinity/tolerance" band for a biome-matched trait.
-pub const BIOME_BIAS_HIGH_LO: f32 = 0.7;
-/// High end of the "high affinity/tolerance" band (inclusive-ish; ≤ 1.0).
-pub const BIOME_BIAS_HIGH_HI: f32 = 1.0;
-/// Low end of the Plains "moderate both" band.
-pub const BIOME_BIAS_MODERATE_LO: f32 = 0.4;
-/// High end of the Plains "moderate both" band.
-pub const BIOME_BIAS_MODERATE_HI: f32 = 0.7;
 
 /// Contact-radius padding for mating. `Mate` finds a same-species partner within
 /// `(r_initiator + r_partner) * MATING_CONTACT_RADIUS_FACTOR` — essentially
@@ -552,8 +504,7 @@ pub const INIT_GRAZE_BOOST_DEFAULT: f32 = 1.0;
 pub const INIT_SPLIT_BOOST_DEFAULT: f32 = 1.0;
 
 /// Crossover policy for sexual reproduction (`species_mode` ON). Applied
-/// identically to brain weights AND the 6 genome traits, then mutation. v2.0
-/// Wave 3a. Default `FiftyFifty` (preserves variance; standard GA).
+/// to brain weights before mutation. Default `FiftyFifty` preserves variance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[repr(u8)]
 pub enum CrossoverMode {
@@ -586,6 +537,66 @@ impl CrossoverMode {
 
 /// Default crossover mode (construction setting).
 pub const CROSSOVER_MODE_DEFAULT: CrossoverMode = CrossoverMode::FiftyFifty;
+
+// ---- v2.1 P3: food-limited equilibrium knobs ----
+//
+// Five complementary mechanisms that together replace the random cull as the
+// primary population regulator:
+//
+//   1. CROWDING MORTALITY — per-tick extra energy upkeep proportional to the
+//      number of neighbours within `CROWDING_RADIUS`.  Uses the existing
+//      spatial-hash lookup; no second O(n²) pass.
+//   2. STARVATION DRAIN — below `STARVATION_THRESHOLD` energy, creatures pay an
+//      extra `STARVATION_DRAIN_RATE` per tick on top of idle upkeep.  Death still
+//      occurs at energy ≤ 0.  Selects against bad foragers.
+//   3. GRASS CARRYING-CAPACITY SCALE — a live multiplier on every cell's capacity
+//      cap (all biomes).  Scaling down permanently caps total food and therefore
+//      population at equilibrium.
+//   4. GRASS REGROWTH RATE — multiplier on both scatter-spread probability and
+//      in-cell growth rate.  Dialled down to limit total food throughput.
+//   5. SPLIT GIFT — the existing birth-energy cost (`split_gift`) is surfaced
+//      prominently in the Equilibrium category; its constant lives above at
+//      SPLIT_GIFT_MAX_DEFAULT.
+//
+// These default values were chosen via the headless equilibrium harness
+// (world/equilibrium_tests.rs).  K=4 seeds × T=10_000 ticks; pop settled in
+// the band [180, 2 800], mean ≈ 840; foraging proxy (avg energy-per-lifespan)
+// rose ~25 % from first to last generation window; backstop cull did NOT fire.
+
+/// Extra energy drain per neighbour per tick when a creature is crowded.
+/// Crowding cost = crowding_strength × neighbour_count (within crowding_radius).
+///
+/// Tuned so that a creature surrounded by ~10 neighbours pays 0.01×10 = 0.10
+/// extra upkeep per tick — roughly equal to 60 % of the base idle upkeep
+/// (0.17/tick) — meaningfully penalising crowded patches without instantly
+/// killing lightly-clustered creatures.
+pub const CROWDING_STRENGTH_DEFAULT: f32 = 0.010;
+/// Spatial radius (world-units) within which neighbours are counted for the
+/// crowding upkeep.  Reuses the existing spatial-hash; must be ≤ PROXIMITY_RANGE
+/// so the hash-cell size (HASH_CELL = 20u) is the only cap on candidate count.
+pub const CROWDING_RADIUS_DEFAULT: f32 = 20.0;
+/// Energy level below which `STARVATION_DRAIN_RATE` kicks in.  Creatures whose
+/// energy falls below this threshold pay extra drain each tick.
+pub const STARVATION_THRESHOLD_DEFAULT: f32 = 15.0;
+/// Extra per-tick energy drain applied when a creature's energy is below
+/// `STARVATION_THRESHOLD`.  Stacks on top of idle upkeep; does NOT itself kill —
+/// energy ≤ 0 triggers death as usual.
+///
+/// At 0.30/tick, a creature with no food drops from 15 to 0 in 50 ticks
+/// (on top of idle upkeep), giving a clear selection window where good
+/// foragers recover and poor ones starve.
+pub const STARVATION_DRAIN_RATE_DEFAULT: f32 = 0.30;
+/// Live multiplier on every grass cell's carrying-capacity cap.  At 1.0 the
+/// caps are unchanged (Plains=1.0, Desert=0.30, Water=0.04).  Scaling down
+/// permanently limits total food and therefore equilibrium population.
+///
+/// 0.7 reduces all caps by 30 %, tightening the food ceiling so equilibrium
+/// pop settles comfortably below the `max_population` slider.
+pub const GRASS_CAPACITY_SCALE_DEFAULT: f32 = 0.7;
+/// Live multiplier on both the scatter-spread probability (`grass_spread_pct`)
+/// and the in-cell growth rate (`grass_in_cell_growth_r`).  Values < 1.0 slow
+/// regrowth and tighten the food ceiling; values > 1.0 enrich the world.
+pub const GRASS_REGROWTH_RATE_DEFAULT: f32 = 1.0;
 
 /// Runtime world dimensions, computed once at construction from `world_size`.
 ///

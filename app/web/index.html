@@ -19,66 +19,40 @@
          says otherwise — avoids a one-frame flash of the rail-open layout
          on fresh loads while CSS is still applying. -->
     <div id="app-shell" class="rail-collapsed">
-      <!-- Left column: top-bar + canvas + optional profiler bottom panel. -->
+      <!-- Left column: top-bar + canvas. The profiler bottom panel (perf-box)
+           is kept in the DOM as an empty placeholder so the resize-handle
+           logic and any legacy references stay intact; the profiler content
+           is now rendered inside the Settings rail's Profiler category pane. -->
       <div id="left-col">
-        <!-- v1.13 Wave 1: top-bar is now an absolute-positioned overlay over
-             the canvas area, hosting five icon buttons (play/pause, restart,
-             auto-restart, settings, perf). The #status span is retained but
-             unused — Wave 2 will remove it along with the status-update path
-             in main.ts. -->
+        <!-- Top-bar controls: play/pause, Restart,
+             auto-restart, and the ⚙ settings rail toggle. NN / Inspector /
+             perf-toggle openers removed from the top bar. -->
         <div id="top-bar">
         </div>
 
         <div id="canvas-wrap">
           <canvas id="aquarium"></canvas>
-          <!-- v2.0.5 S5: status strip removed — the single Restart button in the
-               top bar now always rerolls the seed (fresh random world on every
-               restart). No separate seed display or reroll button. -->
           <!-- v1.13 Wave 3: drag handle for the bottom profiler panel.
-               Lives on the bottom edge of #canvas-wrap (which IS the top
-               edge of #perf-box when the panel is shown). z-indexed above
-               the canvas so pointer events don't reach camera pan/zoom.
                Hidden when #perf-box is display:none. -->
           <div id="perf-resize-handle" aria-hidden="true"></div>
         </div>
 
-        <!-- Bottom monitor + profiler panel. Width follows the left column;
-             height grows only when the panel is visible (display:none when
-             off). v1.13 Wave 2: contents are built by widgets/perf-panel.ts
-             — status line + graphs + selectors + CPU process monitor +
-             profile trees. -->
+        <!-- #perf-box is kept as an empty hidden placeholder. Profiler
+             content now lives in #settings-profiler-pane inside the Settings
+             rail. The resize handle and legacy e2e refs still find this element. -->
         <div id="perf-box" class="perf-widget" style="display:none"></div>
       </div>
 
-      <!-- Right rail: Settings | NN | Inspector -->
+      <!-- Right rail: Settings | Inspector (NN folded into Settings; Inspector
+           stays click-to-open). -->
       <aside id="right-rail">
-        <!-- v1.13 Wave 3: drag handle for the right rail width. Lives on the
-             inner (left) edge of #right-rail. Hidden when the rail is
-             collapsed (.rail-collapsed on #app-shell). -->
+        <!-- v1.13 Wave 3: drag handle for the right rail width. -->
         <div id="rail-resize-handle" aria-hidden="true"></div>
         <nav id="rail-tabs" role="tablist">
           <button data-tab="settings" class="rail-tab is-active" title="Settings" aria-label="Settings">
             <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <circle cx="12" cy="12" r="3"></circle>
               <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
-            </svg>
-          </button>
-          <!-- v2.0.5 S6: improved NN icon — 3-column neural-net diagram. -->
-          <button data-tab="nn" class="rail-tab" title="Neural network" aria-label="Neural network">
-            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <!-- edges -->
-              <line x1="5" y1="7" x2="12" y2="12"/>
-              <line x1="5" y1="17" x2="12" y2="12"/>
-              <line x1="5" y1="7" x2="12" y2="18"/>
-              <line x1="5" y1="17" x2="12" y2="18"/>
-              <line x1="12" y1="12" x2="19" y2="12"/>
-              <line x1="12" y1="18" x2="19" y2="12"/>
-              <!-- nodes: filled circles so they're legible at 18px -->
-              <circle cx="5" cy="7" r="2.2" fill="currentColor" stroke="none"/>
-              <circle cx="5" cy="17" r="2.2" fill="currentColor" stroke="none"/>
-              <circle cx="12" cy="12" r="2.2" fill="currentColor" stroke="none"/>
-              <circle cx="12" cy="18" r="2.2" fill="currentColor" stroke="none"/>
-              <circle cx="19" cy="12" r="2.2" fill="currentColor" stroke="none"/>
             </svg>
           </button>
           <button data-tab="inspector" class="rail-tab" title="Inspector" aria-label="Inspector">
@@ -89,9 +63,61 @@
           </button>
         </nav>
 
-        <!-- Settings tab: dev panel content + Apply / Cancel / Reset footer. -->
+        <!-- Settings tab: left sub-nav categories + right category pane +
+             Apply / Cancel / Reset footer. -->
         <section id="rail-settings" class="rail-panel is-active">
-          <div id="devpanel-box"></div>
+          <!-- Settings inner: sub-nav on the left, active category pane on right. -->
+          <div id="settings-inner">
+            <!-- Left vertical category sub-nav -->
+            <nav id="settings-subnav" aria-label="Settings categories">
+              <button class="settings-cat-btn is-active" data-cat="energy">Energy</button>
+              <button class="settings-cat-btn" data-cat="grass">Grass</button>
+              <button class="settings-cat-btn" data-cat="lifecycle">Lifecycle</button>
+              <button class="settings-cat-btn" data-cat="world">World</button>
+              <button class="settings-cat-btn" data-cat="equilibrium">Equilibrium</button>
+              <button class="settings-cat-btn" data-cat="display">Display</button>
+              <button class="settings-cat-btn" data-cat="profiler">Profiler</button>
+              <button class="settings-cat-btn" data-cat="nn">NN</button>
+            </nav>
+            <!-- Right category pane area: only the is-active pane is visible -->
+            <div id="settings-panes">
+              <!-- Energy: upkeep, move cost, energy max, attack, digestion -->
+              <div id="settings-energy-pane" class="settings-pane is-active">
+                <div id="devpanel-energy"></div>
+              </div>
+              <!-- Grass: grass sim settings, grass rendering/display settings -->
+              <div id="settings-grass-pane" class="settings-pane">
+                <div id="devpanel-grass"></div>
+              </div>
+              <!-- Lifecycle: ages, splits, founders, mutations, species/mating -->
+              <div id="settings-lifecycle-pane" class="settings-pane">
+                <div id="devpanel-lifecycle"></div>
+              </div>
+              <!-- World: world shape, size, seed, wrap, LOD -->
+              <div id="settings-world-pane" class="settings-pane">
+                <div id="devpanel-world"></div>
+              </div>
+              <!-- Equilibrium: stable mount point for P3 equilibrium sliders.
+                   Intentionally sparse now — a later phase wires rows here. -->
+              <div id="settings-equilibrium-pane" class="settings-pane">
+                <div id="devpanel-equilibrium"></div>
+              </div>
+              <!-- Display: grass visuals, theme, render/LOD -->
+              <div id="settings-display-pane" class="settings-pane">
+                <div id="devpanel-display"></div>
+              </div>
+              <!-- Profiler: relocated from #perf-box; stable mount point for
+                   installProfilerPanel. -->
+              <div id="settings-profiler-pane" class="settings-pane">
+                <!-- installProfilerPanel mounts here -->
+              </div>
+              <!-- NN: topology + mutation-bucket editors (folded from rail-nn tab).
+                   Stable mount point for installNnTab. -->
+              <div id="settings-nn-pane" class="settings-pane">
+                <div id="nn-tab-host"></div>
+              </div>
+            </div>
+          </div>
           <div id="settings-footer">
             <button id="settings-apply" type="button" disabled>Apply</button>
             <button id="settings-cancel" type="button" disabled>Cancel</button>
@@ -99,16 +125,12 @@
           </div>
         </section>
 
-        <!-- v1.12 NN tab: left = stage-then-apply topology editor (Apply
-             respawns the worker), right = live-apply 8-bucket mutation
-             policy editor, bottom = per-layer perf log. -->
-        <section id="rail-nn" class="rail-panel">
-          <div id="nn-tab-host"></div>
-        </section>
+        <!-- #rail-nn is no longer a top-level tab. NN editor is now in
+             the Settings rail's "NN" category pane (#settings-nn-pane above).
+             The inspector stays click-to-open (creature click). -->
 
         <!-- Inspector tab: empty-state hint by default; populated when the
-             user clicks a creature on the canvas (only registers while the
-             Inspector tab is the active one, see rail/inspector.ts). -->
+             user clicks a creature on the canvas. -->
         <section id="rail-inspector" class="rail-panel">
           <div id="inspector-empty" class="rail-empty">Waiting for creature to be clicked.</div>
           <div id="inspector-body" style="display:none">
@@ -121,24 +143,13 @@
               <dt>Cooldown</dt><dd id="ins-cooldown">—</dd>
               <dt>Color</dt><dd>
                 <span id="ins-color-swatch" class="ema-swatch"></span>
+                <span id="ins-hue">—</span>
               </dd>
-              <dt>Move penalty</dt><dd id="ins-move-penalty">—</dd>
-            </dl>
-            <!-- v2.0 Wave 2b: evolving body-genome traits (raw [0,1]). -->
-            <div class="ins-genome-title">Genome</div>
-            <dl id="ins-genome">
-              <dt>Body size</dt><dd><span class="trait-bar"><span id="ins-trait-body_size" class="trait-fill"></span></span><span id="ins-trait-body_size-v" class="trait-val">—</span></dd>
-              <dt>Max speed</dt><dd><span class="trait-bar"><span id="ins-trait-max_speed" class="trait-fill"></span></span><span id="ins-trait-max_speed-v" class="trait-val">—</span></dd>
-              <dt>Metabolism</dt><dd><span class="trait-bar"><span id="ins-trait-metabolism" class="trait-fill"></span></span><span id="ins-trait-metabolism-v" class="trait-val">—</span></dd>
-              <dt>Diet</dt><dd><span class="trait-bar"><span id="ins-trait-diet" class="trait-fill"></span></span><span id="ins-trait-diet-v" class="trait-val">—</span></dd>
-              <dt>Water aff.</dt><dd><span class="trait-bar"><span id="ins-trait-water_affinity" class="trait-fill"></span></span><span id="ins-trait-water_affinity-v" class="trait-val">—</span></dd>
-              <dt>Heat tol.</dt><dd><span class="trait-bar"><span id="ins-trait-heat_tolerance" class="trait-fill"></span></span><span id="ins-trait-heat_tolerance-v" class="trait-val">—</span></dd>
             </dl>
             <!-- v2.0 Wave 3b: species panel — shown only when the inspected
-                 creature carries species data (species mode). The history
-                 breadcrumb area is Wave 5; left empty/plumbed for v2.0. -->
+                 creature carries species data (species mode). -->
             <div id="ins-species-block" style="display:none">
-              <div class="ins-genome-title">Species</div>
+              <div class="ins-section-title">Species</div>
               <dl>
                 <dt>Species</dt><dd>
                   <span id="ins-species-swatch" class="ema-swatch"></span>
@@ -153,6 +164,19 @@
               <dt>Recent</dt><dd id="ins-history">—</dd>
               <dt>NN weights</dt><dd id="ins-nn-count">—</dd>
             </dl>
+            <!-- NN I/O block — rendered from creature_nn_inspect_json. -->
+            <div id="ins-nn-block" style="display:none">
+              <div class="ins-section-title">NN Inputs</div>
+              <div id="ins-nn-inputs"></div>
+              <div class="ins-section-title">NN Outputs</div>
+              <dl id="ins-nn-outputs">
+                <dt>vx / vy</dt><dd id="ins-nn-vxvy">—</dd>
+                <dt>Graze</dt><dd><span class="nn-out-bar"><span id="ins-nn-logit-graze-fill" class="nn-out-bar-fill"></span></span><span id="ins-nn-logit-graze-v" class="trait-val">—</span></dd>
+                <dt>Attack</dt><dd><span class="nn-out-bar"><span id="ins-nn-logit-attack-fill" class="nn-out-bar-fill"></span></span><span id="ins-nn-logit-attack-v" class="trait-val">—</span></dd>
+                <dt>Split/Mate</dt><dd><span class="nn-out-bar"><span id="ins-nn-logit-split-fill" class="nn-out-bar-fill"></span></span><span id="ins-nn-logit-split-v" class="trait-val">—</span></dd>
+                <dt>Chosen</dt><dd id="ins-nn-chosen" class="ins-nn-chosen">—</dd>
+              </dl>
+            </div>
           </div>
         </section>
       </aside>
@@ -162,8 +186,7 @@
          etc.). Pinned to the bottom-center of the viewport. -->
     <div id="toast-host"></div>
 
-    <!-- World-end overlay: shown when the last creature dies. Grass keeps
-         spreading underneath so the canvas fills in the background. -->
+    <!-- World-end overlay: shown when the last creature dies. -->
     <div id="world-end-overlay" hidden>
       <div class="world-end-card">
         <h2>World ended</h2>

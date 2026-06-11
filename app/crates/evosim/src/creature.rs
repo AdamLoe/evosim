@@ -1,8 +1,9 @@
 //! Creature SoA. Layout shared by the live (mutable) tick state.
 //!
-//! v2.0 Wave 2a: per-creature 6-trait body `Genome` reintroduced (single-pool).
-//! Six `f32 ∈ [0,1]` rescaled at each use site — see `Genome` below. Only the
-//! brain + genome vary across the population; everything else is constants.
+//! v2.1 P2: `Genome` removed — brain is the only heritable thing. The
+//! `genome` column is replaced by a `hue` column (f32 ∈ [0,1)) for
+//! lineage/ancestry coloring. Founders get distinct seed hues; children
+//! inherit parent hue + a small Gaussian mutation (wrapped to [0,1)).
 //! v1.5 S5b: vision raycast removed; `eye_trig`, `last2_action`, `prev_energy`
 //! columns deleted (no consumer after the 32-input semantic rewrite).
 
@@ -26,200 +27,10 @@ impl Action {
     pub const ALL: [Action; 3] = [Action::Graze, Action::Attack, Action::Split];
 }
 
-/// Per-creature evolving body genome (v2.0 Wave 2a, single-pool).
-///
-/// Six independent traits in `[0, 1]`. Each is rescaled at its use site (the
-/// ranges are centered so a trait of 0.5 reproduces the pre-genome constant):
-///
-/// | trait            | rescale → factor                | plugs into |
-/// |------------------|---------------------------------|------------|
-/// | `body_size`      | `0.5 + t` ∈ [0.5, 1.5]          | sprite + repulsion radius, energy-cap factor, attack damage |
-/// | `max_speed`      | `0.5 + t` ∈ [0.5, 1.5]          | speed cap × factor, move-cost × factor |
-/// | `metabolism`     | `0.5 + t` ∈ [0.5, 1.5]          | idle-upkeep multiplier |
-/// | `diet`           | `t` (0 grazer … 1 predator)     | graze yield × (1 - 0.5·diet); attack effectiveness × (0.5 + diet) |
-/// | `water_affinity` | `t`                             | water move-penalty × (1 - t) |
-/// | `heat_tolerance` | `t`                             | desert move-penalty × (1 - t) |
-///
-/// A median genome (all 0.5) reproduces today's behaviour for body_size /
-/// max_speed / metabolism. `diet`/`water_affinity`/`heat_tolerance` at 0.5 sit
-/// at the middle of their effect range.
-#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Genome {
-    pub body_size: f32,
-    pub max_speed: f32,
-    pub metabolism: f32,
-    pub diet: f32,
-    pub water_affinity: f32,
-    pub heat_tolerance: f32,
-}
-
-impl Genome {
-    /// The neutral median genome — every trait at 0.5. Used as the default at
-    /// founder seeding before randomization and as a clamp reference.
-    pub const fn median() -> Self {
-        Self {
-            body_size: 0.5,
-            max_speed: 0.5,
-            metabolism: 0.5,
-            diet: 0.5,
-            water_affinity: 0.5,
-            heat_tolerance: 0.5,
-        }
-    }
-
-    /// Draw a founder genome uniformly in `[0, 1]` per trait (single-pool:
-    /// visible diversity from tick 0). Trait draw order is fixed for RNG
-    /// determinism: body_size, max_speed, metabolism, diet, water_affinity,
-    /// heat_tolerance.
-    pub fn founder(rng: &mut crate::rng::SimRng) -> Self {
-        Self {
-            body_size: rng.unit(),
-            max_speed: rng.unit(),
-            metabolism: rng.unit(),
-            diet: rng.unit(),
-            water_affinity: rng.unit(),
-            heat_tolerance: rng.unit(),
-        }
-    }
-
-    /// v2.0 Wave 4: the canonical "first member" genome for a species anchor,
-    /// rolled BIASED to survive the biome under the anchor. Only the
-    /// terrain-survival traits (`water_affinity`, `heat_tolerance`) are biased;
-    /// `body_size` / `max_speed` / `metabolism` / `diet` stay uniform-random so
-    /// species still differ in grazer/predator lean + body.
-    ///
-    /// Bias mapping (LOG + FLAG — feel-affecting):
-    ///   * `Biome::Water`  → `water_affinity` ∈ [HIGH_LO, HIGH_HI], `heat_tolerance` random.
-    ///   * `Biome::Desert` → `heat_tolerance` ∈ [HIGH_LO, HIGH_HI], `water_affinity` random.
-    ///   * `Biome::Plains` → both ∈ [MODERATE_LO, MODERATE_HI].
-    ///
-    /// RNG draw order is fixed for determinism: body_size, max_speed, metabolism,
-    /// diet, then water_affinity, then heat_tolerance (each one draw), so the
-    /// stream is well-defined regardless of biome. `rng` is the dedicated
-    /// `world_seed`-derived seeding PRNG (NOT the sim RNG).
-    pub fn canonical_for_biome(
-        rng: &mut crate::rng::SimRng,
-        biome: crate::constants::Biome,
-    ) -> Self {
-        use crate::constants::{
-            Biome, BIOME_BIAS_HIGH_HI, BIOME_BIAS_HIGH_LO, BIOME_BIAS_MODERATE_HI,
-            BIOME_BIAS_MODERATE_LO,
-        };
-        let body_size = rng.unit();
-        let max_speed = rng.unit();
-        let metabolism = rng.unit();
-        let diet = rng.unit();
-        // Always draw water then heat in fixed order (even when one is overwritten
-        // by the biased band) so the RNG stream is biome-independent in length.
-        let water_rand = rng.unit();
-        let heat_rand = rng.unit();
-        let (water_affinity, heat_tolerance) = match biome {
-            Biome::Water => (
-                BIOME_BIAS_HIGH_LO + water_rand * (BIOME_BIAS_HIGH_HI - BIOME_BIAS_HIGH_LO),
-                heat_rand,
-            ),
-            Biome::Desert => (
-                water_rand,
-                BIOME_BIAS_HIGH_LO + heat_rand * (BIOME_BIAS_HIGH_HI - BIOME_BIAS_HIGH_LO),
-            ),
-            Biome::Plains => (
-                BIOME_BIAS_MODERATE_LO
-                    + water_rand * (BIOME_BIAS_MODERATE_HI - BIOME_BIAS_MODERATE_LO),
-                BIOME_BIAS_MODERATE_LO
-                    + heat_rand * (BIOME_BIAS_MODERATE_HI - BIOME_BIAS_MODERATE_LO),
-            ),
-        };
-        Self {
-            body_size,
-            max_speed,
-            metabolism,
-            diet,
-            water_affinity,
-            heat_tolerance,
-        }
-    }
-
-    /// Mutating child genome: each trait takes one Gaussian nudge
-    /// `+= rng.normal() * step` then is clamped to `[0, 1]`. Six normal draws
-    /// in fixed trait order (RNG determinism). `step` is the bucket sigma scaled
-    /// by `trait_mutation_sigma_multiplier`; if `step <= 0` the genome is copied
-    /// verbatim (no draws).
-    pub fn mutated(&self, rng: &mut crate::rng::SimRng, step: f32) -> Self {
-        // Non-positive OR NaN step → copy verbatim (no draws).
-        if step.is_nan() || step <= 0.0 {
-            return *self;
-        }
-        let m = |v: f32, r: &mut crate::rng::SimRng| (v + r.normal() * step).clamp(0.0, 1.0);
-        Genome {
-            body_size: m(self.body_size, rng),
-            max_speed: m(self.max_speed, rng),
-            metabolism: m(self.metabolism, rng),
-            diet: m(self.diet, rng),
-            water_affinity: m(self.water_affinity, rng),
-            heat_tolerance: m(self.heat_tolerance, rng),
-        }
-    }
-
-    /// v2.0 Wave 3a: per-trait crossover of two parent genomes (the genome twin
-    /// of `Brain::child_from_crossover_with_sigma`). Applied BEFORE the mutation
-    /// step. RNG draw order (deterministic): `FiftyFifty` consumes exactly one
-    /// `rng.unit()` per trait, in fixed trait order (body_size, max_speed,
-    /// metabolism, diet, water_affinity, heat_tolerance); `Average` consumes NO
-    /// RNG (pure midpoint).
-    pub fn crossed(
-        &self,
-        other: &Genome,
-        rng: &mut crate::rng::SimRng,
-        crossover: crate::constants::CrossoverMode,
-    ) -> Self {
-        use crate::constants::CrossoverMode;
-        match crossover {
-            CrossoverMode::Average => Genome {
-                body_size: 0.5 * (self.body_size + other.body_size),
-                max_speed: 0.5 * (self.max_speed + other.max_speed),
-                metabolism: 0.5 * (self.metabolism + other.metabolism),
-                diet: 0.5 * (self.diet + other.diet),
-                water_affinity: 0.5 * (self.water_affinity + other.water_affinity),
-                heat_tolerance: 0.5 * (self.heat_tolerance + other.heat_tolerance),
-            },
-            CrossoverMode::FiftyFifty => {
-                // One draw per trait, fixed order. `pick(a, b)` first so the
-                // draw happens in declaration order regardless of which wins.
-                let pick = |a: f32, b: f32, r: &mut crate::rng::SimRng| {
-                    if r.unit() < 0.5 {
-                        a
-                    } else {
-                        b
-                    }
-                };
-                Genome {
-                    body_size: pick(self.body_size, other.body_size, rng),
-                    max_speed: pick(self.max_speed, other.max_speed, rng),
-                    metabolism: pick(self.metabolism, other.metabolism, rng),
-                    diet: pick(self.diet, other.diet, rng),
-                    water_affinity: pick(self.water_affinity, other.water_affinity, rng),
-                    heat_tolerance: pick(self.heat_tolerance, other.heat_tolerance, rng),
-                }
-            }
-        }
-    }
-
-    /// Sprite/body radius factor (× `CREATURE_SIZE`). 0.5 trait → 1.0 (today).
-    #[inline]
-    pub fn body_size_factor(&self) -> f32 {
-        0.5 + self.body_size
-    }
-    /// Speed-cap + move-cost factor (× `MOVE_SPEED_MAX` / × move cost).
-    #[inline]
-    pub fn max_speed_factor(&self) -> f32 {
-        0.5 + self.max_speed
-    }
-    /// Idle-upkeep multiplier. 0.5 trait → 1.0 (today).
-    #[inline]
-    pub fn metabolism_factor(&self) -> f32 {
-        0.5 + self.metabolism
-    }
-}
+/// Sigma for the per-birth hue mutation (fraction of the [0,1) hue circle).
+/// Small enough that siblings look nearly identical; large enough that after
+/// many generations lineages develop visible color drift.
+pub const HUE_MUTATION_SIGMA: f32 = 0.01;
 
 /// Transient action tag recorded for the ring-flash (v2.0 Wave 2a). Stored
 /// per-creature alongside a small ticks-remaining countdown; packed into the
@@ -259,9 +70,10 @@ pub const FLASH_TICKS: u8 = 5;
 /// Hot per-creature scalars promoted into SoA arrays for cache friendliness
 /// in the per-tick inner loops.
 ///
-/// v2.0 Wave 2a: `genome` column added; the action-EMA `color_r/g/b` columns
-/// were deleted (display color now derives from the genome at snapshot write,
-/// and per-action highlight lives in the ring-flash `flash_*` columns).
+/// v2.1 P2: `genome` column removed; replaced by `hue` (f32 ∈ [0,1)) for
+/// lineage/ancestry coloring. The action-EMA `color_r/g/b` columns remain
+/// deleted (deleted in Wave 2a); display color now derives from `hue` at
+/// snapshot write, and per-action highlight lives in the ring-flash columns.
 pub struct CreatureSoA {
     pub id: Vec<u64>,
     pub x: Vec<f32>,
@@ -282,12 +94,11 @@ pub struct CreatureSoA {
     /// splits; incremented in bookkeeping_tail. Drives NN input slot 6.
     pub ticks_since_split: Vec<u32>,
     pub brains: Vec<Brain>,
-    /// v2.0 Wave 2a: per-creature evolving 6-trait body genome. Sim-side only —
-    /// never rides the snapshot (the render-side color is *derived* from it at
-    /// write time). Founders draw uniformly in [0,1]; children mutate off the
-    /// same per-birth mutation bucket as the brain (sigma × the trait-sigma
-    /// slider).
-    pub genome: Vec<Genome>,
+    /// v2.1 P2: lineage/ancestry hue ∈ [0, 1). Founders get distinct seed hues
+    /// spread across the color wheel. At each split/birth the child inherits the
+    /// parent hue plus a small Gaussian nudge (σ = HUE_MUTATION_SIGMA), wrapped
+    /// to [0, 1). Used by `lineage_color_u32` in the snapshot packer.
+    pub hue: Vec<f32>,
     /// v2.0 Wave 2a: transient ring-flash action tag + ticks remaining.
     /// `flash_tag[i]` is the highest-priority action that fired recently;
     /// `flash_ticks[i]` counts down to 0 (cleared in bookkeeping_tail). Packed
@@ -323,7 +134,7 @@ impl CreatureSoA {
             birth_tick: Vec::with_capacity(cap),
             ticks_since_split: Vec::with_capacity(cap),
             brains: Vec::with_capacity(cap),
-            genome: Vec::with_capacity(cap),
+            hue: Vec::with_capacity(cap),
             flash_tag: Vec::with_capacity(cap),
             flash_ticks: Vec::with_capacity(cap),
             species_id: Vec::with_capacity(cap),
@@ -340,8 +151,8 @@ impl CreatureSoA {
         self.len() == 0
     }
 
-    /// Append one creature. Returns new index. v2.0 Wave 2a: takes the
-    /// per-creature `genome`. v2.0 Wave 3a: takes `species_id` (0 = single-pool
+    /// Append one creature. Returns new index. v2.1 P2: takes a `hue` float
+    /// instead of a `Genome`. v2.0 Wave 3a: takes `species_id` (0 = single-pool
     /// / unused). New creatures are born with a `Born` ring-flash (teal) lit for
     /// `FLASH_TICKS`.
     #[allow(clippy::too_many_arguments)]
@@ -353,7 +164,7 @@ impl CreatureSoA {
         energy: f32,
         birth_tick: u32,
         brain: Brain,
-        genome: Genome,
+        hue: f32,
         species_id: u16,
     ) -> usize {
         self.id.push(id);
@@ -370,7 +181,7 @@ impl CreatureSoA {
         self.distance_travelled.push(0.0);
         self.birth_tick.push(birth_tick);
         self.ticks_since_split.push(0);
-        self.genome.push(genome);
+        self.hue.push(hue.rem_euclid(1.0));
         // v2.0 Wave 2a: newborns flash teal ("born").
         self.flash_tag.push(FlashTag::Born);
         self.flash_ticks.push(FLASH_TICKS);
@@ -413,7 +224,7 @@ impl CreatureSoA {
             self.distance_travelled.swap_remove(k);
             self.birth_tick.swap_remove(k);
             self.ticks_since_split.swap_remove(k);
-            self.genome.swap_remove(k);
+            self.hue.swap_remove(k);
             self.flash_tag.swap_remove(k);
             self.flash_ticks.swap_remove(k);
             self.species_id.swap_remove(k);
@@ -427,35 +238,34 @@ impl CreatureSoA {
 mod tests {
     use super::*;
     use crate::brain::{Brain, NnTopology};
-    use crate::rng::SimRng;
 
     /// v1.5 S5b: remove_indices keeps every SoA column length-consistent.
     #[test]
     fn remove_indices_preserves_column_lengths() {
         let mut soa = CreatureSoA::with_capacity(4);
-        let mut rng = SimRng::from_u64(1);
+        let mut rng = crate::rng::SimRng::from_u64(1);
         for i in 0..4u64 {
             let b = Brain::founder(&mut rng, NnTopology::legacy());
-            soa.push(i, i as f32 * 10.0, 0.0, 100.0, 0, b, Genome::median(), 0);
+            soa.push(i, i as f32 * 10.0, 0.0, 100.0, 0, b, 0.1 * i as f32, 0);
         }
         assert_eq!(soa.len(), 4);
         soa.remove_indices(&[1]);
         assert_eq!(soa.len(), 3);
         assert_eq!(soa.x.len(), 3);
-        assert_eq!(soa.genome.len(), 3);
+        assert_eq!(soa.hue.len(), 3);
         assert_eq!(soa.flash_tag.len(), 3);
         assert_eq!(soa.ticks_since_split.len(), 3);
     }
 
-    /// v2.0 Wave 2a: push takes a Genome; len round-trips correctly.
+    /// v2.1 P2: push with hue; len round-trips correctly.
     #[test]
-    fn push_with_genome_roundtrips_len() {
+    fn push_with_hue_roundtrips_len() {
         let mut soa = CreatureSoA::with_capacity(4);
-        let mut rng = SimRng::from_u64(42);
+        let mut rng = crate::rng::SimRng::from_u64(42);
         for k in 0u64..5 {
             let b = Brain::founder(&mut rng, NnTopology::legacy());
-            let g = Genome::founder(&mut rng);
-            soa.push(k, k as f32, 0.0, 100.0, 0, b, g, 0);
+            let hue = (k as f32) / 5.0;
+            soa.push(k, k as f32, 0.0, 100.0, 0, b, hue, 0);
         }
         assert_eq!(soa.len(), 5);
         soa.remove_indices(&[0, 2]);
@@ -466,10 +276,10 @@ mod tests {
     #[test]
     fn newborns_flash_born_at_birth() {
         let mut soa = CreatureSoA::with_capacity(2);
-        let mut rng = SimRng::from_u64(7);
+        let mut rng = crate::rng::SimRng::from_u64(7);
         for k in 0u64..3 {
             let b = Brain::founder(&mut rng, NnTopology::legacy());
-            soa.push(k, k as f32, 0.0, 100.0, 0, b, Genome::median(), 0);
+            soa.push(k, k as f32, 0.0, 100.0, 0, b, 0.0, 0);
         }
         for i in 0..soa.len() {
             assert_eq!(
@@ -488,9 +298,9 @@ mod tests {
     #[test]
     fn set_flash_keeps_highest_priority() {
         let mut soa = CreatureSoA::with_capacity(1);
-        let mut rng = SimRng::from_u64(3);
+        let mut rng = crate::rng::SimRng::from_u64(3);
         let b = Brain::founder(&mut rng, NnTopology::legacy());
-        soa.push(0, 0.0, 0.0, 100.0, 0, b, Genome::median(), 0);
+        soa.push(0, 0.0, 0.0, 100.0, 0, b, 0.5, 0);
         // Lower-priority Grazed over the Born-at-spawn (Born p=1 < Grazed p=2).
         soa.set_flash(0, FlashTag::Grazed);
         assert_eq!(soa.flash_tag[0], FlashTag::Grazed);
@@ -500,5 +310,20 @@ mod tests {
         // Attacked (p=3) does NOT downgrade Killed within the same tick.
         soa.set_flash(0, FlashTag::Attacked);
         assert_eq!(soa.flash_tag[0], FlashTag::Killed);
+    }
+
+    /// v2.1 P2: hue is stored wrapped to [0, 1).
+    #[test]
+    fn hue_wraps_to_unit_interval() {
+        let mut soa = CreatureSoA::with_capacity(2);
+        let mut rng = crate::rng::SimRng::from_u64(5);
+        let b = Brain::founder(&mut rng, NnTopology::legacy());
+        // Push with hue slightly over 1.0 — should wrap.
+        soa.push(0, 0.0, 0.0, 100.0, 0, b, 1.05, 0);
+        assert!(
+            soa.hue[0] < 1.0 && soa.hue[0] >= 0.0,
+            "hue must be in [0,1); got {}",
+            soa.hue[0]
+        );
     }
 }

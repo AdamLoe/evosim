@@ -1,8 +1,9 @@
 //! World — owns SoA + grass + RNG + tick orchestration.
 //!
 //! Within-tick ordering follows v5 §3.5. NN forward pass is live (Milestone D).
-//! v2.0 Wave 2a: per-creature 6-trait body `Genome` reintroduced (single-pool);
-//! Action enum is {Graze, Attack, Split}; per-creature ring-flash state.
+//! v2.1 P2: genome removed; brain is the only heritable thing. Lineage hue
+//! replaces genome for visual identity. Biome penalty removed; only grass
+//! capacity cap remains.
 
 // v2.0.6 S9: exposed pub on non-wasm32 so the snapshot_write bench can call
 // generate_biome_grid directly without a wasm_api wrapper.
@@ -34,12 +35,6 @@ mod biome_tests;
 #[path = "grass_biome_tests.rs"]
 mod grass_biome_tests;
 
-// v2.0 Wave 2a: body-genome mutation determinism + ring-flash + genome-modulated
-// penalty tests, in their own file/module (same merge-hazard rule).
-#[cfg(test)]
-#[path = "genome_tests.rs"]
-mod genome_tests;
-
 // v2.0 Wave 3a: species + sexual-mating tests (mate fires same-species within
 // contact radius, Attack same-species gate, crossover distributions,
 // initiator-only cost/cooldown, species-mode determinism), in their own
@@ -70,11 +65,24 @@ mod seeding_tests;
 #[path = "grass_sight_tests.rs"]
 mod grass_sight_tests;
 
+// v2.1 P3: food-limited equilibrium verification harness. Headless K-seed ×
+// T-tick run; asserts population band + foraging-proxy trend + backstop-cull
+// non-firing.
+#[cfg(test)]
+#[path = "equilibrium_tests.rs"]
+mod equilibrium_tests;
+
+// v2.1 P3 red-team: HONEST measurement harness (death-cohort age + energy).
+// `#[ignore]`d; not part of the gate. Run with `--ignored --nocapture`.
+#[cfg(test)]
+#[path = "equilibrium_measure.rs"]
+mod equilibrium_measure;
+
 use self::nn::{chunk_ranges, dynamic_chunks};
 use self::tick::AttackPick;
 use crate::brain::{Brain, MutationPolicy, NnTopology};
 use crate::constants::*;
-use crate::creature::{Action, CreatureSoA, FlashTag, Genome};
+use crate::creature::{Action, CreatureSoA, FlashTag, HUE_MUTATION_SIGMA};
 use crate::grass::{GrassGrid, GrassPropagation};
 use crate::grid::SpatialGrid;
 use crate::rng::SimRng;
@@ -153,17 +161,6 @@ pub struct DevSliders {
     /// construction/boot; Wave 1b uses it for biome generation. SEPARATE from
     /// the string/XxHash64 sim RNG seed — they are not coupled.
     pub world_seed: u32,
-    /// Live-tunable Water biome base movement-penalty severity `p ∈ [0, 1]`
-    /// (v2.0 Wave 1b). Drives reduced speed / extra upkeep / higher move-cost
-    /// while a creature is on a Water cell. Genome-independent in Wave 1b.
-    pub water_movement_penalty: f32,
-    /// Live-tunable Desert biome base movement-penalty severity `p ∈ [0, 1]`
-    /// (v2.0 Wave 1b). Same three effects as `water_movement_penalty`.
-    pub desert_movement_penalty: f32,
-    /// v2.0 Wave 2a: live multiplier on the per-birth body-genome mutation step.
-    /// The genome mutates off the SAME bucket as the brain (per child), but each
-    /// trait's Gaussian nudge uses `chosen_bucket.sigma * this`. Default 0.3.
-    pub trait_mutation_sigma_multiplier: f32,
     /// v2.0 Wave 3a construction-only: species + sexual-mating mode. OFF ⇒
     /// today's single-pool asexual `Split` sim (unchanged). ON ⇒ 10 seeded
     /// species + `Mate` + Attack-refuses-same-species + 16-sector creature
@@ -172,17 +169,15 @@ pub struct DevSliders {
     pub species_mode: bool,
     /// v2.0 Wave 3a construction-only: crossover policy for sexual reproduction
     /// (species_mode). `Average` = per-slot midpoint; `FiftyFifty` = per-slot
-    /// 50/50 pick. Applied to both brain weights and the 6 genome traits, then
-    /// mutation. Default `FiftyFifty`.
+    /// 50/50 pick. Applied to brain weights, then mutation. Default `FiftyFifty`.
     pub crossover_mode: CrossoverMode,
     /// v2.0 Wave 3a construction-only: number of seeded species (species_mode).
     pub starting_species_count: u32,
     /// v2.0 Wave 3a construction-only: founders per species (species_mode).
     pub starting_species_member_count: u32,
-    /// v2.0 Wave 3a construction-only: per-founder spread multiplier. ACCEPTED
-    /// but INERT in Wave 3 (the placeholder seeding draws uniform-random founder
-    /// genomes); Wave 4 applies it to the per-founder bucket draw. The slider is
-    /// wired + plumbed now so the slider set is final.
+    /// v2.0 Wave 3a construction-only: per-founder spread multiplier applied
+    /// to hue and brain bucket sigmas at seeding. Live but has a small effect
+    /// post-P2 since only hue spread is scaled (genome is gone).
     pub starting_species_member_variance: f32,
     /// v2.0 Wave 3a live: initiator-only post-mating cooldown (ticks). The
     /// initiator pays this after a successful `Mate`; the partner is unaffected.
@@ -244,6 +239,30 @@ pub struct DevSliders {
     /// Applied ONCE to founder brains at construction. >1.0 biases new creatures
     /// toward splitting/mating; 1.0 is a no-op.
     pub init_split_boost: f32,
+
+    // ── v2.1 P3: food-limited equilibrium knobs (idx 67–72) ─────────────────
+    /// Per-neighbour extra energy drain per tick.  Crowded creatures pay
+    /// `crowding_strength × neighbour_count` extra upkeep per tick, draining
+    /// energy faster than isolated ones.  Reuses the spatial-hash; no new O(n²)
+    /// pass.  Live-tunable.  See constants::CROWDING_STRENGTH_DEFAULT.
+    pub crowding_strength: f32,
+    /// Radius (world-units) within which neighbours are counted for the crowding
+    /// upkeep.  Must be ≤ PROXIMITY_RANGE (20u) so the hash-cell (20u) bounds
+    /// the candidate scan.  Live-tunable.
+    pub crowding_radius: f32,
+    /// Energy level at which starvation drain kicks in.  Creatures below this
+    /// threshold pay `starvation_drain_rate` extra per tick.  Live-tunable.
+    pub starvation_threshold: f32,
+    /// Extra per-tick drain while below `starvation_threshold`.  Stacks on top
+    /// of idle upkeep; death at energy ≤ 0 as normal.  Live-tunable.
+    pub starvation_drain_rate: f32,
+    /// Multiplier on every grass cell's carrying-capacity cap.  1.0 = unchanged
+    /// (Plains 1.0, Desert 0.30, Water 0.04).  Scaling down permanently caps
+    /// total food → lowers equilibrium population.  Live-tunable.
+    pub grass_capacity_scale: f32,
+    /// Multiplier on grass-scatter spread probability and in-cell growth rate.
+    /// Values < 1.0 slow regrowth; > 1.0 enrich the world.  Live-tunable.
+    pub grass_regrowth_rate: f32,
 }
 
 impl Default for DevSliders {
@@ -275,9 +294,6 @@ impl Default for DevSliders {
             // Default: random per construction (caller may override). Kept
             // separate from the string RNG seed — see `world_seed` doc.
             world_seed: 0,
-            water_movement_penalty: WATER_MOVEMENT_PENALTY_DEFAULT,
-            desert_movement_penalty: DESERT_MOVEMENT_PENALTY_DEFAULT,
-            trait_mutation_sigma_multiplier: TRAIT_MUTATION_SIGMA_MULTIPLIER_DEFAULT,
             species_mode: SPECIES_MODE_DEFAULT,
             crossover_mode: CROSSOVER_MODE_DEFAULT,
             starting_species_count: STARTING_SPECIES_COUNT_DEFAULT,
@@ -305,6 +321,13 @@ impl Default for DevSliders {
             mate_reach_multiplier: MATE_REACH_MULTIPLIER_DEFAULT,
             init_graze_boost: INIT_GRAZE_BOOST_DEFAULT,
             init_split_boost: INIT_SPLIT_BOOST_DEFAULT,
+            // v2.1 P3: food-limited equilibrium knobs. All live-tunable.
+            crowding_strength: CROWDING_STRENGTH_DEFAULT,
+            crowding_radius: CROWDING_RADIUS_DEFAULT,
+            starvation_threshold: STARVATION_THRESHOLD_DEFAULT,
+            starvation_drain_rate: STARVATION_DRAIN_RATE_DEFAULT,
+            grass_capacity_scale: GRASS_CAPACITY_SCALE_DEFAULT,
+            grass_regrowth_rate: GRASS_REGROWTH_RATE_DEFAULT,
         }
     }
 }
@@ -456,10 +479,6 @@ pub struct World {
     /// parallel clone phase; `None` for culled-before-birth newborns. Drained
     /// during the sequential apply phase.
     pub(crate) scratch_child_brains: Vec<Option<Brain>>,
-    /// v2.0 Wave 2a: per-splitter prospective child genome, computed in the same
-    /// parallel phase as the child brain (off the SAME per-birth mutation bucket
-    /// draw, scaled by `trait_mutation_sigma_multiplier`). `Some` for survivors.
-    pub(crate) scratch_child_genomes: Vec<Option<Genome>>,
     /// v1.5 S3: per-creature pre-fallthrough argmax (index of largest action
     /// logit before validity gating). 0=Graze, 1=Eat, 2=Split. Consumed by the
     /// color-EMA bookkeeping pass to credit Graze intent even when fallthrough
@@ -618,11 +637,11 @@ impl World {
         let mut species = species::SpeciesRegistry::new();
         let mut next_id: u64 = 0;
         if species_mode {
-            // v2.0 Wave 4: REAL N-anchor biome-adapted seeding.
+            // N-anchor species seeding.
             //
             // Determinism: a DEDICATED setup PRNG seeded from `world_seed`
             // (`world_seed ^ SEEDING_PRNG_SALT`) drives EVERYTHING here — anchors,
-            // canonical genomes, founder-spread, founder brains. It is a distinct
+            // canonical hue, founder-spread, founder brains. It is a distinct
             // stream from the biome generator (raw `world_seed` SplitMix64) AND
             // from the sim RNG (`rng`, string-seeded). So the same `world_seed`
             // reproduces the same tick-0 species layout while the run still varies
@@ -635,7 +654,6 @@ impl World {
             species = species::SpeciesRegistry::seed(species_count);
             let policy = &sliders.mutation_policy;
             let variance = sliders.starting_species_member_variance;
-            let trait_sigma_mult = sliders.trait_mutation_sigma_multiplier;
 
             // 1. Anchors spread across the world (rejection-sampled min spacing).
             let anchors = pick_anchors(
@@ -653,21 +671,18 @@ impl World {
 
             for (s, &(ax, ay)) in anchors.iter().enumerate() {
                 let sp_id = s as u16;
-                // 2. Canonical "first member": a random founder brain + a genome
-                //    BIASED to survive the biome under the anchor (water →
-                //    water_affinity, desert → heat_tolerance, plains → moderate
-                //    both); body_size/max_speed/metabolism/diet stay random.
-                let anchor_biome = biome::biome_at_pos(&biome_grid, &dims, ax, ay);
+                // 2. Canonical "first member": a random founder brain with a
+                //    distinct seed hue for this species.
                 let mut canonical_brain = Brain::founder(&mut seed_rng, nn_topology.clone());
                 // Founder-only action-output boost (no-op at 1.0). Applied to the
                 // canonical brain ONCE; spread members derive from it so they
                 // inherit the boost exactly once (no compounding).
                 canonical_brain
                     .boost_action_outputs(sliders.init_graze_boost, sliders.init_split_boost);
-                let canonical_genome = Genome::canonical_for_biome(&mut seed_rng, anchor_biome);
+                // Distinct seed hue per species, spread evenly across the wheel.
+                let canonical_hue = (s as f32) / (species_count as f32);
 
-                // The canonical member spawns AT the anchor (no jitter) so the
-                // first member is exactly reproducible and centred.
+                // The canonical member spawns AT the anchor (no jitter).
                 creatures.push(
                     next_id,
                     ax,
@@ -675,19 +690,18 @@ impl World {
                     founder_energy,
                     0,
                     canonical_brain.clone(),
-                    canonical_genome,
+                    canonical_hue,
                     sp_id,
                 );
                 next_id += 1;
 
                 // 3. `member_count - 1` more founders clustered near the anchor.
-                //    Each = the canonical brain+genome run through ONE normal
-                //    per-birth bucket draw (the same MutationPolicy machinery as a
-                //    real child), with that bucket's RATE AND SIGMA both multiplied
-                //    by `starting_species_member_variance`. Genome spread rides the
-                //    SAME per-founder draw (bucket sigma × variance × trait mult),
-                //    clamped to [0, 1]. Placement jitter is from the SAME seeding
-                //    PRNG (deterministic from `world_seed`).
+                //    Each = the canonical brain run through ONE normal per-birth
+                //    bucket draw (same MutationPolicy machinery as a real child),
+                //    with rate and sigma multiplied by `starting_species_member_variance`.
+                //    Hue inherits from canonical with a small Gaussian mutation.
+                //    Placement jitter is from the SAME seeding PRNG (deterministic
+                //    from `world_seed`).
                 for _ in 1..member_count {
                     let (member_brain, spread_sigma) = Brain::founder_spread_with_sigma(
                         &canonical_brain,
@@ -695,10 +709,9 @@ impl World {
                         policy,
                         variance,
                     );
-                    // Genome founder-spread off the same draw: bucket sigma (already
-                    // × variance) scaled by the trait multiplier, clamped [0,1].
-                    let member_genome =
-                        canonical_genome.mutated(&mut seed_rng, spread_sigma * trait_sigma_mult);
+                    // Hue inherits with a small mutation scaled by spread_sigma.
+                    let hue_nudge = seed_rng.normal() * spread_sigma * HUE_MUTATION_SIGMA;
+                    let member_hue = (canonical_hue + hue_nudge).rem_euclid(1.0);
                     let jx = seed_rng.symm() * cluster_radius;
                     let jy = seed_rng.symm() * cluster_radius;
                     let (x, y) = if dims.wrap_world {
@@ -716,7 +729,7 @@ impl World {
                         founder_energy,
                         0,
                         member_brain,
-                        member_genome,
+                        member_hue,
                         sp_id,
                     );
                     next_id += 1;
@@ -732,17 +745,20 @@ impl World {
                 let mut brain = Brain::founder(&mut rng, nn_topology.clone());
                 // Founder-only action-output boost (no-op at 1.0).
                 brain.boost_action_outputs(sliders.init_graze_boost, sliders.init_split_boost);
-                // v2.0 Wave 2a: single-pool founders draw a genome uniformly in
-                // [0,1] per trait (visible diversity from tick 0). Drawn AFTER the
-                // brain so the RNG stream stays deterministic.
-                let genome = Genome::founder(&mut rng);
+                // v2.1 P2: founder hue spread evenly across the color wheel so the
+                // initial population has visible diversity from tick 0.
+                let hue = if founder_count > 1 {
+                    (k as f32) / (founder_count as f32)
+                } else {
+                    0.33 // single founder: mid-green
+                };
                 // Halton (2, 3) gives a low-discrepancy 2D sequence; shift by 1 so
                 // the first sample isn't (0, 0).
                 let hx = halton(k + 1, 2);
                 let hy = halton(k + 1, 3);
                 let x = lo + hx * (hi - lo);
                 let y = lo + hy * (hi - lo);
-                creatures.push(k as u64, x, y, founder_energy, 0, brain, genome, 0);
+                creatures.push(k as u64, x, y, founder_energy, 0, brain, hue, 0);
                 next_id += 1;
             }
         }
@@ -782,7 +798,6 @@ impl World {
             scratch_existing_dead: Vec::new(),
             scratch_birth_seeds: Vec::new(),
             scratch_child_brains: Vec::new(),
-            scratch_child_genomes: Vec::new(),
             scratch_argmax_pre: Vec::new(),
             sector_lut,
             scratch_sector_accum: Vec::new(),
@@ -806,31 +821,6 @@ impl World {
         self.dims.world_size
     }
 
-    /// Grass-cell index for a world-unit position. Wrap-aware: toroidal worlds
-    /// wrap the coordinate into `[0, world_size)` before indexing; walled worlds
-    /// clamp to the valid cell range. Returns a flat row-major index into the
-    /// `grass_dim × grass_dim` biome grid. (v2.0 Wave 1b.)
-    #[inline]
-    pub(crate) fn biome_cell_index(&self, x: f32, y: f32) -> usize {
-        let dim = self.dims.grass_dim;
-        let ws = self.dims.world_size;
-        let cs = self.dims.grass_cell_size;
-        let (px, py) = if self.dims.wrap_world {
-            (x.rem_euclid(ws), y.rem_euclid(ws))
-        } else {
-            (x.clamp(0.0, ws), y.clamp(0.0, ws))
-        };
-        let ix = ((px / cs) as usize).min(dim - 1);
-        let iy = ((py / cs) as usize).min(dim - 1);
-        iy * dim + ix
-    }
-
-    /// Biome under a world-unit position. Wrap-aware. (v2.0 Wave 1b.)
-    #[inline]
-    pub(crate) fn biome_at(&self, x: f32, y: f32) -> Biome {
-        biome::biome_from_u8(self.biome_grid[self.biome_cell_index(x, y)])
-    }
-
     /// The raw biome grid bytes (one `Biome as u8` per grass cell, row-major).
     /// Used to build the static biome pyramid. (v2.0 Wave 1b.)
     #[inline]
@@ -838,54 +828,26 @@ impl World {
         &self.biome_grid
     }
 
-    /// Base movement-penalty severity `p ∈ [0, 1]` for the cell under a
-    /// position. Genome-INDEPENDENT (the base severity). Plains = 0;
-    /// Water/Desert read their live-tunable sliders. v2.0 Wave 2a: the live tick
-    /// path now uses `movement_penalty_for` (genome-modulated); this base helper
-    /// is retained for the biome tests + as documentation of the base severity.
-    #[inline]
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn movement_penalty_at(&self, x: f32, y: f32) -> f32 {
-        match self.biome_at(x, y) {
-            Biome::Plains => 0.0,
-            Biome::Water => self.sliders.water_movement_penalty,
-            Biome::Desert => self.sliders.desert_movement_penalty,
-        }
-    }
-
-    /// v2.0 Wave 2a: genome-MODULATED movement-penalty severity `p ∈ [0, 1]`
-    /// for creature `i` at its current cell. The biome under the body selects
-    /// which trait reduces the base severity: Water → `p *= (1 -
-    /// water_affinity)`, Desert → `p *= (1 - heat_tolerance)`, Plains → 0.
-    ///
-    /// So a high-water_affinity creature both *reads* (via the same modulation
-    /// applied to its biome NN inputs) and *pays* a lower water penalty — this
-    /// closes the Wave 1b seam. Clamped to [0, 1].
-    #[inline]
-    pub(crate) fn movement_penalty_for(&self, i: usize) -> f32 {
-        let x = self.creatures.x[i];
-        let y = self.creatures.y[i];
-        let g = &self.creatures.genome[i];
-        let p = match self.biome_at(x, y) {
-            Biome::Plains => return 0.0,
-            Biome::Water => self.sliders.water_movement_penalty * (1.0 - g.water_affinity),
-            Biome::Desert => self.sliders.desert_movement_penalty * (1.0 - g.heat_tolerance),
-        };
-        p.clamp(0.0, 1.0)
-    }
-
     /// v2.0.2 Stream 1d: extract the six scatter DevSliders fields into a
     /// `ScatterParams` struct, which the caller passes to
     /// `GrassGrid::apply_scatter_params` before each propagation step.
+    /// v2.1 P3: also threads `grass_capacity_scale` and `grass_regrowth_rate`
+    /// into the kernel (capacity_scale = direct; regrowth_rate multiplied into
+    /// spread_pct).
     #[inline]
     fn scatter_params_from_sliders(&self) -> crate::grass::ScatterParams {
+        let regrowth = self.sliders.grass_regrowth_rate.max(0.0);
         crate::grass::ScatterParams {
             decay_pct: self.sliders.grass_decay_pct,
             decay_amount: self.sliders.grass_decay_amount,
-            spread_pct: self.sliders.grass_spread_pct,
+            // v2.1 P3: multiply spread_pct by regrowth_rate so a single knob
+            // scales food throughput without touching the other scatter params.
+            spread_pct: (self.sliders.grass_spread_pct * regrowth).clamp(0.0, 1.0),
             spread_amount: self.sliders.grass_spread_amount,
             ring1_pct: self.sliders.grass_spread_ring1_pct,
             ring2_pct: self.sliders.grass_spread_ring2_pct,
+            // v2.1 P3: carrying-capacity scale (1.0 = unchanged).
+            capacity_scale: self.sliders.grass_capacity_scale,
         }
     }
 
@@ -914,8 +876,10 @@ impl World {
                     .apply_scatter_params(self.scatter_params_from_sliders());
                 // C2: gate per-tile profiling clocks off the profiler enabled-state.
                 self.grass.set_profile_scatter(self.profile.enabled());
+                // v2.1 P3: multiply in-cell growth rate by grass_regrowth_rate.
+                let regrowth = self.sliders.grass_regrowth_rate.max(0.0);
                 self.grass.compute_propagation(
-                    self.sliders.grass_in_cell_growth_r,
+                    self.sliders.grass_in_cell_growth_r * regrowth,
                     self.sliders.grass_propagation_rate_k,
                 );
                 self.grass.rebuild_row_bitset();
@@ -999,8 +963,10 @@ impl World {
                 .apply_scatter_params(self.scatter_params_from_sliders());
             // C2: gate per-tile profiling clocks off the profiler enabled-state.
             self.grass.set_profile_scatter(self.profile.enabled());
+            // v2.1 P3: multiply in-cell growth rate by grass_regrowth_rate.
+            let regrowth = self.sliders.grass_regrowth_rate.max(0.0);
             self.grass.compute_propagation(
-                self.sliders.grass_in_cell_growth_r,
+                self.sliders.grass_in_cell_growth_r * regrowth,
                 self.sliders.grass_propagation_rate_k,
             );
             use std::sync::atomic::Ordering;
@@ -1256,54 +1222,37 @@ impl World {
         let mut child_brains = std::mem::take(&mut self.scratch_child_brains);
         child_brains.clear();
         child_brains.resize_with(n_splitters, || None);
-        // v2.0 Wave 2a: child genome buffer, computed in lockstep with the brain.
-        let mut child_genomes = std::mem::take(&mut self.scratch_child_genomes);
-        child_genomes.clear();
-        child_genomes.resize_with(n_splitters, || None);
-
         let policy = &self.sliders.mutation_policy;
         let mut_mult = self.sliders.mutation_rate_multiplier;
-        let trait_sigma_mult = self.sliders.trait_mutation_sigma_multiplier;
         {
             let brains = &self.creatures.brains[..n];
-            let parent_genomes = &self.creatures.genome[..n];
             let splitters_view = &splitters[..];
             let seeds_view = &seeds[..];
             let dead_mask = &newborn_dead[..];
             let out = &mut child_brains[..];
-            let out_g = &mut child_genomes[..];
 
-            let build_one = |k: usize, slot: &mut Option<Brain>, gslot: &mut Option<Genome>| {
+            let build_one = |k: usize, slot: &mut Option<Brain>| {
                 if dead_mask[k] {
                     return;
                 }
                 let parent = &brains[splitters_view[k]];
                 let mut rng = SimRng::from_u64(seeds_view[k]);
-                // v2.0 Wave 2a: the genome mutates off the SAME per-birth bucket
-                // draw as the brain. `child_from_with_sigma` returns the chosen
-                // bucket's sigma; the genome step is that sigma × the trait
-                // multiplier. Genome draws happen AFTER the brain weights on the
-                // same RNG so the stream stays deterministic (draw order fixed).
-                let (child_brain, bucket_sigma) =
+                let (child_brain, _bucket_sigma) =
                     Brain::child_from_with_sigma(parent, &mut rng, policy, mut_mult);
-                let parent_genome = &parent_genomes[splitters_view[k]];
-                let child_genome = parent_genome.mutated(&mut rng, bucket_sigma * trait_sigma_mult);
                 *slot = Some(child_brain);
-                *gslot = Some(child_genome);
             };
 
             #[cfg(feature = "threads")]
             {
                 use rayon::prelude::*;
                 out.par_iter_mut()
-                    .zip(out_g.par_iter_mut())
                     .enumerate()
-                    .for_each(|(k, (slot, gslot))| build_one(k, slot, gslot));
+                    .for_each(|(k, slot)| build_one(k, slot));
             }
             #[cfg(not(feature = "threads"))]
             {
-                for (k, (slot, gslot)) in out.iter_mut().zip(out_g.iter_mut()).enumerate() {
-                    build_one(k, slot, gslot);
+                for (k, slot) in out.iter_mut().enumerate() {
+                    build_one(k, slot);
                 }
             }
         }
@@ -1325,7 +1274,10 @@ impl World {
             self.creatures.energy[parent_i] = parent_energy_after_cost - gift;
 
             if let Some(child_brain) = child_brains[k].take() {
-                let child_genome = child_genomes[k].take().unwrap_or_else(Genome::median);
+                // Hue inherits from parent with small Gaussian mutation.
+                let parent_hue = self.creatures.hue[parent_i];
+                let hue_nudge = self.rng.normal() * HUE_MUTATION_SIGMA;
+                let child_hue = (parent_hue + hue_nudge).rem_euclid(1.0);
                 let jitter_x = self.rng.symm() * jitter_scale;
                 let jitter_y = self.rng.symm() * jitter_scale;
                 let (cx, cy) = if wrap {
@@ -1350,7 +1302,7 @@ impl World {
                     gift,
                     self.tick,
                     child_brain,
-                    child_genome,
+                    child_hue,
                     child_species,
                 );
                 // v2.0 Wave 2a: the splitting parent flashes blue ("created a
@@ -1386,7 +1338,6 @@ impl World {
         self.scratch_existing_dead = existing_dead;
         self.scratch_birth_seeds = seeds;
         self.scratch_child_brains = child_brains;
-        self.scratch_child_genomes = child_genomes;
     }
 
     /// v2.0 Wave 3a: sexual mating (species_mode). The action[2] slot decodes to
@@ -1439,7 +1390,7 @@ impl World {
             }
             let xi = self.creatures.x[i];
             let yi = self.creatures.y[i];
-            let ri = base_r * self.creatures.genome[i].body_size_factor();
+            let ri = base_r;
             let self_species = self.creatures.species_id[i];
             let grid = &self.grid;
             let creatures = &self.creatures;
@@ -1466,7 +1417,7 @@ impl World {
                     }
                 }
                 let d2 = dx * dx + dy * dy;
-                let rj = base_r * creatures.genome[j].body_size_factor();
+                let rj = base_r;
                 let contact = (ri + rj) * reach;
                 d2 <= contact * contact
             });
@@ -1516,60 +1467,46 @@ impl World {
             seeds.push(self.rng.next_u64());
         }
 
-        // 4. Parallel: crossover-then-mutate the child brain + genome for every
-        //    surviving pair. RNG draw order per child (deterministic): brain
-        //    crossover (+ bucket mutation), then genome crossover, then genome
-        //    mutation — all off the pair's pre-rolled seed.
+        // 4. Parallel: crossover-then-mutate the child brain for every
+        //    surviving pair. Hue blending is sequential (needs self.rng).
         let mut child_brains = std::mem::take(&mut self.scratch_child_brains);
         child_brains.clear();
         child_brains.resize_with(n_pairs, || None);
-        let mut child_genomes = std::mem::take(&mut self.scratch_child_genomes);
-        child_genomes.clear();
-        child_genomes.resize_with(n_pairs, || None);
 
         let policy = &self.sliders.mutation_policy;
         let mut_mult = self.sliders.mutation_rate_multiplier;
-        let trait_sigma_mult = self.sliders.trait_mutation_sigma_multiplier;
         {
             let brains = &self.creatures.brains[..n];
-            let genomes = &self.creatures.genome[..n];
             let inits = &initiators[..];
             let parts = &partners[..];
             let seeds_view = &seeds[..];
             let dead_mask = &newborn_dead[..];
             let out = &mut child_brains[..];
-            let out_g = &mut child_genomes[..];
 
-            let build_one = |k: usize, slot: &mut Option<Brain>, gslot: &mut Option<Genome>| {
+            let build_one = |k: usize, slot: &mut Option<Brain>| {
                 if dead_mask[k] {
                     return;
                 }
                 let pa = &brains[inits[k]];
                 let pb = &brains[parts[k]];
                 let mut rng = SimRng::from_u64(seeds_view[k]);
-                let (child_brain, bucket_sigma) = Brain::child_from_crossover_with_sigma(
+                let (child_brain, _bucket_sigma) = Brain::child_from_crossover_with_sigma(
                     pa, pb, &mut rng, policy, mut_mult, crossover,
                 );
-                let ga = &genomes[inits[k]];
-                let gb = &genomes[parts[k]];
-                let crossed = ga.crossed(gb, &mut rng, crossover);
-                let child_genome = crossed.mutated(&mut rng, bucket_sigma * trait_sigma_mult);
                 *slot = Some(child_brain);
-                *gslot = Some(child_genome);
             };
 
             #[cfg(feature = "threads")]
             {
                 use rayon::prelude::*;
                 out.par_iter_mut()
-                    .zip(out_g.par_iter_mut())
                     .enumerate()
-                    .for_each(|(k, (slot, gslot))| build_one(k, slot, gslot));
+                    .for_each(|(k, slot)| build_one(k, slot));
             }
             #[cfg(not(feature = "threads"))]
             {
-                for (k, (slot, gslot)) in out.iter_mut().zip(out_g.iter_mut()).enumerate() {
-                    build_one(k, slot, gslot);
+                for (k, slot) in out.iter_mut().enumerate() {
+                    build_one(k, slot);
                 }
             }
         }
@@ -1585,7 +1522,21 @@ impl World {
             self.creatures.mating_cooldown[init_i] = cooldown_ticks;
 
             if let Some(child_brain) = child_brains[k].take() {
-                let child_genome = child_genomes[k].take().unwrap_or_else(Genome::median);
+                // Hue: midpoint of both parents' hues + small Gaussian nudge.
+                let ha = self.creatures.hue[init_i];
+                let hb = self.creatures.hue[part_j];
+                let mid_hue = {
+                    // Minimum-arc midpoint on the hue circle.
+                    let mut diff = hb - ha;
+                    if diff > 0.5 {
+                        diff -= 1.0;
+                    } else if diff < -0.5 {
+                        diff += 1.0;
+                    }
+                    (ha + diff * 0.5).rem_euclid(1.0)
+                };
+                let hue_nudge = self.rng.normal() * HUE_MUTATION_SIGMA;
+                let child_hue = (mid_hue + hue_nudge).rem_euclid(1.0);
                 let species_id = self.creatures.species_id[init_i];
                 // Midpoint of the two parents (wrap-aware minimum-image so a
                 // seam-straddling pair spawns between them, not across the world).
@@ -1625,7 +1576,7 @@ impl World {
                     gift,
                     self.tick,
                     child_brain,
-                    child_genome,
+                    child_hue,
                     species_id,
                 );
                 // Initiator flashes blue ("created a child"); newborn teal via push.
@@ -1658,7 +1609,6 @@ impl World {
         self.scratch_existing_dead = existing_dead;
         self.scratch_birth_seeds = seeds;
         self.scratch_child_brains = child_brains;
-        self.scratch_child_genomes = child_genomes;
     }
 
     pub fn tick_once(&mut self) -> bool {
@@ -1680,7 +1630,7 @@ impl World {
                 self.creatures.energy[i],
                 self.creatures.birth_tick[i],
                 self.creatures.brains[i].clone(),
-                self.creatures.genome[i],
+                self.creatures.hue[i],
                 self.creatures.species_id[i],
             );
             // Restore non-push fields.
@@ -1732,7 +1682,6 @@ impl World {
             scratch_existing_dead: Vec::new(),
             scratch_birth_seeds: Vec::new(),
             scratch_child_brains: Vec::new(),
-            scratch_child_genomes: Vec::new(),
             scratch_argmax_pre: Vec::new(),
             sector_lut,
             scratch_sector_accum: Vec::new(),
@@ -1849,15 +1798,14 @@ mod tests {
         let mut seeder = SimRng::from_string("d19-seed");
 
         // Seed in 999 extra creatures (founder is already there).
-        // v2.0 Wave 2a: each gets a random genome too.
         let ws = w.world_size();
         for k in 0..999u64 {
             let b = Brain::founder(&mut seeder, NnTopology::legacy());
-            let g = Genome::founder(&mut seeder);
+            let hue = (k as f32) / 999.0;
             let x = seeder.uniform(10.0, ws - 10.0);
             let y = seeder.uniform(10.0, ws - 10.0);
             w.creatures
-                .push(k + 1, x, y, START_ENERGY_DEFAULT, 0, b, g, 0);
+                .push(k + 1, x, y, START_ENERGY_DEFAULT, 0, b, hue, 0);
         }
 
         let energy_start: f32 = w.creatures.energy.iter().sum();

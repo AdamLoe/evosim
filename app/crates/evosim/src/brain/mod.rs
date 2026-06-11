@@ -613,11 +613,8 @@ impl Brain {
     /// - Apply geometric-skip with `(bucket.rate * multiplier, bucket.sigma)`.
     ///
     /// `multiplier` is the global `mutation_rate_multiplier` slider; it scales
-    /// the chosen bucket's rate.
-    /// v2.0 Wave 2a: thin wrapper over `child_from_with_sigma` that discards the
-    /// returned bucket sigma. Retained for the brain-mutation unit tests; the
-    /// live birth path calls `child_from_with_sigma` directly (it needs the
-    /// sigma to drive the genome step off the same per-birth draw).
+    /// the chosen bucket's rate. This thin wrapper discards the returned bucket
+    /// sigma and is retained for the brain-mutation unit tests.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn child_from(
         parent: &Brain,
@@ -628,14 +625,13 @@ impl Brain {
         Self::child_from_with_sigma(parent, rng, policy, multiplier).0
     }
 
-    /// v2.0 Wave 2a: like `child_from`, but also returns the **chosen bucket's
-    /// sigma** so the caller can mutate the per-creature body genome off the
-    /// SAME per-birth bucket draw (the genome step scales this sigma by the
-    /// trait-mutation multiplier). Returns `0.0` for the frozen-evolution case
-    /// (all-zero bucket weights) — i.e. the genome is then copied verbatim too.
+    /// Like `child_from`, but also returns the **chosen bucket's sigma** so
+    /// callers can apply a paired heritable mutation, such as lineage hue
+    /// drift, off the same per-birth bucket draw. Returns `0.0` for the
+    /// frozen-evolution case (all-zero bucket weights).
     ///
     /// RNG draw order (deterministic, must not change): bucket pick, then the
-    /// brain-weight geometric-skip Gaussian walk. The genome draws (if any)
+    /// brain-weight geometric-skip Gaussian walk. Any paired heritable draws
     /// happen AFTER this returns, off the same `rng`.
     pub fn child_from_with_sigma(
         parent: &Brain,
@@ -673,11 +669,10 @@ impl Brain {
         (child, sigma)
     }
 
-    /// v2.0 Wave 3a: sexual child from TWO parents — per-weight crossover then
-    /// the same per-birth bucket mutation as `child_from_with_sigma`. Returns the
-    /// child brain + the chosen bucket's sigma so the caller can drive the genome
-    /// step off the SAME per-birth draw (genome crossover + mutation happen AFTER
-    /// this returns, on the same `rng`).
+    /// Sexual child from TWO parents: per-weight crossover, then the same
+    /// per-birth bucket mutation as `child_from_with_sigma`. Returns the child
+    /// brain plus the chosen bucket's sigma so callers can apply paired
+    /// heritable drift off the same draw.
     ///
     /// Both parents must share a topology (same-species mating guarantees it; we
     /// `debug_assert` the weight lengths agree and fall back to parent A's shape).
@@ -686,7 +681,7 @@ impl Brain {
     /// crossover — **fifty_fifty** draws one `rng.unit()` per weight slot to pick
     /// A vs B, while **average** consumes NO RNG (pure midpoint); then the bucket
     /// pick (one `rng.unit()`) and the geom-skip Gaussian mutation walk. The
-    /// genome crossover/mutation draws (if any) happen after this returns.
+    /// paired heritable draws, if any, happen after this returns.
     pub fn child_from_crossover_with_sigma(
         parent_a: &Brain,
         parent_b: &Brain,
@@ -762,14 +757,14 @@ impl Brain {
     ///
     /// `variance == 1.0` reproduces a normal child of the canonical member;
     /// higher = wider spread. Returns the (possibly empty) chosen-bucket sigma —
-    /// already scaled by `variance` — so the caller can drive the canonical
-    /// genome's founder-spread step off the SAME per-founder draw. Returns
+    /// already scaled by `variance` — so the caller can drive lineage-hue
+    /// founder spread off the same per-founder draw. Returns
     /// `0.0` (verbatim copy) for the frozen-evolution case (all-zero weights) or
     /// `variance <= 0`.
     ///
     /// RNG draw order (deterministic): bucket pick, then the geometric-skip
-    /// Gaussian walk. The genome founder-spread draws happen AFTER this returns,
-    /// off the same `rng`, exactly like the child path.
+    /// Gaussian walk. Any paired founder-spread draws happen AFTER this
+    /// returns, off the same `rng`, exactly like the child path.
     pub fn founder_spread_with_sigma(
         canonical: &Brain,
         rng: &mut SimRng,

@@ -227,4 +227,4 @@ the two-place COOP/COEP duplication, the gitignored `app/web/wasm/`.
 - [`../decisions/build.md`](../decisions/build.md)
 - [`../agent-context/dev-loop.md`](../agent-context/dev-loop.md)
 - [`../agent-context/maintaining-docs.md`](../agent-context/maintaining-docs.md)
-- [Doc authoring rules](~/.claude/agent-docs/v1/rules/authoring-rules.md)
+- [Doc authoring rules](~/agent-docs/v1/rules/authoring-rules.md)

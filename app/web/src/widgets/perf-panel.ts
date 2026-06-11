@@ -141,22 +141,31 @@ let workerStatsTeardown: (() => void) | null = null;
 
 /**
  * Set whether the perf+monitor panel is visible. Single source of truth for
- * both the persisted setting and the floating #perf-open toggle button.
- * Hidden state: DOM is display:none, samplers still run so the graphs and
- * profile counters fill in the moment the panel reappears.
+ * both the persisted setting and any toggle buttons.
+ * v2.1 P4: the profiler content now lives in #settings-profiler-pane inside
+ * the Settings rail; #perf-box in the left column is an empty placeholder kept
+ * for resize-handle compatibility. Visibility here means "show the profiler
+ * category pane content" — the pane itself is shown/hidden by the settings
+ * sub-nav, so `panelVisible` just controls whether the poll/render loop runs.
+ * Hidden state: samplers still run so the graphs and profile counters fill in
+ * the moment the panel category is navigated to.
  */
 export function setProfilerVisible(visible: boolean): void {
   panelVisible = visible;
-  const box = document.getElementById("perf-box");
-  if (box) box.style.display = visible ? "" : "none";
-  const openBtn = document.getElementById("perf-open");
-  if (openBtn) openBtn.classList.toggle("is-active", visible);
+  // v2.1 P4: profiler content is in #settings-profiler-pane (not #perf-box).
+  // Keep #perf-box hidden for resize-handle compat (it's an empty placeholder).
+  const pane = document.getElementById("settings-profiler-pane");
+  // The pane visibility is controlled by the settings sub-nav (is-active class),
+  // but we re-trigger chart/tree redraw when made visible.
   if (!isProfilerEnabled()) setProfilerEnabled(true);
-  if (visible) {
+  if (visible && pane) {
     if (lastBundle) pollAndRenderTrees(lastBundle);
     redrawFpsTpsChart();
     redrawPopChart();
   }
+  // Legacy: keep #perf-open sync if it exists (no-op if removed from DOM).
+  const openBtn = document.getElementById("perf-open");
+  if (openBtn) openBtn.classList.toggle("is-active", visible);
 }
 
 /**
@@ -285,7 +294,9 @@ export function setPanelBridge(simBridge: SimBridge): void {
 // ─── Installer ────────────────────────────────────────────────────────────
 
 export function installProfilerPanel(simBridge: SimBridge): void {
-  const box = document.getElementById("perf-box") as HTMLDivElement | null;
+  // v2.1 P4: profiler mounts into #settings-profiler-pane (inside the Settings
+  // rail's Profiler category). #perf-box stays in the DOM as an empty placeholder.
+  const box = document.getElementById("settings-profiler-pane") as HTMLDivElement | null;
   if (!box) return;
 
   // v2.0 Wave 5: capture the bridge so the painted-frame sampler can poll the

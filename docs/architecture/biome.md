@@ -1,7 +1,7 @@
 # Biome generation and effects
 
-Static biome map generation, biome cell lookup, and the three per-tick
-effects biome applies to creatures.
+Static biome map generation and the one surviving per-tick biome effect:
+grass-capacity capping.
 
 ## What it is
 
@@ -30,7 +30,9 @@ near **plains ~60% / water ~20% / desert ~20%** (plains is always the
 plurality).
 
 `biome_from_u8` decodes a raw u8 to the `Biome` enum (bounds-checked; any
-out-of-range byte maps to `Plains`).
+out-of-range byte maps to `Plains`). `capacity_factor_from_u8` maps a biome
+byte to its grass carrying-capacity factor (Plains ×1.0, Desert ×0.30,
+Water ×0.04).
 
 ## Static Biome Pyramid
 
@@ -41,57 +43,36 @@ only the current window with `BiomePyramid::copy_window`, appending it after
 the grass window in the snapshot slot. There is no separate full-field
 biome buffer exposed to the web shell.
 
-## Per-tick movement and energy effects
-
-`crates/evosim/src/world/mod.rs` → `movement_penalty_for`, `biome_at`
-
-Each non-Plains biome carries a base severity `p ∈ [0, 1]` — the live-tunable
-`water_movement_penalty` (default 0.8) and `desert_movement_penalty` (default
-0.4) sliders; Plains = 0. While a creature stands in a penalized cell, `p`
-drives three effects each tick (balance-knob coefficients in
-`crates/evosim/src/constants.rs`):
-
-- **Reduced speed cap** — `MOVE_SPEED_MAX × (1 − K_BIOME_SPEED · p)`;
-  `K_BIOME_SPEED` in `constants.rs` (`apply_movement_and_repulsion` in
-  `crates/evosim/src/world/tick.rs`).
-- **Higher move-cost multiplier** — per-distance move cost scaled by
-  `(1 + K_BIOME_COST · p)`; `K_BIOME_COST` in `constants.rs` (same pass).
-- **Extra per-tick upkeep** — flat surcharge `K_BIOME_UPKEEP · p` added after
-  the age multiplier; `K_BIOME_UPKEEP` in `constants.rs` (`energy_bookkeeping`
-  in `crates/evosim/src/world/tick.rs`).
-
-The penalty is **genome-modulated** per creature via
-`World::movement_penalty_for`: `water_affinity` reduces the effective penalty
-on Water cells; `heat_tolerance` reduces it on Desert cells. The same
-modulation is applied to the biome NN inputs so the creature's perceived
-penalty matches what it pays.
-
-## NN biome inputs
-
-`crates/evosim/src/world/nn.rs` → `BiomeSampler`, `NnInputGroup` (`BiomeDir`, `CurrCellPenalty`)
-
-Two always-on NN input groups expose biome to the creature brain:
-- **`BiomeDir`** (4 slots): genome-modulated movement penalty one cell
-  N/S/E/W from the creature (wrap-aware).
-- **`CurrCellPenalty`** (1 slot): penalty under the body.
-
-These groups are present in **both** `wrap_world` modes.
-
-## Grass biome-capacity scaling
+## Grass biome-capacity scaling (the ONLY surviving per-tick biome effect)
 
 `app/crates/evosim/src/grass/mod.rs` → `compute_propagation_scatter`
 
 Each grass cell's scatter spread is capped at a **biome-capacity byte**
-derived from the cell's biome. Water cells cap lower than Plains; Desert
-cells cap at their own level. The cap is applied to incoming spread writes
-(`scatter_add` clamps to the target cell's biome cap). This shapes grass
-density distributions by biome without per-tick overhead beyond the cap
-lookup.
+derived from the cell's biome via `capacity_factor_from_u8`. Plains cells
+cap at full capacity; Water and Desert cells cap lower. The cap is applied
+to incoming spread writes: `scatter_add` clamps to the target cell's biome
+cap. This limits food availability in non-Plains biomes, shaping grass
+density by biome without any per-creature movement or energy cost.
+
+Water and Desert cells are effectively **dead-grass avoidance zones** — the
+only reason to avoid them is lack of food, not a movement tax. There are no
+speed-cap, move-cost, or upkeep surcharges.
+
+## NN biome input
+
+`crates/evosim/src/world/nn.rs` → `NnInputGroup::CurrBiomeType`
+
+One always-on NN input group exposes the creature's current biome as a
+**raw normalized biome id**: Plains = 0.0, Water = 0.5, Desert = 1.0. This
+lets the brain learn to associate its current terrain with food scarcity
+without any genome modulation. The old `BiomeDir` (4 slots) +
+`CurrCellPenalty` (1 slot) groups are removed; `CurrBiomeType` is a net −4
+inputs vs. the prior layout.
 
 ## Invariants and gotchas
 
 - The biome grid is **static per run**. No in-run mutation. Any code that
-  calls `biome_at` after construction sees the same grid.
+  accesses `World.biome_grid` after construction sees the same grid.
 - The SplitMix64 generator is a **third independent RNG stream** (separate
   from the xoshiro sim RNG and the seeding PRNG). Sharing with either would
   break the invariant that `world_seed` pins both the biome map and the
@@ -99,18 +80,15 @@ lookup.
 - Toroidal distance in the blob generator matches `wrap_world` — if
   `wrap_world` is off, blobs use Euclidean distance and can crowd the map
   edges differently.
-- Genome modulation (affinity traits) is applied at the penalty *lookup*
-  site (`movement_penalty_for`), not at generation time. A creature with
-  `water_affinity = 1.0` pays zero penalty on Water cells even though the
-  biome grid still marks those cells as Water.
+- There is no genome-modulated penalty; every creature sees the same grass
+  capacity in each biome.
 
 ## Code anchors
 
-- `crates/evosim/src/world/biome.rs` → `generate_biome_grid`, `biome_from_u8`
-- `crates/evosim/src/world/mod.rs` → `movement_penalty_for`, `biome_at`, `biome_grid_bytes`
-- `crates/evosim/src/world/tick.rs` → `apply_movement_and_repulsion` (speed + cost effects), `energy_bookkeeping` (upkeep effect)
-- `crates/evosim/src/world/nn.rs` → `BiomeSampler`, `NnInputGroup` (`BiomeDir`, `CurrCellPenalty`)
-- `crates/evosim/src/constants.rs` → `Biome` enum, `K_BIOME_SPEED`, `K_BIOME_COST`, `K_BIOME_UPKEEP`, `WATER_MOVEMENT_PENALTY_DEFAULT`, `DESERT_MOVEMENT_PENALTY_DEFAULT`, `NN_BIOME_DIRS`
+- `crates/evosim/src/world/biome.rs` → `generate_biome_grid`, `biome_from_u8`, `capacity_factor_from_u8`
+- `crates/evosim/src/world/mod.rs` → `World.biome_grid` (the stored u8 grid)
+- `crates/evosim/src/world/nn.rs` → `NnInputGroup::CurrBiomeType`, `NnInputLayout::for_settings`
+- `crates/evosim/src/constants.rs` → `Biome` enum, `GRASS_CAPACITY_PLAINS`, `GRASS_CAPACITY_WATER`, `GRASS_CAPACITY_DESERT`
 - `app/crates/evosim/src/grass/mod.rs` → `compute_propagation_scatter` (biome-capacity cap on spread writes)
 - `app/crates/evosim/src/wasm_api/mod.rs` → `BiomePyramid` (`build`, `copy_window`)
 
@@ -119,6 +97,6 @@ lookup.
 - [`simulation-core.md`](simulation-core.md) — `World` overview, grass mechanic, `WorldDims` (world sizing)
 - [`render-pipeline.md`](render-pipeline.md) — biome-id quad drawn under the grass texture
 - [`shared-memory-and-protocol.md`](shared-memory-and-protocol.md) — per-slot biome window in wasm memory
-- [`../decisions/sim.md`](../decisions/sim.md) — rationale for static biome map and genome-modulated penalties
+- [`../decisions/sim.md`](../decisions/sim.md) — rationale for static biome map and food-only biome effect
 - [`../../agent-context/maintaining-docs.md`](../agent-context/maintaining-docs.md)
-- Global authoring rules: `~/.claude/agent-docs/v1/rules/authoring-rules.md`
+- Global authoring rules: `~/agent-docs/v1/rules/authoring-rules.md`

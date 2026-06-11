@@ -135,7 +135,7 @@
   one view.
 - **Why**: With editable/large worlds (default 9600u) you need *some* way to
   survey the whole map and see *where the factions are*, not just terrain. A
-  minimap / species heatmap is the right long-term answer (v2.1+); zoom-out +
+  minimap / species heatmap is the right long-term answer; zoom-out +
   1px points is nearly free and good enough now. Center clamp still prevents
   pan-into-the-void.
 - **Applies to**: `architecture/render-pipeline.md`.
@@ -147,45 +147,39 @@
 
 ### Snapshot carries render-only fields, packed compactly — stride stays 32 B
 
-- **Decision**: The per-creature `Genome` lives in `CreatureSoA` sim-side and
-  does **not** ride the snapshot. The snapshot carries only what the renderer
-  reads: position, body radius, a packed display color (`color_u32`), the
-  stable id (`id_lo`/`id_hi`), the action ring-flash + `species_id`
+- **Decision**: Per-creature brain state and lineage hue live in `CreatureSoA`
+  sim-side and do **not** ride the snapshot except for the packed display
+  color. The snapshot carries only what the renderer reads: position, body
+  radius, a packed display color (`color_u32`), the stable id
+  (`id_lo`/`id_hi`), the action ring-flash + `species_id`
   (`packed_u32`). The stride does **not** grow — the 7 used lanes pad back to
   the existing 8 (`CREATURE_STRIDE = 8`, 32 B); only the grass + biome regions
   became settings-derived.
 - **Why**: The snapshot is a render feed, not a state dump. The inspector
-  already reads full genome via the separate `creature_inspect_json` path, so
-  traits never need to cross in the hot per-tick SoA. Packing the single-pool
-  color into one RGBA8 lane and bit-packing ring-flash + `species_id` keeps the
-  stride bump to zero, which keeps both the per-tick snapshot write and the
-  per-flip interpolation Map rebuild cheap. An earlier draft feared a 32 B →
-  64 B stride doubling from putting genome in the snapshot; render-only + packed
-  avoids it.
+  reads details via separate inspect calls, so non-render state never needs to
+  cross in the hot per-tick SoA. Packing the single-pool color into one RGBA8
+  lane and bit-packing ring-flash + `species_id` keeps the stride stable, which
+  keeps both the per-tick snapshot write and renderer decode cheap.
 - **Applies to**: `architecture/shared-memory-and-protocol.md`,
   `architecture/render-pipeline.md`.
 - **Code anchors**: `app/crates/evosim/src/wasm_api/mod.rs → write_snapshot_to`, `pack_render_u32`,
-  `genome_color_u32`; `app/web/src/render/gl.ts` (instance pack + id/ring decode).
+  `lineage_color_u32`; `app/web/src/render/gl.ts` (instance pack + id/ring decode).
 - **Tradeoffs**: Packed encodings are less human-readable in a memory dump; the
   decode lives in the renderer. Worth it for bandwidth + a stable stride guard.
 
-### Action-EMA color deleted; body color = genome hue (single-pool) or species color (mating)
+### Body color = lineage hue (single-pool) or species color (mating)
 
-- **Decision**: The per-creature R/G/B action-EMA color (`color_r/g/b` SoA
-  columns + the 3 f32 snapshot lanes) is **removed**. Steady body color is now
-  *identity*: single-pool derives it from the genome via HSV (hue ← `diet`,
-  saturation ← `body_size`, value ← `max_speed`); species mode paints every
-  creature its species's palette color (written into the same `color_u32`
-  lane, so the renderer needs no branch). The action information moves to the
-  ring-flash (below).
-- **Why**: With an evolving body genome, "what is this creature" (identity /
-  morphology / faction) and "what did it just do" (a brief highlight) are
-  *separable*. The old EMA conflated the two and rode 3 f32 lanes; splitting
-  them keeps the steady color readable for identity and frees the lanes.
+- **Decision**: Steady body color is identity. Single-pool color derives from
+  the heritable lineage `hue` via HSV; species mode paints every creature its
+  species palette color (written into the same `color_u32` lane, so the
+  renderer needs no branch). Action information lives in the ring-flash.
+- **Why**: "Which lineage/faction is this?" and "what did it just do?" are
+  separate visual questions. A stable identity color plus a transient action
+  ring answers both without growing the snapshot stride.
 - **Applies to**: `architecture/render-pipeline.md`,
   `architecture/shared-memory-and-protocol.md`, `decisions/sim.md`
   (the sim-side ring-flash state).
-- **Code anchors**: `app/crates/evosim/src/wasm_api/mod.rs → genome_color_u32`,
+- **Code anchors**: `app/crates/evosim/src/wasm_api/mod.rs → lineage_color_u32`,
   `app/crates/evosim/src/world/species.rs → SPECIES_PALETTE`.
 
 ### Per-action highlight is a transient 5-tick outer ring-flash
@@ -457,7 +451,7 @@
   SAB view) keeps biome tint locked to the grass clipmap window at every LOD
   level — no UV mismatch when zoomed out. Drawing under the grass lets grass
   density brighten green on top of terrain. Textured / height-shaded biomes are
-  a future concern (v2.1+).
+  a future concern.
 - **Applies to**: `architecture/render-pipeline.md`,
   `architecture/shared-memory-and-protocol.md`.
 - **Code anchors**: `app/web/src/render/gl.ts → BIOME_VS/BIOME_FS`,

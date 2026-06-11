@@ -384,6 +384,11 @@ pub struct ScatterParams {
     /// Ring-2 (distance 1.5–2.5 cells) weight. Ring-3 is the remainder
     /// (the disc table normalizes all three, so ring3 need not be stored).
     pub ring2_pct: f32,
+    /// v2.1 P3: live multiplier on every cell's carrying-capacity cap.  At 1.0
+    /// the per-biome caps are unchanged.  Values < 1.0 reduce the effective cap
+    /// so cells saturate at a lower density → less total food → lower equilibrium
+    /// population.  Applied in the scatter kernel as `cap_byte * capacity_scale`.
+    pub capacity_scale: f32,
 }
 
 impl Default for ScatterParams {
@@ -395,6 +400,8 @@ impl Default for ScatterParams {
             spread_amount: GRASS_SPREAD_AMOUNT_DEFAULT,
             ring1_pct: GRASS_SPREAD_RING1_PCT_DEFAULT,
             ring2_pct: GRASS_SPREAD_RING2_PCT_DEFAULT,
+            // v2.1 P3: default 1.0 = unchanged behaviour.
+            capacity_scale: crate::constants::GRASS_CAPACITY_SCALE_DEFAULT,
         }
     }
 }
@@ -1679,6 +1686,9 @@ impl GrassGrid {
         // is byte-identical when no slider has been changed.
         let decay_pct = self.scatter_params.decay_pct;
         let spread_pct = self.scatter_params.spread_pct;
+        // v2.1 P3: carrying-capacity scale.  Applied per-cell in the spread
+        // path: effective_cap = cap[cell] * capacity_scale, clamped [0, 1].
+        let capacity_scale = self.scatter_params.capacity_scale.clamp(0.0, 1.0);
         // Stage-3 fix (zero-amount gate): do NOT apply .max(1) here. A slider at
         // 0.0 encodes to byte 0; the tile_body gates the roll when decay_byte==0
         // or spread_byte==0 so a zero-amount setting fires NO effect. The .max(1)
@@ -1827,7 +1837,9 @@ impl GrassGrid {
                             };
                             if gx >= 0 {
                                 let tcell = gy as usize * dim + gx as usize;
-                                let cap_byte = encode_density(cap[tcell]);
+                                // v2.1 P3: apply capacity_scale to limit effective cap.
+                                let cap_byte =
+                                    encode_density((cap[tcell] * capacity_scale).clamp(0.0, 1.0));
                                 // S4: density-scaled add (variant A). Scales the add
                                 // amount by the source cell's byte fraction (s/255).
                                 // Floor to 1 once the effect is active (same as

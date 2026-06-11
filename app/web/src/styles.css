@@ -659,14 +659,14 @@ button {
   background-color: rgb(38, 38, 38);
 }
 
-/* v2.0 Wave 2b: inspector genome trait bars. */
-.ins-genome-title {
+.ins-section-title {
   margin: 6px 0 2px;
   font: 11px ui-monospace, monospace;
   color: var(--fg-muted);
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
+/* Small inline bars used by the inspector output rows. */
 .trait-bar {
   display: inline-block;
   width: 90px;
@@ -687,6 +687,85 @@ button {
 .trait-val {
   font: 11px ui-monospace, monospace;
   color: var(--fg);
+}
+
+/* v2.1 P1: NN I/O inspector block. */
+#ins-nn-outputs {
+  display: grid;
+  grid-template-columns: 140px 1fr;
+  gap: 4px 8px;
+  margin: 0;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+}
+#ins-nn-outputs dt { color: var(--fg-muted); }
+#ins-nn-outputs dd { margin: 0; }
+
+/* Output action logit bars — same width as .trait-bar but accent-2 tinted. */
+.nn-out-bar {
+  display: inline-block;
+  width: 90px;
+  height: 8px;
+  margin-right: 6px;
+  vertical-align: middle;
+  border: 1px solid var(--border-strong);
+  border-radius: 2px;
+  background-color: rgb(38, 38, 38);
+  overflow: hidden;
+}
+.nn-out-bar-fill {
+  display: block;
+  height: 100%;
+  width: 0%;
+  background-color: var(--accent-2, #b07ad4);
+  transition: width 0.15s ease;
+}
+
+/* Chosen-action highlight */
+.ins-nn-chosen {
+  font-weight: 600;
+  color: var(--accent);
+}
+
+/* Input groups: a titled subsection per group. */
+.nn-input-group {
+  margin-bottom: 4px;
+}
+.nn-input-group-title {
+  font: 10px ui-monospace, monospace;
+  color: var(--fg-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 3px 0 2px;
+}
+.nn-input-row {
+  display: grid;
+  grid-template-columns: 48px 80px 1fr;
+  gap: 2px 6px;
+  align-items: center;
+  font: 11px ui-monospace, monospace;
+  line-height: 1.5;
+}
+.nn-input-label { color: var(--fg-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nn-input-bar {
+  display: inline-block;
+  width: 80px;
+  height: 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: 2px;
+  background-color: rgb(38, 38, 38);
+  overflow: hidden;
+  vertical-align: middle;
+}
+.nn-input-bar-fill {
+  display: block;
+  height: 100%;
+  width: 0%;
+  background-color: var(--accent, #67b3a9);
+}
+.nn-input-val {
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
 }
 
 /* v2.0 Wave 5: inspector species name + numeric-id tag + history breadcrumb. */
@@ -723,10 +802,116 @@ button {
 }
 .worker-stats-table td:first-child { text-align: left; color: var(--fg-muted); }
 
-/* ── Settings tab + dev panel ─────────────────────────────────────────────── */
+/* ── Settings tab + dev panel (v2.1 P4 restructure) ──────────────────────── */
 
 #rail-settings { padding: 0; }
 #rail-settings.is-active { display: flex; flex-direction: column; }
+
+/* Inner layout: left sub-nav + right pane area, flex row, fills available
+   height between tab-bar and footer. */
+#settings-inner {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: row;
+  overflow: hidden;
+}
+
+/* Left vertical category sub-nav. */
+#settings-subnav {
+  flex-shrink: 0;
+  width: 88px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  background: var(--bg-panel-alt);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  padding: 4px 0;
+}
+.settings-cat-btn {
+  background: transparent;
+  color: var(--fg-muted);
+  border: 0;
+  border-left: 2px solid transparent;
+  padding: 8px 8px 8px 10px;
+  text-align: left;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: color 0.1s ease, background 0.1s ease;
+}
+.settings-cat-btn:hover {
+  color: var(--fg);
+  background: rgba(255, 255, 255, 0.03);
+}
+.settings-cat-btn.is-active {
+  color: var(--accent);
+  border-left-color: var(--accent);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+/* Right category pane area: fills remaining space, clips overflow. */
+#settings-panes {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+}
+
+/* Individual category panes: hidden by default, shown when is-active. */
+.settings-pane {
+  display: none;
+  position: absolute;
+  inset: 0;
+  overflow-y: auto;
+  flex-direction: column;
+}
+.settings-pane.is-active {
+  display: flex;
+}
+
+/* Devpanel sub-containers inside each pane: same padding as old #devpanel-box. */
+.settings-pane > [id^="devpanel-"] {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 12px 16px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* Profiler pane: fills the pane, scrollable. The profiler installer builds
+   its own DOM inside this container.
+   Stable mount-point id: #settings-profiler-pane */
+#settings-profiler-pane {
+  overflow-y: auto;
+}
+
+/* NN pane: hosts #nn-tab-host which the NN installer fills.
+   Stable mount-point id: #settings-nn-pane */
+#settings-nn-pane {
+  overflow-y: auto;
+}
+#settings-nn-pane #nn-tab-host {
+  flex: 1 1 auto;
+}
+
+/* Equilibrium pane: intentionally sparse now; P3 wires rows into #devpanel-equilibrium.
+   Stable mount-point id: #settings-equilibrium-pane */
+#settings-equilibrium-pane #devpanel-equilibrium {
+  color: var(--fg-faint);
+  font-style: italic;
+  font-size: 12px;
+}
+
+/* Legacy #devpanel-box: no longer used for rendering (rows now go into
+   per-category devpanel-* divs), but keep the class rules so devpanel.ts
+   internal class names still resolve correctly. */
 #devpanel-box {
   flex: 1 1 auto;
   min-height: 0;

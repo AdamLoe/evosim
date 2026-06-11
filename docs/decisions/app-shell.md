@@ -81,6 +81,69 @@ that also bind the shell live in [`cross-cutting.md`](cross-cutting.md).
 - **Revisit when**: a feature needs the world to resize *after* boot (today
   nothing resizes after boot — restart rebuilds the world).
 
+### Settings panel = one navigable surface with left sub-nav; 4-control top bar
+
+- **Decision**: The settings panel uses a single navigable surface with a
+  vertical left sub-nav of categories (Energy, Grass, Lifecycle, World,
+  Equilibrium, Display, Profiler, NN). The top bar is trimmed to exactly
+  four controls: play/pause, Restart, Auto-restart, ⚙ rail toggle.
+  Removed from the top bar: NN opener, Inspector opener, perf-toggle opener.
+  Inspector is still accessible via creature click (auto-opens the rail to
+  the inspector tab). NN editor and Profiler are settings categories.
+- **Why**: Fewer top-bar openers reduces discoverable surface area — one ⚙
+  opens one panel, and all configuration lives in one navigable place. The
+  old three-tab rail plus three top-bar openers duplicated surface area and
+  made the panel feel like four separate tools. A single navigable surface
+  makes the settings a coherent place to configure and inspect the sim.
+- **Tradeoffs**: Inspector is no longer one click from the top bar; creature
+  click is the only entry point. Considered a worthy tradeoff since inspector
+  is creature-contextual — it has no meaningful empty state.
+- **Applies to**: `architecture/app-shell.md`.
+- **Code anchors**: `app/web/src/main.ts → installTopBarButtons`,
+  `app/web/index.html → #rail-tabs`, `app/web/src/rail/index.ts → RailTab`.
+
+### Profiler activated by category-select, not by a top-bar toggle
+
+- **Decision**: Selecting the Profiler sub-nav category in the settings panel
+  calls `setSetting("showProfiler", true)` + `setProfilerVisible(true)`.
+  Navigating to any other category calls both with `false`. `showProfiler`
+  remains the single source of truth for recording state.
+- **Why**: The old top-bar perf-toggle was the only path that set
+  `showProfiler`. With the profiler moved into Settings, the profiler
+  became un-enableable (always showed "Enable to record" placeholder). Coupling
+  category-select → `showProfiler` restores the enable path without adding a
+  separate checkbox inside the profiler pane. The Rust backend stays always-on;
+  only the TS poll is gated.
+- **Applies to**: `architecture/app-shell.md`, `architecture/profiler.md`.
+- **Code anchors**: `app/web/src/widgets/devpanel.ts → installDevPanel` (sub-nav
+  wiring block), `app/web/src/widgets/perf-panel.ts → setProfilerVisible`.
+
+### NN editor folded into Settings "NN" category
+
+- **Decision**: The NN editor (topology + mutation-bucket editors) is a sub-nav
+  category inside the settings panel (`#settings-nn-pane → #nn-tab-host`),
+  not a top-level rail tab.
+- **Why**: The NN editor is configuration, not inspection. Folding it into the
+  settings panel makes it consistent with every other configurable surface and
+  removes the three-tab rail that made the UI feel multi-paned.
+- **Applies to**: `architecture/app-shell.md`.
+- **Code anchors**: `app/web/src/rail/nn-tab.ts → installNnTab`,
+  `app/web/index.html → #settings-nn-pane`.
+
+### Stage-then-apply semantics preserved across Settings restructure
+
+- **Decision**: The stage-then-apply / live-vs-staged carve-out and
+  Apply / Cancel / Reset semantics are unchanged by the settings panel
+  overhaul. Only the navigation layout changed (left sub-nav categories
+  replaced the single flat list).
+- **Why**: The two-tier interaction model is correct — staging sim changes
+  and applying display changes live are independently valuable properties that
+  do not depend on how categories are navigated. Preserving the semantics
+  avoids re-litigating a settled decision.
+- **Applies to**: `architecture/app-shell.md`.
+- **Code anchors**: `app/web/src/widgets/devpanel.ts → makeStagedSlider`,
+  `makeLiveSlider`, `applyAll`, `cancelAll`, `resetAll`.
+
 ## How to use / See also
 
 - [`../architecture/app-shell.md`](../architecture/app-shell.md) — the architecture doc this file constrains.
@@ -88,4 +151,4 @@ that also bind the shell live in [`cross-cutting.md`](cross-cutting.md).
 - [`cross-cutting.md`](cross-cutting.md) — decisions that bind the shell AND other subsystems
   (e.g. the full computed-dims-equality SAB safety model, `MAX_POP_FOR_SIM` duplication,
   slider defaults drift guard).
-- [`~/.claude/agent-docs/v1/rules/authoring-rules.md`](~/.claude/agent-docs/v1/rules/authoring-rules.md) — doc maintenance rules.
+- [`~/agent-docs/v1/rules/authoring-rules.md`](~/agent-docs/v1/rules/authoring-rules.md) — doc maintenance rules.

@@ -102,25 +102,20 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 - **Code anchors**: `app/crates/evosim/src/wasm_api/mod.rs → WorldHandle::set_slider`,
   `app/crates/evosim/src/wasm_api/mod.rs → try_set_slider`.
 
-### `MAX_POP_FOR_SIM` is a hard sim invariant, enforced by random cull
+### `MAX_POP_FOR_SIM` is a safety backstop, not the equilibrium mechanism
 
-- **Decision**: `World::handle_births` performs a uniform-random cull
-  draw from `self.rng` after the birth phase whenever
-  `pop > MAX_POP_FOR_SIM`, removing creatures back to the cap. The
-  snapshot writer asserts `pop <= MAX_POP_FOR_SIM` in dev builds.
-- **Why**: A previous design let the sim run past the cap and the
-  snapshot writer silently truncated. The renderer didn't show the
-  extras — silent state divergence between sim and view, the worst
-  kind of bug. Making the cap a sim invariant means every observer
-  (snapshot writer, future save-load, future test) sees the same
-  population.
-- **Tradeoffs**: One tick of slight EMA-color noise at the cull
-  boundary when a newborn gets swapped into a culled existing slot
-  (scratch state for that index is stale for one tick; the next NN
-  phase rebuilds cleanly). Sub-perceptual.
-- **Splitters get prioritized structurally** — they reproduced before
-  the random sample, so their genes are over-represented in the
-  surviving pool. No special carve-out for newborns.
+- **Decision**: `World::handle_births` retains a uniform-random cull pass
+  that fires whenever `pop > MAX_POP_FOR_SIM`, but under the food-limited
+  equilibrium defaults the backstop **effectively never fires** — population
+  is held well below the cap by crowding upkeep + starvation drain. The
+  snapshot writer asserts `pop <= MAX_POP_FOR_SIM` in dev builds, preserving
+  the state-consistency invariant.
+- **Why**: The random cull is an **anti-selection mechanism** — it kills good
+  and bad foragers equally, so selection never compounds. Demoting it to a
+  safety backstop lets food-limited mortality do the work: creatures that
+  can't find food (high crowding, low energy) die preferentially, so foraging
+  skill is a real selection axis. See the food-limited equilibrium entry below
+  for the mechanism and the verified dynamics.
 - **Applies to**: `architecture/simulation-core.md`,
   `architecture/shared-memory-and-protocol.md`,
   `decisions/cross-cutting.md`.
@@ -129,8 +124,50 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   `app/crates/evosim/src/wasm_api/mod.rs → write_creatures_each` (debug_assert),
   `World::scratch_cull_pool`.
 - **Revisit when**: a feature wants persistent per-creature identity
-  guarantees that random cull would break (e.g., a Hall of Fame), or
-  the cap value moves past where allocator pressure becomes a problem.
+  guarantees (e.g., a Hall of Fame), or the cap value moves past where
+  allocator pressure becomes a problem.
+
+### Food-limited, density-dependent equilibrium via crowding + starvation
+
+- **Decision**: Population equilibrium is held by two food-limited mortality
+  mechanisms in `energy_bookkeeping`, plus grass-supply limits:
+  1. **Crowding upkeep** — extra energy drain proportional to the count of
+     neighbours within `crowding_radius` (`crowding_strength × count`).
+  2. **Starvation drain** — below `starvation_threshold` energy, an extra
+     `starvation_drain_rate` drain fires each tick.
+  3. **Grass capacity scale + regrowth rate** — `grass_capacity_scale`
+     multiplies the per-cell biome carrying-cap; `grass_regrowth_rate`
+     multiplies spread probability + in-cell growth rate. Together they
+     bound total food supply. Six live sliders: idx 67–72
+     (`crowding_strength`=0.010, `crowding_radius`=20, `starvation_threshold`=15,
+     `starvation_drain_rate`=0.30, `grass_capacity_scale`=0.7,
+     `grass_regrowth_rate`=1.0).
+- **Why the random cull was the wrong mechanism**: random cull kills good and
+  bad foragers with equal probability, so selection never compounds — a
+  well-fed, long-lived forager has the same chance of dying as a starving one.
+  Food-limited mortality makes death track foraging skill: a creature that
+  cannot find food (high crowding, low energy) dies preferentially; a skilled
+  forager at good energy level survives. This is the selection argument for
+  replacing the cull.
+- **Verified dynamics** (headless harness, T=3000, K=4 seeds × both RNG paths;
+  exit test `world/equilibrium_tests.rs`): steady-state mean ~1600–1760,
+  CoV 0.007–0.025, never extinct, never cap-pinned, backstop cull never fires.
+  The startup transient dips to ~38 founders before recovery on some seeds —
+  a UX artifact, not extinction. **Foraging learning signal confirmed**:
+  death-cohort age-at-death up 3.1–4.6× from early to late cohorts (real
+  selection, not monotone artifact). Energy-gathered-per-tick is flat (food is
+  the constraint) — skill manifests as *living longer on the same budget*.
+  Age-at-death is therefore the correct foraging proxy.
+- **Applies to**: `architecture/simulation-core.md`.
+- **Code anchors**: `app/crates/evosim/src/world/tick.rs → energy_bookkeeping` (crowding + starvation drain);
+  `app/crates/evosim/src/world/mod.rs → DevSliders` (six new fields);
+  `app/crates/evosim/src/constants.rs → CROWDING_STRENGTH_DEFAULT`, `CROWDING_RADIUS_DEFAULT`,
+  `STARVATION_THRESHOLD_DEFAULT`, `STARVATION_DRAIN_RATE_DEFAULT`,
+  `GRASS_CAPACITY_SCALE_DEFAULT`, `GRASS_REGROWTH_RATE_DEFAULT`;
+  `app/crates/evosim/src/world/equilibrium_tests.rs` (death-cohort + steady-state band gate).
+- **Revisit when**: observed steady-state band or age-at-death trend differs
+  materially in-browser (threaded scatter changes grass texture, headless is
+  single-threaded); re-tune `grass_capacity_scale` first.
 
 ### Sim worker handles restart by terminate + respawn
 
@@ -252,58 +289,53 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 - **Code anchors**: `app/crates/evosim/src/creature.rs → Action`, `Action::ALL`;
   `app/crates/evosim/src/world/nn.rs → ActionGate / decode_action / is_valid_action`.
 
-### Creature color is genome-derived; per-action highlight is a ring-flash
+### Creature color is lineage-hue-derived; per-action highlight is a ring-flash
 
-- **Decision**: The action-EMA `color_r/g/b` channels are **removed**.
-  Display color is now **derived from the genome** at snapshot write
-  (`color_u32`: HSV hue←diet, sat←body_size, value←max_speed). Per-action
-  highlight moved to a transient **ring-flash** — a `flash_tag` +
-  5-tick countdown packed into the snapshot's `packed_u32`. Priority when
-  several fire in one tick: Killed (red) > CreatedChild (blue) > Attacked
-  (yellow) > Grazed (green); Born (teal) is set at spawn.
-- **Why**: With an evolving body genome, identity-color (lineage/morphology)
-  and behaviour-highlight (a brief ring) are *separable* — the steady color
-  reads "what is this creature" and the flash reads "what did it just do".
-  The old EMA conflated the two and rode 3 f32 lanes.
+- **Decision**: Display color derives from the heritable `hue` column
+  (`lineage_color_u32(hue)`: HSV hue = hue×360°, sat = 0.8, val = 0.9).
+  The `hue` column replaces the old genome color: it is inherited at split
+  (or mating) with a small Gaussian nudge, and founders receive evenly spaced
+  seed hues so distinct lineages bloom/die in distinct colors. Per-action
+  highlight remains a transient **ring-flash** — a `flash_tag` + 5-tick
+  countdown packed into the snapshot's `packed_u32`. Priority: Killed (red)
+  > CreatedChild (blue) > Attacked (yellow) > Grazed (green); Born (teal)
+  at spawn.
+- **Why**: Lineage color makes evolution legible on canvas — descendants share
+  a hue, so a successful lineage blooms visibly. Identity-color (lineage) and
+  behaviour-highlight (a brief ring) are separable: the steady color reads
+  "which lineage is this" and the flash reads "what did it just do".
 - **Applies to**: `architecture/simulation-core.md`,
   `architecture/shared-memory-and-protocol.md`,
   `architecture/render-pipeline.md`.
-- **Code anchors**: `app/crates/evosim/src/creature.rs → Genome, FlashTag`,
+- **Code anchors**: `app/crates/evosim/src/creature.rs → CreatureSoA` (`hue` column),
   `app/crates/evosim/src/world/tick.rs → flash_decay`,
-  `app/crates/evosim/src/wasm_api/mod.rs → genome_color_u32, pack_render_u32`.
+  `app/crates/evosim/src/wasm_api/mod.rs → lineage_color_u32, pack_render_u32`.
 
-### Body genome — 6 traits, single-pool, bucket-coupled mutation
+### Pure neuroevolution: genome removed; brain is the only heritable thing
 
-- **Decision**: Each creature carries a 6-trait body `Genome` (`body_size,
-  max_speed, metabolism, diet, water_affinity, heat_tolerance`, each `f32 ∈
-  [0,1]`), rescaled at each use site with ranges **centered so a median (0.5)
-  genome ≈ today's constants**. It is a SoA column, **never on the snapshot**
-  (the render color is derived from it). Founders seed **uniform-random per
-  trait** (single-pool diversity from tick 0). On split the genome mutates off
-  the **same per-birth mutation bucket** as the brain, with the trait Gaussian
-  step using `bucket.sigma * trait_mutation_sigma_multiplier` (default **0.3**),
-  drawn *after* the brain weights on the same RNG (deterministic). Traits clamp
-  to `[0,1]`. The biome movement penalty (and the matching biome NN inputs) are
-  genome-modulated by the affinity traits.
-- **Why**: Reintroduces morphology as a real selection axis (the D3 deletion
-  flattened every creature to constants). Coupling the genome step to the brain's
-  bucket keeps one mutation knob set, and the ×0.3 multiplier keeps trait drift
-  gentler than weight drift so behaviour and body don't co-mutate at the same
-  scale. Single-pool (no species/crossover) is the asexual regime; the species
-  mode adds crossover as an opt-in construction toggle.
-- **Applies to**: `architecture/simulation-core.md`,
-  `architecture/shared-memory-and-protocol.md`.
-- **Code anchors**: `app/crates/evosim/src/creature.rs → Genome`,
-  `app/crates/evosim/src/brain/mod.rs → child_from_with_sigma`,
-  `app/crates/evosim/src/world/mod.rs → handle_births / movement_penalty_for`,
+- **Decision**: The 6-trait body `Genome` struct and the `CreatureSoA.genome`
+  column are gone. Combat effectiveness, speed cap, metabolism/upkeep, energy
+  cap, body radius, and graze yield are now **constants** (their median-genome
+  values). Brain weights + lineage `hue` are the only heritable state.
+- **Why**: The genome coupled many levers that made equilibrium untunable and
+  muddied the "is the brain getting smarter?" question. With genome traits
+  modulating biome penalties, combat, and metabolism simultaneously, it was
+  impossible to isolate whether a population improvement came from brain
+  learning or genome drift. Removing the genome makes the learning signal
+  clean: any improvement in foraging efficiency, lifespan, or energy
+  management is traceable to the brain alone. The constants are set at the
+  median-genome values so behaviour is unchanged from a neutral genome run.
+- **Applies to**: `architecture/simulation-core.md`.
+- **Code anchors**: `app/crates/evosim/src/creature.rs → CreatureSoA` (`hue` column replaces `genome`),
+  `app/crates/evosim/src/constants.rs` (the former genome use-site constants),
   `app/crates/evosim/src/world/tick.rs → graze / attack / energy_bookkeeping`.
 
 ### Attack picks first-valid in a per-attacker-rotated cell walk
 
 - **Decision**: `World::attack` does not scan
   every in-radius candidate to pick the *closest* in-reach target. Instead it
-  takes the first target whose squared distance falls inside the genome-scaled
-  reach, with the per-cell iteration starting at `attacker_idx % K_cell` and
+  takes the first target whose squared distance falls inside the constant
+  body-radius reach, with the per-cell iteration starting at `attacker_idx % K_cell` and
   wrapping. Drops the closest + lowest-id tiebreak the previous impl used.
 - **Why**: At high pop with `repulsion_max=0` (or any large clump),
   every predator's bbox returned dozens of candidates and the inner
@@ -402,9 +434,8 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 - **Why**: A separate stream lets the map pin to `world_seed` alone (so
   it is reproducible / shareable) while the live run still varies on the
   sim RNG. Large blobs (not noise speckle) give creatures a navigable,
-  legible landscape and let the directional biome NN inputs carry a real
-  gradient. SplitMix64 is trivial, fast, and never touches the sim RNG
-  draw order.
+  legible landscape with distinct food-rich and food-poor regions. SplitMix64
+  is trivial, fast, and never touches the sim RNG draw order.
 - **Applies to**: `architecture/simulation-core.md`.
 - **Code anchors**: `app/crates/evosim/src/world/biome.rs → generate_biome_grid`;
   `app/crates/evosim/src/world/mod.rs`.
@@ -414,49 +445,43 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 - **Revisit when**: biomes need finer structure (rivers, gradients) or a
   third+ biome kind, or the target proportions change.
 
-### Biome movement penalty: one base severity → three effects, survivable short-term
+### Biomes are food-only: no movement/energy penalties
 
-- **Decision**: Each non-Plains biome carries a single live-tunable base
-  severity `p ∈ [0, 1]` (`water_movement_penalty` 0.8 /
-  `desert_movement_penalty` 0.4; Plains 0). While a creature is on that
-  cell, `p` drives three effects — reduced speed cap (`× (1 −
-  0.6·p)`), higher move cost (`× (1 + 1.0·p)`), and extra upkeep (`+
-  0.5·p`) — each with a built-in coefficient constant (`K_BIOME_*`).
-  Genome modulation (`water_affinity` / `heat_tolerance`) modulates the
-  penalty via the affinity traits (see body genome entry); the base penalty
-  is genome-independent.
-- **Why**: One knob per biome keeps the live tuning surface tiny while
-  the three effects make a biome both *slower to cross* and *costly to
-  linger in*. The coefficients are tuned **survivable short-term**: a
-  full-energy creature can dash across water/desert (~130 / ~195 ticks of
-  budget) but cannot homestead there. The directional biome NN inputs let
-  brains learn to route around penalized cells.
+- **Decision**: Water and Desert biomes carry **no movement, cost, or upkeep
+  penalties**. The `K_BIOME_SPEED/COST/UPKEEP` constants, the
+  `water_movement_penalty` / `desert_movement_penalty` sliders, and the
+  `movement_penalty_for` function are all removed. The only surviving biome
+  effect is the **grass-capacity cap** on scatter writes (Plains ×1.0,
+  Desert ×0.30, Water ×0.04). Water/Desert are dead-grass avoidance zones:
+  the brain learns to avoid them because there is no food, not because
+  crossing them is expensive.
+- **Why**: Movement tax + genome modulation coupled biome selection and body
+  evolution, muddying the learning signal. With the genome gone and no penalty,
+  biomes do exactly one thing — absence of food — which is the cleanest
+  possible selection pressure. Avoidance remains directly learnable via the
+  `CurrBiomeType` NN input (raw biome id).
+- **Applies to**: `architecture/biome.md`, `architecture/simulation-core.md`.
+- **Code anchors**: `app/crates/evosim/src/world/biome.rs → capacity_factor_from_u8`;
+  `app/crates/evosim/src/grass/mod.rs → compute_propagation_scatter` (the cap write);
+  `app/crates/evosim/src/constants.rs → GRASS_CAPACITY_PLAINS/WATER/DESERT`.
+
+### Biome NN input: single `CurrBiomeType` slot (raw normalized id)
+
+- **Decision**: One always-on NN input group — `NnInputGroup::CurrBiomeType`
+  (1 slot) — exposes biome as a raw normalized id: Plains = 0.0, Water = 0.5,
+  Desert = 1.0. This replaces the former `BiomeDir` (4) + `CurrCellPenalty`
+  (1) pair (net −4 inputs). No genome modulation; every creature reads the
+  same id on the same cell.
+- **Why**: Without movement penalties there is no directional gradient to
+  encode — the 4-cardinal `BiomeDir` inputs were penalty gradients, and
+  `CurrCellPenalty` was the instantaneous penalty. With penalties gone, the
+  only useful signal is "am I in a food-poor zone?" — one raw type id
+  suffices. Fewer inputs keeps widths smaller and the learning surface tighter.
 - **Applies to**: `architecture/simulation-core.md`.
-- **Code anchors**: `app/crates/evosim/src/world/tick.rs → apply_movement_and_repulsion`,
-  `energy_bookkeeping`; `app/crates/evosim/src/constants.rs` (the `K_BIOME_*` balance knobs).
-- **Tradeoffs**: `K_BIOME_*` are global balance knobs, not per-biome; the
-  per-biome severity is the live knob. The penalty samples the cell under
-  the body (and one cell N/S/E/W for the NN), not a sub-cell gradient.
-- **Revisit when**: genome modulation ships, or the
-  survivability/cross-time balance needs retuning.
-
-### Biome NN inputs: always-on `BiomeDir` (4) + `CurrCellPenalty` (1)
-
-- **Decision**: Two input groups are added to the composable layout and
-  are **always-on in both wrap modes**: `BiomeDir` (4 = the penalty one
-  cell N/S/E/W, base severity, wrap-aware) and `CurrCellPenalty` (1 = the
-  penalty under the body). Active widths: **wrap on = 32, wrap off = 40**.
-- **Why**: A creature can't evolve to avoid water/desert without sensing
-  it. Directional inputs give a local gradient (route around); the
-  current-cell input gives an "I'm being penalized now" signal. Always-on
-  keeps the two wrap modes' sensoria comparable.
-- **Applies to**: `architecture/simulation-core.md`.
-- **Code anchors**: `app/crates/evosim/src/world/nn.rs → NnInputGroup`, `NnInputLayout::for_settings`,
-  `build_nn_input`; `app/crates/evosim/src/brain/mod.rs` (drift guard covers widths 32 + 40).
-- **Tradeoffs**: Wrap-off NN width is 40 (wider than wrap-on 32); the SIMD
-  invariants (multiple-of-8) still hold. No genome inputs.
-- **Revisit when**: more biome senses are added, or the input width
-  approaches `MAX_NN_INPUTS = 48`.
+- **Code anchors**: `app/crates/evosim/src/world/nn.rs → NnInputGroup::CurrBiomeType`,
+  `NnInputLayout::for_settings`, `build_nn_input`.
+- **Revisit when**: a new biome effect (other than grass capacity) is added
+  that the brain needs a directional gradient for.
 
 ### Species + sexual mating is an opt-in mode, not a replacement
 
@@ -503,27 +528,23 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 - **Revisit when**: births spike in a way that traces to many initiators mating one
   popular partner in a single tick — add a partner-cooldown guard at that point.
 
-### Crossover is a construction enum applied to brain weights AND genome traits
+### Crossover is a construction enum applied to brain weights only
 
 - **Decision**: `crossover_mode` (construction enum `{average, fifty_fifty}`,
-  default `fifty_fifty`) is applied **identically** to brain weights and the 6
-  genome traits, then mutation (the same per-birth bucket machinery as a normal
-  child). `fifty_fifty` = per-slot 50/50 random pick from the two parents;
-  `average` = per-slot elementwise midpoint. Single-pool `Split` is unchanged
-  (asexual, no crossover). RNG draw order is fixed and deterministic: brain
-  crossover (one `unit()`/weight for fifty_fifty, none for average) → brain
-  bucket mutation → genome crossover → genome mutation, off the pair's pre-rolled
-  seed.
-- **Why**: Both are interesting evolutionary mechanics; one construction switch
-  is cheap and lets the user observe both regimes. `fifty_fifty` preserves
-  variance (standard GA); `average` is available for homogenization research.
-  Per-weight crossover of trained nets is a known neuroevolution hazard, kept
-  safe by the **aligned regime** (same-species-only mating + small per-birth
-  brain mutation + frequent within-species mating) so crossover is allele-shuffling,
-  not basin-mixing — crossover's job here is narrative, not raw optimization.
+  default `fifty_fifty`) is applied to **brain weights only**, then mutation
+  (the same per-birth bucket machinery as a normal child). `fifty_fifty` =
+  per-slot 50/50 random pick from the two parents; `average` = per-slot
+  elementwise midpoint. Lineage `hue` is inherited as the wrap-aware midpoint
+  of both parents' hues plus a small Gaussian nudge. Single-pool `Split` is
+  unchanged (asexual, no crossover). RNG draw order is fixed and deterministic:
+  brain crossover → brain bucket mutation, off the pair's pre-rolled seed.
+- **Why**: The genome is gone, so crossover applies to brain weights only.
+  Both modes are interesting evolutionary mechanics; one construction switch
+  is cheap. `fifty_fifty` preserves variance (standard GA); `average` is
+  available for homogenization research. Per-weight crossover is kept safe by
+  the aligned regime (same-species-only mating + small per-birth mutation).
 - **Applies to**: `architecture/simulation-core.md`.
 - **Code anchors**: `app/crates/evosim/src/brain/mod.rs → Brain::child_from_crossover_with_sigma`,
-  `app/crates/evosim/src/creature.rs → Genome::crossed`,
   `app/crates/evosim/src/world/mod.rs → World::handle_mating`.
 - **Revisit when**: playtest shows one mode strictly dominant, or brains
   demonstrably fail to evolve under mating.
@@ -542,22 +563,20 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 - **Revisit when**: brains grow deep enough that anti-cannibalism could plausibly
   evolve and be retained against drift.
 
-### Species seeding + identity: dynamic registry, hand-spread palette, biome-adapted N-anchor founders
+### Species seeding + identity: dynamic registry, hand-spread palette, N-anchor founders
 
 - **Decision**: `World.species` is a **dynamic** `SpeciesRegistry`
   (`Vec<Species { id, color_u32, name }>`, add/remove/recolor-capable) even
-  though today it seeds a fixed `starting_species_count` (default 10). Real
-  **N-anchor biome-adapted seeding**:
+  though today it seeds a fixed `starting_species_count` (default 10). **N-anchor
+  seeding** (no genome):
   1. Pick anchors spread across the world (rejection-sampled min spacing).
-  2. Per anchor, roll a canonical "first member" = random founder brain + a
-     genome **biased to survive the biome under the anchor**
-     (`Genome::canonical_for_biome`): Water → high `water_affinity`, Desert →
-     high `heat_tolerance`, Plains → moderate both; the other four traits stay
-     random per species.
+  2. Per anchor, roll a canonical first member = random founder brain with a
+     **distinct seed hue** evenly spread across the color wheel
+     (`canonical_hue = species_index / species_count`). No genome bias.
   3. Spawn `starting_species_member_count - 1` more founders clustered near the
-     anchor, each = the canonical brain+genome through **one per-birth bucket
-     draw** with that bucket's **rate AND sigma both ×
-     `starting_species_member_variance`** (default 3.0, now active;
+     anchor, each = the canonical brain through **one per-birth bucket draw**
+     with that bucket's **rate AND sigma both ×
+     `starting_species_member_variance`** (default 3.0;
      `Brain::founder_spread_with_sigma`).
   All of seeding is **deterministic from `world_seed`** via a *dedicated* setup
   PRNG (`SimRng::from_u64(world_seed ^ SEEDING_PRNG_SALT)`) — separate from the
@@ -566,23 +585,19 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   from a **hand-spread 10-hue saturated palette** (`SPECIES_PALETTE`),
   single-sourced for both the per-creature `color_u32` lane and the polled
   species→color table. Labels are `Species-A..J`. Species extinct = extinct.
-- **Why**: Dynamic registry means V2.1 splits/merges need no protocol change.
-  Biome-adapting the founder genome (a deliberate reversal of "random founders,
-  let the world filter them") keeps a clump alive through the opening moves — at
-  gen 0 there's no learned behavior to keep a maladapted clump alive long enough
-  to evolve. Biasing only the genome, not the anchor *position*, keeps the map
-  honest. The dedicated seeding PRNG satisfies the determinism guarantee without
+- **Why**: Dynamic registry means future splits/merges need no protocol change.
+  The dedicated seeding PRNG satisfies the determinism guarantee without
   coupling the whole run to `world_seed`. A hand-spread palette (vs an even-hue
-  ring) keeps adjacent species readable.
+  ring) keeps adjacent species readable. Biome-adapted genome seeding was removed
+  with the genome; species survival now depends entirely on the brain and the
+  food-limited equilibrium, which is the intended selection environment.
 - **Applies to**: `architecture/simulation-core.md`, `architecture/species.md`.
 - **Code anchors**: `app/crates/evosim/src/world/species.rs → SpeciesRegistry`, `SPECIES_PALETTE`;
-  `app/crates/evosim/src/creature.rs → Genome::canonical_for_biome`;
   `app/crates/evosim/src/brain/mod.rs → Brain::founder_spread_with_sigma`;
   `app/crates/evosim/src/world/mod.rs → pick_anchors`, `World::new_with_sliders_topology`
   (seeding branch); `app/crates/evosim/src/wasm_api/mod.rs → fill_creature_bytes` (species color lane).
-- **Revisit when**: v2.1 adds splits/merges (split-aware "one color → two
-  similar-but-distinct" generator); founders survive comfortably and the gen-0
-  pre-adapt masks rather than enables interesting selection.
+- **Revisit when**: future splits/merges land (split-aware color generator needed);
+  founders cold-start-extinct before brain evolution kicks in.
 
 ### Polled species→color/name/count table
 
@@ -606,31 +621,23 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   `app/web/src/sim/worker.ts → maybeWriteSpeciesTable`;
   `app/web/src/generated/control-sab.ts` (regenerated).
 
-### Population balance: sane defaults, the cap never binds via random cull
+### Species-mode population balance: sane defaults for the mating economy
 
-- **Decision**: Ship the plan's reproduction-economy defaults unchanged —
+- **Decision**: Species-mode mating-economy defaults are unchanged —
   mating energy cost = `split_gift` (30), initiator `mating_cooldown_ticks`
   (200), birth gift = the mating cost (30), 10 species × 10 founders ×
-  variance 3.0. An in-process long run confirms the soft pop cap (8k) **never
-  binds via random cull**: at the default 9600u world the population sits well
-  under 200 at all times (boot 100 → low-tens steady state), and at a denser
-  2400u world it holds ~100–122. Multiple species persist for thousands of
-  ticks (no extinct-end). Cold-start did **not** fire, so no cold-start lever
-  was applied (per the plan, change defaults only *if* a default run extinct-ends
-  before learning).
-- **Why**: Per the contract, balance is the *user's* — the implementation job is
-  "runs without the cap binding via random cull + the mechanism demonstrably
-  works," not hand-tuned fun. At 64× area with the same pop ceiling the cap is
-  nowhere near binding; the observed population *decline* at the default world is
-  an encounter-rate (geographic-sparsity) characteristic the user tunes via the
-  live/construction knobs (`world_size`, biome severities, grass richness,
-  `mating_cooldown_ticks`), not a mechanism bug.
+  variance 3.0. The cap never binds via random cull in this mode (population
+  under the encounter-rate / geographic-sparsity equilibrium). Cold-start did
+  not fire at defaults, so no cold-start lever was applied.
+- **Why**: Balance is the user's tuning task. The implementation contract is
+  "mechanism demonstrably works" — the mating economy is one such mechanism.
+  Single-pool equilibrium is now held by the food-limited mortality sliders
+  (see the food-limited equilibrium entry above), not by this entry.
 - **Applies to**: `architecture/simulation-core.md`.
 - **Code anchors**: `app/crates/evosim/src/constants.rs → MATING_COOLDOWN_TICKS_DEFAULT`,
   `SPLIT_GIFT_MAX_DEFAULT`, `starting_species_member_count` (default), `starting_species_count` (default).
 - **Revisit when**: playtest wants growth at the default world — first lever is
-  cranking `starting_species_member_count` (denser clumps); next is the 8-dir
-  mate-proximity NN inputs.
+  cranking `starting_species_member_count` (denser clumps).
 
 ### Why one binary mode toggle, and why species ⇒ mating
 
@@ -655,8 +662,8 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 - **Decision**: A mated child spawns at the wrap-aware midpoint of the two
   parents' positions, even if that cell is hostile (deep water / desert). No
   retry, no nearest-habitable search.
-- **Why**: Simple, and honest selection — most cross-biome mating attempts
-  produce children that die quickly, which is the point, not a bug. A
+- **Why**: Simple, and honest selection — a child spawning in a food-poor zone
+  is exposed to the same selection pressure as any other creature. A
   habitable-cell search would add a scan and quietly mask cross-biome mating
   as a failure mode.
 - **Applies to**: `architecture/simulation-core.md`.
@@ -710,39 +717,29 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   absent wall inputs) is carried *implicitly* by the layout, so a separate
   "are we in species mode" input buys nothing. The bias-learning constant earns
   its slot (every hidden unit gets a learnable threshold) and is standard
-  practice. (The full per-mode width table — 32/40/40/48 across wrap×species —
-  lives in `architecture/simulation-core.md`; the cross-language safety
-  implication is in `decisions/cross-cutting.md`.)
+  practice. (The full 8-way width table across wrap×species×multisight —
+  32/32/40/40/40/40/48/48 — lives in `architecture/simulation-core.md`; the
+  cross-language safety implication is in `decisions/cross-cutting.md`.)
 - **Applies to**: `architecture/simulation-core.md`,
   `app/crates/evosim/src/world/nn.rs → NnInputLayout / NnInputGroup`, `app/crates/evosim/src/brain/mod.rs → NnTopology`.
 - **Alternatives**: keep a constant action-set-indicator input for
   "portability" (rejected — a brain selected against one `action[2]` semantic
   doesn't transfer just because one constant signal says which mode it's in);
-  8-direction biome sectors instead of 4 cardinal (rejected — doubles inputs
-  for marginal signal).
+  directional biome penalty sectors (rejected — penalties are gone; `CurrBiomeType`
+  is sufficient).
 
-### Body genome: 6 floats, not buckets; dropped trait set; sprite/repulsion not collision
+### Body radius and repulsion: constants; sprite/repulsion not collision
 
-- **Decision**: The genome is exactly six **continuous** `f32 ∈ [0,1]` traits
-  (`body_size, max_speed, metabolism, diet, water_affinity, heat_tolerance`),
-  not quantized `u8` buckets. The larger ChatGPT-era trait set (social, fear,
-  aggression, cold, humidity, fertility, photosynthesis) is not included.
-  `body_size` scales sprite + repulsion strength, **not** collision (there is
-  no collision).
-- **Why**: These six are the minimum that distinguish the Grazer / Hunter /
-  Swimmer / Desert archetypes against the 3-biome world, and each does real
-  work in at least one mechanic. The dropped traits either have no biome to
-  express them, duplicate `diet`+`metabolism`, or open a new energy channel
-  (photosynthesis) that destabilizes balance. Floats are honest about drift —
-  buckets read cleaner but hide the small differences accumulating over
-  generations, the very thing the sim exists to expose. Collision means physics
-  + pathfinding (out of scope); repulsion approximates "big creatures own more
-  space."
+- **Decision**: Body radius, repulsion strength, and all creature mechanics
+  previously modulated by genome traits are now constants. `body_size` no
+  longer exists as a trait; the constant radius scales sprite + repulsion
+  strength, **not** collision (there is no collision).
+- **Why**: Removing per-creature body-size variance eliminates one axis of
+  non-brain variation from the learning signal. Repulsion still approximates
+  "creatures own space" without requiring per-creature spatial tracking.
 - **Applies to**: `architecture/simulation-core.md`.
-- **Code anchors**: `app/crates/evosim/src/creature.rs → Genome`;
-  `app/crates/evosim/src/world/tick.rs` (use sites).
-- **Revisit when**: new biomes ship and need new trait axes (forest →
-  social/fear, tundra → cold-tolerance).
+- **Code anchors**: `app/crates/evosim/src/constants.rs` (body radius constant);
+  `app/crates/evosim/src/world/tick.rs` (repulsion use site).
 
 ### Grass density field is `Vec<AtomicU8>` on the snapshot quantization scale
 
@@ -927,9 +924,10 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   Creatures sensing grass at 160u radius can navigate toward distant patches
   before local exhaustion. Shipping default ON keeps all born creatures on the
   same layout as the rest of the world; the toggle is for the A/B and debugging.
-- **Constraint**: the walled+species combination hits 51 real → 56 padded inputs,
-  exceeding `MAX_NN_INPUTS = 48`. The layout **automatically falls back** to
-  single-band for that configuration; documented in `NnInputLayout::for_settings`.
+- **Constraint**: with `CurrBiomeType` replacing the former `BiomeDir`(4)+`CurrCellPenalty`(1)
+  pair (net −4 inputs), all 8 wrap×species×multisight combinations fit within
+  `MAX_NN_INPUTS = 48`; no fallback is needed. The old walled+species
+  combination hit 51 real → 56 padded; the current layout hits 47 → 48.
 - **Applies to**: `architecture/simulation-core.md`.
 - **Code anchors**: `app/crates/evosim/src/world/nn.rs → NnInputGroup::GrassBandsFar`,
   `NnInputLayout::for_settings`; `app/crates/evosim/src/world/proximity.rs →

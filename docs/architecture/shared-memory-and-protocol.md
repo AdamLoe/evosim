@@ -94,7 +94,7 @@ length-prefixed payloads).
 | 7 | `CTRL_RESET_JANK_EPOCH` | Bumped to request `WorldHandle::reset_jank()`. |
 | 16..(16+SLIDER_COUNT) | `CTRL_SLIDERS_BASE+i` | f32 value per slider, indexed by `SLIDER_NAMES`. |
 | 96 | `CTRL_INSPECT_REQ_EPOCH` | Bumped by main when an inspector request is issued. |
-| 97 | `CTRL_INSPECT_REQ_KIND` | 0 = by world coord, 1 = by stable id. |
+| 97 | `CTRL_INSPECT_REQ_KIND` | 0 = by world coord, 1 = by stable id, **2 = NN inspect by stable id** (fetches NN I/O via `creature_nn_inspect_json`). |
 | 98–100 | `CTRL_INSPECT_REQ_WX_BITS`, `_WY_BITS`, `_TOL_BITS` | f32-bits, used when KIND=0. |
 | 101–102 | `CTRL_INSPECT_REQ_ID_LO`, `_HI` | u32 halves of the 64-bit id, used when KIND=1. |
 | 104 | `CTRL_INSPECT_RESP_EPOCH` | Bumped by worker after writing response bytes. |
@@ -133,6 +133,19 @@ list. The worker writes it every ~45 ticks **only in species mode**
 (`maybeWriteSpeciesTable`) and bumps `CTRL_SPECIES_TABLE_EPOCH`. Single-sourced
 with the per-creature `color_u32` via `SPECIES_PALETTE` so canvas and chart
 never drift.
+
+**NN inspect request (KIND=2).** `SimBridge.requestNnInspectId(id)` stores
+`CTRL_INSPECT_REQ_KIND = 2` and the 64-bit id halves, then bumps
+`CTRL_INSPECT_REQ_EPOCH` + futex-notifies. The worker's `serveInspectRequest`
+calls `creature_nn_inspect_json(idx)` and writes the JSON into the
+`INSPECT_RESP_OFFSET` buffer. **Critical invariant:** NN inspect requires the
+sim to be paused (the NN inputs are built from the snapshot, not the live
+state). The worker now serves inspect requests in **both** the RUNNING and
+PAUSED branches of `simLoop`. Before this fix, a KIND=2 request issued while
+paused was silently dropped — the futex woke the PAUSED park, but
+`serveInspectRequest` was only called in the running path. The NN JSON
+worst-case is ~3.3 KB, well within `INSPECT_RESP_CAP` (8 KB) — the cap was
+not raised and does not need changing.
 
 JS-side decoding: `TextDecoder.decode()` rejects views into
 SharedArrayBuffer ("The provided ArrayBufferView value must not be
@@ -216,15 +229,16 @@ and covered by the `bindings_in_sync` test.
 ## Creature SoA (per-creature, 32 bytes)
 
 The creature region is `MAX_POP_FOR_SIM × 32` bytes. `CREATURE_STRIDE = 8` lanes
-/ 32 B. Layout: `color_u32` (packed RGBA8 genome/species color) + `packed_u32`
-(ring-flash + species_id). **7 used lanes + 1 trailing pad.**
+/ 32 B. Layout: `color_u32` (packed RGBA8 lineage-hue color in single-pool,
+species color in species mode) + `packed_u32` (ring-flash + species_id).
+**7 used lanes + 1 trailing pad.**
 
 | Bytes | lane | Field |
 |---|---|---|
 | `0..4` | f32 `[i*8 + 0]` | `x` (world units) |
 | `4..8` | f32 `[i*8 + 1]` | `y` (world units) |
 | `8..12` | f32 `[i*8 + 2]` | `radius` (body_size-derived sprite radius) |
-| `12..16` | u32 `[i*8 + 3]` | `color_u32` (display color, RGBA8 — genome in single-pool, **species color** in species mode) |
+| `12..16` | u32 `[i*8 + 3]` | `color_u32` (display color, RGBA8 — **lineage hue** in single-pool via `lineage_color_u32(hue)`, **species color** in species mode) |
 | `16..20` | u32 `[i*8 + 4]` | `id_lo` |
 | `20..24` | u32 `[i*8 + 5]` | `id_hi` |
 | `24..28` | u32 `[i*8 + 6]` | `packed_u32` (ring-flash + species_id) |
@@ -235,15 +249,17 @@ The creature region is `MAX_POP_FOR_SIM × 32` bytes. `CREATURE_STRIDE = 8` lane
 ### `color_u32` (lane 3) — RGBA8, little-endian
 
 `R = u & 0xFF`, `G = (u >> 8) & 0xFF`, `B = (u >> 16) & 0xFF`, `A = (u >> 24) &
-0xFF` (A always 255). **Single-pool:** built from the genome via HSV
-(`genome_color_u32` in `app/crates/evosim/src/wasm_api/mod.rs`): hue ← `diet` (`120 * (1 - diet)`°,
-grazer-green 120° → predator-red 0°), saturation ← `body_size` → `[0.4, 1.0]`,
-value ← `max_speed` → `[0.5, 1.0]`. **Species mode:** the sim writes the
-**species color** into this same lane (looked up from `World.species`), so the
-renderer needs no change to show species colors. The species color comes
-from a **hand-spread 10-hue saturated palette** (`SPECIES_PALETTE` in
-`crates/evosim/src/world/species.rs`), single-sourced with the polled species→color table so
-canvas and Monitor never drift.
+0xFF` (A always 255). **Single-pool:** produced by `lineage_color_u32(hue)` in
+`app/crates/evosim/src/wasm_api/mod.rs`. Each creature carries an inherited `hue` field
+(`f32` in `CreatureSoA`) that is seeded distinctly at founding and mutates
+slightly at each split, so descendants share a color family and lineage blooms
+are visible on canvas. **The packed RGBA8-LE word format is unchanged**; the
+renderer's lane-3 read in `render/gl.ts` requires no change. **Species mode:**
+the sim writes the **species color** into this same lane (looked up from
+`World.species`), so the renderer needs no change to show species colors. The
+species color comes from a **hand-spread 10-hue saturated palette**
+(`SPECIES_PALETTE` in `crates/evosim/src/world/species.rs`), single-sourced with the
+polled species→color table so canvas and Monitor never drift.
 
 ### `packed_u32` (lane 6) — bit layout (2b decode contract)
 
@@ -330,14 +346,17 @@ if it advanced, the bytes are guaranteed to be coherent.
 - `SLIDER_NAMES` + control-SAB layout — Rust `app/crates/evosim/src/wasm_api/mod.rs` +
   `app/crates/evosim/src/control_sab.rs` ↔ TS `app/web/src/generated/`. Rust unit test
   `bindings_in_sync` fails CI on drift; fix by running
-  `cargo run --bin gen-bindings`. Current state: **`SLIDER_COUNT = 64`**
-  (indices 0–63), `SLIDER_BUCKET_BASE = 30`. Indices 54–59 are the 6 live
-  grass scatter sliders (`grass_decay_pct`, `grass_decay_amount`,
-  `grass_spread_pct`, `grass_spread_amount`, `grass_spread_ring1_pct`,
-  `grass_spread_ring2_pct`). Indices 60–62:
+  `cargo run --bin gen-bindings`. Current state: **`SLIDER_COUNT = 73`**
+  (indices 0–72). Indices 21–23 are `_reserved_legacy_*` no-op placeholders
+  (former biome-penalty sliders, kept to avoid renumbering 24–66).
+  `SLIDER_BUCKET_BASE = 30`. Indices 54–59 are the 6 live
+  grass scatter sliders. Indices 60–62:
   `lod_bias` (60, live f32), `grass_multisight` (61, bool construction),
   `grass_size` (62, f32 construction). Index 63:
   `grass_lod_step` (63, live u32 carried as f32, discrete LOD stepper).
+  Indices 67–72 are the 6 equilibrium knobs (crowding, starvation, grass
+  capacity, regrowth). Authoritative list: `SLIDER_NAMES` in
+  `app/crates/evosim/src/wasm_api/mod.rs`.
 - Camera lanes (`CTRL_CAMERA_CX_BITS` … `CTRL_CAMERA_VIEWPORT_H`, slots **136–140**)
   — defined in `app/crates/evosim/src/control_sab.rs`; re-exported from `app/web/src/sim/bridge.ts`.
   Main writes all five each RAF; the worker reads them in `write_snapshot` and
@@ -427,4 +446,4 @@ as they are, and the SAB-vs-postMessage + double-buffer rationale.
 - [`../decisions/sim.md`](../decisions/sim.md)
 - [`../decisions/cross-cutting.md`](../decisions/cross-cutting.md)
 - [`../agent-context/maintaining-docs.md`](../agent-context/maintaining-docs.md)
-- [Doc authoring rules](~/.claude/agent-docs/v1/rules/authoring-rules.md)
+- [Doc authoring rules](~/agent-docs/v1/rules/authoring-rules.md)

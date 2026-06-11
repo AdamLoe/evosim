@@ -13,7 +13,7 @@ that selects between two regimes:
 | Population | Asexual, one gene pool. | N seeded species, founders clustered at anchors. |
 | Reproduction | Asexual `Split`. | Sexual `Mate` (same-species, contact radius, initiator-gated). |
 | Attack target | Any creature. | Other-species only (no cannibalism). |
-| Body color | Genome-derived hue. | Per-species palette color. |
+| Body color | Lineage hue (heritable). | Per-species palette color. |
 | Creature NN sectors | 8 unified. | 16 (8 same-species + 8 other-species). |
 
 The two modes never coexist in one run — switching requires a restart.
@@ -51,17 +51,16 @@ Algorithm:
 1. **Anchors** — pick `starting_species_count` (default 10) points spread
    across the world by rejection-sampling against a minimum spacing
    (`ANCHOR_MIN_SPACING_FRAC × world_size`, relaxed when infeasible).
-2. **Canonical first member** per anchor — random founder brain + genome
-   biased to survive the biome under the anchor
-   (`Genome::canonical_for_biome`): Water → high `water_affinity`;
-   Desert → high `heat_tolerance`; Plains → moderate both. Other traits
-   (`body_size`, `max_speed`, `metabolism`, `diet`) remain random.
+2. **Canonical first member** per anchor — random founder brain with a
+   distinct seed hue evenly spread across the color wheel
+   (`canonical_hue = species_index / species_count`). There is no genome
+   bias in seeding.
 3. **`starting_species_member_count - 1` more founders** clustered within
    `FOUNDER_CLUSTER_RADIUS_FRAC × world_size` of the anchor (contact-mating
-   reachable at tick 0). Each is the canonical brain+genome passed through
-   one normal per-birth bucket draw, with that bucket's rate and sigma both
+   reachable at tick 0). Each is the canonical brain passed through
+   one per-birth bucket draw, with that bucket's rate and sigma both
    multiplied by `starting_species_member_variance` (default 3.0). This
-   spreads the founding genomes so selection acts from tick 0.
+   spreads the founding brains so selection acts from tick 0.
    Helper: `Brain::founder_spread_with_sigma`.
 
 Defaults: 10 species × 10 founders = 100 starting pop. A species that goes
@@ -97,13 +96,13 @@ widens the contact radius, letting creatures mate from further apart.
 ## Crossover
 
 `app/crates/evosim/src/brain/mod.rs` → `child_from_crossover_with_sigma`
-`crates/evosim/src/creature.rs` → `Genome::crossed`
 
 Crossover (`crossover_mode`: `average` or `fifty_fifty`, default
-`fifty_fifty`) is applied **identically to brain weights and all 6 genome
-traits**, then the same per-birth bucket mutation machinery runs. RNG draw
-order is fixed: brain crossover → brain bucket mutation → genome crossover
-→ genome mutation, all off a pre-rolled per-pair seed.
+`fifty_fifty`) is applied to **brain weights** only, then the same per-birth
+bucket mutation machinery runs. RNG draw order is fixed: brain crossover →
+brain bucket mutation, all off a pre-rolled per-pair seed. Lineage `hue` is
+inherited as the midpoint of the two parents' hues plus a small Gaussian
+nudge.
 
 Single-pool `Split` is unchanged (asexual, no crossover).
 
@@ -112,9 +111,8 @@ Single-pool `Split` is unchanged (asexual, no crossover).
 `crates/evosim/src/world/tick.rs` → `attack`
 
 In species mode, `Attack` refuses same-species targets (sim-side gate; no
-cannibalism). Single-pool `Attack` hits any creature (v1 predation,
-unchanged). Effectiveness still scales with `diet` + `body_size` (genome
-traits — see `simulation-core.md`).
+cannibalism). Single-pool `Attack` hits any creature (unchanged). Attack
+effectiveness is a constant — there is no genome to modulate it.
 
 ## Action gate (mode-dependent action[2])
 
@@ -139,6 +137,8 @@ The logit order is stable across modes.
 - `starting_species_member_variance` scales both rate and sigma — tuning it
   high gives early selection pressure but also increases variance in which
   founding lineages survive.
+- Seeding is no longer genome-biased. Founders get distinct hues and random
+  brains; the biome under the anchor no longer shapes the founder genetics.
 
 ## Code anchors
 
@@ -147,14 +147,14 @@ The logit order is stable across modes.
 - `crates/evosim/src/world/tick.rs` → `attack` (same-species gate), `energy_bookkeeping` (cooldown decrement)
 - `crates/evosim/src/world/nn.rs` → `ActionGate`, `decode_action`, `is_valid_action`
 - `app/crates/evosim/src/brain/mod.rs` → `child_from_crossover_with_sigma`, `founder_spread_with_sigma`
-- `crates/evosim/src/creature.rs` → `CreatureSoA` (`species_id`, `mating_cooldown` columns), `Genome::crossed`, `Genome::canonical_for_biome`
+- `crates/evosim/src/creature.rs` → `CreatureSoA` (`species_id`, `mating_cooldown`, `hue` columns)
 - `crates/evosim/src/constants.rs` → `SPECIES_MODE_DEFAULT`, `CrossoverMode`, `STARTING_SPECIES_COUNT_DEFAULT`, `STARTING_SPECIES_MEMBER_COUNT_DEFAULT`, `STARTING_SPECIES_MEMBER_VARIANCE_DEFAULT`, `MATING_COOLDOWN_TICKS_DEFAULT`, `MATING_CONTACT_RADIUS_FACTOR`, `MATE_REACH_MULTIPLIER_DEFAULT`
 
 ## See also
 
-- [`simulation-core.md`](simulation-core.md) — tick step order, `World`/`CreatureSoA` overview, body genome, FlashTag
+- [`simulation-core.md`](simulation-core.md) — tick step order, `World`/`CreatureSoA` overview, lineage `hue`, FlashTag
 - [`shared-memory-and-protocol.md`](shared-memory-and-protocol.md) — snapshot creature stride, species color in the packed render word
 - [`render-pipeline.md`](render-pipeline.md) — how species colors appear on canvas
 - [`../decisions/sim.md`](../decisions/sim.md) — rationale for the mode-switch design and seeding choices
 - [`../../agent-context/maintaining-docs.md`](../agent-context/maintaining-docs.md)
-- Global authoring rules: `~/.claude/agent-docs/v1/rules/authoring-rules.md`
+- Global authoring rules: `~/agent-docs/v1/rules/authoring-rules.md`

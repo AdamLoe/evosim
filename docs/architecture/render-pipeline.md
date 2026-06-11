@@ -153,6 +153,17 @@ Float32Array view in stride-8 chunks. Creature instance lanes are decoded
 per [architecture/shared-memory-and-protocol.md → Creature SoA](shared-memory-and-protocol.md);
 the GL pack reads them in `render/gl.ts` → `renderWorldImpl`.
 
+**Creature color source.** Lane 3 (`color_u32`) carries a packed RGBA8-LE
+word. In single-pool mode (no species), this word is produced by
+`lineage_color_u32(hue)` in `wasm_api/mod.rs`: the hue is an inherited
+per-creature lineage field that mutates slightly at each split, so
+descendants share a color family and lineage blooms are visible on canvas.
+In species mode the same lane carries the species palette color (unchanged).
+**The packed RGBA8-LE lane-3 format and the renderer's lane-3 read in
+`render/gl.ts → renderWorldImpl` are both unchanged** — only the Rust
+source that fills the word changed (from genome-derived to
+lineage-hue-derived). No renderer change is needed or expected.
+
 Then one `gl.drawArraysInstanced(TRIANGLE_STRIP, 0, 4, bodyCount)` call
 covers every visible body (including wrapped ghost copies). Bodies are
 filled discs; the `disc` fragment shader switches to an annulus when
@@ -535,4 +546,4 @@ unaccounted RAF overhead is visible.
 - [`worker-runtime.md`](worker-runtime.md)
 - [`profiler.md`](profiler.md)
 - [`../decisions/render.md`](../decisions/render.md)
-- [Agent-docs authoring rules](~/.claude/agent-docs/v1/rules/authoring-rules.md)
+- [Agent-docs authoring rules](~/agent-docs/v1/rules/authoring-rules.md)

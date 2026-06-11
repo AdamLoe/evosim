@@ -9,7 +9,7 @@
 //!       both with and without grass_multisight.
 //!   (d) smoke: compute_grass_far_band_sectors returns [0..1] values; a fully
 //!       saturated region → far band ≈ 1.0.
-//!   (e) fallback: walled + species forces single-band regardless of toggle.
+//!   (e) v2.1 P2: no fallback — all 8 combos fit; walled+species+multisight = 47→48.
 //!   (f) default constants agree with documented intent.
 
 use crate::constants::WorldDims;
@@ -157,44 +157,31 @@ fn layout_width_fits_max_nn_inputs_all_combos() {
     }
 }
 
-/// Multi-band layouts must be wider than single-band for configs that fit,
-/// and must fall back to single-band width for walled+species.
+/// v2.1 P2: multi-band layouts are always wider than single-band for ALL 4
+/// (wrap × species) combos — no fallback exists any more.
 #[test]
-fn multisight_layout_wider_when_fits_falls_back_walled_species() {
+fn multisight_layout_wider_for_all_combos() {
     for &wrap in &[true, false] {
         for &species in &[true, false] {
             let single = NnInputLayout::for_settings(wrap, species, false);
             let multi = NnInputLayout::for_settings(wrap, species, true);
-            let walled_species = !wrap && species;
-            if walled_species {
-                // Budget is full; must fall back.
-                assert_eq!(
-                    single.width(),
-                    multi.width(),
-                    "walled+species: multi-band should fall back to same width as single-band"
-                );
-                assert!(
-                    multi.offset_of(NnInputGroup::GrassBandsFar).is_none(),
-                    "walled+species: GrassBandsFar should be absent"
-                );
-            } else {
-                assert!(
-                    multi.width() > single.width(),
-                    "wrap={wrap}, species={species}: multi ({}) must be wider than single ({})",
-                    multi.width(),
-                    single.width()
-                );
-                assert!(
-                    multi.offset_of(NnInputGroup::GrassBandsFar).is_some(),
-                    "wrap={wrap}, species={species}: GrassBandsFar must be present"
-                );
-                let far_off = multi.offset_of(NnInputGroup::GrassBandsFar).unwrap();
-                let near_off = multi.offset_of(NnInputGroup::GrassSectors).unwrap();
-                assert!(
-                    far_off > near_off,
-                    "far band offset ({far_off}) must be > near band offset ({near_off})"
-                );
-            }
+            // All combos fit in v2.1 P2; multi must always be wider.
+            assert!(
+                multi.width() > single.width(),
+                "wrap={wrap}, species={species}: multi ({}) must be wider than single ({})",
+                multi.width(),
+                single.width()
+            );
+            assert!(
+                multi.offset_of(NnInputGroup::GrassBandsFar).is_some(),
+                "wrap={wrap}, species={species}: GrassBandsFar must be present for all combos"
+            );
+            let far_off = multi.offset_of(NnInputGroup::GrassBandsFar).unwrap();
+            let near_off = multi.offset_of(NnInputGroup::GrassSectors).unwrap();
+            assert!(
+                far_off > near_off,
+                "far band offset ({far_off}) must be > near band offset ({near_off})"
+            );
         }
     }
 }
@@ -250,27 +237,31 @@ fn far_band_outputs_always_bounded() {
     }
 }
 
-// ── (e) fallback: walled + species forces single-band ─────────────────────────
+// ── (e) v2.1 P2: no fallback — all 8 combos fit within MAX_NN_INPUTS=48 ───────
 
+/// v2.1 P2: walled + species + multisight now fits within 48 slots (real=47).
+/// GrassBandsFar IS active; there is no fallback.
 #[test]
-fn walled_species_multisight_falls_back_to_single_band() {
+fn walled_species_multisight_fits_no_fallback() {
     let layout_single = NnInputLayout::for_settings(false, true, false);
     let layout_multi = NnInputLayout::for_settings(false, true, true);
-    assert_eq!(
-        layout_single.width(),
+    // Multi must be WIDER than single (far band active, no fallback).
+    assert!(
+        layout_multi.width() > layout_single.width(),
+        "walled+species: multisight layout ({}) must be wider than single-band ({})",
         layout_multi.width(),
-        "walled+species: multisight must fall back to same width as single-band"
+        layout_single.width()
     );
     assert_eq!(
         layout_multi.width(),
         48,
-        "walled+species: expected padded width 48"
+        "walled+species+multisight: expected padded width 48 (real=47)"
     );
     assert!(
         layout_multi
             .offset_of(NnInputGroup::GrassBandsFar)
-            .is_none(),
-        "walled+species: GrassBandsFar must be absent (budget full)"
+            .is_some(),
+        "walled+species+multisight: GrassBandsFar must be present (all combos fit in v2.1 P2)"
     );
 }
 

@@ -28,4 +28,4 @@ follow the doc's `Why is it shaped this way` link into `decisions/`.
 - [`../decisions/index.md`](../decisions/index.md)
 - [`../ownership.md`](../ownership.md)
 - [`../agent-context/maintaining-docs.md`](../agent-context/maintaining-docs.md)
-- Global authoring rules: `~/.claude/agent-docs/v1/rules/authoring-rules.md`
+- Global authoring rules: `~/agent-docs/v1/rules/authoring-rules.md`

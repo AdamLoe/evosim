@@ -144,6 +144,6 @@ still need triage**. Kept: `perf-optimization-ideas.md`, `v2.0.5-bench-recipe.md
 ## See also
 
 - [`index.md`](index.md) — where live plans land.
-- [`~/.claude/agent-docs/v1/plan-lifecycle.md`](~/.claude/agent-docs/v1/plan-lifecycle.md)
-- `~/.claude/agent-docs/v1/rules/authoring-rules.md` — the standards this
+- [`~/agent-docs/v1/plan-lifecycle.md`](~/agent-docs/v1/plan-lifecycle.md)
+- `~/agent-docs/v1/rules/authoring-rules.md` — the standards this
   restructure is bringing the tree back to.

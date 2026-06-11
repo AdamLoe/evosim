@@ -24,6 +24,7 @@ import { getTargetTPS, setTpsChangeListener } from "../main";
 import { getSettings, setSetting, resetSettings, DEFAULTS, type Settings } from "../settings";
 import { showToast } from "../toast";
 import { THEMES, applyTheme } from "../themes";
+import { setProfilerVisible } from "./perf-panel";
 
 // Construction-only sim slider names. Edits land in DevSliders via
 // set_slider so they round-trip through restart, but the active world keeps
@@ -642,16 +643,31 @@ function section(title: string): HTMLDivElement {
 // UPKEEP_BASE + UPKEEP_NN_FIXED + UPKEEP_GUT + UPKEEP_MOUTH_DEFAULT.
 const UPKEEP_PER_TICK_DEFAULT = 0.17;
 
+// ─── Category mount-point helpers ────────────────────────────────────────
+
+/**
+ * Get the devpanel container for a given settings category. Falls back to
+ * `#devpanel-box` if the category container isn't found (defensive).
+ */
+function categoryBox(id: string): HTMLDivElement {
+  return (
+    (document.getElementById(id) as HTMLDivElement | null) ??
+    (document.getElementById("devpanel-box") as HTMLDivElement | null) ??
+    document.createElement("div")
+  );
+}
+
 // ─── Install ──────────────────────────────────────────────────────────────
 
 export function installDevPanel(getBridge: () => SimBridge): void {
-  const box = document.getElementById("devpanel-box") as HTMLDivElement | null;
-  if (!box) return;
+  // v2.1 P4: rows mount into per-category containers inside the new settings
+  // sub-nav IA (#settings-*-pane > #devpanel-*). The footer buttons still
+  // live at #settings-footer and wire the same Apply/Cancel/Reset semantics.
 
-  // ── Display (live) ──
+  // ── Display (live) — mounts into #devpanel-display ──
   // (autoRun moved to top bar's auto-restart icon button in v1.13 Wave 1.)
-  // Profiler visibility lives on the floating monitor-icon button at the
-  // bottom-right of the canvas, not in Settings. See widgets/perf-panel.ts.
+  // Profiler visibility: profiler is now a Settings category; no checkbox here.
+  const displayBox = categoryBox("devpanel-display");
   const displaySec = section("Display");
   displaySec.appendChild(makeLiveToggle(
     { label: "Show grass", simName: null, settingKey: "showGrass" },
@@ -738,9 +754,9 @@ export function installDevPanel(getBridge: () => SimBridge): void {
     formatValue: (v) => v.toFixed(2),
   }));
   displaySec.appendChild(makeThemeRow());
-  box.appendChild(displaySec);
+  displayBox.appendChild(displaySec);
 
-  // ── Render / LOD (v2.0.4 S1, v2.0.6 S10) ──
+  // ── Render / LOD — also mounts into #devpanel-display ──
   // `grassLodStep` is a discrete effective-resolution stepper (LIVE setting):
   //   Auto (0)         — existing formula + lodBias (unchanged behavior)
   //   Full ~1920 (1)   — L0, full resolution; finer than auto when zoomed out
@@ -774,9 +790,10 @@ export function installDevPanel(getBridge: () => SimBridge): void {
     min: 0, max: 4, step: 0.25,
     formatValue: (v) => v.toFixed(2),
   }));
-  box.appendChild(lodSec);
+  displayBox.appendChild(lodSec);
 
-  // ── Energy ──
+  // ── Energy — mounts into #devpanel-energy ──
+  const energyBox = categoryBox("devpanel-energy");
   const energySec = section("Energy");
 
   // Upkeep with /s readout that depends on TPS too.
@@ -815,9 +832,10 @@ export function installDevPanel(getBridge: () => SimBridge): void {
   }, {
     onInput: () => updateSplitThresholdCap(),
   }));
-  box.appendChild(energySec);
+  energyBox.appendChild(energySec);
 
-  // ── Grass ──
+  // ── Grass — mounts into #devpanel-grass ──
+  const grassBox = categoryBox("devpanel-grass");
   const grassSec = section("Grass");
   grassSec.appendChild(makeStagedSlider({
     label: "Energy per bite",
@@ -936,9 +954,10 @@ export function installDevPanel(getBridge: () => SimBridge): void {
     formatValue: (v) => `${Math.round(v)}u`,
     nextWorld: true,
   }));
-  box.appendChild(grassSec);
+  grassBox.appendChild(grassSec);
 
-  // ── World (v2.0 Wave 1a/1b) ──
+  // ── World — mounts into #devpanel-world ──
+  const worldBox = categoryBox("devpanel-world");
   // Construction-only world shape (restart-required, toast on apply) + the
   // two live biome movement-penalty sliders.
   const worldSec = section("World");
@@ -964,22 +983,11 @@ export function installDevPanel(getBridge: () => SimBridge): void {
     settingKey: "wrapWorld",
     nextWorld: true,
   }));
-  // Live biome penalties (apply to the running world).
-  worldSec.appendChild(makeStagedSlider({
-    label: "Water move penalty",
-    simName: "water_movement_penalty",
-    settingKey: "waterMovementPenalty",
-    min: 0, max: 1, step: 0.01,
-    formatValue: (v) => v.toFixed(2),
-  }));
-  worldSec.appendChild(makeStagedSlider({
-    label: "Desert move penalty",
-    simName: "desert_movement_penalty",
-    settingKey: "desertMovementPenalty",
-    min: 0, max: 1, step: 0.01,
-    formatValue: (v) => v.toFixed(2),
-  }));
-  box.appendChild(worldSec);
+  worldBox.appendChild(worldSec);
+
+  // ── Lifecycle — mounts into #devpanel-lifecycle ──
+  // Includes Species & mating (species mode gates Lifecycle rows).
+  const lifecycleBox = categoryBox("devpanel-lifecycle");
 
   // ── Species & mating (v2.0 Wave 3b) ──
   // `species_mode` is a construction toggle that gates the rest of the section:
@@ -1063,9 +1071,9 @@ export function installDevPanel(getBridge: () => SimBridge): void {
     formatValue: (v) => `${v.toFixed(1)}×`,
   });
   speciesSec.appendChild(mateReachRow);
-  box.appendChild(speciesSec);
+  lifecycleBox.appendChild(speciesSec);
 
-  // ── Attack ──
+  // ── Attack — mounts into #devpanel-energy ──
   // v2.0 Wave 5: the action was renamed Eat→Attack; label text only. The
   // slider's `simName` ("eat_bite_fraction") is the Rust wire name — DO NOT
   // rename it or the slider stops applying.
@@ -1084,9 +1092,9 @@ export function installDevPanel(getBridge: () => SimBridge): void {
     min: 0, max: 500, step: 1,
     formatValue: (v) => `${Math.round(v)} ticks`,
   }));
-  box.appendChild(eatSec);
+  energyBox.appendChild(eatSec);
 
-  // ── Lifecycle ──
+  // ── Lifecycle (continued) ──
   const lifeSec = section("Lifecycle");
   lifeSec.appendChild(makeStagedSlider({
     label: "Max age",
@@ -1123,10 +1131,10 @@ export function installDevPanel(getBridge: () => SimBridge): void {
   const founderCountRow = makeStagedSlider({
     label: "Founder count",
     simName: "founder_count",
-    // v2.0.x: raised 32 → 8000 so single-pool worlds can start with a large
-    // population. Each founder is colored from its genome (continuous), so no
-    // palette limit applies. The number input lets you type an exact value; the
-    // active max_population cap still culls down at the first birth phase.
+    // Single-pool worlds can start with a large population. Each founder gets a
+    // continuous lineage hue, so no palette limit applies. The number input lets
+    // you type an exact value; the safety max_population cap still applies at
+    // the first birth phase.
     settingKey: "founderCount",
     min: 1, max: 8000, step: 1,
     formatValue: (v) => String(Math.round(v)),
@@ -1138,15 +1146,6 @@ export function installDevPanel(getBridge: () => SimBridge): void {
     simName: "mutation_rate_multiplier",
     settingKey: "mutRate",
     min: 0, max: 5, step: 0.05,
-    formatValue: (v) => v.toFixed(2),
-  }));
-  // v2.0 Wave 2b: genome trait-mutation sigma multiplier (live-tunable). Scales
-  // the per-birth Gaussian nudge applied to each of the 6 body-genome traits.
-  lifeSec.appendChild(makeStagedSlider({
-    label: "Trait mutation σ ×",
-    simName: "trait_mutation_sigma_multiplier",
-    settingKey: "traitMutationSigmaMultiplier",
-    min: 0, max: 2, step: 0.05,
     formatValue: (v) => v.toFixed(2),
   }));
   // Founder action-output boosts (construction-scoped — applied once to the
@@ -1180,9 +1179,9 @@ export function installDevPanel(getBridge: () => SimBridge): void {
     formatValue: (v) => v.toFixed(1),
   }));
   // v1.13 Wave 2: the "Max population" selector moved out of Settings and
-  // into the bottom perf panel's selectors row. The persisted setting + the
+  // into the profiler panel's selectors row. The persisted setting + the
   // `max_population` slider live there now (live-apply, no staging).
-  box.appendChild(lifeSec);
+  lifecycleBox.appendChild(lifeSec);
 
   // Dynamic split-threshold cap = energy_max - 1.
   function updateSplitThresholdCap(): void {
@@ -1232,6 +1231,71 @@ export function installDevPanel(getBridge: () => SimBridge): void {
   speciesGatingSync = refreshSpeciesGating;
   refreshSpeciesGating();
 
+  // ── Equilibrium (v2.1 P3) — mounts into #devpanel-equilibrium ──
+  // All six knobs are live sliders (take effect on the next tick; no restart).
+  // They appear under the dedicated Equilibrium sub-nav category.
+  const equilibriumBox = categoryBox("devpanel-equilibrium");
+  const equilibriumSec = section("Equilibrium");
+
+  // Prominent reproduction energy cost (existing split_gift slider).
+  equilibriumSec.appendChild(makeLiveSlider({
+    label: "Reproduction cost",
+    simName: "split_gift",
+    settingKey: "splitGift",
+    min: 0, max: 100, step: 1,
+    formatValue: (v) => v.toFixed(0),
+  }));
+
+  // Crowding mortality.
+  equilibriumSec.appendChild(makeLiveSlider({
+    label: "Crowding strength",
+    simName: "crowding_strength",
+    settingKey: "crowdingStrength",
+    min: 0, max: 0.1, step: 0.001,
+    formatValue: (v) => v.toFixed(3),
+  }));
+  equilibriumSec.appendChild(makeLiveSlider({
+    label: "Crowding radius",
+    simName: "crowding_radius",
+    settingKey: "crowdingRadius",
+    min: 0, max: 60, step: 1,
+    formatValue: (v) => v.toFixed(0),
+  }));
+
+  // Starvation drain.
+  equilibriumSec.appendChild(makeLiveSlider({
+    label: "Starvation threshold",
+    simName: "starvation_threshold",
+    settingKey: "starvationThreshold",
+    min: 0, max: 50, step: 0.5,
+    formatValue: (v) => v.toFixed(1),
+  }));
+  equilibriumSec.appendChild(makeLiveSlider({
+    label: "Starvation drain rate",
+    simName: "starvation_drain_rate",
+    settingKey: "starvationDrainRate",
+    min: 0, max: 2.0, step: 0.01,
+    formatValue: (v) => v.toFixed(2),
+  }));
+
+  // Grass carrying-capacity / regrowth.
+  equilibriumSec.appendChild(makeLiveSlider({
+    label: "Grass capacity scale",
+    simName: "grass_capacity_scale",
+    settingKey: "grassCapacityScale",
+    min: 0.1, max: 2.0, step: 0.05,
+    formatValue: (v) => v.toFixed(2),
+  }));
+  equilibriumSec.appendChild(makeLiveSlider({
+    label: "Grass regrowth rate",
+    simName: "grass_regrowth_rate",
+    settingKey: "grassRegrowthRate",
+    min: 0.1, max: 3.0, step: 0.05,
+    formatValue: (v) => v.toFixed(2),
+  }));
+
+  equilibriumBox.appendChild(equilibriumSec);
+
   // ── Footer wiring ──
   footerApply = document.getElementById("settings-apply") as HTMLButtonElement | null;
   footerCancel = document.getElementById("settings-cancel") as HTMLButtonElement | null;
@@ -1240,6 +1304,33 @@ export function installDevPanel(getBridge: () => SimBridge): void {
   if (footerCancel) footerCancel.addEventListener("click", () => cancelAll());
   if (footerReset) footerReset.addEventListener("click", () => resetAll(getBridge));
   refreshDirtyState();
+
+  // ── Settings sub-nav wiring (v2.1 P4) ──
+  // Wire the left-column category buttons so clicking a button activates its
+  // corresponding pane. This runs once at install; no re-install needed.
+  //
+  // v2.1 P4 fix: couple the Profiler category to the profiler recording state.
+  // Selecting "profiler" enables recording (setProfilerVisible(true) + persists
+  // showProfiler=true); navigating away idles it (setProfilerVisible(false) +
+  // showProfiler=false). This restores the enable path that the now-removed
+  // top-bar toggle button used to own.
+  const catBtns = document.querySelectorAll<HTMLButtonElement>(".settings-cat-btn");
+  const catPanes = document.querySelectorAll<HTMLElement>(".settings-pane");
+  catBtns.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const cat = btn.dataset.cat;
+      catBtns.forEach((b) => b.classList.toggle("is-active", b === btn));
+      catPanes.forEach((pane) => {
+        const paneId = pane.id; // e.g. "settings-energy-pane"
+        pane.classList.toggle("is-active", paneId === `settings-${cat}-pane`);
+      });
+      // Enable profiler recording when the Profiler category becomes active;
+      // idle it when the user navigates to any other category.
+      const profilerActive = cat === "profiler";
+      setSetting("showProfiler", profilerActive);
+      setProfilerVisible(profilerActive);
+    });
+  });
 }
 
 if (import.meta.env?.DEV && typeof window !== "undefined") {

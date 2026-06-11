@@ -164,26 +164,6 @@ pub fn generate_biome_grid(world_seed: u32, dims: &WorldDims) -> Vec<u8> {
     grid
 }
 
-/// Sample the biome at a world position from a generated grid + dims. Free
-/// helper usable at construction time (before a `World` exists) — mirrors
-/// `World::biome_cell_index` + `biome_at`. v2.0 Wave 4 (species seeding samples
-/// the biome under each anchor to bias the canonical founder genome).
-#[inline]
-pub(crate) fn biome_at_pos(biome_grid: &[u8], dims: &WorldDims, x: f32, y: f32) -> Biome {
-    let dim = dims.grass_dim;
-    let ws = dims.world_size;
-    let (px, py) = if dims.wrap_world {
-        (x.rem_euclid(ws), y.rem_euclid(ws))
-    } else {
-        (x.clamp(0.0, ws), y.clamp(0.0, ws))
-    };
-    // v2.0.4 S2: use the construction-time cell size from dims.
-    let cs = dims.grass_cell_size;
-    let ix = ((px / cs) as usize).min(dim - 1);
-    let iy = ((py / cs) as usize).min(dim - 1);
-    biome_from_u8(biome_grid[iy * dim + ix])
-}
-
 /// Map a stored biome byte to its [`Biome`]. Unknown bytes fall back to Plains.
 #[inline]
 pub(crate) fn biome_from_u8(b: u8) -> Biome {

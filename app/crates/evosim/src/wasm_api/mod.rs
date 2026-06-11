@@ -62,11 +62,10 @@ pub const SLIDER_NAMES: &[&str] = &[
     "world_size", // 18 f32 (construction) — world extent
     "world_seed", // 19 u32 (carried as f32) — biome seed (Wave 1b)
     "wrap_world", // 20 bool (0.0 / non-zero) — torus vs walled
-    // v2.0 Wave 1b: live-tunable biome movement-penalty base severities [0,1].
-    "water_movement_penalty",  // 21 f32 — Water biome base severity
-    "desert_movement_penalty", // 22 f32 — Desert biome base severity
-    // v2.0 Wave 2a: live multiplier on the per-birth body-genome mutation step.
-    "trait_mutation_sigma_multiplier", // 23 f32 — genome trait-sigma multiplier
+    // v2.1 P2: slots 21/22/23 retired; kept as no-ops to preserve index stability.
+    "_reserved_legacy_water_movement_penalty", // 21 no-op (was water_movement_penalty)
+    "_reserved_legacy_desert_movement_penalty", // 22 no-op (was desert_movement_penalty)
+    "_reserved_legacy_trait_mutation_sigma_multiplier", // 23 no-op (was trait_mutation_sigma_multiplier)
     // v2.0 Wave 3a: species + sexual-mating construction/live settings.
     "species_mode",           // 24 bool (0/non-zero) construction — species + mating
     "crossover_mode",         // 25 enum (0=average, non-zero=fifty_fifty) construction
@@ -126,6 +125,14 @@ pub const SLIDER_NAMES: &[&str] = &[
     "mate_reach_multiplier", // 64 f32 live — × on mating contact radius
     "init_graze_boost",      // 65 f32 construction — founder Graze-output boost
     "init_split_boost",      // 66 f32 construction — founder Split/Mate-output boost
+    // v2.1 P3: food-limited equilibrium knobs. APPEND-ONLY (idx 67+).
+    // All six are live sliders (take effect next tick).
+    "crowding_strength",     // 67 f32 live — extra upkeep per neighbour per tick
+    "crowding_radius",       // 68 f32 live — radius (world-units) for neighbour count
+    "starvation_threshold",  // 69 f32 live — energy floor below which extra drain fires
+    "starvation_drain_rate", // 70 f32 live — extra per-tick drain while below threshold
+    "grass_capacity_scale",  // 71 f32 live — multiplier on per-cell carrying-cap
+    "grass_regrowth_rate",   // 72 f32 live — multiplier on spread_pct + in-cell growth
 ];
 
 /// First mutation-bucket slider slot. v2.0 Wave 3a (shifted from 24 to 30 after
@@ -561,10 +568,10 @@ impl WorldHandle {
         let sliders = crate::world::DevSliders {
             grass_initial_seed_count: initial_grass_seed_count,
             energy_max: energy_max.max(1.0),
-            // v2.0.x: raised the founder cap from 32 to the structural ceiling so
-            // single-pool worlds can start with a large population (1000s). Color is
-            // genome-derived per creature, so no palette limit applies. The active
-            // max_population cull still applies at the first birth phase.
+            // Raised to the structural ceiling so single-pool worlds can start
+            // with a large population. Lineage color is continuous, so no palette
+            // limit applies. The safety max-population cull still applies at the
+            // first birth phase.
             founder_count: founder_count.clamp(1, MAX_POP_FOR_SIM as u32),
             full_grass_on_init,
             world_size,
@@ -1188,18 +1195,9 @@ impl WorldHandle {
     fn apply_wrap_world(&mut self, value: bool) {
         self.inner.sliders.wrap_world = value;
     }
-    /// v2.0 Wave 1b live: Water biome base movement-penalty severity, clamped [0, 1].
-    fn apply_water_movement_penalty(&mut self, value: f32) {
-        self.inner.sliders.water_movement_penalty = value.clamp(0.0, 1.0);
-    }
-    /// v2.0 Wave 1b live: Desert biome base movement-penalty severity, clamped [0, 1].
-    fn apply_desert_movement_penalty(&mut self, value: f32) {
-        self.inner.sliders.desert_movement_penalty = value.clamp(0.0, 1.0);
-    }
-    /// v2.0 Wave 2a live: per-birth body-genome mutation-step multiplier. Clamped
-    /// non-negative (a negative sigma is meaningless).
-    fn apply_trait_mutation_sigma_multiplier(&mut self, value: f32) {
-        self.inner.sliders.trait_mutation_sigma_multiplier = value.max(0.0);
+    // v2.1 P2: sliders 21/22/23 are retired no-ops (genome + biome penalties removed).
+    fn apply_reserved_legacy_noop(&mut self, _value: f32) {
+        // No-op: index retired; field no longer exists on DevSliders.
     }
     /// v2.0 Wave 3a construction-only: species + sexual-mating mode for the
     /// *next* world. Live world keeps its current mode.
@@ -1303,6 +1301,32 @@ impl WorldHandle {
     fn apply_init_split_boost(&mut self, value: f32) {
         self.inner.sliders.init_split_boost = value.max(0.0);
     }
+
+    // ── v2.1 P3: food-limited equilibrium live setters ───────────────────────
+    /// Extra upkeep per crowding neighbour per tick. Floored at 0.
+    fn apply_crowding_strength(&mut self, value: f32) {
+        self.inner.sliders.crowding_strength = value.max(0.0);
+    }
+    /// Radius for crowding neighbour count (world-units). Floored at 0.
+    fn apply_crowding_radius(&mut self, value: f32) {
+        self.inner.sliders.crowding_radius = value.max(0.0);
+    }
+    /// Starvation threshold (energy floor). Floored at 0.
+    fn apply_starvation_threshold(&mut self, value: f32) {
+        self.inner.sliders.starvation_threshold = value.max(0.0);
+    }
+    /// Extra per-tick drain below starvation threshold. Floored at 0.
+    fn apply_starvation_drain_rate(&mut self, value: f32) {
+        self.inner.sliders.starvation_drain_rate = value.max(0.0);
+    }
+    /// Grass carrying-capacity scale multiplier, clamped [0, 10].
+    fn apply_grass_capacity_scale(&mut self, value: f32) {
+        self.inner.sliders.grass_capacity_scale = value.clamp(0.0, 10.0);
+    }
+    /// Grass regrowth rate multiplier, floored at 0.
+    fn apply_grass_regrowth_rate(&mut self, value: f32) {
+        self.inner.sliders.grass_regrowth_rate = value.max(0.0);
+    }
     /// Apply a dev-panel slider live by name. JS console workflow
     /// (BUILD-REPORT Known Issue #4). Returns `Err` on unknown name so a
     /// console typo is visible instead of silently ignored.
@@ -1367,11 +1391,8 @@ impl WorldHandle {
             18 => self.apply_world_size(value),
             19 => self.apply_world_seed(value.max(0.0) as u32),
             20 => self.apply_wrap_world(value != 0.0),
-            // v2.0 Wave 1b live biome movement-penalty severities [0, 1].
-            21 => self.apply_water_movement_penalty(value),
-            22 => self.apply_desert_movement_penalty(value),
-            // v2.0 Wave 2a live genome trait-sigma multiplier.
-            23 => self.apply_trait_mutation_sigma_multiplier(value),
+            // v2.1 P2: slots 21/22/23 retired no-ops.
+            21..=23 => self.apply_reserved_legacy_noop(value),
             // v2.0 Wave 3a species + sexual-mating settings.
             24 => self.apply_species_mode(value != 0.0),
             25 => self.apply_crossover_mode(value),
@@ -1405,6 +1426,13 @@ impl WorldHandle {
             64 => self.apply_mate_reach_multiplier(value),
             65 => self.apply_init_graze_boost(value),
             66 => self.apply_init_split_boost(value),
+            // v2.1 P3: food-limited equilibrium knobs (indices 67–72).
+            67 => self.apply_crowding_strength(value),
+            68 => self.apply_crowding_radius(value),
+            69 => self.apply_starvation_threshold(value),
+            70 => self.apply_starvation_drain_rate(value),
+            71 => self.apply_grass_capacity_scale(value),
+            72 => self.apply_grass_regrowth_rate(value),
             _ => {} // out-of-range: silently ignore (forward-compat with newer TS).
         }
     }
@@ -1475,9 +1503,7 @@ impl WorldHandle {
 
     /// JSON blob for the Inspector panel. Returns None if idx is out of range.
     /// O(1) — all fields are direct SoA reads.
-    /// v2.0 Wave 2a schema: drops `color_ema` (color now derives from the
-    /// genome); adds the 6 genome traits + the creature's current
-    /// genome-modulated movement penalty.
+    /// v2.1 P2 schema: genome fields removed; lineage hue added.
     #[wasm_bindgen]
     pub fn creature_inspect_json(&self, idx: u32) -> Option<String> {
         let i = idx as usize;
@@ -1486,7 +1512,6 @@ impl WorldHandle {
         }
         let action_name = format!("{:?}", self.inner.creatures.action_this_tick[i]);
         let brain = &self.inner.creatures.brains[i];
-        let g = &self.inner.creatures.genome[i];
         // v1.5 S3: wall_proximity (N/S/E/W) computed inline; S5b promotes to
         // a shared proximity.rs helper. Range 50u, linear normalize: 1.0 at
         // wall contact → 0.0 at >=50u away.
@@ -1498,14 +1523,13 @@ impl WorldHandle {
         let wp_s = (1.0 - ((world_size - cy) / wall_range)).clamp(0.0, 1.0);
         let wp_w = (1.0 - (cx / wall_range)).clamp(0.0, 1.0);
         let wp_e = (1.0 - ((world_size - cx) / wall_range)).clamp(0.0, 1.0);
-        // v2.0 Wave 2a: genome-modulated movement penalty at the current cell.
-        let movement_penalty = self.inner.movement_penalty_for(i);
         // v2.0 Wave 3a: species fields (species_mode only). The species-history
         // breadcrumb is Wave 5 — left empty here.
         let species_mode = self.inner.sliders.species_mode;
         let species_id = self.inner.creatures.species_id[i];
         let species_color = self.inner.species.color_of(species_id);
         let species_name = self.inner.species.name_of(species_id);
+        let hue = self.inner.creatures.hue[i];
         let mut json = serde_json::json!({
             "index": idx,
             "id": self.inner.creatures.id[i],
@@ -1515,21 +1539,12 @@ impl WorldHandle {
             "max_age": self.inner.sliders.max_age,
             "energy": self.inner.creatures.energy[i],
             "energy_frac": (self.inner.creatures.energy[i] / 100.0).clamp(0.0, 1.0),
-            "size": CREATURE_SIZE * g.body_size_factor(),
+            "size": CREATURE_SIZE * BODY_RADIUS_PER_SIZE,
             "current_action": action_name,
-            "move_speed": MOVE_SPEED_MAX * g.max_speed_factor(),
+            "move_speed": MOVE_SPEED_MAX,
             "cooldown_remaining": self.inner.creatures.digestion_cooldown[i],
-            // v2.0 Wave 2a: the 6 evolving body-genome traits (raw [0,1]).
-            "genome": {
-                "body_size": g.body_size,
-                "max_speed": g.max_speed,
-                "metabolism": g.metabolism,
-                "diet": g.diet,
-                "water_affinity": g.water_affinity,
-                "heat_tolerance": g.heat_tolerance,
-            },
-            // v2.0 Wave 2a: current genome-modulated biome movement penalty [0,1].
-            "movement_penalty": movement_penalty,
+            // v2.1 P2: lineage hue replaces genome.
+            "hue": hue,
             "wall_proximity": [wp_n, wp_s, wp_e, wp_w],
             "nn_weight_count": brain.weights.len(),
         });
@@ -1545,6 +1560,106 @@ impl WorldHandle {
                 obj.insert("species_history".into(), serde_json::json!([] as [u16; 0]));
             }
         }
+        Some(serde_json::to_string(&json).unwrap_or_else(|_| "{}".into()))
+    }
+
+    /// v2.1 P1 (Stream A): on-demand full NN I/O inspect for one creature.
+    ///
+    /// Recomputes the creature's NN input vector from scratch (same path as the
+    /// tick), runs one `Brain::forward`, and returns a JSON blob. Returns `None`
+    /// if `idx` is out of range.
+    ///
+    /// JSON shape:
+    /// ```json
+    /// {
+    ///   "inputs": [
+    ///     { "group": "<GroupName>", "label": "<label>", "value": <f32> },
+    ///     ...
+    ///   ],
+    ///   "outputs": {
+    ///     "vx": <f32>,
+    ///     "vy": <f32>,
+    ///     "logits": [<graze_f32>, <attack_f32>, <split_or_mate_f32>],
+    ///     "chosen": "<Graze|Attack|Split>"
+    ///   }
+    /// }
+    /// ```
+    ///
+    /// `inputs` has one entry per active slot in the current `NnInputLayout`
+    /// (pad slots are not included). Group names match `NnInputGroup` variants;
+    /// directional groups are labeled by compass sector (N/NE/E/SE/S/SW/W/NW
+    /// for 8-sector groups; N/S/E/W for 4-slot groups). `chosen` is the
+    /// decoded action string (`"Graze"`, `"Attack"`, or `"Split"`; in
+    /// species_mode `"Split"` decodes as `"Mate"` when that action is valid).
+    ///
+    /// See `NnInputLayout::for_settings` for the active group set, which
+    /// depends on `wrap_world`, `species_mode`, and `grass_multisight`.
+    #[wasm_bindgen]
+    pub fn creature_nn_inspect_json(&self, idx: u32) -> Option<String> {
+        let i = idx as usize;
+        if i >= self.inner.creatures.len() {
+            return None;
+        }
+        let w = &self.inner;
+        let biome = crate::world::nn::BiomeSampler::new(
+            &w.biome_grid[..],
+            w.dims.grass_dim,
+            w.dims.world_size,
+            w.dims.wrap_world,
+            w.dims.grass_cell_size,
+        );
+        let (inputs, output_buf) = crate::world::nn::build_labeled_nn_inspect(
+            i,
+            &w.nn_input_layout,
+            w.sliders.species_mode,
+            &w.creatures,
+            &w.grass,
+            &w.grid,
+            &w.sector_lut,
+            biome,
+            w.sliders.energy_max,
+            w.sliders.max_age,
+            w.dims.world_size,
+        );
+
+        // Decode action from the logit outputs.
+        let energy = w.creatures.energy[i];
+        let cooldown = w.creatures.digestion_cooldown[i];
+        let gate = crate::world::nn::ActionGate {
+            species_mode: w.sliders.species_mode,
+            split_threshold: w.sliders.split_threshold,
+            mating_cost: w.sliders.split_gift,
+            mating_cooldown: w.creatures.mating_cooldown[i],
+        };
+        let logits: &[f32; 3] = output_buf[2..5].try_into().unwrap();
+        let action = crate::world::nn::decode_action(logits, energy, cooldown, &gate);
+        // In species_mode, action[2] means "Mate" semantically but the enum
+        // variant is still Split. We expose the mode-aware name so the UI can
+        // display it correctly without knowing the mode.
+        let chosen = match action {
+            crate::creature::Action::Graze => "Graze",
+            crate::creature::Action::Attack => "Attack",
+            crate::creature::Action::Split => {
+                if w.sliders.species_mode {
+                    "Mate"
+                } else {
+                    "Split"
+                }
+            }
+        };
+
+        let vx = output_buf[0] * crate::constants::MOVE_SPEED_MAX;
+        let vy = output_buf[1] * crate::constants::MOVE_SPEED_MAX;
+
+        let json = serde_json::json!({
+            "inputs": inputs,
+            "outputs": {
+                "vx": vx,
+                "vy": vy,
+                "logits": [logits[0], logits[1], logits[2]],
+                "chosen": chosen,
+            }
+        });
         Some(serde_json::to_string(&json).unwrap_or_else(|_| "{}".into()))
     }
 
@@ -1643,11 +1758,10 @@ impl WorldHandle {
             "world_size": d.world_size,
             "world_seed": d.world_seed as f32,
             "wrap_world": if d.wrap_world { 1.0_f32 } else { 0.0 },
-            // v2.0 Wave 1b live biome movement-penalty severities.
-            "water_movement_penalty": d.water_movement_penalty,
-            "desert_movement_penalty": d.desert_movement_penalty,
-            // v2.0 Wave 2a genome trait-sigma multiplier.
-            "trait_mutation_sigma_multiplier": d.trait_mutation_sigma_multiplier,
+            // v2.1 P2: slots 21/22/23 retired; emit 0.0 to satisfy SLIDER_NAMES coverage.
+            "_reserved_legacy_water_movement_penalty": 0.0_f32,
+            "_reserved_legacy_desert_movement_penalty": 0.0_f32,
+            "_reserved_legacy_trait_mutation_sigma_multiplier": 0.0_f32,
             // v2.0 Wave 3a species + sexual-mating settings (bools/enums as 0/1).
             "species_mode": if d.species_mode { 1.0_f32 } else { 0.0 },
             "crossover_mode": d.crossover_mode.to_slider(),
@@ -1700,6 +1814,31 @@ impl WorldHandle {
         obj.insert(
             "init_split_boost".into(),
             serde_json::json!(d.init_split_boost),
+        );
+        // v2.1 P3: food-limited equilibrium knobs.
+        obj.insert(
+            "crowding_strength".into(),
+            serde_json::json!(d.crowding_strength),
+        );
+        obj.insert(
+            "crowding_radius".into(),
+            serde_json::json!(d.crowding_radius),
+        );
+        obj.insert(
+            "starvation_threshold".into(),
+            serde_json::json!(d.starvation_threshold),
+        );
+        obj.insert(
+            "starvation_drain_rate".into(),
+            serde_json::json!(d.starvation_drain_rate),
+        );
+        obj.insert(
+            "grass_capacity_scale".into(),
+            serde_json::json!(d.grass_capacity_scale),
+        );
+        obj.insert(
+            "grass_regrowth_rate".into(),
+            serde_json::json!(d.grass_regrowth_rate),
         );
         serde_json::to_string(&json).unwrap_or_else(|_| "{}".into())
     }
@@ -1806,24 +1945,20 @@ fn fill_creature_bytes(world: &World, dst: &mut [u8]) -> usize {
         "pop={pop} exceeds MAX_POP_FOR_SIM={MAX_POP_FOR_SIM} — sim cull broke",
     );
     debug_assert!(dst.len() >= pop * 32, "dst too small for creature SoA",);
-    let base_r = CREATURE_SIZE * BODY_RADIUS_PER_SIZE;
-    // v2.0 Wave 3a: in species mode the body color is the SPECIES color (looked
-    // up sim-side from the registry) so the renderer needs no change this wave;
-    // single-pool keeps the genome-derived color. The per-creature `species_id`
-    // also rides the snapshot `packed_u32` (bits 7..23).
+    // v2.1 P2: body radius is constant (genome removed).
+    let body_r = CREATURE_SIZE * BODY_RADIUS_PER_SIZE;
+    // v2.0 Wave 3a: in species mode the body color is the SPECIES color;
+    // v2.1 P2: single-pool uses lineage hue color instead of genome color.
     let species_mode = world.sliders.species_mode;
     for i in 0..pop {
         let x = world.creatures.x[i];
         let y = world.creatures.y[i];
-        let g = &world.creatures.genome[i];
-        // v2.0 Wave 2a: sprite radius is body_size-derived.
-        let body_r = base_r * g.body_size_factor();
         let species_id = world.creatures.species_id[i];
-        // Display color: species color (species_mode) or genome color (single-pool).
+        // Display color: species color (species_mode) or lineage hue (single-pool).
         let color = if species_mode {
             world.species.color_of(species_id)
         } else {
-            genome_color_u32(g)
+            lineage_color_u32(world.creatures.hue[i])
         };
         // v2.0 Wave 2a/3a: ring-flash + species_id, bit-packed. species_id is 0
         // (reserved) in single-pool, the creature's species in species_mode.
@@ -1852,21 +1987,15 @@ fn fill_creature_bytes(world: &World, dst: &mut [u8]) -> usize {
     pop
 }
 
-/// v2.0 Wave 2a: single-pool genome → RGBA8 display color packed into one u32.
+/// v2.1 P2: lineage hue (f32 in [0,1)) → RGBA8 display color packed into one u32.
 ///
-/// HSV mapping (visual identity, FEEL KNOB). hue ← `diet` (`hue_deg = 120 * (1 -
-/// diet)`, grazer green 120° → predator red 0°); saturation ← `body_size`
-/// (mapped to [0.4, 1.0]; floor keeps small grazers visible); value ←
-/// `max_speed` (mapped to [0.5, 1.0]; faster = brighter).
-///
+/// HSV mapping: hue = hue * 360° (full wheel), saturation = 0.8, value = 0.9.
 /// Returned as RGBA8 little-endian: R = bits 0..8, G = 8..16, B = 16..24, A =
-/// 24..32 (A always 255). The TS reader (2b) does `R = u & 0xFF`, etc.
+/// 24..32 (A always 255). The TS reader does `R = u & 0xFF`, etc.
 #[inline]
-fn genome_color_u32(g: &crate::creature::Genome) -> u32 {
-    let hue = 120.0 * (1.0 - g.diet); // degrees, 120(green)→0(red)
-    let sat = 0.4 + 0.6 * g.body_size; // [0.4, 1.0]
-    let val = 0.5 + 0.5 * g.max_speed; // [0.5, 1.0]
-    let (r, gg, b) = hsv_to_rgb8(hue, sat, val);
+fn lineage_color_u32(hue: f32) -> u32 {
+    let hue_deg = hue.rem_euclid(1.0) * 360.0;
+    let (r, gg, b) = hsv_to_rgb8(hue_deg, 0.8, 0.9);
     (r as u32) | ((gg as u32) << 8) | ((b as u32) << 16) | (0xFFu32 << 24)
 }
 
@@ -2086,10 +2215,8 @@ mod tests {
             let body = f32::from_le_bytes(creatures[base + 8..base + 12].try_into().unwrap());
             assert_eq!(x, handle.inner.creatures.x[i]);
             assert_eq!(y, handle.inner.creatures.y[i]);
-            // Radius is body_size-derived (genome factor 0.5..1.5).
-            let expected_r = CREATURE_SIZE
-                * BODY_RADIUS_PER_SIZE
-                * handle.inner.creatures.genome[i].body_size_factor();
+            // v2.1 P2: radius is constant (genome removed).
+            let expected_r = CREATURE_SIZE * BODY_RADIUS_PER_SIZE;
             assert!((body - expected_r).abs() < 1e-5, "radius lane mismatch");
             // color_u32 lane (3): alpha byte must be 255.
             let color = u32::from_le_bytes(creatures[base + 12..base + 16].try_into().unwrap());
@@ -2418,5 +2545,6 @@ mod tests {
     mod dims;
     mod lod_config;
     mod lod_stepper;
+    mod nn_inspect;
     mod snapshot;
 }

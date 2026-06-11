@@ -1,21 +1,17 @@
-//! v2.0 Wave 4 — species seeding & balance tests.
+//! v2.1 P2 — species seeding & balance tests.
 //!
-//! Lives in its OWN file/module (wired from `world/mod.rs` via `#[path]`) to
-//! avoid the shared-`mod tests` merge hazard. Covers:
+//! Genome-specific tests removed (genome gone). Remaining tests cover:
 //!   * Seeding determinism: same `world_seed` ⇒ identical anchors / species /
-//!     founder genomes + brains; a different `world_seed` ⇒ a different layout —
+//!     founder hues + brains; a different `world_seed` ⇒ a different layout —
 //!     while the run (sim RNG) stays decoupled from `world_seed`.
 //!   * Founders cluster near their species anchor.
-//!   * Biome-adapted canonical genome (water anchor → high water_affinity,
-//!     desert → high heat_tolerance, plains → moderate both).
-//!   * `member_variance` produces measurable spread off the canonical member.
+//!   * Hue spread: founders of the same species share a common hue with small variation.
+//!   * `member_variance` produces measurable brain-weight spread within a species.
 //!   * Balance smoke: a multi-thousand-tick species-mode run stays under the
 //!     soft pop cap (no random-cull binding) and ≥1 species persists a while.
 
 use super::*;
-use crate::constants::{Biome, BIOME_BIAS_HIGH_LO, MAX_POP_FOR_SIM};
-use crate::creature::Genome;
-use crate::rng::SimRng;
+use crate::constants::MAX_POP_FOR_SIM;
 
 /// Production-style species-mode sliders at a chosen world size + seed. Uses the
 /// real species-seeding defaults (10 × 10) unless overridden by the caller.
@@ -41,8 +37,8 @@ fn species_world(world_size: f32, world_seed: u32) -> World {
 // ─── Seeding determinism ────────────────────────────────────────────────────
 
 /// Same `world_seed` ⇒ byte-identical tick-0 species layout: anchors (positions),
-/// per-creature genomes, and founder brain weights all match. This is the
-/// Wave-4 "seeding deterministic from `world_seed`" verification.
+/// per-creature hues, and founder brain weights all match. This is the
+/// "seeding deterministic from `world_seed`" verification (v2.1 P2: hue replaces genome).
 #[test]
 fn same_world_seed_reproduces_identical_seeding() {
     // Different STRING seeds (different sim RNG) but the SAME world_seed → the
@@ -67,9 +63,10 @@ fn same_world_seed_reproduces_identical_seeding() {
             a.creatures.species_id[i], b.creatures.species_id[i],
             "species_id mismatch at {i}"
         );
-        let ga = &a.creatures.genome[i];
-        let gb = &b.creatures.genome[i];
-        assert_eq!(ga, gb, "genome mismatch at founder {i}");
+        assert_eq!(
+            a.creatures.hue[i], b.creatures.hue[i],
+            "hue mismatch at founder {i}"
+        );
         assert_eq!(
             a.creatures.brains[i].weights, b.creatures.brains[i].weights,
             "brain weights mismatch at founder {i}"
@@ -77,32 +74,25 @@ fn same_world_seed_reproduces_identical_seeding() {
     }
 }
 
-/// A different `world_seed` ⇒ a different tick-0 layout (anchors and/or founder
-/// genomes differ). Guards against the seeding being accidentally seed-invariant.
+/// A different `world_seed` ⇒ a different tick-0 layout (anchors and/or hues
+/// differ). Guards against the seeding being accidentally seed-invariant.
 #[test]
 fn different_world_seed_changes_seeding() {
     let a = species_world(4800.0, 1);
     let b = species_world(4800.0, 2);
 
-    // Population is the same shape (10 × 10), but the positions / genomes differ.
+    // Population is the same shape (10 × 10), but the positions differ.
     assert_eq!(a.creatures.len(), b.creatures.len());
     let mut any_pos_diff = false;
-    let mut any_genome_diff = false;
     for i in 0..a.creatures.len() {
         if a.creatures.x[i] != b.creatures.x[i] || a.creatures.y[i] != b.creatures.y[i] {
             any_pos_diff = true;
-        }
-        if a.creatures.genome[i] != b.creatures.genome[i] {
-            any_genome_diff = true;
+            break;
         }
     }
     assert!(
         any_pos_diff,
         "a different world_seed must produce different anchor/founder positions"
-    );
-    assert!(
-        any_genome_diff,
-        "a different world_seed must produce different founder genomes"
     );
 }
 
@@ -114,7 +104,7 @@ fn sim_rng_string_seed_does_not_affect_seeding() {
     let a = World::new_with_sliders("alpha", species_sliders(3600.0, 77));
     let b = World::new_with_sliders("omega", species_sliders(3600.0, 77));
     for i in 0..a.creatures.len() {
-        assert_eq!(a.creatures.genome[i], b.creatures.genome[i]);
+        assert_eq!(a.creatures.hue[i], b.creatures.hue[i]);
         assert_eq!(a.creatures.x[i], b.creatures.x[i]);
     }
 }
@@ -204,106 +194,48 @@ fn species_anchors_are_spread_apart() {
     );
 }
 
-// ─── Biome-adapted canonical genome ─────────────────────────────────────────
+// ─── Hue spread per species ─────────────────────────────────────────────────
 
-/// `Genome::canonical_for_biome` biases the terrain-survival trait per biome:
-/// water ⇒ high water_affinity, desert ⇒ high heat_tolerance, plains ⇒ moderate
-/// both. The other four traits stay in the full [0,1] range (we just check they
-/// are produced, not their exact distribution).
+/// v2.1 P2: all founders are in [0, 1) hue range; different species have
+/// different canonical hues (evenly spread).
 #[test]
-fn canonical_genome_is_biome_adapted() {
-    let mut rng = SimRng::from_u64(0xC0FFEE);
-    // Sample many canonical genomes per biome and assert the biased trait sits in
-    // the high/moderate band every time.
-    for _ in 0..200 {
-        let water = Genome::canonical_for_biome(&mut rng, Biome::Water);
-        assert!(
-            water.water_affinity >= BIOME_BIAS_HIGH_LO,
-            "water anchor must seed high water_affinity; got {}",
-            water.water_affinity
-        );
-
-        let desert = Genome::canonical_for_biome(&mut rng, Biome::Desert);
-        assert!(
-            desert.heat_tolerance >= BIOME_BIAS_HIGH_LO,
-            "desert anchor must seed high heat_tolerance; got {}",
-            desert.heat_tolerance
-        );
-
-        let plains = Genome::canonical_for_biome(&mut rng, Biome::Plains);
-        assert!(
-            (0.4..=0.7).contains(&plains.water_affinity)
-                && (0.4..=0.7).contains(&plains.heat_tolerance),
-            "plains anchor must seed moderate both; got wa={} ht={}",
-            plains.water_affinity,
-            plains.heat_tolerance
-        );
-    }
-}
-
-/// In a fully-seeded world, each species' canonical member (the at-anchor first
-/// member) matches the biome under its anchor: if the anchor cell is Water, the
-/// canonical water_affinity is high; if Desert, heat_tolerance is high.
-#[test]
-fn seeded_canonical_members_match_anchor_biome() {
-    // A large world makes it likely several anchors land on water/desert blobs.
-    let world_size = 9600.0;
-    let w = species_world(world_size, 31337);
+fn founders_hue_in_unit_range_and_spread() {
+    let w = species_world(4800.0, 77);
     let member_count = w.sliders.starting_species_member_count as usize;
     let species_count = w.sliders.starting_species_count as usize;
 
-    let mut checked_water = 0;
-    let mut checked_desert = 0;
+    for i in 0..w.creatures.len() {
+        let h = w.creatures.hue[i];
+        assert!((0.0..1.0).contains(&h), "founder {i} hue={h} out of [0,1)");
+    }
+
+    // Canonical members (index 0 of each species) should have distinct hues.
+    let canonical_hues: Vec<f32> = (0..species_count)
+        .map(|s| w.creatures.hue[s * member_count])
+        .collect();
+    let mut any_diff = false;
     for s in 0..species_count {
-        let base = s * member_count;
-        let ax = w.creatures.x[base];
-        let ay = w.creatures.y[base];
-        let g = &w.creatures.genome[base];
-        match w.biome_at(ax, ay) {
-            Biome::Water => {
-                assert!(
-                    g.water_affinity >= BIOME_BIAS_HIGH_LO,
-                    "species {s} canonical on Water must have high water_affinity; got {}",
-                    g.water_affinity
-                );
-                checked_water += 1;
-            }
-            Biome::Desert => {
-                assert!(
-                    g.heat_tolerance >= BIOME_BIAS_HIGH_LO,
-                    "species {s} canonical on Desert must have high heat_tolerance; got {}",
-                    g.heat_tolerance
-                );
-                checked_desert += 1;
-            }
-            Biome::Plains => {
-                assert!(
-                    (0.4..=0.7).contains(&g.water_affinity)
-                        && (0.4..=0.7).contains(&g.heat_tolerance),
-                    "species {s} canonical on Plains must have moderate both"
-                );
+        for t in (s + 1)..species_count {
+            if (canonical_hues[s] - canonical_hues[t]).abs() > 0.01 {
+                any_diff = true;
+                break;
             }
         }
     }
-    // Sanity: this seed should land at least one anchor on a non-plains biome so
-    // the biased branch is actually exercised by the seeded path.
-    assert!(
-        checked_water + checked_desert >= 1,
-        "expected ≥1 anchor on water/desert for this seed (exercise the bias path)"
-    );
+    assert!(any_diff, "canonical hues of different species must differ");
 }
 
 // ─── member_variance spread ─────────────────────────────────────────────────
 
-/// `starting_species_member_variance` produces measurable internal spread off
-/// the canonical member: a higher variance yields a larger genome + brain-weight
-/// spread within a species than a near-zero variance.
+/// `starting_species_member_variance` produces measurable brain-weight spread
+/// within a species: a higher variance yields a larger deviation from the
+/// canonical member's weights.
 #[test]
-fn member_variance_produces_measurable_spread() {
+fn member_variance_produces_measurable_brain_spread() {
     let world_size = 4800.0;
     let world_seed = 5;
 
-    let spread_for = |variance: f32| -> (f32, f32) {
+    let spread_for = |variance: f32| -> f32 {
         let sliders = DevSliders {
             starting_species_member_variance: variance,
             starting_species_count: 1,
@@ -312,16 +244,9 @@ fn member_variance_produces_measurable_spread() {
         };
         let w = World::new_with_sliders("variance-test", sliders);
         let n = w.creatures.len();
-        // Canonical member is index 0; measure mean abs deviation of the others.
-        let g0 = &w.creatures.genome[0];
         let w0 = &w.creatures.brains[0].weights;
-        let mut genome_spread = 0.0f32;
         let mut weight_spread = 0.0f32;
         for i in 1..n {
-            let g = &w.creatures.genome[i];
-            genome_spread += (g.body_size - g0.body_size).abs()
-                + (g.diet - g0.diet).abs()
-                + (g.metabolism - g0.metabolism).abs();
             let wi = &w.creatures.brains[i].weights;
             let mut ws = 0.0f32;
             for k in 0..wi.len().min(w0.len()) {
@@ -330,25 +255,21 @@ fn member_variance_produces_measurable_spread() {
             weight_spread += ws / wi.len().max(1) as f32;
         }
         let denom = (n - 1).max(1) as f32;
-        (genome_spread / denom, weight_spread / denom)
+        weight_spread / denom
     };
 
-    let (g_lo, w_lo) = spread_for(0.05);
-    let (g_hi, w_hi) = spread_for(5.0);
+    let w_lo = spread_for(0.05);
+    let w_hi = spread_for(5.0);
 
-    assert!(
-        g_hi > g_lo,
-        "higher member_variance must widen genome spread ({g_hi} vs {g_lo})"
-    );
     assert!(
         w_hi > w_lo,
         "higher member_variance must widen brain-weight spread ({w_hi} vs {w_lo})"
     );
-    // And the default (3.0) actually moves founders off the canonical member.
-    let (g_def, _) = spread_for(STARTING_SPECIES_MEMBER_VARIANCE_DEFAULT);
+    // And the default actually moves founders off the canonical member.
+    let w_def = spread_for(STARTING_SPECIES_MEMBER_VARIANCE_DEFAULT);
     assert!(
-        g_def > 0.0,
-        "default member_variance must produce nonzero genome spread"
+        w_def > 0.0,
+        "default member_variance must produce nonzero brain-weight spread"
     );
 }
 
@@ -356,19 +277,12 @@ fn member_variance_produces_measurable_spread() {
 
 /// Drive a species-mode world for several thousand ticks and assert the
 /// population never approaches the soft cap (so the random cull never binds) and
-/// at least one species persists for a meaningful stretch. Uses a moderately
-/// sized world so the test runs in reasonable time while exercising the real
-/// seeding + mating + birth/cull path. The default-9600 trajectory is reported
-/// separately in the wave writeup (too heavy for the unit-test budget).
+/// at least one species persists for a meaningful stretch.
 #[test]
 fn balance_smoke_pop_stays_under_cap_and_a_species_persists() {
     // 2400u world → 480² grass; full real seeding (10 × 10 = 100 founders).
     let mut w = species_world(2400.0, 20260601);
-    // v2.0.2 Stream 1b: this balance smoke was tuned against the deterministic
-    // BLUR food supply; the live scatter kernel (default at World boot) is a
-    // different, intentionally super-critical grass economy. Pin this test to the
-    // blur path so its population-balance assertions hold unchanged (the scatter
-    // economy is exercised/tuned in the browser + Stage-3 work, not here).
+    // Pin to blur grass so balance assertions are stable.
     w.grass.set_propagation(GrassPropagation::Blur);
     let boot_pop = w.creatures.len();
     assert_eq!(
@@ -410,16 +324,11 @@ fn balance_smoke_pop_stays_under_cap_and_a_species_persists() {
         species_alive_at_end = seen.iter().filter(|&&b| b).count();
     }
 
-    // The headline assertion: the cap never bound (checked in-loop). We also
-    // require the sim to run a meaningful stretch without instantly dying — the
-    // mechanism must demonstrably operate. (We do NOT assert long-term survival
-    // numbers; balance is the user's. The wave writeup reports the trajectory.)
     assert!(
         alive_at >= 200,
         "species run died almost immediately (alive only {alive_at} ticks) — \
          mechanism not exercised"
     );
-    // Surface the trajectory in the test log for the writeup.
     eprintln!(
         "balance_smoke: boot_pop={boot_pop} max_pop={max_pop} alive_ticks={alive_at} \
          end_pop={} species_alive_at_end={species_alive_at_end}",

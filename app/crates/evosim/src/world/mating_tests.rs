@@ -15,7 +15,6 @@
 use super::*;
 use crate::brain::{Brain, Bucket, MutationPolicy, NnTopology};
 use crate::constants::{CrossoverMode, MATING_CONTACT_RADIUS_FACTOR};
-use crate::creature::Genome;
 use crate::rng::SimRng;
 
 /// A small walled species-mode world with no auto-seeding (we place creatures
@@ -40,9 +39,10 @@ fn species_world(seed: &str) -> World {
 fn push_creature(w: &mut World, id: u64, x: f32, y: f32, energy: f32, species_id: u16) -> usize {
     let mut rng = SimRng::from_u64(id.wrapping_mul(2654435761));
     let brain = Brain::founder(&mut rng, w.nn_topology.clone());
-    let genome = Genome::median();
+    // v2.1 P2: hue derived from id.
+    let hue = ((id % 100) as f32) / 100.0;
     w.creatures
-        .push(id, x, y, energy, 0, brain, genome, species_id)
+        .push(id, x, y, energy, 0, brain, hue, species_id)
 }
 
 // ─── Mating: same-species within contact radius ────────────────────────────
@@ -249,7 +249,6 @@ fn attack_hits_other_species_in_species_mode() {
     w.next_creature_id = 0;
     let i = push_creature(&mut w, 0, 100.0, 100.0, 100.0, 0);
     let j = push_creature(&mut w, 1, 101.5, 100.0, 100.0, 1); // DIFFERENT species
-    w.creatures.genome[i] = Genome::median();
     w.creatures.action_this_tick[i] = Action::Attack;
     w.sliders.eat_bite_fraction = 0.5;
     w.grid.rebuild(&w.creatures.x, &w.creatures.y);
@@ -269,7 +268,6 @@ fn attack_hits_any_in_single_pool_mode() {
     // Single-pool walled world (species_mode off).
     let mut w = World::new("attack-single-pool");
     w.creatures.energy[0] = 100.0;
-    w.creatures.genome[0] = Genome::median();
     w.creatures.action_this_tick[0] = Action::Attack;
     w.sliders.eat_bite_fraction = 0.5;
     let px = w.creatures.x[0];
@@ -288,38 +286,22 @@ fn attack_hits_any_in_single_pool_mode() {
 
 // ─── Crossover distributions: average vs fifty_fifty ───────────────────────
 
-fn distinct_parents() -> (Brain, Brain, Genome, Genome) {
+fn distinct_parents() -> (Brain, Brain) {
     let mut rng = SimRng::from_u64(101);
     let pa_brain = Brain::founder(&mut rng, NnTopology::legacy());
-    // Parent B = a clearly-different brain (every weight offset) + genome.
+    // Parent B = a clearly-different brain (every weight offset).
     let mut pb_brain = pa_brain.clone();
     for w in pb_brain.weights.iter_mut() {
         *w += 10.0;
     }
-    let ga = Genome {
-        body_size: 0.0,
-        max_speed: 0.0,
-        metabolism: 0.0,
-        diet: 0.0,
-        water_affinity: 0.0,
-        heat_tolerance: 0.0,
-    };
-    let gb = Genome {
-        body_size: 1.0,
-        max_speed: 1.0,
-        metabolism: 1.0,
-        diet: 1.0,
-        water_affinity: 1.0,
-        heat_tolerance: 1.0,
-    };
-    (pa_brain, pb_brain, ga, gb)
+    (pa_brain, pb_brain)
 }
 
-/// `average` crossover: every brain weight + genome trait is the exact midpoint
-/// of the two parents (with mutation OFF so the midpoint is observable).
+/// `average` crossover: every brain weight is the exact midpoint of the two
+/// parents (with mutation OFF so the midpoint is observable).
 #[test]
-fn crossover_average_is_midpoint_brain_and_genome() {
-    let (pa, pb, ga, gb) = distinct_parents();
+fn crossover_average_is_midpoint_brain() {
+    let (pa, pb) = distinct_parents();
     // No-mutation policy (bucket 0 weight=1, rate=0) so the crossover is clean.
     let policy = MutationPolicy {
         buckets: {
@@ -349,27 +331,14 @@ fn crossover_average_is_midpoint_brain_and_genome() {
             child_brain.weights[k]
         );
     }
-    // Genome midpoint (average consumes no RNG).
-    let mut rng2 = SimRng::from_u64(9);
-    let cg = ga.crossed(&gb, &mut rng2, CrossoverMode::Average);
-    for t in [
-        cg.body_size,
-        cg.max_speed,
-        cg.metabolism,
-        cg.diet,
-        cg.water_affinity,
-        cg.heat_tolerance,
-    ] {
-        assert!((t - 0.5).abs() < 1e-6, "average trait must be 0.5; got {t}");
-    }
 }
 
-/// `fifty_fifty` crossover: every brain weight + genome trait equals ONE of the
-/// two parents (never a blend), and across many slots BOTH parents contribute
-/// (≈50/50). Mutation OFF.
+/// `fifty_fifty` crossover: every brain weight equals ONE of the two parents
+/// (never a blend), and across many slots BOTH parents contribute (≈50/50).
+/// Mutation OFF.
 #[test]
 fn crossover_fifty_fifty_picks_one_parent_per_slot() {
-    let (pa, pb, _ga, _gb) = distinct_parents();
+    let (pa, pb) = distinct_parents();
     let policy = MutationPolicy {
         buckets: {
             let mut b = [Bucket::zero(); crate::constants::MUTATION_BUCKET_COUNT];
@@ -419,10 +388,10 @@ fn crossover_fifty_fifty_picks_one_parent_per_slot() {
 // ─── Same-seed determinism for a species-mode run ──────────────────────────
 
 /// Two species-mode worlds with the same string seed run for N ticks and end up
-/// with identical populations (positions, species_ids, genomes).
+/// with identical populations (positions, species_ids, hues).
 #[test]
 fn species_mode_run_is_deterministic_for_same_seed() {
-    fn run() -> (Vec<f32>, Vec<u16>, Vec<Genome>) {
+    fn run() -> (Vec<f32>, Vec<u16>, Vec<f32>) {
         let sliders = DevSliders {
             species_mode: true,
             starting_species_count: 4,
@@ -438,7 +407,7 @@ fn species_mode_run_is_deterministic_for_same_seed() {
         (
             w.creatures.x.clone(),
             w.creatures.species_id.clone(),
-            w.creatures.genome.clone(),
+            w.creatures.hue.clone(),
         )
     }
     let a = run();
@@ -452,7 +421,7 @@ fn species_mode_run_is_deterministic_for_same_seed() {
         assert_eq!(a.0.len(), b.0.len(), "same seed → same population size");
         assert_eq!(a.0, b.0, "same seed → identical positions");
         assert_eq!(a.1, b.1, "same seed → identical species ids");
-        assert_eq!(a.2, b.2, "same seed → identical genomes");
+        assert_eq!(a.2, b.2, "same seed → identical hues");
     }
 
     // Threaded (--features threads): the u8 scatter grass kernel is intentionally

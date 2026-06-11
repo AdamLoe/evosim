@@ -27,9 +27,9 @@ export const SLIDER_NAMES = [
   "world_size",
   "world_seed",
   "wrap_world",
-  "water_movement_penalty",
-  "desert_movement_penalty",
-  "trait_mutation_sigma_multiplier",
+  "_reserved_legacy_water_movement_penalty",
+  "_reserved_legacy_desert_movement_penalty",
+  "_reserved_legacy_trait_mutation_sigma_multiplier",
   "species_mode",
   "crossover_mode",
   "starting_species_count",
@@ -73,9 +73,15 @@ export const SLIDER_NAMES = [
   "mate_reach_multiplier",
   "init_graze_boost",
   "init_split_boost",
+  "crowding_strength",
+  "crowding_radius",
+  "starvation_threshold",
+  "starvation_drain_rate",
+  "grass_capacity_scale",
+  "grass_regrowth_rate",
 ] as const;
 
-export const SLIDER_COUNT = 67 as const;
+export const SLIDER_COUNT = 73 as const;
 
 export type SliderName = (typeof SLIDER_NAMES)[number];
 

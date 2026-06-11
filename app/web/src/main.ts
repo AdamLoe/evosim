@@ -9,7 +9,6 @@ import { attachCameraControls } from "./render/camera";
 import { installRail, pollRail, highlights, type RailState } from "./rail/index";
 import {
   installProfilerPanel,
-  setProfilerVisible,
   setPanelStatus,
   resetPanelSamples,
   setPanelBridge,
@@ -36,7 +35,7 @@ import {
   getInitSplitBoost,
   currentSliderState,
 } from "./widgets/devpanel";
-import { installCanvasClickHandler, resetInspectorSelection } from "./rail/inspector";
+import { installCanvasClickHandler, resetInspectorSelection, installInspectorE2EHook, refreshInspector } from "./rail/inspector";
 import { installNnTab } from "./rail/nn-tab";
 import { span } from "./perf";
 import { getSettings, setSetting, hasStoredSetting } from "./settings";
@@ -217,6 +216,9 @@ async function main(): Promise<void> {
   const rail = installRail(setRailOpen);
 
   installCanvasClickHandler(canvas, cam, () => ({ w: viewW, h: viewH }), simBridge, rail);
+  // v2.1 P1 e2e: expose window.__evosimE2E.selectFirstCreature() for headless
+  // specs that cannot reliably hit a creature with a blind canvas click.
+  installInspectorE2EHook(rail, simBridge);
 
   installProfilerPanel(simBridge);
   // v1.13 Wave 2: the right-rail Monitor tab is gone. Its population graph
@@ -352,6 +354,10 @@ async function main(): Promise<void> {
     if (seq === lastPaintedSeq) {
       // No new snapshot since the last paint. Re-render only when the camera
       // moved (pan/zoom while paused) so the canvas reflects the new view.
+      // v2.1 P1: always call refreshInspector even when seq is frozen so the
+      // NN I/O fetch can fire while paused (it's serialised inside
+      // refreshInspector and would otherwise never run on a paused world).
+      refreshInspector(simBridge, rail, paused);
       const camMoved =
         cam.cx !== lastPaintedCamX ||
         cam.cy !== lastPaintedCamY ||
@@ -457,7 +463,7 @@ async function main(): Promise<void> {
         }
       }
 
-      pollRail(rail, header, simBridge, creatures, pop);
+      pollRail(rail, header, simBridge, creatures, pop, paused);
       renderWorld(
         gl!,
         cam,
@@ -672,32 +678,9 @@ const SVG_ATTRS =
   'viewBox="0 0 24 24" width="18" height="18" fill="none" ' +
   'stroke="currentColor" stroke-width="1.8" stroke-linecap="round" ' +
   'stroke-linejoin="round" aria-hidden="true"';
-const ICON_PERF = `<svg ${SVG_ATTRS}><rect x="2.5" y="3.5" width="19" height="13" rx="1.5"/><path d="M8 20.5h8M12 16.5v4"/><path d="M5.5 13.5l3-3 2.5 2.5 3.5-5 3.5 3.5"/></svg>`;
-// Rail-tab icons — copied verbatim from the rail-tab SVGs in index.html so the
-// top-bar buttons use the exact same visual language as the tabs they target.
+// v2.1 P4: only the settings ⚙ icon is needed in the top bar (NN/Inspector/perf
+// openers removed). Keep ICON_SETTINGS for the ⚙ rail toggle button.
 const ICON_SETTINGS = `<svg ${SVG_ATTRS}><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>`;
-// v2.0.5 S6: improved NN icon — 3-column neural-network diagram (input nodes,
-// hidden layer, output node) with edge lines, clearly legible as a network.
-const ICON_NN = `<svg ${SVG_ATTRS}>` +
-  // edges: 2 inputs → 1 hidden
-  `<line x1="5" y1="7" x2="12" y2="12"/>` +
-  `<line x1="5" y1="17" x2="12" y2="12"/>` +
-  // edges: 2 inputs → 2nd hidden
-  `<line x1="5" y1="7" x2="12" y2="18"/>` +
-  `<line x1="5" y1="17" x2="12" y2="18"/>` +
-  // edges: hidden → output
-  `<line x1="12" y1="12" x2="19" y2="12"/>` +
-  `<line x1="12" y1="18" x2="19" y2="12"/>` +
-  // input nodes (left column)
-  `<circle cx="5" cy="7" r="2.2" fill="currentColor" stroke="none"/>` +
-  `<circle cx="5" cy="17" r="2.2" fill="currentColor" stroke="none"/>` +
-  // hidden nodes (middle column)
-  `<circle cx="12" cy="12" r="2.2" fill="currentColor" stroke="none"/>` +
-  `<circle cx="12" cy="18" r="2.2" fill="currentColor" stroke="none"/>` +
-  // output node (right column)
-  `<circle cx="19" cy="12" r="2.2" fill="currentColor" stroke="none"/>` +
-  `</svg>`;
-const ICON_INSPECTOR = `<svg ${SVG_ATTRS}><circle cx="11" cy="11" r="7"></circle><path d="M21 21l-5-5"></path></svg>`;
 
 function makeIconBtn(id: string, title: string, html: string): HTMLButtonElement {
   const btn = document.createElement("button");
@@ -720,11 +703,15 @@ function makeTextBtn(id: string, label: string, title: string): HTMLButtonElemen
   return btn;
 }
 
-// Top bar lives in the top-right corner: text labels for the three
-// primary actions (Play/Pause, Restart, Auto-restart) + icon buttons for the
-// bottom-panel toggle and three right-rail openers (Settings, NN, Inspector).
-// Highlight state for the toggleable buttons (auto-restart, perf, rail) is
-// refreshed by a low-rate interval.
+// v2.1 P4: Top bar trimmed to exactly four controls:
+//   1. Play/Pause (pacing)
+//   2. Restart (rerolls seed)
+//   3. Auto-restart toggle
+//   4. ⚙ Settings rail toggle (opens/closes the right rail)
+//
+// Removed from top bar: NN opener, Inspector opener, perf-toggle opener.
+// NN is now a Settings category; Inspector stays click-to-open (creature click);
+// Profiler is now a Settings category (no standalone toggle button needed).
 function installTopBarButtons(
   getBridge: () => SimBridge,
   onRestart: () => void,
@@ -766,50 +753,25 @@ function installTopBarButtons(
     autoBtn.classList.toggle("is-active", next);
   });
 
-  // 4. Perf — bottom panel toggle.
-  const perfBtn = makeIconBtn("perf-btn", "Toggle profiler panel", ICON_PERF);
-  perfBtn.addEventListener("click", () => {
-    const next = !getSettings().showProfiler;
-    setSetting("showProfiler", next);
-    setProfilerVisible(next);
-    perfBtn.classList.toggle("is-active", next);
-  });
-
-  // 5-7. Three rail-panel openers: Settings, NN, Inspector.
-  //   Each button TOGGLES its tab: if the rail is already open on that tab a
-  //   second click collapses it; otherwise it opens the rail and switches to
-  //   that tab. Mirrors the rail's own tab-button toggle-close behavior.
-  //   Active style (.iconbtn.is-active) is shown when the rail is open AND
-  //   that button's tab is the current active one. The 250 ms refreshHighlights
-  //   interval keeps this accurate after external changes (~ hotkey, canvas
-  //   inspector click).
-  const toggleRailTab = (tab: import("./rail/index").RailTab): void => {
-    if (getSettings().railOpen && rail.activeTab === tab) {
+  // 4. ⚙ Settings rail toggle. Toggles the rail open/closed (same as `~`
+  //    hotkey). When the rail is open on the Settings tab a second click
+  //    collapses it; otherwise it opens the rail and switches to Settings.
+  const settingsBtn = makeIconBtn("settings-rail-btn", "Settings (~)", ICON_SETTINGS);
+  settingsBtn.addEventListener("click", () => {
+    if (getSettings().railOpen && rail.activeTab === "settings") {
       setRailOpen(false);
     } else {
       setRailOpen(true);
-      rail.switchTab(tab);
+      rail.switchTab("settings");
     }
-  };
+  });
 
-  const settingsBtn = makeIconBtn("settings-rail-btn", "Settings (~)", ICON_SETTINGS);
-  settingsBtn.addEventListener("click", () => toggleRailTab("settings"));
-
-  const nnBtn = makeIconBtn("nn-rail-btn", "Neural network", ICON_NN);
-  nnBtn.addEventListener("click", () => toggleRailTab("nn"));
-
-  const inspectorBtn = makeIconBtn("inspector-rail-btn", "Inspector", ICON_INSPECTOR);
-  inspectorBtn.addEventListener("click", () => toggleRailTab("inspector"));
-
-  bar.append(playBtn, restartBtn, autoBtn, perfBtn, settingsBtn, nnBtn, inspectorBtn);
+  bar.append(playBtn, restartBtn, autoBtn, settingsBtn);
 
   const refreshHighlights = (): void => {
     const railOpen = getSettings().railOpen;
     autoBtn.classList.toggle("is-active", getSettings().autoRun);
-    perfBtn.classList.toggle("is-active", getSettings().showProfiler);
     settingsBtn.classList.toggle("is-active", railOpen && rail.activeTab === "settings");
-    nnBtn.classList.toggle("is-active", railOpen && rail.activeTab === "nn");
-    inspectorBtn.classList.toggle("is-active", railOpen && rail.activeTab === "inspector");
   };
   refreshPlayLabel();
   refreshHighlights();

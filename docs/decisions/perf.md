@@ -146,4 +146,4 @@ drove the choice — so future optimization passes start from facts, not guesses
 - [`sim.md`](sim.md) — sim-domain decisions (grass scatter, BiomePyramid, fused RNG entries).
 - [`index.md`](index.md) — decisions index and domain map.
 - [`../plans/perf-optimization-ideas.md`](../plans/perf-optimization-ideas.md) — the long-lived perf backlog (parked ideas, measured verdicts).
-- [`~/.claude/agent-docs/v1/rules/authoring-rules.md`](~/.claude/agent-docs/v1/rules/authoring-rules.md) — doc maintenance rules.
+- [`~/agent-docs/v1/rules/authoring-rules.md`](~/agent-docs/v1/rules/authoring-rules.md) — doc maintenance rules.
