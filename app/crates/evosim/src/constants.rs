@@ -558,10 +558,11 @@ pub const CROSSOVER_MODE_DEFAULT: CrossoverMode = CrossoverMode::FiftyFifty;
 //      prominently in the Equilibrium category; its constant lives above at
 //      SPLIT_GIFT_MAX_DEFAULT.
 //
-// These default values were chosen via the headless equilibrium harness
-// (world/equilibrium_tests.rs).  K=4 seeds × T=10_000 ticks; pop settled in
-// the band [180, 2 800], mean ≈ 840; foraging proxy (avg energy-per-lifespan)
-// rose ~25 % from first to last generation window; backstop cull did NOT fire.
+// These default values were checked by the headless equilibrium harness
+// (`world/equilibrium_tests.rs`) across four seeds for 3,000 ticks on both
+// default and threaded RNG paths. The gate asserts a held steady-state
+// population band, no extinction, no cap-pinning, no backstop cull, and a
+// death-cohort age-at-death trend as the foraging proxy.
 
 /// Extra energy drain per neighbour per tick when a creature is crowded.
 /// Crowding cost = crowding_strength × neighbour_count (within crowding_radius).
