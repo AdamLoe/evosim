@@ -39,7 +39,7 @@ gate philosophy in [`architecture/testing.md`](../architecture/testing.md)):
 - `cd app/web && pnpm typecheck` and `pnpm build` (tsc + vite build).
 - `cd app/web && pnpm test:e2e` — Playwright worker-control-path smoke.
 - A threaded wasm rebuild always uses `--features threads`:
-  `rustup run nightly wasm-pack build --target web --out-dir app/web/wasm --dev --features threads`
+  `cd app && rustup run nightly wasm-pack build crates/evosim --target web --out-dir ../../web/wasm --dev --features threads`
   (omitting `--features threads` silently single-threads the sim).
 
 ## Slot: change-to-doc
