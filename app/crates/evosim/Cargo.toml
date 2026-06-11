@@ -81,6 +81,14 @@ harness = false
 name = "grass_spread_repro"
 harness = false
 
+[[bench]]
+name = "grass_step_ab"
+harness = false
+
+[[bench]]
+name = "grass_copy_ab"
+harness = false
+
 # wasm-pack release profile: run wasm-opt with bulk-memory + mutable-globals
 # (required for wasm-bindgen-rayon's SharedArrayBuffer threading).
 [package.metadata.wasm-pack.profile.release]

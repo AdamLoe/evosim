@@ -234,11 +234,19 @@ uniform vec3 u_plains;
 uniform vec3 u_water;
 uniform vec3 u_desert;
 uniform float u_opacity;     // world (biome layer) opacity, 0..1
+// Toroidal wrap period in UV per axis (0 = disabled); see GRASS_FS for the
+// rationale. Set only when the window spans the full world on that axis.
+uniform vec2 u_uv_wrap;
 out vec4 out_color;
 
 void main() {
+  // Wrap into the window period so tiled ghost copies repeat the biome field
+  // instead of smearing the CLAMP_TO_EDGE edge texel across the world seam.
+  vec2 suv = v_uv;
+  if (u_uv_wrap.x > 0.0) suv.x = mod(suv.x, u_uv_wrap.x);
+  if (u_uv_wrap.y > 0.0) suv.y = mod(suv.y, u_uv_wrap.y);
   // R8 unorm: id stored as (biome/255). Recover the integer tag.
-  float id = floor(texture(u_biome, v_uv).r * 255.0 + 0.5);
+  float id = floor(texture(u_biome, suv).r * 255.0 + 0.5);
   vec3 col = u_plains;
   if (id > 1.5) col = u_desert;       // 2 = Desert
   else if (id > 0.5) col = u_water;   // 1 = Water
@@ -319,7 +327,22 @@ uniform float u_contrast;
 uniform float u_brightness;
 // v2.0.3 Stream 2c: reserved for future trilinear LOD blending (always 0.0 now).
 uniform float u_lod_blend;
+// Toroidal wrap period in UV per axis (0 = disabled). Set to win_w/H over the
+// budget axis ONLY when the clipmap window spans the full world on that axis
+// (the only case where tiling/ghost copies happen). The uploaded window is then
+// a full toroidal period, so we wrap v_uv with mod() instead of letting the
+// CLAMP_TO_EDGE sampler smear the last data texel across the off-window region.
+uniform vec2 u_uv_wrap;
 out vec4 out_color;
+
+// Wrap a UV into the window period on each axis where wrapping is enabled.
+// GLSL mod() returns a positive result for negative inputs, so a signed
+// (seam-straddling) window origin wraps correctly too.
+vec2 wrapUV(vec2 uv) {
+  if (u_uv_wrap.x > 0.0) uv.x = mod(uv.x, u_uv_wrap.x);
+  if (u_uv_wrap.y > 0.0) uv.y = mod(uv.y, u_uv_wrap.y);
+  return uv;
+}
 
 // Cheap value-noise + fbm.
 float vhash(vec2 p) {
@@ -361,7 +384,7 @@ float texBicubic(vec2 uv, vec2 ts) {
     for (int n = -1; n <= 2; n++) {
       vec2 tc = (i + vec2(float(n), float(m)) + 0.5) / ts;
       float w = crw(f.x - float(n)) * crw(f.y - float(m));
-      sum += texture(u_grass, tc).r * w;
+      sum += texture(u_grass, wrapUV(tc)).r * w;
       wsum += w;
     }
   }
@@ -374,7 +397,7 @@ float texBlur(vec2 uv, vec2 ts, float radTexels) {
   for (int m = -1; m <= 1; m++) {
     for (int n = -1; n <= 1; n++) {
       float w = (abs(m) + abs(n) == 0) ? 4.0 : (abs(m) + abs(n) == 1 ? 2.0 : 1.0);
-      acc += texture(u_grass, uv + vec2(float(n), float(m)) * px).r * w;
+      acc += texture(u_grass, wrapUV(uv + vec2(float(n), float(m)) * px)).r * w;
       wacc += w;
     }
   }
@@ -389,13 +412,18 @@ float texBlur(vec2 uv, vec2 ts, float radTexels) {
 // for that same reason and for fragment-shading cost at high zoom.
 void main() {
   vec2 ts = vec2(textureSize(u_grass, 0));
+  // Wrap the sample UV into the window period (no-op unless u_uv_wrap is set,
+  // i.e. a full-world clipmap window being tiled across the torus). Sampling on
+  // the wrapped UV is what lets ghost copies repeat the field instead of
+  // smearing the clamped edge texel.
+  vec2 suv = wrapUV(v_uv);
   // Crisp = snapped to texel centre (original blocky look at u_smooth=0).
-  float dCrisp = texture(u_grass, (floor(v_uv * ts) + 0.5) / ts).r;
+  float dCrisp = texture(u_grass, (floor(suv * ts) + 0.5) / ts).r;
   // Bicubic smoothing of the intensities, blended in by u_smooth.
   float d = dCrisp;
-  if (u_smooth > 0.0) d = mix(dCrisp, texBicubic(v_uv, ts), u_smooth);
+  if (u_smooth > 0.0) d = mix(dCrisp, texBicubic(suv, ts), u_smooth);
   // Optional extra softness (blur), radius scales with u_soft.
-  if (u_soft > 0.0) d = mix(d, texBlur(v_uv, ts, u_soft * 4.0), u_soft);
+  if (u_soft > 0.0) d = mix(d, texBlur(suv, ts, u_soft * 4.0), u_soft);
   d = clamp(d, 0.0, 1.0);
 
   // Intensity → look ramp: floor cutoff + rescale, then contrast/gamma.
@@ -571,6 +599,7 @@ interface GLState {
     // v2.0.3 Stream 2d: clipmap UV transform (mirrors grassU).
     uvScale: WebGLUniformLocation;
     uvOffset: WebGLUniformLocation;
+    uvWrap: WebGLUniformLocation;
   };
   biomeVao: WebGLVertexArrayObject;
   biomeTex: WebGLTexture;
@@ -598,6 +627,7 @@ interface GLState {
     // v2.0.3 Stream 2c: clipmap UV transform + LOD blend reserve.
     uvScale: WebGLUniformLocation;
     uvOffset: WebGLUniformLocation;
+    uvWrap: WebGLUniformLocation;
     lodBlend: WebGLUniformLocation;
   };
   grassVao: WebGLVertexArrayObject;
@@ -818,6 +848,7 @@ function initRenderer(gl: WebGL2RenderingContext): GLState {
     // v2.0.3 Stream 2d: clipmap UV transform (mirrors grassU).
     uvScale: mustGet(gl.getUniformLocation(biomeProgram, "u_uv_scale"), "u_uv_scale"),
     uvOffset: mustGet(gl.getUniformLocation(biomeProgram, "u_uv_offset"), "u_uv_offset"),
+    uvWrap: mustGet(gl.getUniformLocation(biomeProgram, "u_uv_wrap"), "u_uv_wrap"),
   };
   // v2.0.3 Stream 2d: biome id texture (R8). NEAREST so each cell is flat color.
   // Allocated at GRASS_LOD_BUDGET_AXIS² (same budget as grass) once in initRenderer.
@@ -838,6 +869,7 @@ function initRenderer(gl: WebGL2RenderingContext): GLState {
   gl.useProgram(biomeProgram);
   gl.uniform2f(biomeU.uvScale, 1.0, 1.0);
   gl.uniform2f(biomeU.uvOffset, 0.0, 0.0);
+  gl.uniform2f(biomeU.uvWrap, 0.0, 0.0);
 
   // ─── Grass program ───
   const grassProgram = link(
@@ -882,6 +914,7 @@ function initRenderer(gl: WebGL2RenderingContext): GLState {
     // v2.0.3 Stream 2c: clipmap UV transform + LOD blend.
     uvScale: mustGet(gl.getUniformLocation(grassProgram, "u_uv_scale"), "u_uv_scale"),
     uvOffset: mustGet(gl.getUniformLocation(grassProgram, "u_uv_offset"), "u_uv_offset"),
+    uvWrap: mustGet(gl.getUniformLocation(grassProgram, "u_uv_wrap"), "u_uv_wrap"),
     lodBlend: mustGet(gl.getUniformLocation(grassProgram, "u_lod_blend"), "u_lod_blend"),
   };
 
@@ -914,6 +947,7 @@ function initRenderer(gl: WebGL2RenderingContext): GLState {
   gl.useProgram(grassProgram);
   gl.uniform2f(grassU.uvScale, 1.0, 1.0);
   gl.uniform2f(grassU.uvOffset, 0.0, 0.0);
+  gl.uniform2f(grassU.uvWrap, 0.0, 0.0);
   gl.uniform1f(grassU.lodBlend, 0.0);
 
   // ─── Frame program ───
@@ -1116,6 +1150,29 @@ export function renderWorld(
   }
 }
 
+// Toroidal UV wrap period (in budget-texture UV units) per axis for the grass
+// and biome clipmap. Returns [0, 0] unless the world is toroidal AND the
+// uploaded window spans the full world on that axis — the only situation where
+// ghost copies are drawn and where the window is therefore a full toroidal
+// period that can be safely wrapped with mod() in the shader. `winW`/`winH` are
+// level-k cell counts, so `winW * cellSizeL` equals the world width exactly when
+// the window covers the world (within one cell of float rounding). For slice
+// windows (zoomed in, never tiled) we return 0 so the shader keeps the plain
+// CLAMP_TO_EDGE sampling that is correct inside a single world view.
+function windowUvWrap(
+  wrapWorld: boolean,
+  winW: number,
+  winH: number,
+  cellSizeL: number,
+  worldSize: number,
+): [number, number] {
+  if (!wrapWorld) return [0, 0];
+  const eps = cellSizeL * 0.5;
+  const wrapX = winW * cellSizeL >= worldSize - eps ? winW / GRASS_LOD_BUDGET_AXIS : 0;
+  const wrapY = winH * cellSizeL >= worldSize - eps ? winH / GRASS_LOD_BUDGET_AXIS : 0;
+  return [wrapX, wrapY];
+}
+
 function renderWorldImpl(
   gl: WebGL2RenderingContext,
   cam: Camera,
@@ -1202,6 +1259,15 @@ function renderWorldImpl(
     const uvScaleVal = world_size / (cellSizeL * GRASS_LOD_BUDGET_AXIS);
     const uvOffsetX = -winOriginX / GRASS_LOD_BUDGET_AXIS;
     const uvOffsetY = -winOriginY / GRASS_LOD_BUDGET_AXIS;
+    // Toroidal wrap: when the window spans the full world on an axis (the only
+    // case where ghost tiles are drawn), the upload is a full period — wrap the
+    // sample UV (mod) so ghost copies repeat the field instead of smearing the
+    // CLAMP_TO_EDGE edge texel. winW/H are the level-k cell counts, so winW ==
+    // full-world width exactly when the window covers the world. Slice windows
+    // (zoomed in, never tiled) keep wrap = 0 and the plain clamp behavior.
+    const [uvWrapX, uvWrapY] = windowUvWrap(
+      wrap_world, winW, winH, cellSizeL, world_size,
+    );
 
     gl.useProgram(s.biomeProgram);
     gl.uniform2f(s.biomeU.viewport, viewW, viewH);
@@ -1215,6 +1281,7 @@ function renderWorldImpl(
     // v2.0.3 Stream 2d: clipmap UV transform (same as grass).
     gl.uniform2f(s.biomeU.uvScale, uvScaleVal, uvScaleVal);
     gl.uniform2f(s.biomeU.uvOffset, uvOffsetX, uvOffsetY);
+    gl.uniform2f(s.biomeU.uvWrap, uvWrapX, uvWrapY);
     gl.bindVertexArray(s.biomeVao);
     for (let xi = 0; xi < tileXOffsets.length; xi++) {
       for (let yi = 0; yi < tileYOffsets.length; yi++) {
@@ -1277,6 +1344,10 @@ function renderWorldImpl(
       const uvScaleVal = world_size / (cellSizeL * GRASS_LOD_BUDGET_AXIS);
       const uvOffsetX = -winOriginX / GRASS_LOD_BUDGET_AXIS;
       const uvOffsetY = -winOriginY / GRASS_LOD_BUDGET_AXIS;
+      // Toroidal wrap period (see biome pass + windowUvWrap for rationale).
+      const [uvWrapX, uvWrapY] = windowUvWrap(
+        wrap_world, winW, winH, cellSizeL, world_size,
+      );
 
       gl.useProgram(s.grassProgram);
       gl.uniform2f(s.grassU.viewport, viewW, viewH);
@@ -1297,6 +1368,7 @@ function renderWorldImpl(
       gl.uniform3f(s.grassU.tint, tint[0], tint[1], tint[2]);
       gl.uniform2f(s.grassU.uvScale, uvScaleVal, uvScaleVal);
       gl.uniform2f(s.grassU.uvOffset, uvOffsetX, uvOffsetY);
+      gl.uniform2f(s.grassU.uvWrap, uvWrapX, uvWrapY);
       gl.uniform1f(s.grassU.lodBlend, 0.0);
       gl.bindVertexArray(s.grassVao);
       for (let xi = 0; xi < tileXOffsets.length; xi++) {

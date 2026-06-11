@@ -81,9 +81,9 @@ export {
 };
 
 /** Protocol version. Bump on a breaking change to either message union.
- *  v3 (v2.0 Wave 1c): boot carries world_size/wrap_world/world_seed and
- *  boot_ready adds wrap_world/world_seed + the biome buffer geometry; the
- *  snapshot grass region is now u8 (was f32). */
+ *  v3 (v2.0 Wave 1c): boot carries world_size/wrap_world/world_seed,
+ *  boot_ready adds wrap_world/world_seed, and the snapshot grass region is now
+ *  u8 (was f32). */
 export const SIM_BRIDGE_VERSION = 3;
 
 /**
@@ -123,8 +123,8 @@ export const CREATURE_STRIDE = 8;
  *   off 16: `jank_count`   u32
  *   off 20..32: reserved / padding (unchanged)
  *   off 32: `mip_level`    u32
- *   off 36: `win_origin_x` u32
- *   off 40: `win_origin_y` u32
+ *   off 36: `win_origin_x` i32
+ *   off 40: `win_origin_y` i32
  *   off 44: `win_w`        u32
  *   off 48: `win_h`        u32
  *   off 52: `tex_dim_w`    u32
@@ -258,9 +258,9 @@ export function biomeWinOffset(layout: SlotLayout, slot: 0 | 1): number {
 export interface WindowMetadata {
   /** Pyramid LOD level (0 = full resolution). */
   mipLevel: number;
-  /** Window origin X in level-k cells. */
+  /** Logical window origin X in level-k cells. Signed for toroidal seam windows. */
   winOriginX: number;
-  /** Window origin Y in level-k cells. */
+  /** Logical window origin Y in level-k cells. Signed for toroidal seam windows. */
   winOriginY: number;
   /** Window width in level-k cells. */
   winW: number;
@@ -284,8 +284,8 @@ export function readWindowMetadata(view: DataView, slotByteBase: number): Window
   const base = slotByteBase + 32; // window metadata starts at header offset 32
   return {
     mipLevel:    view.getUint32(base +  0, true),
-    winOriginX:  view.getUint32(base +  4, true),
-    winOriginY:  view.getUint32(base +  8, true),
+    winOriginX:  view.getInt32(base +  4, true),
+    winOriginY:  view.getInt32(base +  8, true),
     winW:        view.getUint32(base + 12, true),
     winH:        view.getUint32(base + 16, true),
     texDimW:     view.getUint32(base + 20, true),
@@ -352,7 +352,7 @@ export interface SimMessageBoot {
   world_seed: number;
   /** v2.0 Wave 3b: species + sexual-mating construction settings. These shape
    * world seeding at construction, so — like the world-shape args above — they
-   * ride `newWithFounderCount`'s 5 trailing args (not the live slider SAB).
+   * ride `newWithFounderCount`'s explicit construction args (not the live slider SAB).
    * `crossover_mode` is the Rust f32 encoding (0 = average, 1 = fifty_fifty).
    * (`mating_cooldown_ticks` is live and flows through `initial_sliders`.) */
   species_mode: boolean;
@@ -364,6 +364,10 @@ export interface SimMessageBoot {
    * Must ride the explicit construction path (not initial_sliders) because
    * initial_sliders is applied AFTER World construction and cannot affect dims. */
   grass_cell_size: number;
+  /** v2.0.4 S6 / Wave 2: multi-band grass NN sight at construction (default ON).
+   * Must ride the explicit construction path because it changes the NN input
+   * layout before topology/founder-brain construction. */
+  grass_multisight: boolean;
   /** v2.0.6 S3: seeded grass clumps at construction. Must ride the explicit
    * construction path (same constraint as grass_cell_size). clump_count=0 falls
    * back to the old uniform-scatter behaviour. Default 40. */
@@ -390,8 +394,7 @@ export interface SimReplyBootReady {
   kind: "boot_ready";
   world_size: number;
   /** v2.0 Wave 1a: runtime grass cells per axis (1920 at the 9600 default).
-   * Sizes the grass + biome views as `grass_dim²` bytes each — the single
-   * source of truth for the SAB grass-region geometry. */
+   * Single source of truth for the snapshot slot grass/window geometry. */
   grass_dim: number;
   /** v2.0.4 S2: grass cell size in world-units used at construction. Default 5.0.
    * The renderer uses this for UV transform: cellSizeL = grass_cell_size × 2^mip.
@@ -417,11 +420,6 @@ export interface SimReplyBootReady {
   snapshot_buf_byte_offset: number;
   /** Byte length of the snapshot region (runtime; grass region is u8). */
   snapshot_buf_byte_len: number;
-  /** v2.0 Wave 1a: byte offset of the biome buffer (one u8 `Biome` per grass
-   * cell) within `wasm_memory.buffer`. Static for the worker's lifetime. */
-  biome_buf_byte_offset: number;
-  /** v2.0 Wave 1a: biome buffer length in bytes (== `grass_dim²`). */
-  biome_buf_byte_len: number;
   control_sab: SharedArrayBuffer | null;
   /** JSON map of every slider name → Rust default. Drift-guard input. */
   sliders_defaults_json: string;

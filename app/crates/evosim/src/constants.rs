@@ -278,19 +278,6 @@ pub const GRASS_ENERGY_PER_BITE_DEFAULT: f32 = 10.0;
 /// grass cell. Density removed per bite = GRASS_MAX / bites_per_block.
 /// Live-tunable via DevSliders.grass_bites_per_block.
 pub const GRASS_BITES_PER_BLOCK_DEFAULT: u32 = 2;
-/// Fixed bites-per-block for Stage-1 graze energy quantization (v2.0.2 Stream 1e).
-///
-/// Stream 1e treats `grass_bites_per_block` as a constant (not a live slider)
-/// so that `density_chunk = GRASS_MAX / GRASS_BITES_PER_BLOCK` is a stable f32
-/// with a predictable u8 representation. At 2, `density_chunk = 0.5`, which
-/// encodes to exactly 128 u8 bytes — 128/255 of the full range — giving
-/// 128 u8 levels per bite, well above the "≥ 8 levels/bite" cap required for
-/// valid u8 energy-reward granularity (cap ≤ 32 → ≥ 8 levels/bite). Matches
-/// `GRASS_BITES_PER_BLOCK_DEFAULT` so the slider default and the constant agree.
-/// The spec names no other value; 2 is the shipped default and the simplest cap
-/// that satisfies the u8-floor guard. Stage 3 can re-expose as a live slider
-/// once the graze path handles arbitrary chunk sizes.
-pub const GRASS_BITES_PER_BLOCK: u32 = 2;
 /// Default for `full_grass_on_init`: when true, world init fills every grass
 /// cell to `GRASS_MAX` instead of seeding `grass_initial_seed_count` cells.
 pub const FULL_GRASS_ON_INIT_DEFAULT: bool = false;
@@ -401,10 +388,11 @@ pub const NN_CURR_GRASS_SLOT: usize = 29;
 pub const NN_BIAS_SLOT: usize = 30;
 
 // ---- Biome (v2.0 Wave 1b) ----
-/// Per-cell biome tag stored in the dedicated `biomeSab` (one u8 per grass
-/// cell). v2.0 Wave 1b generates the grid from `world_seed` (a few large
-/// water/desert blobs over a Plains background — see `src/world/biome.rs`).
-/// The enum is `#[repr(u8)]` so the SAB byte maps directly.
+/// Per-cell biome tag stored in the sim-side biome grid and per-slot snapshot
+/// biome window (one u8 per grass cell). v2.0 Wave 1b generates the grid from
+/// `world_seed` (a few large water/desert blobs over a Plains background — see
+/// `src/world/biome.rs`). The enum is `#[repr(u8)]` so snapshot bytes map
+/// directly.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Biome {
@@ -604,8 +592,9 @@ pub const CROSSOVER_MODE_DEFAULT: CrossoverMode = CrossoverMode::FiftyFifty;
 /// v2.0 Wave 1a: replaces the old compile-time `WORLD_SIZE` / `HASH_DIM` /
 /// `GRASS_GRID_DIM` / `GRASS_CELL_COUNT` constants. A small `Copy` value carried
 /// on `World`, `GrassGrid`, and `SpatialGrid` so every bounds/clamp/wrap/spawn
-/// site reads the same derived dims. The snapshot grass region (u8) and the
-/// `biomeSab` (u8) are both sized from `grass_cell_count`.
+/// site reads the same derived dims. The full grass field and sim-side biome
+/// grid are both sized from `grass_cell_count`; snapshots carry runtime-sized
+/// grass/biome windows.
 ///
 /// v2.0.4 S2: `grass_cell_size` added. The construction slider default is
 /// `GRASS_CELL_SIZE_DEFAULT` (5.0); the LOD computation in `wasm_api.rs` and

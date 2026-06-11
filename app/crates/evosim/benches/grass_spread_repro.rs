@@ -40,6 +40,7 @@ fn make(world: f32) -> WorldHandle {
         600,
         0.0,
         5.0,
+        true,
         40,
         8,
         1.0, // init_graze_boost (neutral)

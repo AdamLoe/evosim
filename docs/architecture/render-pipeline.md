@@ -374,12 +374,33 @@ u_uv_offset = -vec2(winOriginX, winOriginY) / BUDGET_AXIS
 
 At default scale (mip=0, origin=(0,0), win=1920, grass_cell_size=5.0):
 `scale = 9600 / (5 × 1 × 4096) ≈ 0.46875` and `offset = (0,0)`.
-`u_lod_blend` is reserved for future trilinear blending and is always `0.0`.
+Toroidal seam windows use signed logical `winOriginX/Y`; the Rust copy path
+normalizes that origin modulo the level dimensions before uploading bytes.
+`u_uv_offset` is **constant across all ghost copies** — only the camera
+position is shifted per copy (see toroidal tiling below). `u_lod_blend` is
+reserved for future trilinear blending and is always `0.0`.
 
 **Toroidal tiling on zoom-out.** When `wrap_world` is on and the camera
 frustum extends past a world edge, `renderWorldImpl` issues extra grass
 and biome draw calls with a shifted camera position (the per-axis offset
-set `{-W, 0, +W}` shared with creatures), so both layers tile seamlessly.
+set `{-W, 0, +W}` shared with creatures). Each ghost quad keeps the **same**
+`u_uv_offset` as the primary draw: because every offset is exactly one world
+width and the field is toroidally periodic, the same `a_corner → v_uv`
+mapping samples the correct wrapped content one world over.
+
+The one catch is the fixed-budget texture: the window data fills only the
+`win_w × win_h` corner of the 4096² `CLAMP_TO_EDGE` texture, so a `v_uv` that
+leaves the window would smear the edge texel. The fix is a per-axis wrap
+period `u_uv_wrap` (`render/gl.ts → windowUvWrap`): when the window spans the
+**full world on an axis** — exactly the case where ghost copies are drawn, so
+the upload is a complete toroidal period — the fragment shader wraps the
+sample UV with `mod(v_uv, win_dim / BUDGET_AXIS)` before every tap (crisp,
+bicubic, and blur for grass; the single fetch for biome). Slice windows
+(zoomed in, never tiled) pass `u_uv_wrap = 0` and keep the plain clamp path,
+which is correct inside a single world view. Without this wrap, biome lakes
+and grass clamp into hard rectangular blocks at each world-tile boundary when
+zoomed out and panned (the centered case happened to have `winOrigin = 0` and
+hid the bug).
 
 **Texture filters.** The **biome** texture uses `gl.NEAREST` (min + mag) so each
 cell stays a flat color. The **grass** texture uses `gl.LINEAR` (min + mag) to feed
@@ -419,12 +440,6 @@ the ground. (The underlying *density* still LOD-pops at mip switches — clipmap
 design, separate from this overlay; pin "Grass resolution" / `grass_lod_step` to a
 fixed level to avoid it.) Per-mip trilinear density blending is still reserved via
 `u_lod_blend` (always `0.0`).
-
-> **Known limitation — toroidal wrap seam.** A clipmap window straddling
-> the world wrap boundary (grass_dim > 2048, non-default zoom, toroidal
-> world) shows the wrong grass/biome region because the window is a
-> rectangular crop that cannot span the seam. This is a documented TODO in
-> the code; it does not affect the default (grass_dim=1920) configuration.
 
 If `settings.showGrass === false` the grass upload + draw is skipped
 entirely — at high cell counts this is a real perf win.
@@ -490,9 +505,9 @@ fully on top.
   `gl.UNSIGNED_BYTE` triple and the upload path). The texture dimensions
   are fixed at `GRASS_LOD_BUDGET_AXIS²` and do not change per boot.
 - The clipmap window metadata layout changes (snapshot header bytes
-  [32..64); `readWindowMetadata`; the `u_uv_scale`/`u_uv_offset` derivation
-  in `renderWorldImpl`; the `GRASS_CELL_SIZE` constant; or the camera SAB
-  lanes at control-SAB slots **136–140**).
+  [32..64); `readWindowMetadata`; the `u_uv_scale`/`u_uv_offset`/`u_uv_wrap`
+  derivation in `renderWorldImpl` + `windowUvWrap`; the `GRASS_CELL_SIZE`
+  constant; or the camera SAB lanes at control-SAB slots **136–140**).
 - A new per-frame span is added (must nest under `frame` to avoid
   orphaning).
 - The id encoding changes (currently raw u32 pair via `f32::from_bits`

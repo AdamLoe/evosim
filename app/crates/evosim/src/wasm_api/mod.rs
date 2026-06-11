@@ -150,10 +150,8 @@ pub const SLIDER_COUNT: usize = SLIDER_NAMES.len();
 // snapshot write). The creature region is UNCHANGED (stride 32 B / 8 lanes).
 // The header + creature region are compile-time constants; only the grass region
 // (and thus slot/buf totals) are computed at boot from the world's `grass_dim`
-// and stored on the `WorldHandle`. The "computed-dims-equality" safety model
-// replaces the old constant-equality asserts: the boot-computed grass region
-// size must equal `grass_cell_count` bytes, and the dedicated `biomeSab` is the
-// same size.
+// and stored on the `WorldHandle`. The live biome channel is per-slot and
+// windowed alongside grass; no full-field biome buffer is exposed to JS.
 
 /// Bytes per snapshot stats header (matches `SNAPSHOT_HEADER_BYTES` TS-side).
 /// v2.0.3 Stream 2b: bumped 32 → 64 to add 32 bytes of window-metadata fields
@@ -167,8 +165,8 @@ pub const SLIDER_COUNT: usize = SLIDER_NAMES.len();
 ///   off 16: `jank_count`   u32
 ///   off 20..32: reserved / padding (unchanged)
 ///   off 32: `mip_level`    u32  — pyramid LOD level used (0 = full-res)
-///   off 36: `win_origin_x` u32  — window origin X in level-k cells
-///   off 40: `win_origin_y` u32  — window origin Y in level-k cells
+///   off 36: `win_origin_x` i32  — logical window origin X in level-k cells
+///   off 40: `win_origin_y` i32  — logical window origin Y in level-k cells
 ///   off 44: `win_w`        u32  — window width  in level-k cells
 ///   off 48: `win_h`        u32  — window height in level-k cells
 ///   off 52: `tex_dim_w`    u32  — texture upload width  (= win_w for now)
@@ -199,6 +197,16 @@ pub const GRASS_LOD_BUDGET_AXIS: usize = 4096;
 /// visible viewport × GRASS_LOD_MARGIN_FACTOR (centered). A full-viewport pan
 /// in any direction stays covered for ≥ 1 tick without a new window.
 pub const GRASS_LOD_MARGIN_FACTOR: f32 = 1.5;
+
+#[inline]
+fn snapshot_window_copy_origin(raw: isize, level_dim: usize, win_dim: usize, wrap: bool) -> usize {
+    debug_assert!(level_dim > 0);
+    if wrap {
+        raw.rem_euclid(level_dim as isize) as usize
+    } else {
+        (raw.max(0) as usize).min(level_dim.saturating_sub(win_dim))
+    }
+}
 
 // ─── v2.0.6 S9: static biome mode-pyramid ─────────────────────────────────────
 //
@@ -281,11 +289,14 @@ impl BiomePyramid {
 
     /// Copy the window (origin_x, origin_y, win_w, win_h) from level `k` into
     /// `dst`. `dst.len()` must equal `win_w * win_h`. The origin and window
-    /// dimensions are in level-k cells (already clamped by the caller).
+    /// dimensions are in level-k cells. Toroidal windows wrap; walled windows
+    /// are already clamped by the caller.
     #[inline]
+    #[allow(clippy::too_many_arguments)]
     fn copy_window(
         &self,
         k: usize,
+        wrap: bool,
         origin_x: usize,
         origin_y: usize,
         win_w: usize,
@@ -294,12 +305,26 @@ impl BiomePyramid {
     ) {
         debug_assert!(k < self.levels.len(), "level {k} out of range");
         debug_assert_eq!(dst.len(), win_w * win_h, "dst size mismatch");
-        let (lk_w, _lk_h) = self.level_dims[k];
+        let (lk_w, lk_h) = self.level_dims[k];
+        debug_assert!(origin_x < lk_w && origin_y < lk_h);
         let src = &self.levels[k];
         for row in 0..win_h {
-            let src_off = (origin_y + row) * lk_w + origin_x;
-            let dst_off = row * win_w;
-            dst[dst_off..dst_off + win_w].copy_from_slice(&src[src_off..src_off + win_w]);
+            let sy = if wrap {
+                (origin_y + row) % lk_h
+            } else {
+                origin_y + row
+            };
+            let src_row = &src[sy * lk_w..(sy + 1) * lk_w];
+            let dst_row = &mut dst[row * win_w..(row + 1) * win_w];
+            if wrap {
+                let first_len = win_w.min(lk_w - origin_x);
+                dst_row[..first_len].copy_from_slice(&src_row[origin_x..origin_x + first_len]);
+                if first_len < win_w {
+                    dst_row[first_len..].copy_from_slice(&src_row[..win_w - first_len]);
+                }
+            } else {
+                dst_row.copy_from_slice(&src_row[origin_x..origin_x + win_w]);
+            }
         }
     }
 }
@@ -323,8 +348,6 @@ struct SnapshotLayout {
     slot_bytes: usize,
     /// two double-buffered slots.
     buf_bytes: usize,
-    /// biomeSab size = grass_cell_count bytes (u8 per cell).
-    biome_bytes: usize,
     /// The full grass_dim (cells per axis), for window-compute reference.
     grass_dim: usize,
 }
@@ -357,15 +380,11 @@ impl SnapshotLayout {
             (SNAPSHOT_HEADER_BYTES + SNAPSHOT_CREATURE_BYTES + grass_bytes + biome_win_bytes)
                 .next_multiple_of(SNAPSHOT_SLOT_ALIGN);
         let buf_bytes = 2 * slot_bytes;
-        // biomeSab mirrors the full grass_cell_count (unchanged — biome is always
-        // the full field; windowed biome is a 2d concern).
-        let biome_bytes = grass_cell_count;
         Self {
             grass_bytes,
             biome_win_bytes,
             slot_bytes,
             buf_bytes,
-            biome_bytes,
             grass_dim,
         }
     }
@@ -384,11 +403,6 @@ pub struct WorldHandle {
     /// v2.0 Wave 1a: runtime snapshot region sizes, computed at boot from the
     /// world's `grass_dim` (grass region is u8, `grass_cell_count` bytes/slot).
     snapshot_layout: SnapshotLayout,
-    /// v2.0 Wave 1a: dedicated biome SAB — one u8 per grass cell (`Biome` enum,
-    /// `repr(u8)`). Wave 1a fills it with `Plains` (0) placeholder; Wave 1b
-    /// populates it from `world_seed`. Lives in wasm linear memory like the
-    /// snapshot buffer; the main thread reads via a view at `biome_buf_byte_offset`.
-    biome_buf: Vec<u8>,
     /// v2.0.6 S9: precomputed biome mode-pyramid. One level per GrassPyramid level;
     /// `biome_pyramid.levels[k]` holds the mode-downsampled biome grid at mip level k.
     /// Replaces the per-tick nested-loop recompute in `write_snapshot` with a
@@ -440,22 +454,18 @@ impl WorldHandle {
         Self::from_world(inner)
     }
 
-    /// Allocate the runtime-sized snapshot + biome buffers from a constructed
-    /// world's grass dims and assemble the handle. v2.0 Wave 1a: the snapshot
-    /// grass region and the biomeSab are both `grass_cell_count` u8 bytes/slot.
+    /// Allocate the runtime-sized snapshot buffer from a constructed world's
+    /// grass dims and assemble the handle. v2.0: the snapshot carries grass and
+    /// biome windows per slot; the old full-field biome buffer is gone.
     /// v2.0.6 S9: also builds the biome mode-pyramid (one-time, static).
     fn from_world(inner: World) -> Self {
         let grass_cell_count = inner.dims.grass_cell_count;
         let layout = SnapshotLayout::from_grass_cell_count(grass_cell_count);
-        // v2.0 Wave 1b: fill the biomeSab from the world's generated biome grid
-        // (deterministic from `world_seed`). The grid is exactly
-        // `grass_cell_count` u8 tags, matching `biome_bytes`.
         debug_assert_eq!(
             inner.biome_grid_bytes().len(),
-            layout.biome_bytes,
-            "biome grid length must equal biomeSab byte size"
+            grass_cell_count,
+            "biome grid length must equal grass cell count"
         );
-        let biome_buf = inner.biome_grid_bytes().to_vec();
         // v2.0.6 S9: build the static biome mode-pyramid once.
         // `GrassPyramid::level_dims` records the (w,h) pairs for every level;
         // we mirror them for the biome pyramid so copy_window always has the
@@ -466,7 +476,6 @@ impl WorldHandle {
             inner,
             snapshot_buf: vec![0u8; layout.buf_bytes],
             snapshot_layout: layout,
-            biome_buf,
             biome_pyramid,
             tick_intervals_ms: std::collections::VecDeque::new(),
             last_tick_end_ms: None,
@@ -513,6 +522,10 @@ impl WorldHandle {
         // `initial_sliders` is applied AFTER World construction — too late to
         // affect dims. Default 5.0 (= GRASS_CELL_SIZE_DEFAULT) when not set.
         grass_cell_size: f32,
+        // v2.0.4 S6 / Wave 2: multi-band grass NN sight. Construction-only:
+        // it changes the NN input layout and must be applied before founder
+        // brain/topology construction. Default true (= GRASS_MULTISIGHT_DEFAULT).
+        grass_multisight: bool,
         // v2.0.6 S3: seeded grass clumps construction knobs. Must ride the
         // explicit boot param (not initial_sliders) — same constraint as
         // grass_cell_size; clump seeding runs at world construction, before
@@ -566,6 +579,9 @@ impl WorldHandle {
             // v2.0.4 S2 / v2.0.5 S4: grass cell size — explicit construction arg.
             // Floored at 1.0; passed pre-construction so dims are correct.
             grass_cell_size: grass_cell_size.max(1.0),
+            // v2.0.4 S6: explicit construction arg so restart applies the
+            // persisted setting before NN input-layout/topology construction.
+            grass_multisight,
             // v2.0.6 S3: seeded grass clumps — explicit construction args.
             // clump_count=0 falls back to uniform-scatter.
             grass_clump_count,
@@ -772,23 +788,6 @@ impl WorldHandle {
         self.snapshot_layout.biome_win_bytes as u32
     }
 
-    // ─── v2.0 Wave 1a: dedicated biome SAB ───────────────────────────────────
-
-    /// Byte offset of the biome buffer (one u8 `Biome` per grass cell) inside
-    /// wasm linear memory. Main thread builds a view at this offset of length
-    /// `biome_buf_byte_len()`. Wave 1b: filled from `world_seed` via
-    /// `biome::generate_biome_grid` (Plains/Water/Desert blobs).
-    #[wasm_bindgen(getter)]
-    pub fn biome_buf_byte_offset(&self) -> u32 {
-        self.biome_buf.as_ptr() as u32
-    }
-
-    /// Length of the biome buffer in bytes = `grass_cell_count` (u8 per cell).
-    #[wasm_bindgen(getter)]
-    pub fn biome_buf_byte_len(&self) -> u32 {
-        self.snapshot_layout.biome_bytes as u32
-    }
-
     /// Write a full snapshot (stats header + creature SoA + clipmap grass window)
     /// into the requested slot of `self.snapshot_buf` (which lives in wasm linear
     /// memory). No JS-side `Uint8Array` parameters — main reads the same
@@ -804,7 +803,7 @@ impl WorldHandle {
     /// Layout per slot (little-endian throughout):
     ///   `[0..20)`    tick, pop, world_ended, tps_bits, jank_count (u32 each)
     ///   `[20..32)`   padding (unchanged; 32-byte align for creature SoA)
-    ///   `[32..64)`   window metadata (8 × u32 LE): mip_level, win_origin_x,
+    ///   `[32..64)`   window metadata: mip_level (u32), win_origin_x/y (i32),
     ///                win_origin_y, win_w, win_h, tex_dim_w, tex_dim_h, wrap_mode
     ///   `[64..64+SNAPSHOT_CREATURE_BYTES)` creature SoA, 32 B stride
     ///   `[grass region: min(grass_dim,2048)² bytes]` clipmap window grass bytes
@@ -909,21 +908,30 @@ impl WorldHandle {
             .min(level_h)
             .min(GRASS_LOD_BUDGET_AXIS);
 
-        // Window origin: center on camera, clamped to level bounds.
+        // Window origin: center on camera. Toroidal worlds publish the signed
+        // logical origin so render can map ghost tiles into the rotated upload;
+        // copy-out normalizes that origin modulo the level dimensions. Walled
+        // worlds retain edge clamps for both metadata and copy-out.
         // Camera world coords → level-k cell coords.
         let cam_cx_cells = (cam_cx / (cell_size * scale)).floor() as isize;
         let cam_cy_cells = (cam_cy / (cell_size * scale)).floor() as isize;
         let half_w = (raw_win_w / 2) as isize;
         let half_h = (raw_win_h / 2) as isize;
-        let ox = (cam_cx_cells - half_w).max(0) as usize;
-        let oy = (cam_cy_cells - half_h).max(0) as usize;
-        // Clamp so the window doesn't extend past the level edge.
-        // TODO (Stage-3 wrap-seam): For toroidal worlds this clamp is wrong —
-        // when the camera is near the seam the origin should be allowed to
-        // overflow (so viewport_window can wrap it modulo lw/lh). Remove this
-        // clamp for the wrap_world=true path once viewport_window supports wrap.
-        let win_origin_x = ox.min(level_w.saturating_sub(raw_win_w));
-        let win_origin_y = oy.min(level_h.saturating_sub(raw_win_h));
+        let raw_origin_x = cam_cx_cells - half_w;
+        let raw_origin_y = cam_cy_cells - half_h;
+        let wrap = self.inner.dims.wrap_world;
+        let copy_origin_x = snapshot_window_copy_origin(raw_origin_x, level_w, raw_win_w, wrap);
+        let copy_origin_y = snapshot_window_copy_origin(raw_origin_y, level_h, raw_win_h, wrap);
+        let meta_origin_x = if wrap {
+            raw_origin_x
+        } else {
+            copy_origin_x as isize
+        };
+        let meta_origin_y = if wrap {
+            raw_origin_y
+        } else {
+            copy_origin_y as isize
+        };
         let win_w = raw_win_w.min(level_w);
         let win_h = raw_win_h.min(level_h);
 
@@ -978,14 +986,14 @@ impl WorldHandle {
         }
 
         // v2.0.3 Stream 2b: window metadata — bytes [32..64) of the slot, LE.
-        // 8 × u32: mip_level, win_origin_x, win_origin_y, win_w, win_h,
-        //           tex_dim_w, tex_dim_h, wrap_mode.
+        // Window metadata: mip_level u32, logical win_origin_x/y i32, then
+        // win_w, win_h, tex_dim_w, tex_dim_h, wrap_mode as u32.
         let wrap_mode: u32 = if self.inner.dims.wrap_world { 1 } else { 0 };
         {
             let wmeta = &mut self.snapshot_buf[slot_base + 32..slot_base + 64];
             wmeta[0..4].copy_from_slice(&(mip_level as u32).to_le_bytes());
-            wmeta[4..8].copy_from_slice(&(win_origin_x as u32).to_le_bytes());
-            wmeta[8..12].copy_from_slice(&(win_origin_y as u32).to_le_bytes());
+            wmeta[4..8].copy_from_slice(&(meta_origin_x as i32).to_le_bytes());
+            wmeta[8..12].copy_from_slice(&(meta_origin_y as i32).to_le_bytes());
             wmeta[12..16].copy_from_slice(&(win_w as u32).to_le_bytes());
             wmeta[16..20].copy_from_slice(&(win_h as u32).to_le_bytes());
             wmeta[20..24].copy_from_slice(&(win_w as u32).to_le_bytes()); // tex_dim_w = win_w
@@ -1008,8 +1016,9 @@ impl WorldHandle {
         pyramid.viewport_window(
             density,
             mip_level,
-            win_origin_x,
-            win_origin_y,
+            wrap,
+            copy_origin_x,
+            copy_origin_y,
             win_w,
             win_h,
             grass_region,
@@ -1042,8 +1051,9 @@ impl WorldHandle {
             // `copy_window` is a simple row-by-row memcpy from the pyramid level.
             self.biome_pyramid.copy_window(
                 mip_level,
-                win_origin_x,
-                win_origin_y,
+                wrap,
+                copy_origin_x,
+                copy_origin_y,
                 win_w,
                 win_h,
                 &mut biome_region[..win_w * win_h],
@@ -2038,6 +2048,8 @@ mod tests {
             3.0,
             // v2.0.5 S4: new grass_cell_size arg — default 5.0.
             5.0,
+            // v2.0.4 S6: grass_multisight default ON.
+            true,
             // v2.0.6 S3: clump_count=0 → old uniform-scatter (no seeds here).
             0,
             0,
@@ -2152,6 +2164,8 @@ mod tests {
             3.0,
             // v2.0.5 S4: new grass_cell_size arg — default 5.0.
             5.0,
+            // v2.0.4 S6: grass_multisight default ON.
+            true,
             // v2.0.6 S3: clump_count=0 → old uniform-scatter.
             0,
             0,
@@ -2198,6 +2212,84 @@ mod tests {
         // u64::MAX is guaranteed never to be allocated in any v1 session.
         let idx = handle.creature_idx_by_id(u64::MAX as f64);
         assert!(idx.is_none(), "unknown id must return None");
+    }
+
+    /// Wave 2 boot/config regression: `grass_multisight` is construction-only
+    /// because it changes the NN input layout. It must ride the explicit boot
+    /// constructor so restart applies the persisted value before topology/founder
+    /// brain construction.
+    #[test]
+    fn construction_grass_multisight_controls_nn_layout_width() {
+        use crate::world::nn::NnInputGroup;
+
+        let make = |grass_multisight: bool| {
+            WorldHandle::new_with_founder_count(
+                if grass_multisight {
+                    "grass-multisight-on"
+                } else {
+                    "grass-multisight-off"
+                },
+                0,
+                100.0,
+                1,
+                false,
+                "",
+                1200.0,
+                true,
+                1,
+                false,
+                1.0,
+                10,
+                10,
+                3.0,
+                5.0,
+                grass_multisight,
+                0,
+                0,
+                1.0,
+                1.0,
+            )
+            .unwrap()
+        };
+
+        let off = make(false);
+        assert_eq!(
+            off.inner
+                .nn_input_layout
+                .offset_of(NnInputGroup::GrassBandsFar),
+            None,
+            "grass_multisight=false must omit the far grass band"
+        );
+        assert_eq!(
+            off.inner.nn_input_layout.width(),
+            32,
+            "grass_multisight=false should keep the reduced single-band input width"
+        );
+        assert_eq!(
+            off.inner.nn_topology.input_width(),
+            off.inner.nn_input_layout.width(),
+            "topology must be reconciled to the construction-time layout"
+        );
+
+        let on = make(true);
+        let default = WorldHandle::new("grass-multisight-default");
+        assert!(
+            on.inner
+                .nn_input_layout
+                .offset_of(NnInputGroup::GrassBandsFar)
+                .is_some(),
+            "grass_multisight=true must include the far grass band"
+        );
+        assert_eq!(
+            on.inner.nn_input_layout.width(),
+            default.inner.nn_input_layout.width(),
+            "grass_multisight=true must retain the default input width"
+        );
+        assert_eq!(
+            on.inner.nn_topology.input_width(),
+            on.inner.nn_input_layout.width(),
+            "topology must be reconciled to the construction-time layout"
+        );
     }
 
     // ─── S17: typed slider setter tests ─────────────────────────────────────

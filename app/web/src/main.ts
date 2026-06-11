@@ -28,6 +28,7 @@ import {
   getStartingSpeciesCount,
   getStartingSpeciesMemberCount,
   getStartingSpeciesMemberVariance,
+  getGrassMultisight,
   getGrassSize,
   getGrassClumpCount,
   getGrassClumpSize,
@@ -560,6 +561,9 @@ async function spawnSimWorker(seed: string): Promise<SimBridge> {
     // v2.0.4 S2 / v2.0.5 S4: grass cell size — must ride the explicit
     // construction path so dims are correct at World construction. Default 5.0.
     grass_cell_size: getGrassSize(),
+    // v2.0.4 S6 / Wave 2: multi-band grass sight changes NN input layout, so it
+    // must ride the explicit construction path before topology construction.
+    grass_multisight: getGrassMultisight(),
     // v2.0.6 S3: seeded grass clumps — must ride the explicit construction path
     // (clump seeding runs during World construction, before initial_sliders).
     grass_clump_count: getGrassClumpCount(),
@@ -626,14 +630,10 @@ async function spawnSimWorker(seed: string): Promise<SimBridge> {
   // Reuse the resolved numeric seed on the next restart so the same biome
   // layout returns; a reroll/edit in Settings overrides `pendingWorldSeed`.
   pendingWorldSeed = ready.world_seed;
-  // v2.0 Wave 1a: build the runtime slot geometry from the reported grass_dim
-  // (the single source of truth) and bind the static biome layer view. The
-  // biome buffer is `grass_dim²` u8 bytes in wasm linear memory.
+  // v2.0 Wave 1a/2d: build the runtime slot geometry from the reported grass_dim
+  // (the single source of truth). Biome tint comes from the per-slot biome
+  // window appended after grass in each snapshot slot.
   slotLayout = makeSlotLayout(ready.grass_dim);
-  // v2.0.3 Stream 2d: biome tint now comes from the per-slot biome window
-  // channel (mode-downsampled, appended after the grass region in each slot).
-  // The biome_buf (full-field static, biome_buf_byte_offset/len) is no longer
-  // read by the renderer — the slot carries the windowed biome data instead.
   // Stash the Rust-side slider defaults for the Wave D drift-guard e2e to
   // read. Cheap, only the test consumes it.
   (window as unknown as { __rustSlidersDefaults?: string }).__rustSlidersDefaults =

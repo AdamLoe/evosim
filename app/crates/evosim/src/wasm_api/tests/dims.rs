@@ -1,9 +1,9 @@
-//! v2.0 Wave 1a — computed snapshot/biome dims tests.
+//! v2.0 Wave 1a — computed snapshot/window dims tests.
 //!
-//! Pins the "computed-dims-equality" safety model: the snapshot grass region
-//! (u8) and the dedicated biomeSab are both `grass_cell_count` BYTES, derived at
-//! boot from the runtime `world_size`. Lives in its OWN file/module (wired from
-//! `wasm_api.rs` via `#[path]`) to avoid the shared-`mod tests` merge hazard.
+//! Pins the runtime slot geometry: the snapshot grass region (u8) and the
+//! per-slot biome window region are both derived at boot from the runtime
+//! `world_size`. Lives in its OWN file/module (wired from `wasm_api.rs` via
+//! `#[path]`) to avoid the shared-`mod tests` merge hazard.
 
 use super::super::WorldHandle;
 use crate::constants::{WorldDims, WORLD_SIZE_DEFAULT};
@@ -24,13 +24,13 @@ fn dims_1200() {
     assert_eq!(d.grass_cell_count, 240 * 240);
 }
 
-/// The snapshot grass region (u8) + the biomeSab byte sizes both derive from
-/// `grass_cell_count` and agree (computed-dims-equality model). Exercised
-/// against a real boot at a small walled world so the buffers stay test-cheap.
+/// The snapshot grass region (u8) + the per-slot biome window region both
+/// derive from the live grass-window allocation. Exercised against a real boot
+/// at a small walled world so the buffers stay test-cheap.
 /// v2.0.3 Stream 2d: slot_bytes now includes the biome window region (same size
 /// as the grass region), so slot = header + creatures + grass + biome_win.
 #[test]
-fn snapshot_and_biome_sizes_derive_from_grass_cell_count() {
+fn snapshot_and_biome_window_sizes_follow_live_slot_layout() {
     // Small 1200u walled world → 240² = 57_600 grass cells.
     let h = WorldHandle::new_with_founder_count(
         "dims-seam",
@@ -49,6 +49,8 @@ fn snapshot_and_biome_sizes_derive_from_grass_cell_count() {
         3.0,
         // v2.0.5 S4: new grass_cell_size arg — default 5.0.
         5.0,
+        // v2.0.4 S6: grass_multisight default ON.
+        true,
         // v2.0.6 S3: clump_count=0 → old uniform-scatter.
         0,
         0,
@@ -61,12 +63,9 @@ fn snapshot_and_biome_sizes_derive_from_grass_cell_count() {
     assert_eq!(h.grass_dim(), 240);
     // u8 grass: one byte per cell.
     assert_eq!(h.snapshot_grass_bytes() as usize, cells);
-    // biomeSab: one u8 per cell.
-    assert_eq!(h.biome_buf_byte_len() as usize, cells);
-    // The two derived sizes must be equal (same source dim).
-    assert_eq!(h.snapshot_grass_bytes(), h.biome_buf_byte_len());
-    // v2.0.3 Stream 2d: biome window allocation = same as grass bytes.
+    // v2.0.3 Stream 2d: biome window allocation = same live window budget as grass.
     assert_eq!(h.snapshot_biome_win_bytes() as usize, cells);
+    assert_eq!(h.snapshot_grass_bytes(), h.snapshot_biome_win_bytes());
 
     // Slot/buf totals follow from header + creatures + u8 grass + biome_win.
     // (Stream 2d: biome_win appended after grass — same allocation size.)
@@ -79,11 +78,11 @@ fn snapshot_and_biome_sizes_derive_from_grass_cell_count() {
 }
 
 /// The default (9600u) boot derives the documented 1920² grass dim end-to-end,
-/// and the snapshot grass region is exactly `grass_cell_count` u8 bytes.
+/// and the grass/biome-window slot regions are exactly `grass_cell_count` bytes.
 #[test]
 fn default_boot_reports_1920_grass_dim() {
     let h = WorldHandle::new("dims-default");
     assert_eq!(h.grass_dim(), 1920);
     assert_eq!(h.snapshot_grass_bytes() as usize, 1920 * 1920);
-    assert_eq!(h.biome_buf_byte_len() as usize, 1920 * 1920);
+    assert_eq!(h.snapshot_biome_win_bytes() as usize, 1920 * 1920);
 }

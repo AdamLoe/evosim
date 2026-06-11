@@ -32,14 +32,14 @@ plurality).
 `biome_from_u8` decodes a raw u8 to the `Biome` enum (bounds-checked; any
 out-of-range byte maps to `Plains`).
 
-## Static biome region
+## Static Biome Pyramid
 
-The biome grid is copied byte-for-byte into the boot `biome_buf` SAB at
-construction — see `architecture/shared-memory-and-protocol.md` (biome
-region). This lets the renderer draw a biome-color underlay without any
-per-tick transfer cost. The grid is stable; only the per-tick render window
-varies (extracted via `BiomePyramid::copy_window` in
-`app/crates/evosim/src/wasm_api/mod.rs`).
+The full biome grid stays sim-side on `World`. At `WorldHandle`
+construction, `BiomePyramid::build` precomputes mode-downsampled static
+biome levels that mirror the grass pyramid dimensions. Each snapshot copies
+only the current window with `BiomePyramid::copy_window`, appending it after
+the grass window in the snapshot slot. There is no separate full-field
+biome buffer exposed to the web shell.
 
 ## Per-tick movement and energy effects
 
@@ -112,13 +112,13 @@ lookup.
 - `crates/evosim/src/world/nn.rs` → `BiomeSampler`, `NnInputGroup` (`BiomeDir`, `CurrCellPenalty`)
 - `crates/evosim/src/constants.rs` → `Biome` enum, `K_BIOME_SPEED`, `K_BIOME_COST`, `K_BIOME_UPKEEP`, `WATER_MOVEMENT_PENALTY_DEFAULT`, `DESERT_MOVEMENT_PENALTY_DEFAULT`, `NN_BIOME_DIRS`
 - `app/crates/evosim/src/grass/mod.rs` → `compute_propagation_scatter` (biome-capacity cap on spread writes)
-- `app/crates/evosim/src/wasm_api/mod.rs` → `BiomePyramid` (`build`, `copy_window`), `biome_buf_byte_offset`/`biome_buf_len` getters
+- `app/crates/evosim/src/wasm_api/mod.rs` → `BiomePyramid` (`build`, `copy_window`)
 
 ## See also
 
 - [`simulation-core.md`](simulation-core.md) — `World` overview, grass mechanic, `WorldDims` (world sizing)
 - [`render-pipeline.md`](render-pipeline.md) — biome-id quad drawn under the grass texture
-- [`shared-memory-and-protocol.md`](shared-memory-and-protocol.md) — biome region in wasm memory and `biomeSab`
+- [`shared-memory-and-protocol.md`](shared-memory-and-protocol.md) — per-slot biome window in wasm memory
 - [`../decisions/sim.md`](../decisions/sim.md) — rationale for static biome map and genome-modulated penalties
 - [`../../agent-context/maintaining-docs.md`](../agent-context/maintaining-docs.md)
 - Global authoring rules: `~/.claude/agent-docs/v1/rules/authoring-rules.md`

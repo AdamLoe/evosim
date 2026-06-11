@@ -389,8 +389,8 @@ pub struct World {
     /// Static biome grid (v2.0 Wave 1b): one `Biome as u8` per grass cell,
     /// row-major `grass_dim × grass_dim`. Generated deterministically from
     /// `world_seed` at construction (see `biome::generate_biome_grid`) and
-    /// copied byte-for-byte into the boot `biome_buf` SAB. Read O(1) per tick
-    /// via `biome_at`.
+    /// used both for O(1) `biome_at` lookups and to build the static biome
+    /// pyramid that feeds per-slot snapshot biome windows.
     pub(crate) biome_grid: Vec<u8>,
     /// v2.0 Wave 3a: species registry (id → color). Empty when `species_mode`
     /// is off; seeded with `starting_species_count` species otherwise. Dynamic
@@ -563,11 +563,9 @@ impl World {
                 grass.dset(c, grass.capacity[c]);
             }
             grass.rebuild_row_bitset();
-            // v2.0.1 §2/§3: density was set wholesale outside propagation — rebuild
-            // the per-tile class + active set, and mark all tiles dirty so the
-            // first snapshot writes the full (now-saturated) grass region.
+            // Density was set wholesale outside propagation, so rebuild the
+            // per-tile class and active set.
             grass.resync_active_from_density();
-            grass.mark_all_tiles_dirty();
         } else if sliders.grass_clump_count > 0 {
             // v2.0.6 S3: seeded clump boot — plant `grass_clump_count` circular
             // patches of radius `grass_clump_size` cells, centres derived from
@@ -834,7 +832,7 @@ impl World {
     }
 
     /// The raw biome grid bytes (one `Biome as u8` per grass cell, row-major).
-    /// Used to fill the boot `biome_buf` SAB. (v2.0 Wave 1b.)
+    /// Used to build the static biome pyramid. (v2.0 Wave 1b.)
     #[inline]
     pub(crate) fn biome_grid_bytes(&self) -> &[u8] {
         &self.biome_grid

@@ -78,6 +78,31 @@ const rayonCurrentNumThreads = (_wasmMod as unknown as Record<string, unknown>)[
   "rayon_current_num_threads"
 ] as (() => number) | undefined;
 
+type WorldHandleBootCtor = {
+  newWithFounderCount(
+    seed: string,
+    initialGrassSeedCount: number,
+    energyMax: number,
+    founderCount: number,
+    fullGrassOnInit: boolean,
+    nnTopologyJson: string,
+    worldSize: number,
+    wrapWorld: boolean,
+    worldSeed: number,
+    speciesMode: boolean,
+    crossoverMode: number,
+    startingSpeciesCount: number,
+    startingSpeciesMemberCount: number,
+    startingSpeciesMemberVariance: number,
+    grassCellSize: number,
+    grassMultisight: boolean,
+    grassClumpCount: number,
+    grassClumpSize: number,
+    initGrazeBoost: number,
+    initSplitBoost: number,
+  ): WorldHandle;
+};
+
 /** Target rayon worker count (kept from v1.9; see worker-runtime.md). */
 const TARGET_RAYON_WORKERS = 12;
 
@@ -195,7 +220,8 @@ async function handleBoot(boot: SimMessageBoot): Promise<void> {
     threads = actual;
   }
 
-  world = WorldHandle.newWithFounderCount(
+  const bootCtor = WorldHandle as unknown as WorldHandleBootCtor;
+  world = bootCtor.newWithFounderCount(
     boot.seed,
     boot.initial_grass_seed_count,
     boot.energy_max,
@@ -216,6 +242,9 @@ async function handleBoot(boot: SimMessageBoot): Promise<void> {
     // v2.0.4 S2 / v2.0.5 S4: grass cell size — explicit construction arg so
     // dims are computed before initial_sliders is applied.
     boot.grass_cell_size ?? 5.0,
+    // v2.0.4 S6 / Wave 2: multi-band grass NN sight changes the NN layout, so
+    // it must be applied before founder-brain/topology construction.
+    boot.grass_multisight ?? true,
     // v2.0.6 S3: seeded grass clumps — explicit construction args.
     // clump_count=0 falls back to old uniform-scatter.
     boot.grass_clump_count ?? 40,
@@ -292,9 +321,7 @@ async function handleBoot(boot: SimMessageBoot): Promise<void> {
     // v2.0.4 S2: runtime grass cell size (default 5.0; adjustable via grass_size slider).
     // The renderer uses this for UV transform so it stays correct at non-default sizes.
     grass_cell_size: world.grass_cell_size,
-    // v2.0 Wave 1a: torus flag + resolved numeric biome seed + biome buffer
-    // geometry. The biome buffer lives in wasm linear memory next to the
-    // snapshot region; main reads it via a Uint8Array view at this offset.
+    // v2.0 Wave 1a: torus flag + resolved numeric biome seed.
     wrap_world: world.wrap_world,
     world_seed: world.world_seed,
     threads,
@@ -303,8 +330,6 @@ async function handleBoot(boot: SimMessageBoot): Promise<void> {
     wasm_memory: wasmInit.memory,
     snapshot_buf_byte_offset: world.snapshot_buf_byte_offset,
     snapshot_buf_byte_len: world.snapshot_buf_byte_len,
-    biome_buf_byte_offset: world.biome_buf_byte_offset,
-    biome_buf_byte_len: world.biome_buf_byte_len,
     control_sab: controlSab,
     sliders_defaults_json: world.sliders_defaults_json(),
   };

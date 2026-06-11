@@ -5,10 +5,10 @@ the main ↔ sim-worker boundary.
 
 ## What it is
 
-A `controlSab` (≈30 KB), the wasm-memory-resident snapshot region (runtime-sized;
-at the 9600u default ≈ 2 × (≈1 MB creatures + 3.69 MB u8 grass window + 3.69 MB u8 biome window)
-≈ 17 MB — grass/biome regions are `min(grass_dim, 4096)²` each, sized from
-`GRASS_LOD_BUDGET_AXIS = 4096`), and the dedicated wasm-memory `biomeSab` (`grass_cell_count` u8 ≈ 3.69 MB at default) —
+A `controlSab` (≈30 KB), the wasm-memory-resident snapshot region
+(runtime-sized; at the 9600u default ≈ 2 × (≈1 MB creatures + 3.69 MB u8
+grass window + 3.69 MB u8 biome window) ≈ 17 MB — grass/biome regions are
+`min(grass_dim, 4096)²` each, sized from `GRASS_LOD_BUDGET_AXIS = 4096`),
 plus a one-shot `boot` message in each direction.
 All main↔worker control is on SAB; the only postMessage payloads are
 the `boot` handshake and its `boot_ready` reply. Every other control
@@ -44,9 +44,6 @@ equal at boot — drift is a thrown error pointing at "rebuild wasm".
   region is compile-time-fixed. Main accesses it via a `DataView` over
   `wasm_memory.buffer` at the `snapshot_buf_byte_offset` from `boot_ready`
   — no separate SharedArrayBuffer.
-- The dedicated **`biomeSab`**: one `Biome` u8 per grass cell, sized from
-  `grass_cell_count` at boot. The full static biome grid — separate from the
-  per-slot biome window written into the snapshot each tick.
 - The creature SoA stride: `CREATURE_STRIDE = 8` (= 32 bytes). World-size independent.
 - The snapshot atomic-flip ordering (write inactive slot → flip
   `CTRL_CURRENT_SLOT` → bump `CTRL_SEQ`).
@@ -165,7 +162,7 @@ the user drags).
 |---|---|---|
 | `0..20` | 20 | Stats header — `[tick: u32, pop: u32, world_ended: u32, tps_bits: u32, jank_count: u32]`, all little-endian. |
 | `20..32` | 12 | Padding (unchanged — aligns creature SoA to 32 B). |
-| `32..64` | 32 | Window metadata — 8 × u32 LE: `mip_level`, `win_origin_x`, `win_origin_y`, `win_w`, `win_h`, `tex_dim_w`, `tex_dim_h`, `wrap_mode` (0 = clamp/walled, 1 = wrap/torus). |
+| `32..64` | 32 | Window metadata — `mip_level: u32`, `win_origin_x/y: i32`, then `win_w`, `win_h`, `tex_dim_w`, `tex_dim_h`, `wrap_mode` as u32 LE. `wrap_mode`: 0 = clamp/walled, 1 = wrap/torus. |
 | `64..(64 + MAX_POP_FOR_SIM*32)` | `MAX_POP_FOR_SIM × 32` | Creature SoA at stride 32 bytes. **World-size independent.** |
 | grass region | `min(grass_dim, 4096)²` | Clipmap grass window — u8 density bytes. `win_w × win_h` bytes are meaningful per tick; remaining allocation is zero-initialised. At default `grass_dim = 1920` the full field is written. Sized from `GRASS_LOD_BUDGET_AXIS = 4096` (generated from Rust → `lod-constants.ts`). |
 | biome window | `min(grass_dim, 4096)²` | Clipmap biome window — u8 `Biome` tags, MODE-downsampled from the static biome grid at `mip_level`. Same `win_w × win_h` extent and UV transform as the grass window. Appended immediately after the grass region. |
@@ -187,42 +184,31 @@ the worker from the camera SAB lanes (`CTRL_CAMERA_CX_BITS` … `CTRL_CAMERA_VIE
 It computes the LOD level as `floor(log2(max(1.0, visible_cell_span / 4096)))`,
 applies the `lod_bias` nudge (subtracts, clamps ≥ 0), and computes the window
 origin/size with a 1.5× margin factor and an **aspect-correct** height (derived from
-`viewport_h / viewport_w`). It then extracts the window via `pyramid.viewport_window`
-into the grass region and MODE-downsamples the static biome grid into the biome window
-region. At default scale (`world_size = 9600`, `zoom = 1`, `grass_dim = 1920`) the
-result is `mip_level = 0`, `win = (0, 0, 1920, 1920)` — the full field, byte-identical
-to the pre-pyramid layout.
+`viewport_h / viewport_w`). Walled worlds clamp the logical origin to level bounds.
+Toroidal worlds publish the signed logical origin and copy bytes from its
+modulo-normalized origin, so a window can straddle the world wrap. It then extracts
+the window via `pyramid.viewport_window` into the grass region and copies the
+matching static `BiomePyramid` window into the biome region. At default scale
+(`world_size = 9600`, `zoom = 1`, `grass_dim = 1920`) the result is `mip_level = 0`,
+`win = (0, 0, 1920, 1920)` — the full field, byte-identical to the pre-pyramid layout.
 
-The TS side calls `readWindowMetadata(view, slotByteBase)` (from `app/web/src/sim/bridge.ts`) to
-retrieve the window geometry, then uploads `win_w × win_h` bytes via `texSubImage2D`
-(sub-array guarded). The UV transform in the renderer is
-`u_uv_scale = world_size / (grass_cell_size × 2^L × 4096)`,
-`u_uv_offset = -winOrigin / 4096`; at default scale both reduce to a fixed scale.
-
-**Known limitation:** toroidal wrap-seam. When `wrap_world = true` and the camera is
-near the world wrap edge at non-default zoom (`grass_dim > 2048`), the window origin
-clamp is incorrect and the wrong region is displayed. Documented as a TODO in
-`write_snapshot`; not fixed.
-
-### biomeSab
-
-A **separate** buffer of `grass_cell_count` u8 — one `Biome`
-(`{Plains=0, Water=1, Desert=2}`) per grass cell, single-buffered (no slots). Its
-byte offset/length ride `boot_ready` (`biome_buf_byte_offset` /
-`biome_buf_byte_len`). Filled from `world_seed` via `biome::generate_biome_grid`
-at construction (deterministic Plains/Water/Desert blobs). Static for the
-worker's lifetime; never written again after boot.
+The TS side calls `readWindowMetadata(view, slotByteBase)` (from
+`app/web/src/sim/bridge.ts`) to retrieve the window geometry, then uploads
+`win_w × win_h` bytes via `texSubImage2D` (sub-array guarded). The UV transform
+in the renderer is `u_uv_scale = world_size / (grass_cell_size × 2^L × 4096)`.
+For each toroidal ghost draw, the renderer adds the ghost's world translation
+to the signed logical origin transform so the wrapped complement samples the
+correct part of the uploaded window. At default scale both uniforms reduce to
+a fixed scale/zero offset.
 
 ### Computed-dims-equality safety model
 
 A *computed* equality guard keyed on `grass_dim` from `boot_ready` replaces any
-hardcoded constant. Three derived sizes must
-be consistent:
+hardcoded constant. The derived per-slot window sizes must be consistent:
 - `grassRegionBytes` (slot grass window allocation) = `biomeWinBytes` (slot biome window allocation) = `min(grass_dim, 4096)²`
-- `biome_buf_byte_len` (the separate `biomeSab`) = `grass_cell_count` = `grass_dim²`
 
-At default scale (`grass_dim = 1920 < 4096`) all three equal `grass_dim²`.
-The TS side must size all three views from the boot-time `grass_dim` it receives,
+At default scale (`grass_dim = 1920 < 4096`) both equal `grass_dim²`.
+The TS side must size slot views from the boot-time `grass_dim` it receives,
 never a hardcoded constant. The `GRASS_LOD_BUDGET_AXIS = 4096` value is
 generated from Rust into `app/web/src/generated/lod-constants.ts` by `gen_bindings`
 and covered by the `bindings_in_sync` test.
@@ -277,7 +263,7 @@ Decode: `flash_tag = p & 0x7`, `flash_ticks = (p >> 3) & 0xF`, `species_id = (p
 
 | `kind` | Payload | Freq |
 |---|---|---|
-| `boot` | `{ seed, initial_grass_seed_count, energy_max, founder_count, full_grass_on_init, world_size, wrap_world, world_seed, species_mode, crossover_mode, starting_species_count, starting_species_member_count, starting_species_member_variance, grass_cell_size, grass_clump_count, grass_clump_size, initial_sliders, initial_target_tps, initial_paused }` | once per worker lifetime |
+| `boot` | `{ seed, initial_grass_seed_count, energy_max, founder_count, full_grass_on_init, world_size, wrap_world, world_seed, species_mode, crossover_mode, starting_species_count, starting_species_member_count, starting_species_member_variance, grass_cell_size, grass_multisight, grass_clump_count, grass_clump_size, initial_sliders, initial_target_tps, initial_paused }` | once per worker lifetime |
 
 Everything else is on the control SAB. The `boot` message carries
 `initial_target_tps` and `initial_paused` so the worker can seed those SAB lanes
@@ -289,23 +275,24 @@ a random one and reports it back), species/mating construction args
 `starting_species_count: u32`, `starting_species_member_count: u32`,
 `starting_species_member_variance: f32`), the **`grass_cell_size: f32`**
 (default 5.0) which determines `grass_dim` and all grass/biome buffer sizes at
-construction, and the **`grass_clump_count: u32`** + **`grass_clump_size: u32`**
-(defaults 40 / 8) which control boot grass seeding. `grass_cell_size`, `grass_clump_count`,
-and `grass_clump_size` must travel this explicit path — `initial_sliders` is applied after
-construction and cannot re-seed or resize the already-built `WorldDims`. These shape the
-world topology at construction, not as live sliders. `world_seed` is **separate** from the
-string `seed` (the RNG seed) — not coupled. `mating_cooldown_ticks` is live and rides
-the slider SAB.
+construction, **`grass_multisight: bool`** which changes the NN input layout
+before founder brains/topology are built, and the **`grass_clump_count: u32`** +
+**`grass_clump_size: u32`** (defaults 40 / 8) which control boot grass seeding.
+`grass_cell_size`, `grass_multisight`, `grass_clump_count`, and
+`grass_clump_size` must travel this explicit path — `initial_sliders` is applied
+after construction and cannot resize `WorldDims`, rebuild the NN input layout, or
+re-seed boot grass. These shape the world topology at construction, not as live
+sliders. `world_seed` is **separate** from the string `seed` (the RNG seed) — not
+coupled. `mating_cooldown_ticks` is live and rides the slider SAB.
 
 ## Worker → main replies (`SimReply`)
 
 | `kind` | Payload | Notes |
 |---|---|---|
-| `boot_ready` | `{ world_size, wrap_world, world_seed, grass_dim, threads, rayon_ok, max_pop_for_sim, wasm_memory, snapshot_buf_byte_offset, snapshot_buf_byte_len, biome_buf_byte_offset, biome_buf_byte_len, control_sab, sliders_defaults_json }` | Posted **after** the worker runs one tick + writes one snapshot to slot 0, guaranteeing main a valid first frame. |
+| `boot_ready` | `{ world_size, wrap_world, world_seed, grass_dim, grass_cell_size, threads, rayon_ok, max_pop_for_sim, wasm_memory, snapshot_buf_byte_offset, snapshot_buf_byte_len, control_sab, sliders_defaults_json }` | Posted **after** the worker runs one tick + writes one snapshot to slot 0, guaranteeing main a valid first frame. |
 
 The reply carries the **runtime `grass_dim`** (so main sizes its views correctly),
-`wrap_world` + `world_seed`, and the **`biome_buf_byte_offset` / `biome_buf_byte_len`**
-for the dedicated biomeSab view (over `wasm_memory.buffer` like the snapshot buffer).
+`grass_cell_size` (so render UVs match construction), and `wrap_world` + `world_seed`.
 `snapshot_buf_byte_len` is a runtime value: `2 × (SNAPSHOT_HEADER_BYTES + SNAPSHOT_CREATURE_BYTES + grassRegionBytes + biomeWinBytes)`.
 Main calls `makeSlotLayout(grass_dim)` (from `app/web/src/sim/bridge.ts`) to derive all slot
 geometry — `grassRegionBytes`, `biomeWinBytes`, `slotBytes` — from the single
@@ -359,8 +346,7 @@ if it advanced, the bytes are guaranteed to be coherent.
 - `CREATURE_STRIDE = 8` — renderer-side guard `if (stride !== 8) throw`.
 - **Grass + biome region sizes** — derived at boot from `grass_dim` (see
   computed-dims-equality above). `grassRegionBytes = biomeWinBytes = min(grass_dim, 4096)²`;
-  `biome_buf_byte_len = grass_dim²`. The TS side must use `makeSlotLayout(grass_dim)`
-  and `boot_ready.biome_buf_byte_len`, never hardcoded constants.
+  the TS side must use `makeSlotLayout(grass_dim)`, never hardcoded constants.
 
 ## Code anchors
 
@@ -418,8 +404,8 @@ if it advanced, the bytes are guaranteed to be coherent.
 - The `SlotLayout` shape changes (`grassRegionBytes`, `biomeWinBytes`, `slotBytes`).
 - The biome window channel is added, removed, or changes encoding (currently
   MODE-downsampled u8 Biome tags).
-- The grass region encoding (u8 density) or the `WorldDims` derivation
-  (`GRASS_CELL_SIZE`, `world_size` default) changes, or the biomeSab format changes.
+- The grass region encoding (u8 density), biome window encoding, or the
+  `WorldDims` derivation (`GRASS_CELL_SIZE`, `world_size` default) changes.
 - The snapshot atomic-flip ordering changes (currently store-before-add).
 - `MAX_POP_FOR_SIM` or `CREATURE_STRIDE` changes value.
 

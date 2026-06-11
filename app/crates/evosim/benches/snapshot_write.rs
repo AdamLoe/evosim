@@ -42,10 +42,11 @@ fn make_handle() -> WorldHandle {
         FOUNDER_COUNT,
         0.0, // starting_species_member_variance
         GRASS_CELL_SIZE,
-        0,   // grass_clump_count (0 = uniform scatter)
-        0,   // grass_clump_size
-        1.0, // init_graze_boost (neutral)
-        1.0, // init_split_boost (neutral)
+        true, // grass_multisight default ON
+        0,    // grass_clump_count (0 = uniform scatter)
+        0,    // grass_clump_size
+        1.0,  // init_graze_boost (neutral)
+        1.0,  // init_split_boost (neutral)
     )
     .expect("WorldHandle construction failed")
 }

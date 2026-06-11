@@ -9,6 +9,7 @@
 //! `mod tests`).
 
 use crate::constants::WorldDims;
+use crate::wasm_api::{snapshot_window_copy_origin, BiomePyramid};
 use crate::world::biome::generate_biome_grid;
 
 /// Reference implementation of the old per-tick biome window loop (verbatim
@@ -410,4 +411,23 @@ fn biome_pyramid_tiebreak_lowest_tag_wins() {
         reference, *l1,
         "reference must match precomputed for tie-break test"
     );
+}
+
+#[test]
+fn biome_pyramid_copy_window_wraps_both_seams() {
+    let level_dims = vec![(4, 3)];
+    let pyramid = BiomePyramid::build(&(0u8..12).collect::<Vec<_>>(), &level_dims);
+    let mut dst = vec![0u8; 6];
+
+    pyramid.copy_window(0, true, 3, 2, 3, 2, &mut dst);
+
+    assert_eq!(dst, vec![11, 8, 9, 3, 0, 1]);
+}
+
+#[test]
+fn snapshot_window_copy_origin_wraps_but_walled_origin_clamps() {
+    assert_eq!(snapshot_window_copy_origin(-2, 8, 3, true), 6);
+    assert_eq!(snapshot_window_copy_origin(9, 8, 3, true), 1);
+    assert_eq!(snapshot_window_copy_origin(-2, 8, 3, false), 0);
+    assert_eq!(snapshot_window_copy_origin(9, 8, 3, false), 5);
 }

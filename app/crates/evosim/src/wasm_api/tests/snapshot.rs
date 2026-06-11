@@ -47,6 +47,8 @@ fn snapshot_lane_offsets_match_repack() {
         3.0,
         // v2.0.5 S4: new grass_cell_size arg — default 5.0.
         5.0,
+        // v2.0.4 S6: grass_multisight default ON.
+        true,
         // v2.0.6 S3: clump_count=0 → old uniform-scatter.
         0,
         0,
@@ -95,6 +97,54 @@ fn snapshot_lane_offsets_match_repack() {
         let pad = u32::from_le_bytes(creatures[base + 28..base + 32].try_into().unwrap());
         assert_eq!(pad, 0, "pad lane @28 must be zero");
     }
+}
+
+#[test]
+fn toroidal_snapshot_publishes_signed_logical_window_origin() {
+    let make = |wrap_world: bool| {
+        WorldHandle::new_with_founder_count(
+            if wrap_world {
+                "signed-window-origin-wrap"
+            } else {
+                "signed-window-origin-wall"
+            },
+            0,
+            100.0,
+            1,
+            false,
+            "",
+            1200.0,
+            wrap_world,
+            1,
+            false,
+            1.0,
+            10,
+            10,
+            3.0,
+            5.0,
+            true,
+            0,
+            0,
+            1.0,
+            1.0,
+        )
+        .unwrap()
+    };
+
+    let mut wrapped = make(true);
+    wrapped.write_snapshot(0, 2.0, 2.0, 1.0, 100, 100);
+    let wrapped_x = i32::from_le_bytes(wrapped.snapshot_buf[36..40].try_into().unwrap());
+    let wrapped_y = i32::from_le_bytes(wrapped.snapshot_buf[40..44].try_into().unwrap());
+    assert!(
+        wrapped_x < 0 && wrapped_y < 0,
+        "toroidal seam windows must publish signed logical origins, got ({wrapped_x}, {wrapped_y})"
+    );
+
+    let mut walled = make(false);
+    walled.write_snapshot(0, 2.0, 2.0, 1.0, 100, 100);
+    let walled_x = i32::from_le_bytes(walled.snapshot_buf[36..40].try_into().unwrap());
+    let walled_y = i32::from_le_bytes(walled.snapshot_buf[40..44].try_into().unwrap());
+    assert_eq!((walled_x, walled_y), (0, 0));
 }
 
 /// `pack_render_u32` round-trips flash_tag + flash_ticks + species_id within

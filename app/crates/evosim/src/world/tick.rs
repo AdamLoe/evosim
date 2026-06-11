@@ -46,13 +46,7 @@ impl World {
             return;
         }
 
-        // v2.0.2 Stream 1e: `grass_bites_per_block` is treated as a CONSTANT this
-        // stage (the six-not-seven decision). Use `GRASS_BITES_PER_BLOCK` from
-        // constants.rs so `density_chunk` is stable and its u8 representation is
-        // predictable (0.5 → 128 bytes at bpb=2 — well above the ≥8 level guard).
-        // The slider (`self.sliders.grass_bites_per_block`) is wired and retained
-        // for future live-tuning (Stage 3); it is NOT used here this stage.
-        let density_chunk = GRASS_MAX / GRASS_BITES_PER_BLOCK as f32;
+        let density_chunk = GRASS_MAX / self.sliders.grass_bites_per_block.max(1) as f32;
         let energy_per_bite = self.sliders.grass_energy_per_bite;
 
         for i in 0..n {
@@ -909,6 +903,37 @@ mod tests {
             127u8,
             "density must drop to byte 127 after one bite (255 - 128); got byte {}",
             w.grass.dget_u8(cell_idx)
+        );
+    }
+
+    #[test]
+    fn graze_uses_live_grass_bites_per_block() {
+        use crate::constants::{GRASS_CELL_SIZE, GRASS_ENERGY_PER_BITE_DEFAULT, GRASS_MAX};
+
+        let mut w = World::new("graze-live-bites");
+        w.sliders.grass_bites_per_block = 4;
+        let mut genome = crate::creature::Genome::median();
+        genome.diet = 0.0;
+        w.creatures.genome[0] = genome;
+
+        let ix = 5usize;
+        let iy = 5usize;
+        w.creatures.x[0] = (ix as f32 + 0.5) * GRASS_CELL_SIZE;
+        w.creatures.y[0] = (iy as f32 + 0.5) * GRASS_CELL_SIZE;
+        w.creatures.action_this_tick[0] = Action::Graze;
+        let cell_idx = iy * GRASS_GRID_DIM + ix;
+        w.grass.dset(cell_idx, GRASS_MAX);
+
+        let energy_before = w.creatures.energy[0];
+        w.graze();
+
+        assert!(
+            (w.creatures.energy[0] - energy_before - GRASS_ENERGY_PER_BITE_DEFAULT).abs() < 1e-4
+        );
+        assert_eq!(
+            w.grass.dget_u8(cell_idx),
+            191,
+            "bites_per_block=4 must drain one encoded quarter-block (64 bytes)"
         );
     }
 

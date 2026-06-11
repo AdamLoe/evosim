@@ -11,11 +11,11 @@ Two suites:
    `#[cfg(test)] mod tests` blocks. Cover sim invariants, wasm-bindgen
    surface behaviour, NN forward + decode, grass propagation, slider
    dispatch, snapshot byte layout.
-2. **Playwright e2e** — `cd app/web && pnpm test:e2e`. One spec file at
-   `app/web/tests/e2e/sim-bridge.spec.ts` covering the main↔worker control
-   path: pause, target TPS, slider change, profile toggle, restart.
-   Boots Vite via Playwright's `webServer` hook so the suite is one
-   command.
+2. **Playwright e2e** — `cd app/web && pnpm test:e2e`. Specs under
+   `app/web/tests/e2e/` cover the main↔worker control path, Rust↔TS slider
+   defaults drift, settings persistence, grass LOD/window metadata, and
+   restart-time grass sizing. Playwright boots Vite via its `webServer` hook
+   so the suite is one command.
 
 There is no Rust integration-test crate, no goldens, no snapshot-hash
 acceptance, no save-load round-trip. The sim has no persistence layer
@@ -63,7 +63,7 @@ Notable coverage by file:
 | `crates/evosim/src/world/nn.rs` | NN input layout, slot offsets, threaded NN matches sequential NN bit-for-bit (when seeded), chunk-range partition invariants. |
 | `crates/evosim/src/world/proximity.rs` | Sector LUT correctness, wall proximity edges, grass density bilinear seam wrap. |
 | `app/crates/evosim/src/brain/mod.rs` | Forward-pass shape, Leaky ReLU sign behaviour, mutation produces finite values. |
-| `app/crates/evosim/src/grass/mod.rs` | Density init, in-cell growth, two-pass separable Gaussian propagation (active-tile path equivalence to full-grid reference), dirty-tile quantize correctness, bilinear sample, row-has-density bitset rebuild. Tests live in the `grass/tests/` subdir. |
+| `app/crates/evosim/src/grass/mod.rs` | Density init, in-cell growth, scatter/blur propagation coverage, active-tile path equivalence to full-grid reference, wrapped `viewport_window` extraction, bilinear sample, row-has-density bitset rebuild. Tests live in the `grass/tests/` subdir. |
 | `crates/evosim/src/grid.rs` | `cell_of` boundary clamping, `for_each_in_radius` enumeration. |
 | `crates/evosim/src/profiler.rs` | Ring buffer pruning, four-tree minting via `ensure_root`, RAII span correctness. |
 
@@ -71,7 +71,7 @@ Determinism gates: `clippy.toml` forbids `HashMap` / `HashSet`
 `iter*` in sim-critical files (non-deterministic order would silently
 make tests flaky); use `BTreeMap` / sorted `Vec` if iteration is needed.
 
-## Playwright e2e (`app/web/tests/e2e/sim-bridge.spec.ts`)
+## Playwright e2e (`app/web/tests/e2e/`)
 
 Run:
 
@@ -86,18 +86,27 @@ Playwright boots Vite itself via its `webServer` hook (see
 `app/web/playwright.config.ts`); a running dev server on `:47821` is
 reused (`reuseExistingServer: true`).
 
-Tests:
+Key coverage:
 
-- **pause + resume** — clicks `#playpause-btn`, asserts the tick counter
+- `sim-bridge.spec.ts` **pause + resume** — clicks `#playpause-btn`, asserts the tick counter
   stops within ~300 ms and resumes on the second click.
-- **target TPS** — selects values in `#target-tps-input` and asserts the
+- `sim-bridge.spec.ts` **target TPS** — selects values in `#target-tps-input` and asserts the
   observed tick rate tracks the dropdown.
-- **slider change** — opens the dev panel, edits `basic upkeep`, asserts
+- `sim-bridge.spec.ts` **slider change** — opens the dev panel, edits `basic upkeep`, asserts
   no `set_slider … rejected` warning lands on the console.
-- **profile toggle** — toggles `show profiler` + `#profiler-enable`,
+- `sim-bridge.spec.ts` **profile toggle** — toggles `show profiler` + `#profiler-enable`,
   asserts all four stacked profiler tables populate within 4 s.
-- **restart `r`** — presses the `r` hotkey, asserts the tick counter
+- `sim-bridge.spec.ts` **restart `r`** — presses the `r` hotkey, asserts the tick counter
   resets (drops below the pre-restart value).
+- `defaults-drift.spec.ts` compares Rust `sliders_defaults_json()` against
+  `settings.ts → DEFAULTS` for every Settings-mirrored Rust slider lane.
+- `settings-persistence.spec.ts` seeds localStorage, verifies every
+  `Settings` key loads/saves/reloads, and asserts `currentSliderState()` emits
+  every persisted Rust slider setting needed to seed worker boot.
+- `grass-size-restart.spec.ts` verifies `grass_size` changes `grass_dim` only
+  after restart.
+- `grass-lod-smoke.spec.ts` verifies the default grass window/LOD metadata and
+  grass evolution path.
 
 **Every test forces `targetTPS = 1000` before interacting.** That is
 the regime where `1000/targetTPS - elapsed` clamps to 0 and
@@ -114,7 +123,10 @@ If you touch `simLoop()` in `app/web/src/sim/worker.ts`, run it.
 - `crates/evosim/Cargo.toml` → `[features] threads`.
 - `app/web/package.json` → `"test:e2e": "playwright test"`.
 - `app/web/playwright.config.ts` → `webServer`, `reuseExistingServer`.
-- `app/web/tests/e2e/sim-bridge.spec.ts` → the five smoke tests.
+- `app/web/tests/e2e/sim-bridge.spec.ts` → worker control-path smoke tests.
+- `app/web/tests/e2e/defaults-drift.spec.ts` → Rust↔TS slider default drift guard.
+- `app/web/tests/e2e/settings-persistence.spec.ts` → Settings localStorage and
+  boot slider-state persistence guard.
 - `app/web/tests/README.md` → onboarding pointer; the authoritative
   command/coverage list lives here and in
   [`../agent-context/testing-how-to.md`](../agent-context/testing-how-to.md).

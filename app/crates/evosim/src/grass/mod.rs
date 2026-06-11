@@ -24,8 +24,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 // ─── v2.0.2 Stream 1a: u8 density quantization ──────────────────────────────
 //
 // The density field is stored as `Vec<AtomicU8>` (1 byte/cell). The scale is
-// the SAME one the snapshot path has always used (`quantize_grass_into` /
-// `quantize_dirty_tiles_into`): a cell's grass amount `d ∈ [0, GRASS_MAX]` maps
+// the SAME one the snapshot path has always used: a cell's grass amount
+// `d ∈ [0, GRASS_MAX]` maps
 // to `round(clamp(d / GRASS_MAX, 0, 1) * 255)`, so `GRASS_MAX` ⇒ 255 and 0 ⇒ 0.
 // Decode is the exact inverse `u8 / 255 * GRASS_MAX`. Because the in-memory
 // field now holds those same bytes, the snapshot copy-out is a trivial byte copy
@@ -416,7 +416,7 @@ impl Default for ScatterParams {
 // Active-set-keyed partial refresh (dirty-subtree walk) is the planned Stage-3
 // optimization — deferred from this stream for correctness-first shipping.
 // TODO(stage3-pyramid-perf): replace the full recompute with a dirty-subtree walk
-//   keyed off `tile_active` / `tile_dirty` bitsets to restore the sparse-frontier
+//   keyed off `tile_active` to restore the sparse-frontier
 //   win at large scale. The interface is already active-set-aware (refresh takes
 //   `tile_active` + `tiles_per_axis`); only the loop body needs to change.
 
@@ -562,35 +562,18 @@ impl GrassPyramid {
     }
 
     /// Fill a row-major destination buffer `dst` with a `(win_w × win_h)`
-    /// window of `level`, with origin `(origin_x, origin_y)` in level cells.
-    /// Out-of-bounds cells are CLAMPED (edge-repeat). `dst` must have length
-    /// `>= win_w * win_h`.
+    /// window of `level`, with normalized unsigned origin `(origin_x, origin_y)`
+    /// in level cells. Toroidal windows wrap; walled windows edge-clamp.
     ///
     /// This is the extraction API for 2b (snapshot publish) and 2c (render
     /// LOD upload): the worker calls this to populate the snapshot window bytes.
     ///
-    /// TODO (Stage-3 wrap-seam): For toroidal worlds this function should WRAP
-    /// out-of-bounds coordinates modulo `(lw, lh)` instead of clamping. The
-    /// origin computation in `wasm_api::write_snapshot` (the
-    /// `.max(0).min(level_w - raw_win_w)` clamp) must also be removed for the
-    /// toroidal path so that a camera near the seam can have an origin that
-    /// overflows the high edge. Required changes:
-    ///   1. Add a `wrap: bool` parameter to this function.
-    ///   2. Change `origin_x`/`origin_y` to `isize` (or perform modular
-    ///      offset computation inside) so negative origins are representable.
-    ///   3. In the inner loop: `let sx = (origin_x + col as isize).rem_euclid(lw as isize) as usize`.
-    ///   4. Update `write_snapshot` origin calculation: for toroidal worlds skip
-    ///      the `saturating_sub` clamp; keep the existing clamp for walled worlds.
-    ///   5. Apply the same wrapping in the biome mode-downsample loop.
-    ///
-    /// The default (non-toroidal, zoom=1, full-field) path must stay byte-identical.
-    /// This was deferred because the signature change is breaking for tests and the
-    /// biome loop requires parallel changes; risk outweighed the single-pass benefit.
     #[allow(clippy::too_many_arguments)]
     pub fn viewport_window(
         &self,
         density: &[AtomicU8],
         level: usize,
+        wrap: bool,
         origin_x: usize,
         origin_y: usize,
         win_w: usize,
@@ -604,16 +587,47 @@ impl GrassPyramid {
             win_w * win_h
         );
         let (lw, lh) = self.level_dims[level];
+        debug_assert!(origin_x < lw && origin_y < lh);
+
+        // Source rows are read as plain `&[u8]`, one contiguous row at a time.
+        // For level ≥ 1 this is the owned mip buffer. For level 0 it aliases the
+        // live `AtomicU8` density field: `viewport_window` runs in the snapshot
+        // phase, after the tick returns with every rayon worker parked, so there
+        // is no concurrent writer and a non-atomic bulk read is sound. This
+        // replaces a per-cell `AtomicU8::load` loop (3.7M atomic byte loads at
+        // default scale, each an un-vectorizable `i32.atomic.load8_u` on wasm)
+        // with a per-row `copy_from_slice` (memcpy) — the same fast path the mip
+        // levels already used.
+        //
+        // SAFETY: `AtomicU8` is documented to have the same in-memory
+        // representation as `u8`, and the snapshot phase has exclusive access to
+        // the density field (no concurrent mutators).
+        let src: &[u8] = if level == 0 {
+            unsafe { core::slice::from_raw_parts(density.as_ptr() as *const u8, density.len()) }
+        } else {
+            &self.levels[level - 1]
+        };
+
         for row in 0..win_h {
-            let sy = (origin_y + row).min(lh.saturating_sub(1));
-            for col in 0..win_w {
-                let sx = (origin_x + col).min(lw.saturating_sub(1));
-                let byte = if level == 0 {
-                    density[sy * lw + sx].load(Ordering::Relaxed)
-                } else {
-                    self.levels[level - 1][sy * lw + sx]
-                };
-                dst[row * win_w + col] = byte;
+            let sy = if wrap {
+                (origin_y + row) % lh
+            } else {
+                (origin_y + row).min(lh - 1)
+            };
+            let dst_row = &mut dst[row * win_w..(row + 1) * win_w];
+            let src_row = &src[sy * lw..(sy + 1) * lw];
+            if wrap {
+                let first_len = win_w.min(lw - origin_x);
+                dst_row[..first_len].copy_from_slice(&src_row[origin_x..origin_x + first_len]);
+                if first_len < win_w {
+                    dst_row[first_len..].copy_from_slice(&src_row[..win_w - first_len]);
+                }
+            } else if origin_x + win_w <= lw {
+                dst_row.copy_from_slice(&src_row[origin_x..origin_x + win_w]);
+            } else {
+                let first_len = lw - origin_x;
+                dst_row[..first_len].copy_from_slice(&src_row[origin_x..]);
+                dst_row[first_len..].fill(src_row[lw - 1]);
             }
         }
     }
@@ -743,17 +757,6 @@ pub struct GrassGrid {
     /// v2.0.2 Stream 1c: `AtomicU64` so scatter workers can `fetch_or` the
     /// next-tick active bit of any tile they spread into.
     tile_active_next: Vec<AtomicU64>,
-    /// v2.0.1 §3: per-tile "dirty since each snapshot slot was written" — 2 bits
-    /// per tile (one per ping-pong slot). A tile's bit for slot S is set when its
-    /// density changed (propagation or graze) and cleared when re-quantized into
-    /// slot S. Lets `quantize_dirty_tiles_into` re-quantize only changed tiles
-    /// into a slot while keeping BOTH ping-pong slots valid. Indexed
-    /// `tile_dirty[slot]`, each a `tiles_per_axis²`-bit bitset.
-    ///
-    /// v2.0.2 Stream 1c: `AtomicU64` words so a scatter worker that writes into a
-    /// neighbour tile can mark that tile dirty (so the snapshot re-quantizes it)
-    /// via `fetch_or(Relaxed)` without racing other workers.
-    pub tile_dirty: [Vec<AtomicU64>; 2],
     /// v2.0.1 §2: persistent per-tile equilibrium class — `TILE_EMPTY` (all cells
     /// ≤ EPS), `TILE_SATURATED` (all cells ≥ cap−EPS), or `TILE_MIXED` (a moving
     /// frontier). One byte per tile (`tiles_per_axis²`). Only ACTIVE tiles are
@@ -820,6 +823,16 @@ pub struct GrassGrid {
     /// Set by `World` before each `compute_propagation` call to match the
     /// `Profiler::enabled()` state. Defaults to `false`.
     pub profile_scatter: bool,
+    /// Tick-start snapshot of the density field used by the scatter kernel as a
+    /// stable, no-intra-cascade source. Bulk-copied from `density` (reinterpreted
+    /// as `&[u8]`) once per scatter tick before the parallel dispatch — at that
+    /// point no worker is writing, so the copy is a single non-atomic memcpy. The
+    /// kernel then reads every source byte from here as plain `&[u8]`, replacing
+    /// the old per-tile freeze that did `GRASS_TILE_SIZE²` `AtomicU8::load`s per
+    /// active tile (millions of un-vectorizable atomic byte loads per tick at full
+    /// coverage). Lazily sized to `density.len()`; empty until the first scatter
+    /// tick. Unused on the blur path.
+    pub scatter_prev: Vec<u8>,
 }
 
 /// v2.0.2 Stream 1c: deep-copy a `Vec<AtomicU64>` bitset (Relaxed loads) — the
@@ -861,10 +874,6 @@ impl Clone for GrassGrid {
             tiles_per_axis: self.tiles_per_axis,
             tile_active: clone_atomic_bits(&self.tile_active),
             tile_active_next: clone_atomic_bits(&self.tile_active_next),
-            tile_dirty: [
-                clone_atomic_bits(&self.tile_dirty[0]),
-                clone_atomic_bits(&self.tile_dirty[1]),
-            ],
             tile_class: self.tile_class.clone(),
             propagation: self.propagation,
             world_seed: self.world_seed,
@@ -884,6 +893,7 @@ impl Clone for GrassGrid {
             // v2.0.4 C2: profiling gate — reset to off in clones; World will
             // re-set it before the next compute_propagation call.
             profile_scatter: false,
+            scatter_prev: self.scatter_prev.clone(),
         }
     }
 }
@@ -953,10 +963,6 @@ impl GrassGrid {
             tiles_per_axis,
             tile_active: (0..tile_words).map(|_| AtomicU64::new(0)).collect(),
             tile_active_next: (0..tile_words).map(|_| AtomicU64::new(0)).collect(),
-            tile_dirty: [
-                (0..tile_words).map(|_| AtomicU64::new(0)).collect(),
-                (0..tile_words).map(|_| AtomicU64::new(0)).collect(),
-            ],
             tile_class: vec![TILE_EMPTY; tiles_per_axis * tiles_per_axis],
             // v2.0.2 Stream 1b: default to BLUR at this low-level ctor so existing
             // grid-direct propagation tests stay on the blur path; World/wasm flips
@@ -980,14 +986,13 @@ impl GrassGrid {
             // v2.0.4 C2: profiling gate — off by default; World sets it before
             // each compute_propagation call to match the Profiler enabled state.
             profile_scatter: false,
+            // Lazily sized on the first scatter tick (blur-path ctor leaves it empty).
+            scatter_prev: Vec::new(),
         };
         g.rebuild_row_bitset();
         // Seed the active set from the initial density so the first tick
-        // processes every non-equilibrium tile, and mark ALL tiles dirty so the
-        // first snapshot writes the full grass region into both slots (the SAB
-        // slots start zeroed; seeded-but-saturated tiles aren't "active").
+        // processes every non-equilibrium tile.
         g.resync_active_from_density();
-        g.mark_all_tiles_dirty();
         g
     }
 
@@ -1001,8 +1006,7 @@ impl GrassGrid {
     ///
     /// Callers invoke this AFTER constructing the grid with `initial_seed_count=0`
     /// (so the density field starts zeroed) and BEFORE `resync_active_from_density`
-    /// + `mark_all_tiles_dirty`. [`World::new_with_sliders_topology`] is the
-    ///   authoritative call site.
+    /// resync. [`World::new_with_sliders_topology`] is the authoritative call site.
     ///
     /// # Budget note
     ///   Default clump_count=40, clump_size=8 cells:
@@ -1060,7 +1064,6 @@ impl GrassGrid {
         // seed_clumps is a standalone mutation so it keeps its own fence.
         self.rebuild_row_bitset();
         self.resync_active_from_density();
-        self.mark_all_tiles_dirty();
     }
 
     /// Recompute the per-row "any non-empty" bitset. Called from `step()`
@@ -1171,7 +1174,7 @@ impl GrassGrid {
         (self.row_has_density[w] >> (iy % 64)) & 1 == 1
     }
 
-    // ─── v2.0.1 §2/§3 active-tile + dirty-tile helpers ─────────────────────────
+    // ─── active-tile helpers ───────────────────────────────────────────────────
 
     /// Tile index for a cell index (row-major over the tile grid).
     #[inline]
@@ -1186,7 +1189,7 @@ impl GrassGrid {
 
     // ─── v2.0.2 Stream 1c: atomic tile-bitset helpers ──────────────────────────
     //
-    // `tile_active`/`tile_active_next`/`tile_dirty` are `Vec<AtomicU64>`. Single-
+    // `tile_active`/`tile_active_next` are `Vec<AtomicU64>`. Single-
     // threaded callers (resync, the sequential setup) use Relaxed load/store via
     // these helpers; the parallel scatter pass uses `bitset_set_atomic` (fetch_or)
     // so a worker can set a NEIGHBOUR tile's bit (cross-tile spread) without a race.
@@ -1211,7 +1214,7 @@ impl GrassGrid {
 
     /// Atomically set bit `i` (`fetch_or`, Relaxed). Safe to call concurrently
     /// from multiple scatter workers — this is how a worker marks a cross-tile
-    /// neighbour active/dirty for next tick without losing a concurrent set.
+    /// neighbour active for next tick without losing a concurrent set.
     #[inline]
     fn bitset_set_atomic(set: &[AtomicU64], i: usize) {
         set[i / 64].fetch_or(1u64 << (i % 64), Ordering::Relaxed);
@@ -1225,12 +1228,8 @@ impl GrassGrid {
         }
     }
 
-    /// Mark a tile (and its 8 neighbours, honoring wrap) active for the NEXT
-    /// tick AND dirty for both snapshot slots. `set_active` chooses whether the
-    /// activation lands in the current `tile_active` set (used at resync / graze,
-    /// which must affect the upcoming pass) — propagation builds the next-set
-    /// separately. Marking the 8 neighbours guarantees the frontier can advance
-    /// one tile/tick and that a re-quantize covers any cell a change can reach.
+    /// Mark a tile (and its 8 neighbours, honoring wrap) active for the next tick.
+    /// Marking the neighbours guarantees the frontier can advance one tile/tick.
     fn activate_tile_and_fringe(&mut self, tile: usize) {
         let tpa = self.tiles_per_axis;
         let wrap = self.dims.wrap_world;
@@ -1256,15 +1255,13 @@ impl GrassGrid {
                 };
                 let nt = ny as usize * tpa + nx as usize;
                 Self::bitset_set(&self.tile_active, nt);
-                Self::bitset_set(&self.tile_dirty[0], nt);
-                Self::bitset_set(&self.tile_dirty[1], nt);
             }
         }
     }
 
-    /// Mark the tile containing `cell_idx` active+dirty (with its fringe).
+    /// Mark the tile containing `cell_idx` active (with its fringe).
     /// Called from the graze/`consume` path so a grazed (drained) cell re-enters
-    /// frontier processing and regrows, and so the snapshot re-quantizes it.
+    /// frontier processing and regrows.
     #[inline]
     pub fn mark_tile_active(&mut self, cell_idx: usize) {
         let t = self.tile_of_cell(cell_idx);
@@ -1329,26 +1326,20 @@ impl GrassGrid {
         }
     }
 
-    /// Rebuild `tile_active` (and dirty both slots for every active tile) from the
-    /// current `tile_class`: active = MIXED tiles ∪ any tile bordering a tile of a
+    /// Rebuild `tile_active` from the current `tile_class`: active = MIXED tiles
+    /// ∪ any tile bordering a tile of a
     /// different class. A uniform tile bordering a uniform tile of the SAME class
     /// is true equilibrium and stays inactive.
     fn rebuild_active_from_class(&mut self) {
         Self::bitset_clear_all(&self.tile_active);
-        Self::bitset_clear_all(&self.tile_dirty[0]);
-        Self::bitset_clear_all(&self.tile_dirty[1]);
         let tpa = self.tiles_per_axis;
-        let wrap = self.dims.wrap_world;
         let ntiles = tpa * tpa;
         for t in 0..ntiles {
             let active = self.tile_class[t] == TILE_MIXED || self.borders_different_class(t);
             if active {
                 Self::bitset_set(&self.tile_active, t);
-                Self::bitset_set(&self.tile_dirty[0], t);
-                Self::bitset_set(&self.tile_dirty[1], t);
             }
         }
-        let _ = wrap;
     }
 
     /// True if any 8-neighbour of tile `t` has a different `tile_class` (wrap-aware).
@@ -1622,14 +1613,10 @@ impl GrassGrid {
             }
         }
 
-        // Persist the post-pass class of every processed tile, and mark it dirty
-        // for both snapshot slots (its cells were recomputed). Skipped tiles kept
-        // their density (identity copy) so their class + bytes are unchanged.
+        // Persist the post-pass class of every processed tile.
         for (i, &t) in active_list.iter().enumerate() {
             let t = t as usize;
             self.tile_class[t] = new_class[i];
-            Self::bitset_set(&self.tile_dirty[0], t);
-            Self::bitset_set(&self.tile_dirty[1], t);
         }
 
         // Build the NEXT-tick active set: a tile must be processed next tick iff it
@@ -1709,16 +1696,34 @@ impl GrassGrid {
         }
 
         // The NEXT-tick active set is rebuilt fresh: workers `fetch_or` into it
-        // (including cross-tile). Both dirty slots are LEFT AS-IS (the snapshot
-        // consumes/clears them); workers `fetch_or` the tiles they changed.
+        // (including cross-tile).
         Self::bitset_clear_all(&self.tile_active_next);
 
+        // Tick-start double-buffer: snapshot the whole density field into
+        // `scatter_prev` as a single memcpy. This runs BEFORE the parallel
+        // dispatch, so no worker is writing the field and the read is sound and
+        // non-atomic. The kernel then reads every source byte from `scatter_prev`
+        // (plain `&[u8]`), giving each tile a stable, globally-consistent source
+        // snapshot with no intra-tick cascade — replacing the old per-tile freeze
+        // that re-read the whole field through `AtomicU8::load`s and a per-tile
+        // 1 KiB stack copy on every active tile.
+        {
+            let n = self.density.len();
+            if self.scatter_prev.len() != n {
+                self.scatter_prev.resize(n, 0);
+            }
+            // SAFETY: `AtomicU8` has the same in-memory representation as `u8`,
+            // and no concurrent writer exists at this point (pre-dispatch).
+            let dens_u8 =
+                unsafe { core::slice::from_raw_parts(self.density.as_ptr() as *const u8, n) };
+            self.scatter_prev.copy_from_slice(dens_u8);
+        }
+
         let d = &self.density;
+        let prev = &self.scatter_prev;
         let cap = &self.capacity;
         let disc = &self.disc;
         let tile_active_next = &self.tile_active_next;
-        let tile_dirty0 = &self.tile_dirty[0];
-        let tile_dirty1 = &self.tile_dirty[1];
         let row_body_self_us = &self.row_body_self_us;
         let row_body_calls = &self.row_body_calls;
 
@@ -1748,36 +1753,27 @@ impl GrassGrid {
             let ix1 = (ix0 + GRASS_TILE_SIZE).min(dim);
             let iy1 = (iy0 + GRASS_TILE_SIZE).min(dim);
 
-            // (1) C1: FREEZE the tile's source bytes into a STACK buffer (no heap
-            // alloc) so spread/decay decisions read a stable snapshot (no
-            // intra-tile cascade). GRASS_TILE_SIZE×GRASS_TILE_SIZE = 1024 bytes;
-            // edge tiles only fill the tw×th prefix but the full array fits on the
-            // stack cheaply. Zero-init ensures unused slots (s==0) are skipped.
+            // (1) Source bytes come from the tick-start `prev` snapshot (plain
+            // `&[u8]`), so spread/decay decisions read a stable, no-intra-cascade
+            // source with no per-tile atomic-load freeze. `prev` is a row-major
+            // copy of the whole field; index it directly at `iy * dim + ix`.
             let tw = ix1 - ix0;
             let th = iy1 - iy0;
-            let mut src = [0u8; GRASS_TILE_SIZE * GRASS_TILE_SIZE];
-            for ly in 0..th {
-                let iy = iy0 + ly;
-                let row = iy * dim;
-                for lx in 0..tw {
-                    src[ly * GRASS_TILE_SIZE + lx] = d[row + ix0 + lx].load(Ordering::Relaxed);
-                }
-            }
 
             let mut tile_touched = false; // any write into THIS tile this tick
             let mut tile_has_grass = false; // any source cell had grass (frozen)
 
-            // (2) Roll spread/decay for each frozen source cell that has grass.
+            // (2) Roll spread/decay for each source cell that has grass.
             for ly in 0..th {
                 let iy = iy0 + ly;
                 for lx in 0..tw {
                     let ix = ix0 + lx;
-                    let s = src[ly * GRASS_TILE_SIZE + lx];
+                    let c = iy * dim + ix;
+                    let s = prev[c];
                     if s == 0 {
                         continue; // no spontaneous spawn — dead cell stays a source-skip
                     }
                     tile_has_grass = true;
-                    let c = iy * dim + ix;
                     let cid = c as u64;
 
                     // C3: fuse all four RNG draws into two hash calls (salts 1+2)
@@ -1841,16 +1837,14 @@ impl GrassGrid {
                                 if cap_byte > 0
                                     && scatter_add(&d[tcell], density_add_byte, cap_byte)
                                 {
-                                    // Target may be in a NEIGHBOUR tile: activate +
-                                    // dirty it atomically (cross-tile safe).
+                                    // Target may be in a neighbour tile: activate
+                                    // it atomically (cross-tile safe).
                                     let tt = (gy as usize / GRASS_TILE_SIZE) * tpa
                                         + (gx as usize / GRASS_TILE_SIZE);
                                     if tt == t {
                                         tile_touched = true;
                                     } else {
                                         Self::bitset_set_atomic(tile_active_next, tt);
-                                        Self::bitset_set_atomic(tile_dirty0, tt);
-                                        Self::bitset_set_atomic(tile_dirty1, tt);
                                     }
                                 }
                             }
@@ -1866,8 +1860,6 @@ impl GrassGrid {
             // isolated tiles are the only skippable class.
             if tile_touched || tile_has_grass {
                 Self::bitset_set_atomic(tile_active_next, t);
-                Self::bitset_set_atomic(tile_dirty0, t);
-                Self::bitset_set_atomic(tile_dirty1, t);
             }
             if tile_has_grass {
                 for ddy in -1i64..=1 {
@@ -1888,7 +1880,10 @@ impl GrassGrid {
                         } else {
                             nx
                         };
-                        Self::bitset_set_atomic(tile_active_next, ny as usize * tpa + nx as usize);
+                        let nt = ny as usize * tpa + nx as usize;
+                        if nt != t {
+                            Self::bitset_set_atomic(tile_active_next, nt);
+                        }
                     }
                 }
             }
@@ -1967,68 +1962,6 @@ impl GrassGrid {
         // blur's equilibrium classes), but is kept coherent enough for graze's
         // `mark_tile_active` (which sets TILE_MIXED) by leaving it untouched here.
         std::mem::swap(&mut self.tile_active, &mut self.tile_active_next);
-    }
-
-    /// v2.0.1 §3: quantize ONLY the tiles dirty for ping-pong snapshot `slot`
-    /// into `dst` (the slot's `grass_cell_count`-byte u8 grass region), then clear
-    /// those tiles' dirty bits for that slot. Each cell becomes
-    /// `round(clamp(density/GRASS_MAX, 0, 1) * 255)` — the same value the old
-    /// full-grid `quantize_grass_into` produced, so the SAB wire bytes are
-    /// unchanged. Unchanged tiles are left as-is in `dst` (the slot persists
-    /// across writes, so it already holds valid prior bytes for them).
-    ///
-    /// COORDINATION (v2.0.1 writer wave): this is the single self-contained
-    /// callable the upcoming snapshot `pack()` invokes — pass it the destination
-    /// slot's grass region and the slot index and it writes only dirty tiles. Do
-    /// not inline it; `write_snapshot` calls it today and `pack()` will tomorrow.
-    ///
-    /// `dst.len()` must equal `grass_cell_count`. `slot` is masked to 0/1.
-    pub fn quantize_dirty_tiles_into(&mut self, dst: &mut [u8], slot: usize) {
-        debug_assert_eq!(dst.len(), self.dims.grass_cell_count);
-        let slot = slot & 1;
-        let dim = self.dims.grass_dim;
-        let tpa = self.tiles_per_axis;
-        let ntiles = tpa * tpa;
-        for t in 0..ntiles {
-            if !Self::bitset_get(&self.tile_dirty[slot], t) {
-                continue;
-            }
-            let tx = t % tpa;
-            let ty = t / tpa;
-            let ix0 = tx * GRASS_TILE_SIZE;
-            let iy0 = ty * GRASS_TILE_SIZE;
-            let ix1 = (ix0 + GRASS_TILE_SIZE).min(dim);
-            let iy1 = (iy0 + GRASS_TILE_SIZE).min(dim);
-            for iy in iy0..iy1 {
-                let row = iy * dim;
-                for ix in ix0..ix1 {
-                    let c = row + ix;
-                    // v2.0.2 Stream 1a: density is now stored on the SAME u8 scale
-                    // the snapshot used, so quantizing is a direct byte copy
-                    // (Relaxed load) — identical bytes to the old f32→u8 path.
-                    dst[c] = self.density[c].load(Ordering::Relaxed);
-                }
-            }
-            // Clear this slot's dirty bit — the slot now holds current bytes for t.
-            // v2.0.2 Stream 1c: tile_dirty is AtomicU64; clear via Relaxed RMW
-            // (single-threaded snapshot path, no concurrent writers here).
-            let w = &self.tile_dirty[slot][t / 64];
-            w.store(
-                w.load(Ordering::Relaxed) & !(1u64 << (t % 64)),
-                Ordering::Relaxed,
-            );
-        }
-    }
-
-    /// v2.0.1 §3: mark EVERY tile dirty for both snapshot slots. Used after a
-    /// wholesale `density` mutation outside propagation (full-grass-on-init,
-    /// tests) so the next quantize refreshes the entire grass region.
-    pub fn mark_all_tiles_dirty(&mut self) {
-        for slot in 0..2 {
-            for w in self.tile_dirty[slot].iter() {
-                w.store(!0, Ordering::Relaxed);
-            }
-        }
     }
 
     /// v2.0.2 Stream 1b: select the propagation kernel (live SCATTER vs retained
@@ -2154,9 +2087,8 @@ impl GrassGrid {
         // Write back reduced density. `saturating_sub` is safe here: taken_bytes
         // ≤ cur_byte, so the result is always ≥ 0.
         self.density[cell_idx].store(cur_byte - taken_bytes, Ordering::Relaxed);
-        // v2.0.1 §2/§3: a drained cell may turn a SATURATED tile into a frontier
-        // tile and changes a snapshot byte — reactivate it + its fringe and mark
-        // it dirty so it re-enters propagation, regrows, and is re-quantized.
+        // A drained cell may turn a saturated tile into a frontier tile, so
+        // reactivate it and its fringe for propagation.
         self.mark_tile_active(cell_idx);
         energy_per_bite * (taken_bytes as f32 / chunk_bytes as f32)
     }
@@ -2281,10 +2213,6 @@ mod tests {
             tiles_per_axis: tpa,
             tile_active: (0..tile_words).map(|_| AtomicU64::new(0)).collect(),
             tile_active_next: (0..tile_words).map(|_| AtomicU64::new(0)).collect(),
-            tile_dirty: [
-                (0..tile_words).map(|_| AtomicU64::new(0)).collect(),
-                (0..tile_words).map(|_| AtomicU64::new(0)).collect(),
-            ],
             tile_class: vec![TILE_EMPTY; tpa * tpa],
             // Low-level test grid: default to BLUR so existing assertions hold.
             propagation: GrassPropagation::Blur,
@@ -2301,10 +2229,10 @@ mod tests {
             pyramid: GrassPyramid::new(TEST_DIMS.grass_dim),
             // v2.0.4 C2: profiling gate — off by default.
             profile_scatter: false,
+            scatter_prev: Vec::new(),
         };
         g.rebuild_row_bitset();
         g.resync_active_from_density();
-        g.mark_all_tiles_dirty();
         g
     }
 

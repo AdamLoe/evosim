@@ -17,7 +17,7 @@
 // The v2.0 world-shape changes (removed `fullGrassOnInit`, added world_size /
 // world_seed / wrap_world / biome penalties) are a MAJOR bump from the v1
 // single-`v=1` scheme, so every legacy v1 blob resets cleanly to defaults.
-const STORAGE_KEY = "evosim.settings.v2";
+export const SETTINGS_STORAGE_KEY = "evosim.settings.v2";
 const SCHEMA_MAJOR = 2;
 // v2.0 Wave 2b: added `traitMutationSigmaMultiplier` (a new additive key with a
 // default) → MINOR bump 0 → 1. Existing v2 blobs keep their values and pick up
@@ -358,7 +358,41 @@ export const DEFAULTS: Settings = {
   initSplitBoost: 1.0,
 };
 
-const KNOWN_KEYS = new Set<string>(Object.keys(DEFAULTS));
+export const SETTINGS_KEYS = Object.freeze(Object.keys(DEFAULTS)) as readonly (keyof Settings)[];
+export const SETTINGS_USER_KEYS = Object.freeze(
+  SETTINGS_KEYS.filter((k) => k !== "vMajor" && k !== "vMinor"),
+) as readonly (keyof Settings)[];
+
+const KNOWN_KEYS = new Set<string>(SETTINGS_KEYS);
+
+function cloneBuckets(src: readonly MutationBucket[]): MutationBucket[] {
+  return src.map((b) => ({ ...b }));
+}
+
+function cloneTopology(src: NnTopology): NnTopology {
+  return {
+    layerSizes: src.layerSizes.slice(),
+    activations: src.activations.slice(),
+  };
+}
+
+function cloneSettingsDefaults(): Settings {
+  return {
+    ...DEFAULTS,
+    mutationBuckets: cloneBuckets(DEFAULTS.mutationBuckets),
+    nnTopology: cloneTopology(DEFAULTS.nnTopology),
+  };
+}
+
+function cloneSettingValue<K extends keyof Settings>(key: K, value: Settings[K]): Settings[K] {
+  if (key === "mutationBuckets") {
+    return cloneBuckets(value as MutationBucket[]) as Settings[K];
+  }
+  if (key === "nnTopology") {
+    return cloneTopology(value as NnTopology) as Settings[K];
+  }
+  return value;
+}
 
 function pickKnown(raw: unknown): Partial<Settings> {
   if (typeof raw !== "object" || raw === null) return {};
@@ -421,7 +455,7 @@ function sanitiseTopology(raw: unknown): NnTopology | null {
 
 function readFromStorage(): Partial<Settings> {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
     if (!raw) return {};
     const parsed = JSON.parse(raw) as unknown;
     // v2.0 Wave 1c major/minor migration:
@@ -456,7 +490,7 @@ export function hasStoredSetting<K extends keyof Settings>(key: K): boolean {
 // rewritten to the current major.minor so a future load sees a coherent
 // schema marker (and a minor-only bump merges cleanly on the NEXT load).
 const current: Settings = {
-  ...DEFAULTS,
+  ...cloneSettingsDefaults(),
   ...storedAtLoad,
   vMajor: SCHEMA_MAJOR,
   vMinor: SCHEMA_MINOR,
@@ -464,7 +498,7 @@ const current: Settings = {
 
 function persist(): void {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(current));
+    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(current));
   } catch {
     // Best-effort: ignore quota / disabled storage.
   }
@@ -475,13 +509,27 @@ export function getSettings(): Readonly<Settings> {
 }
 
 export function setSetting<K extends keyof Settings>(key: K, value: Settings[K]): void {
-  current[key] = value;
+  current[key] = cloneSettingValue(key, value);
   persist();
 }
 
 /** Reset every setting to its canonical default and persist. Used by the
  * Settings tab's Reset button. */
 export function resetSettings(): void {
-  Object.assign(current, DEFAULTS);
+  Object.assign(current, cloneSettingsDefaults());
   persist();
+}
+
+if (import.meta.env?.DEV && typeof window !== "undefined") {
+  (window as unknown as {
+    __evosimSettingsForTests?: {
+      getSettings: typeof getSettings;
+      setSetting: typeof setSetting;
+      storageKey: string;
+    };
+  }).__evosimSettingsForTests = {
+    getSettings,
+    setSetting,
+    storageKey: SETTINGS_STORAGE_KEY,
+  };
 }

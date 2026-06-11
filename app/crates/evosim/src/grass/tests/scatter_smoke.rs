@@ -76,7 +76,6 @@ fn build_scatter_grid() -> (GrassGrid, Vec<usize>, Vec<usize>) {
     // Sync the active/class state to the seeded field so the first scatter tick
     // processes the seeded tiles (production drives this incrementally).
     g.resync_active_from_density();
-    g.mark_all_tiles_dirty();
     (g, patch, water_block)
 }
 

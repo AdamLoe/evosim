@@ -160,23 +160,23 @@ Decisions that bind more than one architecture doc.
 
 - **Decision**: `world_size` (default 9600u) is a **runtime** construction
   setting, not a compile-time constant. Consequently grass-grid dims
-  (`grass_dim = round(world_size / GRASS_CELL_SIZE)`), the snapshot grass
-  region, and the biome region are all **derived from settings at boot**. The
+  (`grass_dim = round(world_size / GRASS_CELL_SIZE)`) and the snapshot
+  grass/biome window regions are all **derived from settings at boot**. The
   cross-language SAB-safety model shifts from "assert equal *constant*"
   (`GRASS_CELL_COUNT` Rust ↔ TS) to "size every view off the **boot-reported**
   `grass_dim`": `boot_ready` carries the runtime `grass_dim`, the snapshot grass
-  region and biome region are both `grass_dim²` bytes (a Rust `debug_assert`
-  checks they're byte-equal), and the TS side sizes both views off the reported
-  `grass_dim`, never a hardcoded constant. `MAX_POP_FOR_SIM` / `CREATURE_STRIDE`
-  stay constant-asserted (the creature region is world-size-independent).
+  and biome window allocations are both `min(grass_dim, 4096)²` bytes, and the
+  TS side sizes both views off the reported `grass_dim`, never a hardcoded
+  constant. `MAX_POP_FOR_SIM` / `CREATURE_STRIDE` stay constant-asserted (the
+  creature region is world-size-independent).
   The app-shell SAB-view binding side (how `makeSlotLayout` is built from
   `boot_ready.grass_dim`) is recorded in `decisions/app-shell.md`.
 - **Why**: The user explicitly wants worlds **editable across a wide range**
   from one binary (a tiny fast asexual screensaver up to a grand toroidal
   multi-species map), which forces runtime SAB sizing. Sizing both grass and
-  biome from the same `grass_dim` makes them provably equal without a second
-  constant to drift. Getting a view length wrong silently over/under-runs the
-  SAB slot, so the boot-time `grass_dim` is the single source of truth (one
+  biome windows from the same `grass_dim` and budget cap makes them provably
+  equal without a second constant to drift. Getting a view length wrong silently
+  over/under-runs the snapshot slot, so the boot-time `grass_dim` is the single source of truth (one
   layout object, rebuilt per boot).
 - **Applies to**: `architecture/shared-memory-and-protocol.md`
   (computed-dims-equality), `architecture/simulation-core.md` (`WorldDims`).

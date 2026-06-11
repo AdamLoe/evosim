@@ -1,7 +1,7 @@
 //! v2.0.4 S4: fertility (density-weighted spread) tests.
 //!
 //! Wired as a child of `grass` so it can reach internal fields/fns
-//! (`dget_u8`, `dset`, `resync_active_from_density`, `mark_all_tiles_dirty`,
+//! (`dget_u8`, `dset`, `resync_active_from_density`,
 //! `scatter_params`, etc.).
 //!
 //! Tests in this file:
@@ -108,7 +108,6 @@ fn amount_proportional_to_density() {
     g.dset(full_idx, GRASS_MAX); // byte 255 → scale = 1.0
     g.dset(low_idx, GRASS_MAX / 8.0); // byte ~32 → scale ≈ 1/8
     g.resync_active_from_density();
-    g.mark_all_tiles_dirty();
 
     // Single tick.
     tick_n(&mut g, 1);
@@ -177,7 +176,6 @@ fn amount_proportional_to_density() {
         g2.dset(i, cap_val);
     }
     g2.resync_active_from_density();
-    g2.mark_all_tiles_dirty();
     tick_n(&mut g2, 50);
     for i in 0..DIMS.grass_cell_count {
         let b = g2.dget_u8(i);
@@ -242,7 +240,6 @@ fn persistence_invariant_plains_and_water() {
     }
 
     g.resync_active_from_density();
-    g.mark_all_tiles_dirty();
 
     // Run 300 ticks — enough to see steady state.
     tick_n(&mut g, 300);
@@ -342,7 +339,6 @@ fn net_growth_sanity() {
         }
     }
     g.resync_active_from_density();
-    g.mark_all_tiles_dirty();
 
     let before = total_bytes(&g);
     tick_n(&mut g, 500);

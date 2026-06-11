@@ -235,10 +235,15 @@ Accessors `dget`/`dset` encode/decode via `encode_density`/`decode_density`.
 
 `GrassGrid::compute_propagation` dispatches on a `GrassPropagation` selector:
 
-**`Scatter`** (the live path): stochastic u8 scatter. Per tick, over the
-active-tile set (rayon-parallel), each worker freezes its tile into a stack
-scratch buffer, then for each non-zero source cell rolls a **decay** event
-and a **spread** event. Spread amount is **density-weighted**: denser source
+**`Scatter`** (the live path): stochastic u8 scatter. Once per tick the whole
+density field is snapshotted into a `scatter_prev` buffer (one bulk memcpy
+before the parallel dispatch, when no worker is writing). Then over the
+active-tile set (rayon-parallel), each worker reads its source bytes from
+`scatter_prev` (a stable, globally-consistent, no-intra-cascade snapshot) and
+for each non-zero source cell rolls a **decay** event and a **spread** event,
+writing the results back into the live field via atomic RMW. (This replaced an
+older per-tile stack-freeze that re-read the field on every active tile —
+~20% slower at full coverage.) Spread amount is **density-weighted**: denser source
 cells push harder, producing tighter self-reinforcing clumps. The spread
 target is picked from a precomputed round disc (`DiscTable`,
 `GRASS_SPREAD_RADIUS` cells), with isotropic angular distribution via
@@ -252,8 +257,8 @@ path. Grid-direct test constructors default to `Blur`.
 
 Both paths share the **32×32 active-tile frontier**: only frontier tiles
 and their 8-neighbour fringe are processed; equilibrium tiles are skipped.
-The snapshot grass write is dirty-tile-incremental via
-`quantize_dirty_tiles_into`.
+Snapshots read grass through `GrassPyramid::viewport_window`; the old
+dirty-tile quantize path is gone.
 
 **`GrassPyramid`**: u8 box-filter mip pyramid (clipmap). L0 aliases the
 live density field; L1+ are owned, mean-downsampled. L1+ refresh every
@@ -273,9 +278,11 @@ Halton sequence for positions and genome-derived colors. The UI exposes up to
 8000 founders, and the live `max_population` cap applies at the first birth
 phase.
 
-**Graze**: per-bite transfer using u8 quantization (`GRASS_BITES_PER_BLOCK`).
-Six live scatter-params sliders (indices 54–59); three construction-scoped
-grass knobs (60–62); two construction-only clump knobs.
+**Graze**: per-bite transfer using u8 quantization. The live
+`grass_bites_per_block` slider controls the density chunk size, with the
+default remaining `GRASS_BITES_PER_BLOCK_DEFAULT = 2`. Six live
+scatter-params sliders (indices 54–59); three construction-scoped grass
+knobs (60–62); two construction-only clump knobs.
 
 **Determinism**: single-threaded runs are deterministic. Under
 `--features threads` the scatter kernel's lossy cross-tile relaxed RMW
@@ -317,10 +324,10 @@ renderer — see [`shared-memory-and-protocol.md`](shared-memory-and-protocol.md
 - `crates/evosim/src/world/proximity.rs` → `LUT_RADIUS`, sector LUT build, creature + grass proximity helpers, `compute_creature_proximity_sectors_species`, `compute_grass_far_band_sectors`
 - `app/crates/evosim/src/brain/mod.rs` → `Brain`, `Brain::forward`, `Brain::child_from`, `NnTopology`, `lrelu`
 - `crates/evosim/src/creature.rs` → `CreatureSoA`, `Genome`, `FlashTag`, `Action`
-- `app/crates/evosim/src/grass/mod.rs` → `GrassGrid`, `GrassPropagation`, `ScatterParams`, `DiscTable`, `GrassPyramid`, `compute_propagation`, `consume`, `quantize_dirty_tiles_into`
+- `app/crates/evosim/src/grass/mod.rs` → `GrassGrid`, `GrassPropagation`, `ScatterParams`, `DiscTable`, `GrassPyramid`, `compute_propagation`, `consume`
 - `crates/evosim/src/rng.rs` → `SimRng`, `grass_hash_u64`, `grass_hash_fused_4`
 - `crates/evosim/src/grid.rs` → `SpatialGrid`, `cell_of`, `rebuild`, `for_each_in_radius`
-- `crates/evosim/src/constants.rs` → `WorldDims`, `MAX_POP_FOR_SIM`, `GRASS_CELL_SIZE`, `MAX_NN_INPUTS`, `MIN_CHUNKS`, `MAX_CHUNKS`, `GRASS_SPREAD_RADIUS`, `GRASS_BITES_PER_BLOCK`, `GRASS_PYRAMID_MAX_LEVELS`, [etc — authoritative list in file]
+- `crates/evosim/src/constants.rs` → `WorldDims`, `MAX_POP_FOR_SIM`, `GRASS_CELL_SIZE`, `MAX_NN_INPUTS`, `MIN_CHUNKS`, `MAX_CHUNKS`, `GRASS_SPREAD_RADIUS`, `GRASS_BITES_PER_BLOCK_DEFAULT`, `GRASS_PYRAMID_MAX_LEVELS`, [etc — authoritative list in file]
 - `app/crates/evosim/src/wasm_api/mod.rs` → `WorldHandle`, `WorldHandle::set_slider`, `WorldHandle::write_snapshot`, `BiomePyramid`, `max_pop_for_sim`
 
 ## Update when

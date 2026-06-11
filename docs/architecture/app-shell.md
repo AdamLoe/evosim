@@ -246,14 +246,19 @@ consumes to build the boot payload so a mid-drag restart carries dragged
 values. See `app/crates/evosim/src/wasm_api/mod.rs → WorldHandle::newWithFounderCount`
 for the full argument order and types (the boot payload). The key
 invariant: construction-only args (`world_size`, `grass_cell_size`,
-`grass_clump_count`, `grass_clump_size`, and the species args) must ride
-this explicit path because `initial_sliders` is applied after construction
-and cannot resize the already-built `WorldDims` or re-seed boot grass.
+`grass_multisight`, `grass_clump_count`, `grass_clump_size`, and the species
+args) must ride this explicit path because `initial_sliders` is applied after
+construction and cannot resize the already-built `WorldDims`, rebuild the NN
+input layout, or re-seed boot grass.
 
 `currentSliderState()` snapshots the in-memory widget value for every
 registered staged widget; the worker applies it via `set_slider` after
 construction (this is the path the live `mating_cooldown_ticks` slider
-takes).
+takes). It also injects persisted sim settings whose controls live outside
+the staged Settings widgets: `max_population` from the perf panel, the hidden
+legacy Blur grass knobs `grass_propagation_rate_k` /
+`grass_in_cell_growth_r`, and the mutation bucket table from the NN tab unless
+that tab has registered live widget readers.
 
 ## Runtime-dims SAB view binding
 

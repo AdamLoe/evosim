@@ -227,7 +227,7 @@ fn viewport_window_full_level() {
     p.refresh(&density, &tile_active, 1);
 
     let mut dst = vec![0u8; 4];
-    p.viewport_window(&density, 1, 0, 0, 2, 2, &mut dst);
+    p.viewport_window(&density, 1, false, 0, 0, 2, 2, &mut dst);
     assert_eq!(dst, vec![200, 200, 200, 200], "full L1 window");
 }
 
@@ -249,7 +249,7 @@ fn viewport_window_overscan_clamped() {
 
     // Request a 3×3 window starting at (0,0) from L0.
     let mut dst = vec![0u8; 9];
-    p.viewport_window(&density, 0, 0, 0, 3, 3, &mut dst);
+    p.viewport_window(&density, 0, false, 0, 0, 3, 3, &mut dst);
     // Expected (edge-clamp): col 2 repeats col 1; row 2 repeats row 1.
     //   [10, 20, 20]
     //   [30, 40, 40]
@@ -270,9 +270,22 @@ fn viewport_window_partial_interior() {
 
     // Read L0 cell at (2, 1) directly via viewport_window.
     let mut dst = vec![0u8; 1];
-    p.viewport_window(&density, 0, 2, 1, 1, 1, &mut dst);
+    p.viewport_window(&density, 0, false, 2, 1, 1, 1, &mut dst);
     // Cell (2, 1) = index 1*4+2 = 6, value = 6 as u8.
     assert_eq!(dst[0], 6, "L0 cell (2,1)");
+}
+
+#[test]
+fn viewport_window_wraps_both_seams() {
+    let w = 4usize;
+    let h = 3usize;
+    let density = indexed_density(w, h);
+    let p = GrassPyramid::new_rect(w, h);
+
+    let mut dst = vec![0u8; 6];
+    p.viewport_window(&density, 0, true, 3, 2, 3, 2, &mut dst);
+
+    assert_eq!(dst, vec![11, 8, 9, 3, 0, 1]);
 }
 
 // ── Test (d): sample_clamped API ─────────────────────────────────────────────

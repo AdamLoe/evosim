@@ -32,7 +32,7 @@ const WORLD_SEED: u32 = 0xDEAD_5678;
 
 /// Build a scatter grid with a custom biome map and params, seeded at
 /// world_seed = WORLD_SEED. Caller populates density and calls
-/// `resync_active_from_density()` + `mark_all_tiles_dirty()` afterwards.
+/// `resync_active_from_density()` afterwards.
 fn make_scatter_grid_biome(biome: Option<&[u8]>, params: ScatterParams) -> GrassGrid {
     let mut rng = SimRng::from_u64(0xCAFE_BABE);
     let mut g = GrassGrid::new_with_capacity(&mut rng, 0, DIMS, biome);
@@ -88,7 +88,6 @@ fn disc_footprint_is_round() {
     let center = cy * dim + cx;
     g.dset(center, GRASS_MAX);
     g.resync_active_from_density();
-    g.mark_all_tiles_dirty();
 
     // 60 ticks: enough for the front to advance several cell-radii.
     tick_n(&mut g, 60);
@@ -167,7 +166,6 @@ fn decay_floor_reaches_zero() {
     let cell = (dim / 2) * dim + (dim / 2);
     g.dset(cell, GRASS_MAX); // byte 255
     g.resync_active_from_density();
-    g.mark_all_tiles_dirty();
 
     // 300 ticks is far more than enough to drain 255 bytes at 2 bytes/tick.
     tick_n(&mut g, 300);
@@ -211,7 +209,6 @@ fn persistence_no_collapse() {
     }
     assert!(any_seeded);
     g.resync_active_from_density();
-    g.mark_all_tiles_dirty();
 
     let total_before = total_bytes(&g);
     tick_n(&mut g, 200);
@@ -259,7 +256,6 @@ fn biome_cap_clamp() {
         g.dset(i, cap_val);
     }
     g.resync_active_from_density();
-    g.mark_all_tiles_dirty();
 
     // 100 ticks.
     tick_n(&mut g, 100);

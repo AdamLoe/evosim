@@ -785,7 +785,7 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   uniform angle → round footprint), lossy relaxed RMW add `spread_amount`
   (floor ≥ 1 byte), clamp to the target cell's biome-cap byte. No
   spontaneous spawn — a zero-byte cell is skipped as a source. (3)
-  Frontier: tiles written to are marked active+dirty next tick via atomic
+  Frontier: tiles written to are marked active next tick via atomic
   `fetch_or`; cross-tile spread lands in the immediate 8-fringe neighbour
   (spread radius ≤ `GRASS_TILE_SIZE = 32`). Measured ~34× faster than
   blur, linear O(N) over active tiles, does not balloon past the 2048
@@ -858,28 +858,24 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 - **Applies to**: `architecture/simulation-core.md`,
   `app/crates/evosim/src/grass/mod.rs → GRASS_EQ_EPS`.
 
-### 6 live grass sliders (SLIDER_NAMES 54–59); GRASS_BITES_PER_BLOCK = 2 constant
+### Grass scatter sliders plus live bites-per-block
 
 - **Decision**: Six live sliders wire into `GrassGrid.scatter_params` via
   `WorldHandle` apply_ setters: `grass_decay_pct` (54),
   `grass_decay_amount` (55), `grass_spread_pct` (56),
   `grass_spread_amount` (57), `grass_spread_ring1_pct` (58),
   `grass_spread_ring2_pct` (59). Ring 3 is implicit (disc table
-  normalizes all three; ring3 = max(0, 1 − ring1 − ring2)).
-  `GRASS_BITES_PER_BLOCK = 2` is a **compile-time constant** (not a live
-  slider) so that `density_chunk = GRASS_MAX / 2 = 0.5` encodes to
-  exactly 128 u8 bytes — 128 u8 levels per bite, satisfying the
-  `≥ 8 levels/bite` u8-floor guard. The `.max(1)` floor on `consume`
-  means a grass-present cell never yields 0 energy.
-- **Why**: Making bites-per-block constant avoids tracking the u8
-  representation of an arbitrary slider value (arbitrary chunk sizes can
-  produce u8 encodings near 0, making the `.max(1)` floor non-trivial to
-  reason about). The six scatter sliders let the operator tune decay vs
-  spread dynamics and the radial distribution live without a restart.
+  normalizes all three; ring3 = max(0, 1 − ring1 − ring2)). The existing
+  `grass_bites_per_block` slider is also live: graze computes
+  `density_chunk = GRASS_MAX / max(1, grass_bites_per_block)` each tick.
+- **Why**: Scatter parameters and graze bite granularity are simulation
+  balance knobs that do not resize buffers or rebuild topology, so they can
+  update on the running world. The default bite count remains 2, preserving the
+  shipped default transfer.
 - **Applies to**: `architecture/simulation-core.md`.
-- **Code anchors**: `app/crates/evosim/src/constants.rs → GRASS_BITES_PER_BLOCK`,
-  `GRASS_BITES_PER_BLOCK_DEFAULT`;
+- **Code anchors**: `app/crates/evosim/src/constants.rs → GRASS_BITES_PER_BLOCK_DEFAULT`;
   `app/crates/evosim/src/wasm_api/mod.rs → SLIDER_NAMES` (indices 54–59), `try_set_slider`;
+  `app/crates/evosim/src/world/tick.rs → graze`;
   `app/crates/evosim/src/grass/mod.rs → GrassGrid::consume`.
 
 ### Grass pyramid: u8 box-filter mip clipmap over the density field
@@ -910,9 +906,6 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   far-grass sensing may lag by at most that period; default zoom render reads
   live L0. Active-set-keyed partial refresh is deferred; see the
   `TODO(stage3-pyramid-perf)` anchor in `app/crates/evosim/src/grass/mod.rs`.
-  Toroidal wrap-seam: a window straddling the world wrap on a toroidal
-  world (grass_dim > 2048, non-default zoom) shows the wrong region —
-  documented TODO in `GrassPyramid::viewport_window`, not yet fixed.
 - **Code anchors**: `app/crates/evosim/src/grass/mod.rs → GrassPyramid`, `GrassGrid::pyramid`,
   `GrassGrid::refresh_pyramid`;
   `app/crates/evosim/src/constants.rs → GRASS_PYRAMID_MAX_LEVELS`,
@@ -926,8 +919,10 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   read at `GRASS_FAR_MIP_LEVEL = 3` from `GrassPyramid::sample_clamped`).
   This is **default ON** via the `grass_multisight` construction slider (idx 61,
   default true). Both the multi-band and single-band layouts stay compiled;
-  the dev-panel toggle lets the user A/B them. The A/B is a regression guard,
-  not a ship gate: multi-band was confirmed not-worse than single-band.
+  the dev-panel toggle lets the user A/B them. Because the setting changes the
+  NN input layout, it rides the explicit boot payload before founder brains and
+  topology are constructed; applying `initial_sliders` after construction is too
+  late.
 - **Why**: O(1) pyramid taps cost nothing at mip level 3 (one sample per sector).
   Creatures sensing grass at 160u radius can navigate toward distant patches
   before local exhaustion. Shipping default ON keeps all born creatures on the

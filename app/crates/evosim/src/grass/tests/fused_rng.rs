@@ -259,7 +259,6 @@ fn scatter_does_not_advance_sim_rng() {
     g.set_propagation(GrassPropagation::Scatter);
     g.world_seed = 0x1234_5678;
     g.resync_active_from_density();
-    g.mark_all_tiles_dirty();
 
     // Snapshot SimRng state before the scatter tick.
     let state_before = rng.state();

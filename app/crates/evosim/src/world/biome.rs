@@ -17,7 +17,8 @@
 //! Tuned for roughly plains ~60% / water ~20% / desert ~20%.
 //!
 //! The generated grid is stored sim-side on [`super::World`] for O(1) per-tick
-//! `biome_at` lookups AND copied byte-for-byte into the boot `biome_buf` SAB.
+//! `biome_at` lookups and feeds the static biome pyramid used for per-slot
+//! snapshot biome windows.
 
 use crate::constants::{
     Biome, WorldDims, GRASS_CAPACITY_DESERT, GRASS_CAPACITY_PLAINS, GRASS_CAPACITY_WATER,

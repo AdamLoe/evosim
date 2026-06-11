@@ -1,14 +1,4 @@
-//! v2.0.1 GRASS wave tests — organic spread (#5) + active-tile frontier &
-//! dirty-tile snapshot perf (#6). Kept in its OWN file (merge-hazard rule;
-//! never appended to the shared `grass::tests` module).
-//!
-//! Scope note: §3's *u16 internal storage* migration was deferred (it forces
-//! edits far outside the permitted file scope — see the wave report). The §3
-//! snapshot win (re-quantize only dirty tiles, both slots stay valid) IS
-//! implemented on the f32 path and is exercised here by the dirty-tile-quantize
-//! equivalence + both-slots-valid tests; `bilinear_sample`/`consume` parity is
-//! covered against a full reference quantize. When u16 lands, the parity test
-//! below should be tightened to the u16 LSB tolerance.
+//! v2.0.1 GRASS wave tests — organic spread and active-tile frontier.
 
 use super::super::*;
 use crate::constants::{WorldDims, GRASS_CELL_SIZE};
@@ -51,10 +41,6 @@ fn make_grid(dims: WorldDims) -> GrassGrid {
         tiles_per_axis: tpa,
         tile_active: (0..tile_words).map(|_| AtomicU64::new(0)).collect(),
         tile_active_next: (0..tile_words).map(|_| AtomicU64::new(0)).collect(),
-        tile_dirty: [
-            (0..tile_words).map(|_| AtomicU64::new(0)).collect(),
-            (0..tile_words).map(|_| AtomicU64::new(0)).collect(),
-        ],
         tile_class: vec![TILE_EMPTY; tpa * tpa],
         // v2.0.2 Stream 1b: these v2.0.1 equivalence/disc tests exercise the BLUR
         // path; default the grid to Blur so their assertions are unchanged.
@@ -73,6 +59,7 @@ fn make_grid(dims: WorldDims) -> GrassGrid {
         pyramid: GrassPyramid::new(dims.grass_dim),
         // v2.0.4 C2: profiling gate — off by default.
         profile_scatter: false,
+        scatter_prev: Vec::new(),
     }
 }
 
@@ -81,7 +68,6 @@ fn seed_center(g: &mut GrassGrid) {
     let c = (dim / 2) * dim + dim / 2;
     g.dset(c, GRASS_MAX);
     g.resync_active_from_density();
-    g.mark_all_tiles_dirty();
 }
 
 // ─── §1: organic disc-shape regression (NOT a diamond) ──────────────────────
@@ -171,7 +157,6 @@ fn assert_active_equals_full(dims: WorldDims, r: f32, k: f32, ticks: usize) {
         refg.dset(idx, GRASS_MAX);
     }
     fast.resync_active_from_density();
-    fast.mark_all_tiles_dirty();
 
     for t in 0..ticks {
         fast.compute_propagation(r, k);
@@ -213,7 +198,6 @@ fn active_tile_equals_full_grid_with_grazing() {
         }
     }
     fast.resync_active_from_density();
-    fast.mark_all_tiles_dirty();
     refg.resync_active_from_density();
 
     let r = 0.02;
@@ -277,105 +261,17 @@ fn propagation_is_deterministic_same_seed() {
     }
 }
 
-// ─── §3: dirty-tile snapshot quantize parity + both-slots-valid ─────────────
+// ─── consume / bilinear_sample contract preserved ───────────────────────────
 
-/// Full reference quantize (every cell), matching the legacy `quantize_grass_into`.
-/// v2.0.2 Stream 1a: density is now stored on the SAME u8 scale, so a full
-/// quantize is the raw byte snapshot.
-fn full_quantize(g: &GrassGrid) -> Vec<u8> {
-    g.density_u8_snapshot()
-}
-
-/// After stepping with dirty-tile-only re-quantize into a single slot, that slot
-/// must equal a full quantize of the current density (the dirty set must have
-/// covered every changed cell).
+/// `consume` drains the cell, returns proportional energy, and reactivates its tile.
 #[test]
-fn dirty_tile_quantize_matches_full() {
-    let dims = DIMS_WRAP;
-    let n = dims.grass_cell_count;
-    let mut g = make_grid(dims);
-    let mut rng = SimRng::from_u64(11);
-    for _ in 0..150 {
-        g.dset(rng.index(n), GRASS_MAX);
-    }
-    g.resync_active_from_density();
-    g.mark_all_tiles_dirty();
-
-    let mut slot0 = vec![0u8; n];
-    // First write: full region (everything dirty at init).
-    g.quantize_dirty_tiles_into(&mut slot0, 0);
-    assert_eq!(
-        slot0,
-        full_quantize(&g),
-        "initial slot0 must be full+correct"
-    );
-
-    for t in 0..30 {
-        g.compute_propagation(0.02, 0.3);
-        g.quantize_dirty_tiles_into(&mut slot0, 0);
-        assert_eq!(
-            slot0,
-            full_quantize(&g),
-            "dirty-tile slot0 diverged from full quantize at tick {t}"
-        );
-    }
-}
-
-/// BOTH ping-pong slots must remain valid after dirty-only writes that alternate
-/// between slots: each slot, after being written this tick, equals a full
-/// quantize of the current density. The per-slot dirty tracking must keep a tile
-/// dirty for a slot until THAT slot has been refreshed.
-#[test]
-fn both_slots_valid_after_dirty_writes() {
-    let dims = DIMS_WRAP;
-    let n = dims.grass_cell_count;
-    let mut g = make_grid(dims);
-    let mut rng = SimRng::from_u64(13);
-    for _ in 0..150 {
-        g.dset(rng.index(n), GRASS_MAX);
-    }
-    g.resync_active_from_density();
-    g.mark_all_tiles_dirty();
-
-    let mut slots = [vec![0u8; n], vec![0u8; n]];
-    // Prime both slots with a full write.
-    g.quantize_dirty_tiles_into(&mut slots[0], 0);
-    g.quantize_dirty_tiles_into(&mut slots[1], 1);
-
-    for t in 0..30 {
-        g.compute_propagation(0.02, 0.3);
-        // The worker alternates slots each tick. Write only the slot for this
-        // tick, then assert THAT slot is fully valid (the other holds last tick's
-        // valid bytes, which is the ping-pong contract).
-        let slot = t & 1;
-        g.quantize_dirty_tiles_into(&mut slots[slot], slot);
-        assert_eq!(
-            slots[slot],
-            full_quantize(&g),
-            "slot {slot} invalid after dirty write at tick {t}"
-        );
-    }
-}
-
-// ─── §3: consume / bilinear_sample contract preserved ───────────────────────
-
-/// `consume` still drains the cell and returns the proportional energy exactly,
-/// and now also reactivates the cell's tile (so the snapshot re-quantizes it).
-#[test]
-fn consume_drains_and_marks_dirty() {
+fn consume_drains_and_reactivates() {
     let dims = DIMS_WRAP;
     let mut g = make_grid(dims);
     let dim = dims.grass_dim;
     let cell = 50 * dim + 50;
     g.dset(cell, GRASS_MAX);
     g.resync_active_from_density();
-    // Clear dirty so we can observe the graze re-dirtying.
-    // v2.0.2 Stream 1c: tile_dirty is now Vec<AtomicU64>; clear via Relaxed store.
-    for slot in 0..2 {
-        for w in g.tile_dirty[slot].iter() {
-            w.store(0, std::sync::atomic::Ordering::Relaxed);
-        }
-    }
     let got = g.consume(cell, 0.5, 10.0);
     assert!(
         (got - 10.0).abs() < 1e-6,
@@ -391,10 +287,6 @@ fn consume_drains_and_marks_dirty() {
         "cell must be drained to exactly byte 127 (255 - 128)"
     );
     let t = (50 / GRASS_TILE_SIZE) * g.tiles_per_axis + 50 / GRASS_TILE_SIZE;
-    assert!(
-        GrassGrid::bitset_get(&g.tile_dirty[0], t) && GrassGrid::bitset_get(&g.tile_dirty[1], t),
-        "grazed tile must be marked dirty for both slots"
-    );
     assert!(
         GrassGrid::bitset_get(&g.tile_active, t),
         "grazed tile must be reactivated for the next propagation pass"

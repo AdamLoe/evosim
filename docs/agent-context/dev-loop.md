@@ -14,6 +14,19 @@ replaces it).
 
 ## The inner loop
 
+For a full local rebuild-and-serve pass with no HMR/watch mode, run:
+
+```bash
+# Run from app/ (the workspace root)
+./local_dev.sh
+```
+
+The script builds native Rust targets with and without `threads`, regenerates
+the TypeScript mirrors, removes stale `web/dist` + `web/wasm`, rebuilds the
+threaded wasm bundle, runs `pnpm build`, and serves the built app with
+`pnpm preview` on port 47821. Stop it with Ctrl-C and rerun the same command
+after agent changes to rebuild from a clean web bundle.
+
 1. **Rust change?** Rebuild wasm. Always with `--features threads`. No
    exceptions:
 

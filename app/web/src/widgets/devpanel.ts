@@ -169,6 +169,17 @@ export function currentSliderState(): Record<string, number> {
   // clicked the selector.
   if (!("max_population" in out)) out.max_population = getSettings().maxPopulation;
 
+  // These legacy Blur-kernel sliders are intentionally not exposed in the
+  // Settings UI while the live sim uses Scatter, but they remain persisted
+  // Settings keys and Rust slider lanes. Keep them in the boot payload so every
+  // saved sim setting round-trips through worker construction.
+  if (!("grass_propagation_rate_k" in out)) {
+    out.grass_propagation_rate_k = getSettings().grassPropagK;
+  }
+  if (!("grass_in_cell_growth_r" in out)) {
+    out.grass_in_cell_growth_r = getSettings().grassGrowthR;
+  }
+
   // v1.12: fan persisted mutation buckets into bucket_k_<field> sliders so
   // boot/respawn re-applies the most-recently-saved policy. NN tab widgets
   // override these via registerWidget when installed (live-edit path).
@@ -1229,4 +1240,14 @@ export function installDevPanel(getBridge: () => SimBridge): void {
   if (footerCancel) footerCancel.addEventListener("click", () => cancelAll());
   if (footerReset) footerReset.addEventListener("click", () => resetAll(getBridge));
   refreshDirtyState();
+}
+
+if (import.meta.env?.DEV && typeof window !== "undefined") {
+  (window as unknown as {
+    __evosimDevPanelForTests?: {
+      currentSliderState: typeof currentSliderState;
+    };
+  }).__evosimDevPanelForTests = {
+    currentSliderState,
+  };
 }

@@ -332,7 +332,9 @@
   sub-region: `u_uv_scale = world_size / (grass_cell_size * 2^mipLevel * BUDGET_AXIS)`,
   `u_uv_offset = -vec2(winOriginX, winOriginY) / BUDGET_AXIS`. `grass_cell_size`
   comes from `boot_ready` (not hard-coded 5.0) so non-default `grass_size`
-  settings render correctly.
+  settings render correctly. For toroidal ghost-copy draws, the renderer adds
+  the ghost world translation divided by the window's world span to the base
+  UV offset.
 - **Why**: A fixed allocation avoids per-frame `texImage2D` resize overhead.
   Uploading only the window avoids uploading the entire budget² texture when the
   window is smaller. Nearest-mip first keeps the implementation simple; switching
@@ -394,9 +396,10 @@
 ### SNAPSHOT_HEADER_BYTES bumped 32→64 to carry window metadata
 
 - **Decision**: The per-slot snapshot header is 64 bytes (was 32). Bytes
-  `[32..64)` carry 8 × u32 LE window-metadata fields: `mip_level`,
-  `win_origin_x`, `win_origin_y`, `win_w`, `win_h`, `tex_dim_w`, `tex_dim_h`,
-  `wrap_mode`. The creature SoA still starts at offset 64 (32-byte aligned).
+  `[32..64)` carry window metadata: `mip_level: u32`, signed logical
+  `win_origin_x/y: i32`, then `win_w`, `win_h`, `tex_dim_w`, `tex_dim_h`,
+  `wrap_mode` as u32. The creature SoA still starts at offset 64
+  (32-byte aligned).
 - **Why**: The renderer needs the window parameters to compute the UV transform
   and to call `texSubImage2D` with the correct dimensions. Embedding them in the
   header is the lowest-latency path (same atomic flip as the snapshot data)
@@ -422,22 +425,22 @@
 - **Code anchors**: `app/crates/evosim/src/wasm_api/mod.rs → write_snapshot` (the DEFAULT-SCALE
   INVARIANT comment block).
 
-### Toroidal wrap-seam is a known limitation at grass_dim > 2048
+### Toroidal clipmap windows use signed origins plus per-ghost UV offsets
 
-- **Decision**: When the camera is near the world seam on a toroidal world with
-  `grass_dim > 2048` (i.e., non-default zoom-out), the clipmap window origin is
-  clamped to `[0, level_dim - win]` rather than allowed to overflow and wrap.
-  This means a window straddling the seam shows the wrong grass/biome region.
-  The limitation is documented in `write_snapshot` and is NOT fixed.
-- **Why**: Supporting toroidal wrap in `viewport_window` requires the window
-  origin to overflow modulo `level_dim`, which `pyramid.viewport_window` does
-  not currently implement. At the shipped default (`grass_dim=1920 < 2048`) the
-  window always equals the full field and the seam never arises. Fixing this is
-  a Stage-3 item (the TODO comment in `write_snapshot` marks the exact clamp to
-  remove).
+- **Decision**: On toroidal worlds, the worker publishes signed logical
+  `win_origin_x/y` metadata while copying grass/biome bytes from the
+  modulo-normalized origin. The renderer applies the base UV transform for the
+  primary draw and adds each ghost draw's world translation divided by the
+  window world span.
+- **Why**: A wrapped upload is ordered in logical window space, not canonical
+  `[0, world_size]` space. Signed origins keep primary seam samples inside the
+  uploaded window; per-ghost offsets make the `±world_size` copies sample the
+  wrapped complement instead of repeating the primary region.
 - **Applies to**: `architecture/render-pipeline.md`.
 - **Code anchors**: `app/crates/evosim/src/wasm_api/mod.rs → write_snapshot`
-  (the `TODO (Stage-3 wrap-seam)` comment on the `win_origin_x/y` clamp).
+  (signed metadata + wrapped copy origins);
+  `app/crates/evosim/src/grass/mod.rs → GrassPyramid::viewport_window`;
+  `app/web/src/render/gl.ts → renderWorldImpl`.
 
 ### Biomes render as flat per-cell color under the grass, fed from the snapshot biome channel
 
