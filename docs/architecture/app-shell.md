@@ -51,9 +51,11 @@ and app/version badge.
 - The stage-then-apply pattern in the Settings panel: per-row dirty
   tracking, Apply / Cancel / Reset semantics, the live-vs-staged
   carve-out, the "construction-only" toast trigger.
-- Settings row anatomy: each devpanel row has an effect dot, a top label line
-  with optional tooltip, and a flex-wrapped control line with the control(s),
-  value readout where present, and a per-row RESET button. Effect colors are
+- Settings row anatomy: each devpanel row is a compact wrapping row made from
+  a header segment (effect dot, setting name, optional tooltip), an optional
+  slider segment, and a meta segment (input, value readout where present, and
+  row-local RESET). Wide rows can stay on one line; narrower slider rows wrap
+  as header / slider+meta, then header / slider / meta. Effect colors are
   green for current-run updates, yellow for restart-needed construction
   settings, and red is reserved for page-refresh-required settings.
 - The Settings panel left sub-nav: eight category buttons (`data-cat`
@@ -170,7 +172,8 @@ readWidget, writeWidget, snapshot, rowEl}`. A row is **dirty** iff
 `readWidget() !== snapshot`. Dirty rows get a `.is-dirty` class which
 the CSS renders as a left-border accent. The row helper also attaches the
 effect dot (`.devpanel-effect-instant`, `.devpanel-effect-restart`, or
-`.devpanel-effect-refresh`) and the row-local RESET button.
+`.devpanel-effect-refresh`) into the header segment and the row-local RESET
+button into the meta segment.
 
 Per-row RESET:
 

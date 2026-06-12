@@ -336,34 +336,41 @@ function makeSettingRow(opts: SettingRowOptions): HTMLDivElement {
   row.className = `devpanel-row devpanel-effect-${opts.effect}`;
   if (opts.wide) row.classList.add("devpanel-row-wide");
 
+  const header = document.createElement("div");
+  header.className = "devpanel-row-header";
+
   const dot = document.createElement("span");
   dot.className = "devpanel-effect-dot";
   dot.title = opts.effectLabel ?? EFFECT_LABELS[opts.effect];
   dot.setAttribute("aria-label", dot.title);
-
-  const body = document.createElement("div");
-  body.className = "devpanel-row-body";
-
-  const top = document.createElement("div");
-  top.className = "devpanel-row-top";
+  header.appendChild(dot);
 
   const labelEl = document.createElement("label");
   labelEl.textContent = opts.label;
   if (opts.nextWorld) labelEl.classList.add("next-world");
   if (opts.tooltip) labelEl.title = opts.tooltip;
-  top.appendChild(labelEl);
+  header.appendChild(labelEl);
 
   if (opts.tooltip) {
     const tip = document.createElement("span");
     tip.className = "devpanel-tooltip";
     tip.textContent = "?";
     tip.title = opts.tooltip;
-    top.appendChild(tip);
+    header.appendChild(tip);
   }
 
-  const controls = document.createElement("div");
-  controls.className = "devpanel-row-controls";
-  for (const control of opts.controls) controls.appendChild(control);
+  const meta = document.createElement("div");
+  meta.className = "devpanel-row-meta";
+  const sliderControls: HTMLElement[] = [];
+  for (const control of opts.controls) {
+    if (control instanceof HTMLInputElement && control.type === "range") {
+      control.classList.add("devpanel-row-slider");
+      sliderControls.push(control);
+    } else {
+      meta.appendChild(control);
+    }
+  }
+  if (sliderControls.length > 0) row.classList.add("devpanel-row-has-slider");
 
   const reset = document.createElement("button");
   reset.type = "button";
@@ -371,10 +378,9 @@ function makeSettingRow(opts: SettingRowOptions): HTMLDivElement {
   reset.textContent = "RESET";
   reset.title = `Reset ${opts.label} to default`;
   reset.addEventListener("click", opts.reset);
-  controls.appendChild(reset);
+  meta.appendChild(reset);
 
-  body.append(top, controls);
-  row.append(dot, body);
+  row.append(header, ...sliderControls, meta);
   return row;
 }
 
