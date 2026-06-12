@@ -1,10 +1,10 @@
 # Profiler
 
-The four-tree, no-rollup, per-row-real-measurement perf instrumentation.
+The five-tree, no-rollup, per-row-real-measurement perf instrumentation.
 
 ## What it is
 
-A runtime-toggleable hierarchical profiler with **six sibling top-level
+A runtime-toggleable hierarchical profiler with **5 sibling top-level
 trees** displayed as stacked tables in the perf panel:
 
 ```
@@ -41,8 +41,6 @@ tick                 ← per-tick sim wall-clock (Rust-side)
   tick.color_ema
   tick.bookkeeping_tail
 
-snapshot             ← write_snapshot_to wall-clock (Rust-side)
-
 nn                   ← sum-busy across all rayon workers, per tick
   nn.build_input
     nn.build_input.proximity
@@ -62,7 +60,7 @@ grass_step           ← sum-busy across all rayon workers, per tick
 
 ## What it owns
 
-- The four-tree structure and the rule that every measured node is a
+- The five-tree structure and the rule that every measured node is a
   real timer pair (NO rollups). Parent nodes have their own clock-now
   brackets; they may exceed the sum of their children (loop overhead,
   dispatch overhead, etc.) and that is the diagnostic value.
@@ -83,7 +81,7 @@ grass_step           ← sum-busy across all rayon workers, per tick
 - The 1 Hz worker→main poll cadence for the profile report.
 - The display rules: insertion-order stable, indent by dotted-prefix
   depth, `(no samples yet)` placeholder for an empty tree, a single
-  `window: X.X s` header above the four trees.
+  `window: X.X s` header above the five trees.
 - The backend is **always-on**. The worker calls
   `world.profile_enable(true)` once at boot and never disables. The
   `showProfiler` setting is the source of truth for panel visibility
@@ -210,12 +208,12 @@ counters into a single reply alongside the JSON tree:
 
 The TS-side `frame` tree (from `app/web/src/perf.ts::reportJson()`) is
 spliced in by `app/web/src/widgets/perf-panel.ts` before rendering. The
-panel renders four `.profiler-tree-section` blocks in the order
-`[frame, tick, nn, grass_step]`; any tree not in that whitelist
-renders at the bottom in JSON-insertion order so a future fifth tree
+panel renders five `.profiler-tree-section` blocks in the order
+`[frame, sim_worker, tick, nn, grass_step]`; any tree not in that whitelist
+renders at the bottom in JSON-insertion order so a future sixth tree
 is not dropped.
 
-A single `window: X.X s` header sits above the four trees, computed
+A single `window: X.X s` header sits above the five trees, computed
 from `max(effective_window_ms)` across every populated node in the
 merged report. Per-tick aggregation makes the window uniform across
 nodes (every tree gets one drained sample per tick), so one number
@@ -313,7 +311,7 @@ span that wants to reach the perf panel should too.
 ## Why is it shaped this way
 
 See [`decisions/profiler.md`](../decisions/profiler.md) — no-rollup
-rule, the four-tree layout, the per-worker accumulator pattern, the
+rule, the five-tree layout, the per-worker accumulator pattern, the
 TS-side `frame` mirror.
 
 ## See also

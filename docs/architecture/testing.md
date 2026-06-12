@@ -4,14 +4,18 @@ What test suites exist, what each covers, where they live.
 
 ## What it is
 
-Two suites:
+Three gate surfaces:
 
 1. **Rust unit tests** — `cargo test --lib`, run both with the default
    feature set and with `--features threads`. Live next to the code as
    `#[cfg(test)] mod tests` blocks. Cover sim invariants, wasm-bindgen
    surface behaviour, NN forward + decode, grass propagation, slider
    dispatch, snapshot byte layout.
-2. **Playwright e2e** — `cd app/web && pnpm test:e2e`. Specs under
+2. **Docs lint** — `cd app/web && pnpm docs:lint`. Dependency-free Node
+   gate for mechanical docs drift: local links/paths, architecture/decision
+   routing, ownership paths, Rust↔TS generated constants, worker pacing
+   invariants, and profiler tree/span drift.
+3. **Playwright e2e** — `cd app/web && pnpm test:e2e`. Specs under
    `app/web/tests/e2e/` cover the main↔worker control path, Rust↔TS slider
    defaults drift, settings persistence, grass LOD/window metadata, and
    restart-time grass sizing. Playwright boots Vite via its `webServer` hook
@@ -29,6 +33,7 @@ to round-trip.
 - The "worker-control Playwright tests force `targetTPS = 1000` before
   interacting" rule, because that is the regime where worker pacing,
   futex wake handling, and snapshot back-pressure regressions surface.
+- The `pnpm docs:lint` command name and what mechanical drift it covers.
 - The `pnpm test:e2e` command name and how Playwright finds Vite.
 
 ## What it does NOT own
@@ -65,7 +70,25 @@ Notable coverage by file:
 | `app/crates/evosim/src/brain/mod.rs` | Forward-pass shape, Leaky ReLU sign behaviour, mutation produces finite values. |
 | `app/crates/evosim/src/grass/mod.rs` | Density init, in-cell growth, scatter/blur propagation coverage, active-tile path equivalence to full-grid reference, wrapped `viewport_window` extraction, bilinear sample, row-has-density bitset rebuild. Tests live in the `grass/tests/` subdir. |
 | `crates/evosim/src/grid.rs` | `cell_of` boundary clamping, `for_each_in_radius` enumeration. |
-| `crates/evosim/src/profiler.rs` | Ring buffer pruning, four-tree minting via `ensure_root`, RAII span correctness. |
+| `crates/evosim/src/profiler.rs` | Ring buffer pruning, five-tree minting via `ensure_root`, RAII span correctness. |
+
+## Docs lint
+
+Run:
+
+```bash
+cd app/web
+pnpm docs:lint
+```
+
+The script lives at `scripts/docs-lint.mjs` and has no third-party
+dependencies. It checks mechanical drift only: relative markdown links,
+high-confidence inline code paths, architecture/decision index routes,
+ownership owner/reference paths, generated Rust→TS constants
+(`control-sab.ts`, `slider-ids.ts`, `lod-constants.ts`), the duplicated
+snapshot constants in `sim/bridge.ts`, the synchronous `Atomics.wait`
+worker pacing invariants, and the profiler doc's tree/span list against
+current producers. It intentionally skips non-current plan files.
 
 Determinism gates: `clippy.toml` forbids `HashMap` / `HashSet`
 `iter*` in sim-critical files (non-deterministic order would silently
@@ -102,9 +125,14 @@ Key coverage:
 - `sim-bridge.spec.ts` **slider change** — opens the dev panel, edits `basic upkeep`, asserts
   no `set_slider … rejected` warning lands on the console.
 - `sim-bridge.spec.ts` **profile toggle** — toggles `show profiler` + `#profiler-enable`,
-  asserts all four stacked profiler tables populate within 4 s.
+  asserts all five stacked profiler tables populate within 4 s.
 - `sim-bridge.spec.ts` **restart `r`** — presses the `r` hotkey, asserts the tick counter
   resets (drops below the pre-restart value).
+- `sab-control.spec.ts` verifies the all-SAB transport still populates
+  worker/profile trees, nested NN proximity rows, and SAB inspector
+  round-trips.
+- `inspector-nn.spec.ts` verifies paused NN inspection through the SAB
+  inspector path.
 - `defaults-drift.spec.ts` compares Rust `sliders_defaults_json()` against
   `settings.ts → DEFAULTS` for every Settings-mirrored Rust slider lane.
 - `settings-persistence.spec.ts` seeds localStorage, verifies every
@@ -127,6 +155,8 @@ If you touch `simLoop()` in `app/web/src/sim/worker.ts`, run it.
 
 - `crates/evosim/Cargo.toml` → `[features] threads`.
 - `app/web/package.json` → `"test:e2e": "playwright test"`.
+- `app/web/package.json` → `"docs:lint": "node ../../scripts/docs-lint.mjs"`.
+- `scripts/docs-lint.mjs` → mechanical docs drift gate.
 - `app/web/playwright.config.ts` → `webServer`, `reuseExistingServer`.
 - `app/web/tests/e2e/app-fps.spec.ts` → App FPS choices, persistence, and
   snapshot back-pressure under high target TPS.
@@ -144,6 +174,7 @@ If you touch `simLoop()` in `app/web/src/sim/worker.ts`, run it.
 
 - A new Rust test suite or integration crate is added.
 - The Playwright suite gains, loses, or renames a spec file.
+- The docs-lint command or coverage changes.
 - The `pnpm test:e2e` command name changes (must stay in sync with
   `app/web/tests/README.md` and `app/web/package.json`).
 - The worker-control `targetTPS = 1000` rule is relaxed (would need a

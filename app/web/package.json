@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
+    "docs:lint": "node ../../scripts/docs-lint.mjs",
     "preview": "vite preview --host",
     "typecheck": "tsc --noEmit",
     "test:e2e": "playwright test"

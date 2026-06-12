@@ -1,8 +1,8 @@
 ---
-status:        active
+status:        shipped
 owner:         orchestrator
 last_updated:  2026-06-12
-okay_to_delete: false
+okay_to_delete: true
 long_lived:    false
 owning_docs:
   - architecture/testing.md
@@ -143,5 +143,13 @@ Code routes:
 
 ## Migration Notes
 
-At ship time, update `manifest.md`, `testing.md`, `testing-how-to.md`, and any
-new tooling docs with the final command and what it covers.
+- `docs/_meta/manifest.md` now lists `cd app/web && pnpm docs:lint` in
+  drift gates and names the worker pacing/profiler checks in
+  drift-verification.
+- `docs/architecture/testing.md` owns the command, coverage, and current
+  e2e spec inventory.
+- `docs/agent-context/testing-how-to.md` documents when and how agents run
+  the command.
+- `docs/architecture/profiler.md`, `docs/_meta/ownership.json`, and the
+  affected decision/procedural docs now reflect the current `Atomics.wait`
+  pacing, five-tree profiler layout, and moved test files.

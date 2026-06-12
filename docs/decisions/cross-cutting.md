@@ -229,7 +229,8 @@ Decisions that bind more than one architecture doc.
   `decisions/sim.md` (the settings-derived-layout decision).
 - **Code anchors**: `app/crates/evosim/src/world/nn.rs → NnInputLayout`,
   `app/crates/evosim/src/brain/mod.rs → NnTopology::with_input_width`,
-  `app/crates/evosim/src/constants.rs → MAX_NN_INPUTS = 48`, `crates/evosim/src/brain_width_tests.rs`.
+  `app/crates/evosim/src/constants.rs → MAX_NN_INPUTS = 48`,
+  `app/crates/evosim/src/brain/tests/width.rs`.
 
 ## See also
 

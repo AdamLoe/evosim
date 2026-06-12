@@ -924,7 +924,7 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   (salts 1–4) with `grass_hash_fused_4` (`app/crates/evosim/src/rng.rs`): 2 `grass_hash_u64`
   words, bit-sliced into non-overlapping windows for decay/spread/band/pick.
   The property "grass never perturbs `SimRng`" is preserved; distribution
-  statistics match within tolerance (tested in `crates/evosim/src/grass_fused_rng_tests.rs`).
+  statistics match within tolerance (tested in `app/crates/evosim/src/grass/tests/fused_rng.rs`).
 - **Why**: Attribution bench (S0) measured RNG as the dominant per-cell cost at
   dense fill (3.05 ns/cell, 47% of 6.42 ns/cell total). Fusing to 2 calls saves
   ~0.86 ns/cell at dense fill. Non-overlapping bit windows avoid cross-salt
@@ -947,7 +947,7 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 - **Why**: Denser source cells push harder → self-reinforcing patch centers →
   tighter, more organic-looking clumps. The persistence invariant (plains
   super-critical, water sub-critical at shoreline) is preserved (tested in
-  `crates/evosim/src/grass_fertility_tests.rs`). The 0.04 decay default is **feel-tunable** —
+  `app/crates/evosim/src/grass/tests/fertility.rs`). The 0.04 decay default is **feel-tunable** —
   the lead should confirm it reads well in the browser.
 - **Applies to**: `architecture/simulation-core.md`.
 - **Code anchors**: `app/crates/evosim/src/grass/mod.rs → compute_propagation_scatter`
@@ -1016,7 +1016,7 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   default.
 - **Applies to**: `architecture/simulation-core.md`.
 - **Code anchors**: `app/crates/evosim/src/grass/mod.rs → compute_propagation_blur`,
-  `blur_at`, `GrassPropagation`; `crates/evosim/src/grass_v201_tests.rs`.
+  `blur_at`, `GrassPropagation`; `app/crates/evosim/src/grass/tests/v201.rs`.
 - **Revisit when**: the lead decides to delete the blur path.
 
 ### Snapshot stays on the sim thread; off-thread snapshot worker rejected

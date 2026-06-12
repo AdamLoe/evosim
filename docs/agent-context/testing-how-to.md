@@ -37,9 +37,16 @@ cargo clippy --all-targets --features threads -- -D warnings
 ```bash
 # From app/web/
 cd app/web
+pnpm docs:lint           # mechanical docs drift gate
 pnpm typecheck            # tsc --noEmit
 pnpm build                # also runs typecheck, then vite build
 ```
+
+`pnpm docs:lint` runs `scripts/docs-lint.mjs` from the repo root. It
+checks local docs links/paths, ownership/index routes, generated Rust↔TS
+constant mirrors, synchronous `Atomics.wait` worker pacing invariants,
+and profiler tree/span drift. It is the first gate to run for docs-only
+changes.
 
 ### Playwright e2e
 
@@ -89,9 +96,9 @@ Add to `app/web/tests/e2e/sim-bridge.spec.ts` (or a new spec next to it).
 Conventions:
 
 - **Force `targetTPS = 1000` before interacting.** This is the only
-  TPS regime where the `Atomics.waitAsync(0)` regression class
-  surfaces. A test at default TPS=60 passes on the buggy commit and
-  misses the regression entirely.
+  TPS regime where pacing overshoot, futex wake handling, and
+  snapshot back-pressure failures reliably surface. A test at default
+  TPS=60 can pass while high-throughput control is broken.
 - Read state back via the status line (`#perf-status-line` `textContent`:
   `seed: X · tick N · pop P`) or via a downstream observable
   (`#profiler-trees` populated, the dev-panel showing a new value).
@@ -114,11 +121,11 @@ Conventions:
    consumer.
 4. **Playwright `pause + resume` or `target TPS` or `slider change`
    fails.** This is the smoke for the worker control path. Check
-   `app/web/src/sim/worker.ts → simLoop`: the 1 ms `timeoutMs` floor,
-   the macrotask yield on the not-equal branch, the
-   `drainMessages()` at the top of the loop. The bug class has
-   shipped twice; the test exists to fail in exactly this regime.
-5. **Playwright `profile toggle` fails.** Four trees should populate
+   `app/web/src/sim/worker.ts → simLoop`: synchronous `Atomics.wait`,
+   futex wake handling, `readControlSab()` at the top of the loop, and
+   ack-gated snapshot publication. The test exists to fail in the
+   high-throughput regime where those regressions surface.
+5. **Playwright `profile toggle` fails.** Five trees should populate
    within 4 s of toggling. If only some populate, a `record_under_root`
    call is missing or routed to the wrong tree. See
    [`../architecture/profiler.md`](../architecture/profiler.md).
@@ -135,7 +142,7 @@ pass still makes sense:
 # From app/ workspace root
 cargo fmt --all --check     # in case formatter rules drifted
 cargo build                 # cheap; catches accidental compile-break
-cd app/web && pnpm typecheck && cd -
+cd app/web && pnpm docs:lint && pnpm typecheck && cd -
 ```
 
 ## See also

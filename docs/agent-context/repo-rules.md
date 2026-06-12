@@ -21,8 +21,10 @@ The repo has these classes of invariant that must hold before any commit:
 - **Rust unit tests (both feature sets).** `cargo test --lib` and
   `cargo test --lib --features threads`. Cross-feature equivalence
   (same seed → same output) must hold.
+- **Docs lint.** `cd app/web && pnpm docs:lint` — mechanical docs
+  drift gate.
 - **TypeScript gates.** `cd app/web && pnpm typecheck && pnpm build` (run from repo root).
-- **Playwright e2e.** `cd web && pnpm test:e2e` — consolidated final
+- **Playwright e2e.** `cd app/web && pnpm test:e2e` — consolidated final
   gate; not run per-stream.
 
 Full invocations and procedures live in

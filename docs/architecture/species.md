@@ -156,5 +156,5 @@ The logit order is stable across modes.
 - [`shared-memory-and-protocol.md`](shared-memory-and-protocol.md) — snapshot creature stride, species color in the packed render word
 - [`render-pipeline.md`](render-pipeline.md) — how species colors appear on canvas
 - [`../decisions/sim.md`](../decisions/sim.md) — rationale for the mode-switch design and seeding choices
-- [`../../agent-context/maintaining-docs.md`](../agent-context/maintaining-docs.md)
+- [`../agent-context/maintaining-docs.md`](../agent-context/maintaining-docs.md)
 - Global authoring rules: `~/agent-docs/v1/rules/authoring-rules.md`

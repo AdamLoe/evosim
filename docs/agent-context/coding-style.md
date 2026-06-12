@@ -87,15 +87,13 @@ You're editing Rust in `app/crates/evosim/src/` or TypeScript in `app/web/`.
 
 **Don't:**
 
-- Replace `Atomics.waitAsync` with `Atomics.wait` in the worker loop.
+- Replace synchronous `Atomics.wait` with `Atomics.waitAsync` in the
+  worker loop.
   See [`../decisions/sim.md`](../decisions/sim.md) and the comment in
   `app/web/src/sim/worker.ts → simLoop`.
-- Lower the `timeoutMs` floor in the worker loop below 1 ms.
-  `Atomics.waitAsync(.., 0)` returns synchronously and dark-holes
-  `onmessage`.
-- `await Promise.resolve()` where the not-equal race path expects a
-  macrotask yield. Microtask resolution races ahead of `onmessage`
-  dispatch.
+- Add `await`, `Promise.resolve()`, or `setTimeout` to `simLoop`.
+  Steady-state control is SAB-only, so the loop is intentionally
+  synchronous and does not feed a postMessage hot path.
 - Source restart-time slider values from `getSettings()` (localStorage).
   Use `currentSliderState()` (in-memory widget values) so a mid-drag
   restart carries the dragged value.

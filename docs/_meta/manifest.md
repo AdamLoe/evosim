@@ -36,6 +36,9 @@ gate philosophy in [`architecture/testing.md`](../architecture/testing.md)):
   `cargo clippy --all-targets --features threads -- -D warnings`.
 - `cargo bench --no-run` — compile-gate the benches (NOT
   `cargo build --benches`: `panic=abort` vs criterion's unwind).
+- `cd app/web && pnpm docs:lint` — cheap mechanical docs drift check
+  (local links/paths, ownership/index routing, generated constant mirrors,
+  worker pacing invariants, profiler tree/span drift).
 - `cd app/web && pnpm typecheck` and `pnpm build` (tsc + vite build).
 - `cd app/web && pnpm test:e2e` — Playwright worker-control-path smoke.
 - A threaded wasm rebuild always uses `--features threads`:
@@ -87,14 +90,16 @@ symbol's existence:
   says "derived from"): `MAX_POP_FOR_SIM`, `CREATURE_STRIDE`, `GRASS_BYTES`,
   `SNAPSHOT_HEADER_BYTES`, `CONTROL_SAB_I32_LEN`, the `CTRL_*` indices.
   Also `GRASS_CELL_COUNT`, `NN_INPUTS`, `FOUNDER_COUNT_DEFAULT`.
-- **Profiler spans:** every `tick.*` / `frame.*` / `nn.*` / `grass_step.*`
-  span named in `architecture/profiler.md` grep-matches an exact span
-  string in code (and no orphan spans exist in code but not docs).
+- **Profiler spans:** `cd app/web && pnpm docs:lint` checks the profiler
+  doc's top-level tree order against `app/web/src/widgets/perf-panel.ts`
+  and verifies the documented `frame.*` / `sim_worker.*` / `tick.*` /
+  `nn.*` / `grass_step.*` spans have producers in code.
 - **Worker control path** (`app/web/src/sim/worker.ts → simLoop`): pacing
-  is `Atomics.waitAsync` (not `Atomics.wait`); the `timeoutMs` floor is
-  `Math.max(1, …)` (a `0` is the dark-hole regression class); the
-  not-equal branch yields a macrotask (`setTimeout`), not a microtask
-  (`Promise.resolve()`).
+  is synchronous `Atomics.wait` (not `Atomics.waitAsync`); the paused path
+  waits with `Infinity`; the target-TPS path waits on `remainingMs` only
+  when `remainingMs > 0.25`; `simLoop` stays synchronous with no
+  `await`/`Promise.resolve()`/`setTimeout` yield path. `pnpm docs:lint`
+  checks those invariants.
 - **Build config:** `Cargo.toml` `[profile.dev]` + `[profile.release]`
   both `panic = "abort"`; `.cargo/config.toml` still has `--shared-memory`,
   `--max-memory`, `--import-memory`, TLS exports; COOP **and** COEP set in

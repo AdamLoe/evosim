@@ -73,6 +73,9 @@ jobs:
       - name: pnpm install
         working-directory: app/web
         run: pnpm install --frozen-lockfile
+      - name: docs lint
+        working-directory: app/web
+        run: pnpm docs:lint
       - name: typecheck + build
         working-directory: app/web
         run: pnpm build

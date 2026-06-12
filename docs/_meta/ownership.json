@@ -10,7 +10,7 @@
     },
     {
       "id": "worker-runtime",
-      "summary": "Web Worker spawn/terminate, Atomics.waitAsync pacing, slider drain ordering",
+      "summary": "Web Worker spawn/terminate, Atomics.wait pacing, slider drain ordering",
       "owner": "architecture/worker-runtime.md",
       "references": ["architecture/simulation-core.md", "architecture/shared-memory-and-protocol.md", "architecture/render-pipeline.md"]
     },
@@ -34,7 +34,7 @@
     },
     {
       "id": "profiler",
-      "summary": "The four profiler trees (frame, tick, nn, grass_step) and the no-rollup rule",
+      "summary": "The five profiler trees (frame, sim_worker, tick, nn, grass_step) and the no-rollup rule",
       "owner": "architecture/profiler.md",
       "references": ["architecture/*"]
     },

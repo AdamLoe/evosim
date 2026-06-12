@@ -266,7 +266,7 @@
 - **Code anchors**: `app/crates/evosim/src/wasm_api/mod.rs → apply_lod_step`, `WorldHandle::lod_step`,
   `write_snapshot` (the `lod_step > 0` branch); `app/web/src/settings.ts → grassLodStep`;
   `app/web/src/widgets/devpanel.ts` (Render/LOD section dropdown);
-  `crates/evosim/src/wasm_lod_stepper_tests.rs` (12 mapping-assertion tests).
+  `app/crates/evosim/src/wasm_api/tests/lod_stepper.rs` (12 mapping-assertion tests).
 - **SAB note**: adding slider index 63 pushed SLIDER_COUNT to 64, which required
   shifting `CTRL_INSPECT_REQ_EPOCH` from 80 → 96 (and all downstream inspect/stats
   constants +16). The camera slots shifted from 120–124 → 136–140.

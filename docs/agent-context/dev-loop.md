@@ -9,7 +9,7 @@ in the browser. The canonical build commands, flags, and threaded-bundle
 invariants live in
 [`../architecture/build-and-deploy.md`](../architecture/build-and-deploy.md);
 this doc is the procedural version for an agent at the keyboard. It is also the canonical landing for the dev-server workflow (the
-`docs/prompts/dev-server.md` prompt file has been deleted; this doc
+The old in-repo dev-server prompt file has been deleted; this doc
 replaces it).
 
 ## The inner loop
@@ -121,7 +121,7 @@ sleep 1
 | `[sim] not cross-origin isolated; rayon disabled` | COOP/COEP missed somewhere | Check `web/vite.config.ts` AND `web/public/_headers` both set the headers |
 | `[sim] rayon collapsed to 1 thread` | wasm bundle threaded but pool failed | Most often a header miss; sometimes a stale wasm |
 | Sim looks frozen but main UI is responsive | Worker booted but tick loop is dark-holing | Check the sim-worker console for an error; restart the worker via `r` |
-| All sliders / pause / TPS dropdown silently fail | `Atomics.waitAsync(0)` regression class | Run `pnpm test:e2e` — it catches this. Check the 1 ms floor in `simLoop` is intact |
+| All sliders / pause / TPS dropdown silently fail | Worker pacing / futex wake regression | Run `pnpm test:e2e` — it catches this. Check that `simLoop` still uses synchronous `Atomics.wait` with SAB wakeups |
 | Vite refuses to start | Port 47821 is held | `lsof -i :47821`; kill the offender |
 | Inexplicable Vite module errors | Vite cache stale (very rare) | `rm -rf web/node_modules/.vite` and restart |
 
