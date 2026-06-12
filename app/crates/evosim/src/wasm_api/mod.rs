@@ -1602,13 +1602,6 @@ impl WorldHandle {
             return None;
         }
         let w = &self.inner;
-        let biome = crate::world::nn::BiomeSampler::new(
-            &w.biome_grid[..],
-            w.dims.grass_dim,
-            w.dims.world_size,
-            w.dims.wrap_world,
-            w.dims.grass_cell_size,
-        );
         let (inputs, output_buf) = crate::world::nn::build_labeled_nn_inspect(
             i,
             &w.nn_input_layout,
@@ -1617,7 +1610,6 @@ impl WorldHandle {
             &w.grass,
             &w.grid,
             &w.sector_lut,
-            biome,
             w.sliders.energy_max,
             w.sliders.max_age,
             w.dims.world_size,

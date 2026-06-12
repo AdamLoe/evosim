@@ -405,6 +405,9 @@ pub(crate) fn compute_grass_density_sectors(
                 }
                 ix_raw
             };
+            if dxo == 0 && dyo == 0 {
+                continue;
+            }
             // v2.0.2 Stream 1a: density is now u8-backed; decode to f32 on read.
             let d = grass.dget(row_off + ix as usize);
             if d <= 0.0 {

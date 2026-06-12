@@ -218,8 +218,7 @@ and `≤ MAX_NN_INPUTS`; see `crates/evosim/src/constants.rs` for the ceiling va
 (`MAX_NN_INPUTS = 48`).
 
 **Active input groups** (always-on): `SelfMemory` (8), `CreatureSectors` (8
-single-pool / 16 species mode), `GrassSectors` (8), `CurrBiomeType` (1 —
-raw normalized biome id: Plains=0.0, Water=0.5, Desert=1.0), `CurrGrass` (1),
+single-pool / 16 species mode), `GrassSectors` (8), `CurrGrass` (1),
 `Bias` (1).
 **Conditional groups**: `WallProximity` (4) when `wrap_world = false`;
 `GrassBandsFar` (8 far sectors at `GRASS_FAR_SIGHT_RADIUS`, mip level
@@ -232,21 +231,21 @@ Single-band (`grass_multisight=false`):
 
 | `wrap_world` | `species_mode` | real | pad to |
 |---|---|---|---|
-| on | off | 27 | **32** |
-| off | off | 31 | **32** |
-| on | on | 35 | **40** |
-| off | on | 39 | **40** |
+| on | off | 26 | **32** |
+| off | off | 30 | **32** |
+| on | on | 34 | **40** |
+| off | on | 38 | **40** |
 
 Multi-band (`grass_multisight=true`, `GrassBandsFar` +8):
 
 | `wrap_world` | `species_mode` | real | pad to |
 |---|---|---|---|
-| on | off | 35 | **40** |
-| off | off | 39 | **40** |
-| on | on | 43 | **48** |
-| off | on | 47 | **48** |
+| on | off | 34 | **40** |
+| off | off | 38 | **40** |
+| on | on | 42 | **48** |
+| off | on | 46 | **48** |
 
-Default (wrap on, species off, `grass_multisight=true`): real 35 → padded **40**.
+Default (wrap on, species off, `grass_multisight=true`): real 34 → padded **40**.
 
 Outputs: `out[0]=vx`, `out[1]=vy`, `out[2..5]` = action logits for
 `{Graze=0, Attack=1, Split=2}`. In species mode `action[2]` decodes to
@@ -254,9 +253,10 @@ Outputs: `out[0]=vx`, `out[1]=vy`, `out[2..5]` = action logits for
 `species.md`). Hidden layers use Leaky ReLU (slope 0.01). Per-layer
 founder init: He-uniform `r = sqrt(6 / fan_in)` at runtime.
 
-`CurrBiomeType` is a raw normalized biome id (Plains=0.0, Water=0.5,
-Desert=1.0) — no genome modulation, no penalty. Biomes carry no movement/energy
-effects; the NN input lets the brain learn food avoidance. See [`biome.md`](biome.md).
+There is no direct biome-type NN input. Biomes carry no movement/energy
+effects and shape learning only by changing grass carrying capacity; the brain
+reads that through `GrassSectors`, optional `GrassBandsFar`, and `CurrGrass`.
+See [`biome.md`](biome.md).
 
 `GrassBandsFar`: 8 directional sectors at far radius, sampled at mip
 level 3 from `GrassPyramid::sample_clamped` — O(1) per tap regardless of
@@ -342,7 +342,7 @@ renderer — see [`shared-memory-and-protocol.md`](shared-memory-and-protocol.md
 
 - `crates/evosim/src/world/mod.rs` → `World`, `DevSliders`, `World::step`, `World::handle_births`
 - `crates/evosim/src/world/tick.rs` → `apply_movement_and_repulsion`, `graze`, `attack`, `energy_bookkeeping`, `collect_deaths`, `flash_decay`
-- `crates/evosim/src/world/nn.rs` → `nn_forward_all_chunks`, `build_nn_input`, `build_labeled_nn_inspect`, `NnInputLayout`, `NnInputGroup`, `BiomeSampler`, `ActionGate`, `decode_action`, `is_valid_action`, `chunk_ranges`, `dynamic_chunks`
+- `crates/evosim/src/world/nn.rs` → `nn_forward_all_chunks`, `build_nn_input`, `build_labeled_nn_inspect`, `NnInputLayout`, `NnInputGroup`, `ActionGate`, `decode_action`, `is_valid_action`, `chunk_ranges`, `dynamic_chunks`
 - `crates/evosim/src/world/nn_stats.rs` → `NnStats`
 - `crates/evosim/src/world/proximity.rs` → `LUT_RADIUS`, sector LUT build, creature + grass proximity helpers, `compute_creature_proximity_sectors_species`, `compute_grass_far_band_sectors`
 - `app/crates/evosim/src/brain/mod.rs` → `Brain`, `Brain::forward`, `Brain::child_from`, `NnTopology`, `lrelu`

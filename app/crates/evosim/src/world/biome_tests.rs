@@ -1,15 +1,13 @@
-//! v2.1 P2 — biome generation + CurrBiomeType NN-input tests.
+//! Biome generation tests.
 //! Movement penalty tests removed (penalties gone); genome-modulation tests
-//! removed (genome gone). CurrBiomeType (1 slot, Plains=0/Water=0.5/Desert=1)
-//! replaces the old BiomeDir(4)+CurrCellPenalty(1) groups.
+//! removed (genome gone). Biome no longer contributes a direct NN input; grass
+//! density is the selection signal.
 //!
 //! Lives in its OWN file/module (wired from `world/mod.rs` via `#[path]`) to
 //! avoid the shared-`mod tests` merge hazard.
 
 use super::biome::generate_biome_grid;
-use super::nn::{build_nn_input, BiomeSampler, NnInputGroup};
-use super::{DevSliders, World};
-use crate::constants::{Biome, WorldDims, MAX_NN_INPUTS, WORLD_SIZE_DEFAULT};
+use crate::constants::{WorldDims, WORLD_SIZE_DEFAULT};
 
 /// Count each biome tag in a grid → (plains, water, desert).
 fn counts(grid: &[u8]) -> (usize, usize, usize) {
@@ -93,113 +91,4 @@ fn biome_wrap_aware_generation_changes_seam_cells() {
     let total = dims_wrap.grass_cell_count;
     assert!(pw * 2 > total, "wrap grid must stay plains-majority");
     assert!(pl * 2 > total, "walled grid must stay plains-majority");
-}
-
-/// Build NN inputs for creature 0 at (x,y) using a world's live settings.
-fn build_inputs_at(w: &mut World, x: f32, y: f32) -> [f32; MAX_NN_INPUTS] {
-    w.creatures.x[0] = x;
-    w.creatures.y[0] = y;
-    let mut scratch = [0.0f32; 16];
-    let prev_vx = w.creatures.vx[0];
-    let prev_vy = w.creatures.vy[0];
-    let energy_max = w.sliders.energy_max;
-    let max_age = w.sliders.max_age;
-    let world_size = w.dims.world_size;
-    let species_mode = w.sliders.species_mode;
-    let layout = w.nn_input_layout.clone();
-    let biome = BiomeSampler::new(
-        &w.biome_grid[..],
-        w.dims.grass_dim,
-        w.dims.world_size,
-        w.dims.wrap_world,
-        w.dims.grass_cell_size,
-    );
-    build_nn_input(
-        0,
-        &layout,
-        species_mode,
-        &w.creatures,
-        &w.grass,
-        &w.grid,
-        &w.sector_lut,
-        &mut scratch,
-        biome,
-        prev_vx,
-        prev_vy,
-        energy_max,
-        max_age,
-        world_size,
-        None,
-    )
-}
-
-/// v2.1 P2: `CurrBiomeType` (1 slot) is present in both wrap modes.
-/// Plains → 0.0, Water → 0.5, Desert → 1.0.
-#[test]
-fn curr_biome_type_slot_active_in_both_wrap_modes() {
-    for wrap in [true, false] {
-        let mut w = World::new_with_sliders(
-            "biome-nn-p2",
-            DevSliders {
-                founder_count: 1,
-                world_size: 1000.0,
-                wrap_world: wrap,
-                world_seed: 4242,
-                ..Default::default()
-            },
-        );
-        let curr_off = w
-            .nn_input_layout
-            .offset_of(NnInputGroup::CurrBiomeType)
-            .expect("CurrBiomeType must be active in both wrap modes");
-
-        let dim = w.dims.grass_dim;
-        let cell = crate::constants::GRASS_CELL_SIZE;
-
-        // Find a plains cell → 0.0
-        if let Some(idx) = w.biome_grid.iter().position(|&b| b == Biome::Plains as u8) {
-            let cx = (idx % dim) as f32 * cell + cell * 0.5;
-            let cy = (idx / dim) as f32 * cell + cell * 0.5;
-            let inp = build_inputs_at(&mut w, cx, cy);
-            assert_eq!(
-                inp[curr_off], 0.0,
-                "wrap={wrap}: Plains CurrBiomeType must be 0.0"
-            );
-        }
-
-        // Find a water cell → 0.5
-        if let Some(idx) = w.biome_grid.iter().position(|&b| b == Biome::Water as u8) {
-            let cx = (idx % dim) as f32 * cell + cell * 0.5;
-            let cy = (idx / dim) as f32 * cell + cell * 0.5;
-            let inp = build_inputs_at(&mut w, cx, cy);
-            assert_eq!(
-                inp[curr_off], 0.5,
-                "wrap={wrap}: Water CurrBiomeType must be 0.5"
-            );
-        }
-
-        // Find a desert cell → 1.0
-        if let Some(idx) = w.biome_grid.iter().position(|&b| b == Biome::Desert as u8) {
-            let cx = (idx % dim) as f32 * cell + cell * 0.5;
-            let cy = (idx / dim) as f32 * cell + cell * 0.5;
-            let inp = build_inputs_at(&mut w, cx, cy);
-            assert_eq!(
-                inp[curr_off], 1.0,
-                "wrap={wrap}: Desert CurrBiomeType must be 1.0"
-            );
-        }
-    }
-}
-
-/// v2.1 P2: BiomeDir and CurrCellPenalty groups are gone — they must not
-/// appear in the active layout.
-#[test]
-fn biome_dir_and_curr_cell_penalty_not_in_layout() {
-    let w = World::new("biome-no-penalty");
-    assert!(
-        w.nn_input_layout
-            .offset_of(NnInputGroup::CurrBiomeType)
-            .is_some(),
-        "CurrBiomeType must be active"
-    );
 }

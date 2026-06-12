@@ -9,7 +9,7 @@
 //!       both with and without grass_multisight.
 //!   (d) smoke: compute_grass_far_band_sectors returns [0..1] values; a fully
 //!       saturated region → far band ≈ 1.0.
-//!   (e) v2.1 P2: no fallback — all 8 combos fit; walled+species+multisight = 47→48.
+//!   (e) no fallback — all 8 combos fit; walled+species+multisight = 46→48.
 //!   (f) default constants agree with documented intent.
 
 use crate::constants::WorldDims;
@@ -239,7 +239,7 @@ fn far_band_outputs_always_bounded() {
 
 // ── (e) v2.1 P2: no fallback — all 8 combos fit within MAX_NN_INPUTS=48 ───────
 
-/// v2.1 P2: walled + species + multisight now fits within 48 slots (real=47).
+/// Walled + species + multisight fits within 48 slots (real=46).
 /// GrassBandsFar IS active; there is no fallback.
 #[test]
 fn walled_species_multisight_fits_no_fallback() {
@@ -255,7 +255,7 @@ fn walled_species_multisight_fits_no_fallback() {
     assert_eq!(
         layout_multi.width(),
         48,
-        "walled+species+multisight: expected padded width 48 (real=47)"
+        "walled+species+multisight: expected padded width 48 (real=46)"
     );
     assert!(
         layout_multi

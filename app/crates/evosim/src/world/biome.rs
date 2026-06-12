@@ -165,6 +165,7 @@ pub fn generate_biome_grid(world_seed: u32, dims: &WorldDims) -> Vec<u8> {
 }
 
 /// Map a stored biome byte to its [`Biome`]. Unknown bytes fall back to Plains.
+#[cfg(test)]
 #[inline]
 pub(crate) fn biome_from_u8(b: u8) -> Biome {
     match b {

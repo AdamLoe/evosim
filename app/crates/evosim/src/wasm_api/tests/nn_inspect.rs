@@ -43,11 +43,11 @@ fn make_handle() -> WorldHandle {
 ///
 /// Default config (walled, single-pool, grass_multisight=true) — v2.1 P2:
 /// `SelfMemory(8) + WallProximity(4) + CreatureSectors(8) + GrassSectors(8)`
-/// `+ GrassBandsFar(8) + CurrBiomeType(1) + CurrGrass(1) + Bias(1)`
-/// `= 39 real slots → padded layout width = 40.`
+/// `+ GrassBandsFar(8) + CurrGrass(1) + Bias(1)`
+/// `= 38 real slots → padded layout width = 40.`
 ///
-/// `inputs` has one entry per active slot (39, excluding the 1 SIMD pad lane).
-/// We verify against the known real count (39) and the padded layout width (40).
+/// `inputs` has one entry per active slot (38, excluding the 2 SIMD pad lanes).
+/// We verify against the known real count (38) and the padded layout width (40).
 #[test]
 fn nn_inspect_input_count_matches_layout_width() {
     let handle = make_handle();
@@ -72,7 +72,7 @@ fn nn_inspect_input_count_matches_layout_width() {
     );
 
     // The `inputs` array has one entry per ACTIVE slot (no pad entries).
-    // For this config: 39 active slots (= 40 padded - 1 SIMD pad lane).
+    // For this config: 38 active slots (= 40 padded - 2 SIMD pad lanes).
     // We verify the count by checking against the known real count directly,
     // and confirm it is strictly less than the padded width (pad slots omitted).
     let n = inputs.len();
@@ -82,9 +82,22 @@ fn nn_inspect_input_count_matches_layout_width() {
         handle.inner.nn_input_layout.width()
     );
     assert_eq!(
-        n,
-        39,
-        "active slot count must be 39 for walled + single-pool + multisight config (v2.1 P2), got {n}"
+        n, 38,
+        "active slot count must be 38 for walled + single-pool + multisight config, got {n}"
+    );
+}
+
+#[test]
+fn nn_inspect_omits_curr_biome_type() {
+    let handle = make_handle();
+    let json_str = handle
+        .creature_nn_inspect_json(0)
+        .expect("creature 0 must be present");
+    let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+    let inputs = parsed["inputs"].as_array().unwrap();
+    assert!(
+        inputs.iter().all(|entry| entry["group"] != "CurrBiomeType"),
+        "inspector NN inputs must not expose CurrBiomeType"
     );
 }
 

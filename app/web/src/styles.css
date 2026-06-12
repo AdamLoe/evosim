@@ -752,8 +752,8 @@ button {
 }
 .nn-input-row {
   display: grid;
-  grid-template-columns: 48px 80px 1fr;
-  gap: 2px 6px;
+  grid-template-columns: minmax(60px, 1fr) 52px minmax(62px, max-content);
+  gap: 2px 2px;
   align-items: center;
   font: 11px ui-monospace, monospace;
   line-height: 1.5;
@@ -761,7 +761,7 @@ button {
 .nn-input-label { color: var(--fg-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .nn-input-bar {
   display: inline-block;
-  width: 80px;
+  width: 52px;
   height: 6px;
   border: 1px solid var(--border-strong);
   border-radius: 2px;
@@ -778,6 +778,8 @@ button {
 .nn-input-val {
   color: var(--fg);
   font-variant-numeric: tabular-nums;
+  text-align: right;
+  min-width: 62px;
 }
 
 /* v2.0 Wave 5: inspector species name + numeric-id tag + history breadcrumb. */
@@ -997,7 +999,7 @@ button {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 2px;
   min-width: 0;
 }
 .devpanel-row-wide select {
@@ -1043,16 +1045,16 @@ button {
   line-height: 1;
 }
 .devpanel-row input[type=range] {
-  flex: 1 1 116px;
-  min-width: 74px;
+  flex: 1 1 78px;
+  min-width: 50px;
   accent-color: var(--accent);
 }
 .devpanel-row input[type=checkbox] {
   flex: 0 0 auto;
 }
 .devpanel-numinput {
-  flex: 0 0 58px;
-  width: 58px;
+  flex: 0 0 40px;
+  width: 40px;
   min-width: 0;
   font-size: 11px;
   font-family: ui-monospace, monospace;
@@ -1070,7 +1072,7 @@ button {
 .devpanel-numinput::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 .devpanel-numinput { -moz-appearance: textfield; }
 .devpanel-readout {
-  flex: 0 0 56px;
+  flex: 0 0 48px;
   text-align: right;
   font-variant-numeric: tabular-nums;
   font-family: ui-monospace, monospace;

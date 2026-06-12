@@ -463,30 +463,26 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 - **Why**: Movement tax + genome modulation coupled biome selection and body
   evolution, muddying the learning signal. With the genome gone and no penalty,
   biomes do exactly one thing — absence of food — which is the cleanest
-  possible selection pressure. Avoidance remains directly learnable via the
-  `CurrBiomeType` NN input (raw biome id).
+  possible selection pressure. Avoidance remains learnable through grass-sector
+  and current-grass inputs.
 - **Applies to**: `architecture/biome.md`, `architecture/simulation-core.md`.
 - **Code anchors**: `app/crates/evosim/src/world/biome.rs → capacity_factor_from_u8`;
   `app/crates/evosim/src/grass/mod.rs → compute_propagation_scatter` (the cap write);
   `app/crates/evosim/src/constants.rs → GRASS_CAPACITY_PLAINS/WATER/DESERT`.
 
-### Biome NN input: single `CurrBiomeType` slot (raw normalized id)
+### Biomes have no direct NN type input
 
-- **Decision**: One always-on NN input group — `NnInputGroup::CurrBiomeType`
-  (1 slot) — exposes biome as a raw normalized id: Plains = 0.0, Water = 0.5,
-  Desert = 1.0. This replaces the former `BiomeDir` (4) + `CurrCellPenalty`
-  (1) pair (net −4 inputs). No genome modulation; every creature reads the
-  same id on the same cell.
-- **Why**: Without movement penalties there is no directional gradient to
-  encode — the 4-cardinal `BiomeDir` inputs were penalty gradients, and
-  `CurrCellPenalty` was the instantaneous penalty. With penalties gone, the
-  only useful signal is "am I in a food-poor zone?" — one raw type id
-  suffices. Fewer inputs keeps widths smaller and the learning surface tighter.
+- **Decision**: The active NN layout has no direct biome-type input. Biomes
+  influence the brain only through grass-sector, far-grass, and current-grass
+  density inputs.
+- **Why**: Biomes now only change grass carrying capacity. A raw biome id is a
+  redundant proxy for the food signal and makes the learning surface wider
+  without adding an effect the creature can act on directly.
 - **Applies to**: `architecture/simulation-core.md`.
-- **Code anchors**: `app/crates/evosim/src/world/nn.rs → NnInputGroup::CurrBiomeType`,
-  `NnInputLayout::for_settings`, `build_nn_input`.
-- **Revisit when**: a new biome effect (other than grass capacity) is added
-  that the brain needs a directional gradient for.
+- **Code anchors**: `app/crates/evosim/src/world/nn.rs → NnInputLayout::for_settings`,
+  `build_nn_input`; `app/crates/evosim/src/world/proximity.rs →
+  compute_grass_density_sectors`, `compute_grass_far_band_sectors`.
+- **Revisit when**: a new biome effect other than grass capacity is added.
 
 ### Species + sexual mating is an opt-in mode, not a replacement
 
@@ -730,8 +726,8 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 - **Alternatives**: keep a constant action-set-indicator input for
   "portability" (rejected — a brain selected against one `action[2]` semantic
   doesn't transfer just because one constant signal says which mode it's in);
-  directional biome penalty sectors (rejected — penalties are gone; `CurrBiomeType`
-  is sufficient).
+  directional biome penalty sectors (rejected — penalties are gone and grass
+  density carries the remaining biome effect).
 
 ### Body radius and repulsion: constants; sprite/repulsion not collision
 
@@ -929,10 +925,10 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   Creatures sensing grass at 160u radius can navigate toward distant patches
   before local exhaustion. Shipping default ON keeps all born creatures on the
   same layout as the rest of the world; the toggle is for the A/B and debugging.
-- **Constraint**: with `CurrBiomeType` replacing the former `BiomeDir`(4)+`CurrCellPenalty`(1)
-  pair (net −4 inputs), all 8 wrap×species×multisight combinations fit within
-  `MAX_NN_INPUTS = 48`; no fallback is needed. The old walled+species
-  combination hit 51 real → 56 padded; the current layout hits 47 → 48.
+- **Constraint**: without direct biome-type inputs, all
+  wrap×species×multisight combinations fit within `MAX_NN_INPUTS = 48`; no
+  fallback is needed. The widest current layout is walled+species+multisight
+  at 46 real slots → 48 padded.
 - **Applies to**: `architecture/simulation-core.md`.
 - **Code anchors**: `app/crates/evosim/src/world/nn.rs → NnInputGroup::GrassBandsFar`,
   `NnInputLayout::for_settings`; `app/crates/evosim/src/world/proximity.rs →
@@ -990,7 +986,7 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 - **Tradeoffs**: `LUT_RADIUS = 4` (in `app/crates/evosim/src/world/proximity.rs`) is pinned to the
   5u default — a safe over-approximation across the full 5–20u range. The grass
   `bilinear_sample` + circle-overlap uses the runtime `grass_cell_size`; so do
-  `biome.rs`, `nn.rs` BiomeSampler, and the `render/gl.ts` UV transform (all
+  `biome.rs` and the `render/gl.ts` UV transform (all
   previously hard-coded 5.0).
 - **Applies to**: `architecture/simulation-core.md`, `architecture/render-pipeline.md`.
 - **Code anchors**: `app/crates/evosim/src/constants.rs → WorldDims::from_world_size_with_cell_size`,

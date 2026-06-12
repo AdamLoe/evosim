@@ -62,28 +62,24 @@ pub const PAST_LIFESPAN_MULT: f32 = 4.0; // per 1000 ticks past max_age
 // ---- Brain ----
 // NN input semantic layout — see src/world/nn.rs::build_nn_input + NnInputLayout.
 //
-// BiomeDir(4) + CurrCellPenalty(1) were replaced by a single
-//   CurrBiomeType(1) — the raw biome id of the current cell (Plains=0.0,
-//   Water=0.5, Desert=1.0). Net change: -4 slots per layout.
-//
 //   Active layout:
 //   SelfMemory(8) + [WallProximity(4)] + CreatureSectors(8/16) + GrassSectors(8)
-//   + [GrassBandsFar(8)] + CurrBiomeType(1) + CurrGrass(1) + Bias(1)
+//   + [GrassBandsFar(8)] + CurrGrass(1) + Bias(1)
 //
 // Width table (all 8 configs, real → padded):
 //   Single-band (grass_multisight=false):
-//     wrap/no-species:  27 → 32
-//     walled/no-species: 31 → 32
-//     wrap/species:     35 → 40
-//     walled/species:   39 → 40
+//     wrap/no-species:  26 → 32
+//     walled/no-species: 30 → 32
+//     wrap/species:     34 → 40
+//     walled/species:   38 → 40
 //   Multi-band (+8 GrassBandsFar, grass_multisight=true):
-//     wrap/no-species:  35 → 40
-//     walled/no-species: 39 → 40
-//     wrap/species:     43 → 48
-//     walled/species:   47 → 48  ← fits now! (was 51→56 before P2)
+//     wrap/no-species:  34 → 40
+//     walled/no-species: 38 → 40
+//     wrap/species:     42 → 48
+//     walled/species:   46 → 48
 //
 // Max padded width = 48 = MAX_NN_INPUTS. The walled+species+multisight fallback
-// is no longer needed: 47 real ≤ 48.
+// is not needed: 46 real ≤ 48.
 //
 // Legacy width-32 slot order (the `NnInputLayout::legacy()` anchor):
 //   [0..8)   self/memory (hunger, age_frac, prev_vx, prev_vy, is_last_graze,
@@ -411,10 +407,9 @@ pub enum Biome {
 // (K_BIOME_SPEED, K_BIOME_COST, K_BIOME_UPKEEP, water/desert penalty sliders)
 // have been removed. Creatures learn to avoid dead-grass zones via grass sensing.
 //
-// The NN biome input is a single compact raw biome-type scalar (`CurrBiomeType`,
-// 1 slot) — the normalized biome id of the creature's current cell: Plains=0.0,
-// Water=0.5, Desert=1.0. This lets brains directly learn "this cell is barren"
-// without any genome modulation.
+// There is no direct biome-type NN input. Biomes shape grass carrying capacity;
+// brains sense the resulting food distribution through grass sector and current
+// grass inputs.
 
 // ---- Species + sexual mating (v2.0 Wave 3a) ----
 //

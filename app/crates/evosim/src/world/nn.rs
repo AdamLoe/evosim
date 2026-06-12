@@ -1,9 +1,8 @@
 //! NN forward pass and action-decode helpers. Both sequential and threaded paths live here.
 //! v2.1 P2: Action enum is {Graze=0, Attack=1, Split=2}. NN_OUTPUTS=5.
-//! BiomeDir(4)+CurrCellPenalty(1) replaced by CurrBiomeType(1); no penalty args.
+//! BiomeDir, CurrCellPenalty, and CurrBiomeType are removed; no penalty args.
 //! v1.5 S5b: build_nn_input rewritten to semantic layout; vision deleted.
 
-use super::biome::biome_from_u8;
 use super::proximity;
 use super::World;
 use crate::constants::*;
@@ -12,58 +11,6 @@ use crate::grass::GrassGrid;
 use crate::grid::SpatialGrid;
 #[cfg(feature = "threads")]
 use rayon::prelude::*;
-
-/// Read-only view over the static biome grid used by `build_nn_input` to
-/// compute the `CurrBiomeType` NN input. `Copy` so the threaded NN pass can
-/// hand a cheap value to every chunk. (v2.1 P2: penalties removed.)
-#[derive(Clone, Copy)]
-pub(crate) struct BiomeSampler<'a> {
-    grid: &'a [u8],
-    grass_dim: usize,
-    world_size: f32,
-    wrap: bool,
-    /// v2.0.4 S2: grass cell size at construction (default 5.0).
-    grass_cell_size: f32,
-}
-
-impl<'a> BiomeSampler<'a> {
-    pub(crate) fn new(
-        grid: &'a [u8],
-        grass_dim: usize,
-        world_size: f32,
-        wrap: bool,
-        grass_cell_size: f32,
-    ) -> Self {
-        Self {
-            grid,
-            grass_dim,
-            world_size,
-            wrap,
-            grass_cell_size,
-        }
-    }
-
-    /// v2.1 P2: raw normalized biome type for the cell under a world position.
-    /// Plains=0.0, Water=0.5, Desert=1.0. Wrap-aware.
-    #[inline]
-    pub(crate) fn biome_type_at(&self, x: f32, y: f32) -> f32 {
-        let dim = self.grass_dim;
-        let ws = self.world_size;
-        let cs = self.grass_cell_size;
-        let (px, py) = if self.wrap {
-            (x.rem_euclid(ws), y.rem_euclid(ws))
-        } else {
-            (x.clamp(0.0, ws), y.clamp(0.0, ws))
-        };
-        let ix = ((px / cs) as usize).min(dim - 1);
-        let iy = ((py / cs) as usize).min(dim - 1);
-        match biome_from_u8(self.grid[iy * dim + ix]) {
-            Biome::Plains => 0.0,
-            Biome::Water => 0.5,
-            Biome::Desert => 1.0,
-        }
-    }
-}
 
 impl World {
     /// Run the NN forward pass for all creatures across fixed chunks (v6 §J).
@@ -102,15 +49,6 @@ impl World {
                 let mating_cost = self.sliders.split_gift;
                 let max_age = self.sliders.max_age;
                 let world_size = self.dims.world_size;
-                // v2.0 Wave 1b: cheap Copy view over the static biome grid +
-                // live severities, shared read-only across all chunks.
-                let biome_ref = BiomeSampler::new(
-                    &self.biome_grid[..],
-                    self.dims.grass_dim,
-                    self.dims.world_size,
-                    self.dims.wrap_world,
-                    self.dims.grass_cell_size,
-                );
                 let stats_ref = std::sync::Arc::clone(&self.nn_stats);
 
                 let chunk_size = chunk_base_size_from_ranges(ranges, n);
@@ -164,7 +102,6 @@ impl World {
                                     grid_ref,
                                     sector_lut_ref,
                                     &mut sec_sub[k],
-                                    biome_ref,
                                     prev_vx,
                                     prev_vy,
                                     energy_max,
@@ -223,15 +160,6 @@ impl World {
             let max_age = self.sliders.max_age;
             let world_size = self.dims.world_size;
             let layout = self.nn_input_layout.clone();
-            // v2.0 Wave 1b: biome view, built once (borrows self.biome_grid +
-            // dims + slider severities, none of which the loop mutates).
-            let biome = BiomeSampler::new(
-                &self.biome_grid[..],
-                self.dims.grass_dim,
-                self.dims.world_size,
-                self.dims.wrap_world,
-                self.dims.grass_cell_size,
-            );
             for &(lo, hi) in ranges {
                 let mut input_buf = [0.0f32; MAX_NN_INPUTS];
                 let mut scratch_a = [0.0f32; NN_MAX_HIDDEN_WIDTH];
@@ -257,7 +185,6 @@ impl World {
                         &self.grid,
                         &self.sector_lut,
                         &mut self.scratch_sector_accum[i],
-                        biome,
                         prev_vx,
                         prev_vy,
                         energy_max,
@@ -459,7 +386,7 @@ pub(crate) struct BuildTimings {
 ///
 /// For Wave 0 the only active configuration is the legacy layout
 /// (`NnInputLayout::legacy()`), which reproduces the historical width-32 slot
-/// order bit-for-bit. Future waves toggle groups (wrap walls 4→8, biome,
+/// order bit-for-bit. Future waves toggle groups (wrap walls 4→8,
 /// creature sectors 8↔16) and the offsets + total width recompute here — no
 /// hand-maintained slot constants.
 ///
@@ -487,9 +414,6 @@ pub(crate) enum NnInputGroup {
     /// single-band). Placed after `GrassSectors` in canonical order so it
     /// never shifts the near-band offset.
     GrassBandsFar,
-    /// v2.1 P2: raw normalized biome type under the body (1 slot, always-on).
-    /// Plains=0.0, Water=0.5, Desert=1.0.
-    CurrBiomeType,
     ReservedPredator,
     CurrGrass,
     Bias,
@@ -498,13 +422,12 @@ pub(crate) enum NnInputGroup {
 impl NnInputGroup {
     /// Canonical group order. The legacy layout activates every group; future
     /// waves choose a subset / wider variants from this same ordering.
-    const ORDER: [NnInputGroup; 9] = [
+    const ORDER: [NnInputGroup; 8] = [
         NnInputGroup::SelfMemory,
         NnInputGroup::WallProximity,
         NnInputGroup::CreatureSectors,
         NnInputGroup::GrassSectors,
         NnInputGroup::GrassBandsFar,
-        NnInputGroup::CurrBiomeType,
         NnInputGroup::ReservedPredator,
         NnInputGroup::CurrGrass,
         NnInputGroup::Bias,
@@ -564,36 +487,35 @@ impl NnInputLayout {
         Self { groups, width }
     }
 
-    /// v2.1 P2 active layout, driven by construction settings (wrap + species +
+    /// Active layout, driven by construction settings (wrap + species +
     /// grass_multisight).
     ///
-    /// Drops `ReservedPredator` entirely; includes `WallProximity` (4 slots)
-    /// ONLY when walled (`wrap_world == false`). Replaces the old `BiomeDir`
-    /// (4) + `CurrCellPenalty` (1) pair with a single `CurrBiomeType` (1 slot):
-    /// raw normalized biome id — Plains=0.0, Water=0.5, Desert=1.0.
+    /// Drops `ReservedPredator`, `BiomeDir`, `CurrCellPenalty`, and
+    /// `CurrBiomeType` entirely. Includes `WallProximity` (4 slots) ONLY when
+    /// walled (`wrap_world == false`).
     ///
     /// `CreatureSectors` is **8** in single-pool and **16** in `species_mode`.
     /// When `grass_multisight` is ON, `GrassBandsFar` (8 slots) is appended
     /// after `GrassSectors`; all 8 configurations now fit within MAX_NN_INPUTS.
     ///
-    /// Width table (base = SelfMemory 8 + GrassSectors 8 + CurrBiomeType 1 +
-    /// CurrGrass 1 + Bias 1 = 19):
+    /// Width table (base = SelfMemory 8 + GrassSectors 8 + CurrGrass 1 +
+    /// Bias 1 = 18):
     ///
     /// Single-band (grass_multisight=false):
     /// | wrap | species | real | pad |
     /// |------|---------|------|-----|
-    /// | on   | off     | 27   | 32  |
-    /// | off  | off     | 31   | 32  |
-    /// | on   | on      | 35   | 40  |
-    /// | off  | on      | 39   | 40  |
+    /// | on   | off     | 26   | 32  |
+    /// | off  | off     | 30   | 32  |
+    /// | on   | on      | 34   | 40  |
+    /// | off  | on      | 38   | 40  |
     ///
     /// Multi-band (grass_multisight=true, GrassBandsFar +8):
     /// | wrap | species | real | pad |
     /// |------|---------|------|-----|
-    /// | on   | off     | 35   | 40  |
-    /// | off  | off     | 39   | 40  |
-    /// | on   | on      | 43   | 48  |
-    /// | off  | on      | 47   | 48  |
+    /// | on   | off     | 34   | 40  |
+    /// | off  | off     | 38   | 40  |
+    /// | on   | on      | 42   | 48  |
+    /// | off  | on      | 46   | 48  |
     ///
     /// All 8 combinations fit within MAX_NN_INPUTS=48 (no fallback needed).
     pub(crate) fn for_settings(
@@ -611,7 +533,7 @@ impl NnInputLayout {
             + if !wrap_world { 4 } else { 0 } // WallProximity
             + creature_sectors               // CreatureSectors (8 or 16)
             + NN_SECTORS                     // GrassSectors (8)
-            + 1 + 1 + 1; // CurrBiomeType + CurrGrass + Bias
+            + 1 + 1; // CurrGrass + Bias
         let include_far_band = grass_multisight && (base_real + NN_SECTORS <= MAX_NN_INPUTS);
 
         let mut groups: Vec<(NnInputGroup, usize)> = Vec::with_capacity(8);
@@ -624,7 +546,6 @@ impl NnInputLayout {
         if include_far_band {
             groups.push((NnInputGroup::GrassBandsFar, NN_SECTORS));
         }
-        groups.push((NnInputGroup::CurrBiomeType, 1));
         groups.push((NnInputGroup::CurrGrass, 1));
         groups.push((NnInputGroup::Bias, 1));
         let layout = Self::from_groups(&groups);
@@ -717,7 +638,6 @@ pub(crate) fn build_nn_input(
     grid: &SpatialGrid,
     sector_lut: &[(u8, u8, f32)],
     sector_scratch: &mut [f32; 16],
-    biome: BiomeSampler,
     prev_vx: f32,
     prev_vy: f32,
     energy_max: f32,
@@ -829,11 +749,6 @@ pub(crate) fn build_nn_input(
         let mut far_sec = [0.0f32; 8];
         proximity::compute_grass_far_band_sectors(x, y, grass, &mut far_sec);
         buf[o..o + NN_SECTORS].copy_from_slice(&far_sec[..NN_SECTORS]);
-    }
-
-    // --- current biome type (v2.1 P2: single scalar, Plains=0.0/Water=0.5/Desert=1.0) ---
-    if let Some(o) = layout.offset_of(NnInputGroup::CurrBiomeType) {
-        buf[o] = biome.biome_type_at(x, y);
     }
 
     // --- reserved-predator padding (explicit 0.0) ---
@@ -996,7 +911,6 @@ pub(crate) fn pick_action_d(
     grid: &SpatialGrid,
     sector_lut: &[(u8, u8, f32)],
     sector_scratch: &mut [f32; 16],
-    biome: BiomeSampler,
     prev_vx: f32,
     prev_vy: f32,
     energy_max: f32,
@@ -1019,7 +933,6 @@ pub(crate) fn pick_action_d(
         grid,
         sector_lut,
         sector_scratch,
-        biome,
         prev_vx,
         prev_vy,
         energy_max,
@@ -1126,7 +1039,6 @@ pub(crate) fn build_labeled_nn_inspect(
     grass: &crate::grass::GrassGrid,
     grid: &crate::grid::SpatialGrid,
     sector_lut: &[(u8, u8, f32)],
-    biome: BiomeSampler,
     energy_max: f32,
     max_age: u32,
     world_size: f32,
@@ -1144,7 +1056,6 @@ pub(crate) fn build_labeled_nn_inspect(
         grid,
         sector_lut,
         &mut sector_scratch,
-        biome,
         prev_vx,
         prev_vy,
         energy_max,
@@ -1232,13 +1143,6 @@ pub(crate) fn build_labeled_nn_inspect(
                     });
                 }
             }
-            NnInputGroup::CurrBiomeType => {
-                inputs.push(LabeledInput {
-                    group: "CurrBiomeType",
-                    label: "biome_type",
-                    value: raw[off],
-                });
-            }
             NnInputGroup::ReservedPredator => {
                 inputs.push(LabeledInput {
                     group: "ReservedPredator",
@@ -1297,13 +1201,6 @@ mod tests {
         let world_size = w.dims.world_size;
         let species_mode = w.sliders.species_mode;
         let layout = w.nn_input_layout.clone();
-        let biome = BiomeSampler::new(
-            &w.biome_grid[..],
-            w.dims.grass_dim,
-            w.dims.world_size,
-            w.dims.wrap_world,
-            w.dims.grass_cell_size,
-        );
         build_nn_input(
             0,
             &layout,
@@ -1313,7 +1210,6 @@ mod tests {
             &w.grid,
             &w.sector_lut,
             &mut scratch,
-            biome,
             prev_vx,
             prev_vy,
             energy_max,
@@ -1336,12 +1232,11 @@ mod tests {
     }
 
     /// v2.1 P2: the SIMD trailing-pad lanes are always 0.0. The walled
-    /// single-pool multisight layout is now width 40 (CurrBiomeType replaces
-    /// BiomeDir(4)+CurrCellPenalty(1) with a single slot, saving 4 slots).
+    /// single-pool multisight layout is width 40.
     ///
     /// Layout: SelfMemory(8) + WallProximity(4) + CreatureSectors(8) +
-    ///   GrassSectors(8) + GrassBandsFar(8) + CurrBiomeType(1)
-    ///   + CurrGrass(1) + Bias(1) = 39 real → padded to 40.
+    ///   GrassSectors(8) + GrassBandsFar(8) + CurrGrass(1) + Bias(1)
+    ///   = 38 real → padded to 40.
     #[test]
     fn nn_input_trailing_pad_is_zero() {
         let mut w = World::new("s5b-pad");
@@ -1357,8 +1252,8 @@ mod tests {
     }
 
     /// The bias-learning constant lane is always 1.0 (at the layout's Bias
-    /// offset — slot 38 in the walled single-pool multisight layout v2.1 P2:
-    /// 8+4+8+8+8+1+1 = 38 before pad).
+    /// offset — slot 37 in the walled single-pool multisight layout:
+    /// 8+4+8+8+8+1 = 37 before the bias slot.
     #[test]
     fn nn_input_bias_is_one() {
         let mut w = World::new("s5b-bias");
@@ -1369,8 +1264,8 @@ mod tests {
         let inp = build_for_founder(&mut w);
         assert_eq!(inp[bias_off], 1.0, "bias slot must be 1.0");
         assert_eq!(
-            bias_off, 38,
-            "walled single-pool multisight layout puts Bias at 38 (v2.1 P2)"
+            bias_off, 37,
+            "walled single-pool multisight layout puts Bias at 37"
         );
     }
 
@@ -1410,6 +1305,47 @@ mod tests {
                 "grass sector {s} must be 0 on empty grid"
             );
         }
+    }
+
+    #[test]
+    fn nn_input_grass_sector_ignores_current_cell() {
+        let mut w = World::new_with_sliders(
+            "grass-sector-current-cell",
+            crate::world::DevSliders {
+                founder_count: 1,
+                grass_multisight: false,
+                ..Default::default()
+            },
+        );
+        w.grass.fill_density(0.0);
+        let x = w.creatures.x[0];
+        let y = w.creatures.y[0];
+        let ix = (x / w.dims.grass_cell_size) as usize;
+        let iy = (y / w.dims.grass_cell_size) as usize;
+        let idx = iy.min(w.dims.grass_dim - 1) * w.dims.grass_dim + ix.min(w.dims.grass_dim - 1);
+        w.grass.dset(idx, GRASS_MAX);
+        w.grass.rebuild_row_bitset();
+
+        let inp = build_for_founder(&mut w);
+        let grass_off = w
+            .nn_input_layout
+            .offset_of(NnInputGroup::GrassSectors)
+            .expect("GrassSectors must be active");
+        for s in 0..NN_SECTORS {
+            assert_eq!(
+                inp[grass_off + s],
+                0.0,
+                "current grass cell must not light grass sector {s}"
+            );
+        }
+        let curr_off = w
+            .nn_input_layout
+            .offset_of(NnInputGroup::CurrGrass)
+            .expect("CurrGrass must be active");
+        assert!(
+            inp[curr_off] > 0.0,
+            "current grass cell must still be visible through CurrGrass"
+        );
     }
 
     // ---- decode_action tests (kept; layout-independent) ----

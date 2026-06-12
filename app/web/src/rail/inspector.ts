@@ -56,6 +56,23 @@ export interface CreatureNnInspectJson {
   outputs: NnOutputs;
 }
 
+const NN_INPUT_GROUP_TOOLTIPS: Record<string, string> = {
+  SelfMemory: "Creature internal state and short action memory.",
+  WallProximity: "Distance-to-wall sensors; 1.0 means touching that wall.",
+  CreatureSectors: "Nearby creature intensity by compass direction.",
+  CreatureSectors_same: "Nearby same-species creature intensity by compass direction.",
+  CreatureSectors_other: "Nearby other-species creature intensity by compass direction.",
+  GrassSectors: "Nearby grass density by compass direction; excludes the current cell.",
+  GrassBandsFar: "Far grass density sampled from the grass LOD pyramid.",
+  CurrGrass: "Grass density under the creature.",
+  Bias: "Constant 1.0 bias input.",
+};
+
+function nnInputTooltip(slot: NnInputSlot): string {
+  const group = NN_INPUT_GROUP_TOOLTIPS[slot.group] ?? slot.group;
+  return `${slot.group}.${slot.label}: ${slot.value.toFixed(3)}\n${group}`;
+}
+
 interface SoASnapshot {
   creatures: Float32Array;
   creaturesU32: Uint32Array;
@@ -229,15 +246,17 @@ function renderNnInspector(data: CreatureNnInspectJson): void {
       const titleDiv = document.createElement("div");
       titleDiv.className = "nn-input-group-title";
       titleDiv.textContent = groupName;
+      titleDiv.title = NN_INPUT_GROUP_TOOLTIPS[groupName] ?? groupName;
       groupDiv.appendChild(titleDiv);
 
       for (const slot of slots) {
         const row = document.createElement("div");
         row.className = "nn-input-row";
+        row.title = nnInputTooltip(slot);
 
         const labelEl = document.createElement("span");
         labelEl.className = "nn-input-label";
-        labelEl.title = slot.label;
+        labelEl.title = nnInputTooltip(slot);
         labelEl.textContent = slot.label;
 
         const barWrap = document.createElement("span");
@@ -252,6 +271,7 @@ function renderNnInspector(data: CreatureNnInspectJson): void {
 
         const valEl = document.createElement("span");
         valEl.className = "nn-input-val";
+        valEl.title = nnInputTooltip(slot);
         valEl.textContent = slot.value.toFixed(3);
 
         row.appendChild(labelEl);

@@ -58,16 +58,13 @@ Water and Desert cells are effectively **dead-grass avoidance zones** — the
 only reason to avoid them is lack of food, not a movement tax. There are no
 speed-cap, move-cost, or upkeep surcharges.
 
-## NN biome input
+## NN signal
 
-`crates/evosim/src/world/nn.rs` → `NnInputGroup::CurrBiomeType`
+`crates/evosim/src/world/nn.rs` → `NnInputLayout::for_settings`, `build_nn_input`
 
-One always-on NN input group exposes the creature's current biome as a
-**raw normalized biome id**: Plains = 0.0, Water = 0.5, Desert = 1.0. This
-lets the brain learn to associate its current terrain with food scarcity
-without any genome modulation. The old `BiomeDir` (4 slots) +
-`CurrCellPenalty` (1 slot) groups are removed; `CurrBiomeType` is a net −4
-inputs vs. the prior layout.
+There is no direct biome-type NN input. Biomes affect learning only by
+modulating grass carrying capacity, so creatures sense the result through the
+grass-sector, far-grass, and current-grass NN inputs.
 
 ## Invariants and gotchas
 
@@ -87,7 +84,7 @@ inputs vs. the prior layout.
 
 - `crates/evosim/src/world/biome.rs` → `generate_biome_grid`, `biome_from_u8`, `capacity_factor_from_u8`
 - `crates/evosim/src/world/mod.rs` → `World.biome_grid` (the stored u8 grid)
-- `crates/evosim/src/world/nn.rs` → `NnInputGroup::CurrBiomeType`, `NnInputLayout::for_settings`
+- `crates/evosim/src/world/nn.rs` → `NnInputLayout::for_settings`, `build_nn_input`
 - `crates/evosim/src/constants.rs` → `Biome` enum, `GRASS_CAPACITY_PLAINS`, `GRASS_CAPACITY_WATER`, `GRASS_CAPACITY_DESERT`
 - `app/crates/evosim/src/grass/mod.rs` → `compute_propagation_scatter` (biome-capacity cap on spread writes)
 - `app/crates/evosim/src/wasm_api/mod.rs` → `BiomePyramid` (`build`, `copy_window`)
