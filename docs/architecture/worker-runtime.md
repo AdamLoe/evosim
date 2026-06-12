@@ -31,6 +31,10 @@ the pacing primitive.
 - The boot handshake: apply persisted sliders, seed SAB slider /
   paused / target_tps values, run one tick, write one snapshot to slot
   0, post `boot_ready`. Main's first RAF then reads a populated slot.
+- Main-side worker health: boot timeout, worker `error` /
+  `messageerror`, and missing snapshot/report progress while unpaused
+  are detected in `main.ts`; recovery uses the same respawn path as
+  restart.
 - The tight synchronous `function simLoop()` body. No `async`, no
   `await`, no `setTimeout` — by design.
 - Per-tick SAB read of paused / target_tps / sliders (gated on
@@ -153,24 +157,41 @@ worker might be parked when the user drags a slider, and we want
 the new value to apply on the next tick rather than after a full
 pacing-slice timeout.
 
-## Restart
+## Restart and recovery
 
 Implemented in `app/web/src/main.ts` → `restart`:
 
 ```ts
 async function restart(): Promise<void> {
-  const oldBridge = simBridge;
-  simBridge = await spawnSimWorker("");
-  oldBridge.terminate();
+  await restartWorker(rail, false);
 }
 ```
 
-`worker.terminate()` is unconditional; any in-progress wasm call is
-dropped, and the synchronous `Atomics.wait` parked thread is killed
-along with the worker. SAB views on main remain valid until the old
-bridge is collected. Restart was the easiest path to leave outside
-the SAB transport because it's already external to the worker loop —
-no in-loop tear-down logic needed.
+`restartWorker` keeps the old bridge alive while the replacement boots,
+then calls `oldBridge.terminate()` and re-points the perf panel, inspector
+selection, highlights, world-end overlay, and RAF seq gate at the new
+bridge. Resetting the frame seq gate matters for early failures: a
+replacement worker can start at the same `CTRL_SEQ` as the last painted
+dead worker, and main must still consume that first replacement snapshot
+so the worker is not left snapshot-back-pressured.
+
+The watchdog in `main.ts` tracks a progress signature made from
+`CTRL_SEQ`, `CTRL_PROFILE_REPORT_EPOCH`, and `CTRL_NN_STATS_EPOCH`.
+While unpaused, no change for `WORKER_STALL_TIMEOUT_MS` means the worker
+is stalled/frozen and automatic recovery starts. Paused worlds are
+excluded because pause intentionally freezes new snapshots. World-ended
+grass-only ticking is not special-cased as a crash; as long as snapshots
+or reports continue, the worker is healthy.
+
+Boot is also bounded by `WORKER_BOOT_TIMEOUT_MS`, and worker `error` /
+`messageerror` events after boot enter the same automatic recovery path.
+Automatic recovery is restart-first: it does not serialize or restore the
+dead worker's exact world state. After repeated automatic failures
+(`MAX_AUTO_RECOVERY_ATTEMPTS`), main switches to `failed` and exposes a
+manual Retry control in the top bar.
+
+The e2e-only `debug_fault` boot field can simulate crash, freeze, or boot
+timeout via `window.__evosimE2E`; no production UI exposes it.
 
 ## Pacing
 
@@ -200,9 +221,12 @@ and GL work is capped by the persisted App FPS setting.
 - [`app/web/src/sim/worker.ts`](../../app/web/src/sim/worker.ts) →
   `handleBoot`, `readControlSab`, `serveInspectRequest`,
   `maybeWriteProfileReport`, `maybeWriteNnStats`,
-  `maybeWriteSpeciesTable`, `writeSnapshotToSAB`, `simLoop`,
+  `maybeWriteSpeciesTable`, `writeSnapshotToSAB`, `freezeForE2E`, `simLoop`,
   `TARGET_RAYON_WORKERS`, `PROFILE_REPORT_EVERY_N_TICKS`,
   `NN_STATS_EVERY_N_TICKS`.
+- [`app/web/src/main.ts`](../../app/web/src/main.ts) →
+  `spawnSimWorker`, `checkWorkerWatchdog`, `restartWorker`,
+  `recoverWorker`, `installWorkerStatusUi`.
 - [`app/web/src/sim/bridge.ts`](../../app/web/src/sim/bridge.ts) →
   `SimBridge`, `SimBridge.sendBoot`, `SimBridge.attachControlSab`,
   `SimBridge.debouncedSetSlider`, `SimBridge.setPaused`,
@@ -222,6 +246,8 @@ and GL work is capped by the persisted App FPS setting.
   regression coverage for the all-SAB transport (sim_worker tree,
   snapshot tree, nn.build_input.proximity nesting, SAB inspector
   round-trip).
+- [`app/web/tests/e2e/worker-watchdog.spec.ts`](../../app/web/tests/e2e/worker-watchdog.spec.ts) —
+  crash/freeze recovery and paused no-false-positive coverage.
 
 ## Update when
 
@@ -230,7 +256,8 @@ and GL work is capped by the persisted App FPS setting.
 - A new top-level profiler tree is added inside the worker.
 - The boot handshake gains or loses a step.
 - The rayon thread-count policy changes.
-- The restart sequence changes shape (e.g. SAB-based tear-down).
+- The restart/recovery sequence changes shape (e.g. SAB-based tear-down,
+  different watchdog progress signals, or stateful world restoration).
 
 ## Why is it shaped this way
 

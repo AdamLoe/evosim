@@ -17,9 +17,9 @@ Three gate surfaces:
    invariants, and profiler tree/span drift.
 3. **Playwright e2e** — `cd app/web && pnpm test:e2e`. Specs under
    `app/web/tests/e2e/` cover the main↔worker control path, Rust↔TS slider
-   defaults drift, settings persistence, grass LOD/window metadata, and
-   restart-time grass sizing. Playwright boots Vite via its `webServer` hook
-   so the suite is one command.
+   defaults drift, settings persistence, grass LOD/window metadata,
+   restart-time grass sizing, and worker watchdog recovery. Playwright
+   boots Vite via its `webServer` hook so the suite is one command.
 
 There is no Rust integration-test crate, no goldens, no snapshot-hash
 acceptance, no save-load round-trip. The sim has no persistence layer
@@ -142,6 +142,9 @@ Key coverage:
   after restart.
 - `grass-lod-smoke.spec.ts` verifies the default grass window/LOD metadata and
   grass evolution path.
+- `worker-watchdog.spec.ts` uses the test-only worker fault hook to verify
+  crash recovery, frozen-worker recovery while unpaused, and no stall false
+  positive while paused.
 
 **Every worker-control test forces `targetTPS = 1000` before interacting.**
 That is the regime where pacing overshoot, futex wake handling, and
@@ -161,6 +164,8 @@ If you touch `simLoop()` in `app/web/src/sim/worker.ts`, run it.
 - `app/web/tests/e2e/app-fps.spec.ts` → App FPS choices, persistence, and
   snapshot back-pressure under high target TPS.
 - `app/web/tests/e2e/sim-bridge.spec.ts` → worker control-path smoke tests.
+- `app/web/tests/e2e/worker-watchdog.spec.ts` → worker crash/freeze recovery
+  and paused no-false-positive coverage.
 - `app/web/tests/e2e/defaults-drift.spec.ts` → Rust↔TS slider default drift guard.
 - `app/web/tests/e2e/settings-persistence.spec.ts` → Settings localStorage and
   boot slider-state persistence guard.

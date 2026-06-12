@@ -64,7 +64,7 @@ the pacing/snapshot plan, not as a hidden implementation detail.
 |---|---|---|---|---|---|
 | Pacing/FPS snapshots | Worker runtime + app shell | Shipped | Commit `9fb9ea1` added app FPS choices, consumed-seq ack lane, snapshot decimation, and docs migration. | None for this wave; velocity lanes remain a later research item. | None. |
 | Render hot path | WebGL renderer | Shipped | Commit `9fb9ea1` cached static biome uploads and added `trail_state` measurement. | Defer velocity lane as a protocol/layout research item. | Velocity lane likely changes stride/layout, not just one pad lane. |
-| Crash resilience | Worker runtime + app shell | Active | Runtime ack/FPS semantics now exist; main can observe seq, consumed seq, pause, and restart state. | Implement `02-worker-watchdog-recovery.md`. | Need threshold semantics around low TPS, app FPS, hidden tab, and explicit pause. |
+| Crash resilience | Worker runtime + app shell | Shipped | Plan `02-worker-watchdog-recovery.md` added boot timeout, worker `error`/`messageerror`, unpaused snapshot/report stall detection, restart-first recovery, visible top-bar status/toast/Retry, and focused e2e fault hooks. | None for this wave; exact world-state recovery remains persistence scope. | None. |
 | Telemetry/history | Sim + protocol + UI/export | Draft plan | Existing cadence report carries profile/TPS/jank/grass; no per-N aggregate history/export surface yet. | See `03-telemetry-history-export.md`. | Needs control-SAB byte-buffer ownership if streamed through existing report family. |
 | Persistence | Rust wasm API + IndexedDB | Draft plan | Only settings persist today; world save would touch `World`, `GrassGrid`, species, RNG, IDs, and selected `WorldHandle` layout state. | See `04-world-persistence-artifacts.md`. | Need format/versioning decision aligned with `WorldConfig`. |
 | Config/schema/presets | Rust + generated TS + app shell | Draft plan | `DevSliders`, `SLIDER_NAMES`, TS settings, construction-only slider set, and positional `new_with_founder_count` all define config pieces. | See `05-world-config-schema-presets.md`. | Broad protocol migration; should not overlap other protocol edits. |
@@ -141,6 +141,11 @@ the pacing/snapshot plan, not as a hidden implementation detail.
 - `d09cac2` shipped `07-docs-drift-lint.md`.
   Verification reported by implementer: `cd app/web && pnpm docs:lint`,
   `cd app/web && pnpm typecheck`, and `git diff --check` passed.
+- `02-worker-watchdog-recovery.md` shipped worker watchdog recovery.
+  Verification reported by implementer: `cd app/web && pnpm typecheck`,
+  `cd app/web && pnpm docs:lint`, focused
+  `cd app/web && pnpm test:e2e -- worker-watchdog.spec.ts`, full
+  `cd app/web && pnpm test:e2e`, and `git diff --check` passed.
 
 ## Migration Notes
 

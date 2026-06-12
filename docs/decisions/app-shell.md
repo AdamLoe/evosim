@@ -85,8 +85,8 @@ that also bind the shell live in [`cross-cutting.md`](cross-cutting.md).
 
 - **Decision**: The settings panel uses a single navigable surface with a
   vertical left sub-nav of categories (Energy, Grass, Lifecycle, World,
-  Equilibrium, Display, Profiler, NN). The top bar is trimmed to exactly
-  four controls: play/pause, Restart, Auto-restart, ⚙ rail toggle.
+  Equilibrium, Display, Profiler, NN). The top bar has four primary
+  controls: play/pause, Restart, Auto-restart, ⚙ rail toggle.
   Removed from the top bar: NN opener, Inspector opener, perf-toggle opener.
   Inspector is still accessible via creature click (auto-opens the rail to
   the inspector tab). NN editor and Profiler are settings categories.
@@ -101,6 +101,22 @@ that also bind the shell live in [`cross-cutting.md`](cross-cutting.md).
 - **Applies to**: `architecture/app-shell.md`.
 - **Code anchors**: `app/web/src/main.ts → installTopBarButtons`,
   `app/web/index.html → #rail-tabs`, `app/web/src/rail/index.ts → RailTab`.
+
+### Worker recovery uses conditional top-bar status and Retry
+
+- **Decision**: Worker boot/recovery/failure state is shown as a conditional
+  top-bar status chip, with a Retry button only after repeated automatic
+  recovery fails.
+- **Why**: Worker failure should be visible without a modal and without
+  opening the rail, but the normal running UI should stay focused on the
+  four primary controls.
+- **Tradeoffs**: The top bar can temporarily contain more than the four
+  primary controls during failure handling. The extra controls disappear in
+  healthy running/paused states.
+- **Applies to**: `architecture/app-shell.md`,
+  `architecture/worker-runtime.md`.
+- **Code anchors**: `app/web/src/main.ts → installWorkerStatusUi`,
+  `recoverWorker`.
 
 ### Profiler activated by category-select, not by a top-bar toggle
 

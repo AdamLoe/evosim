@@ -40,12 +40,15 @@ import { installNnTab } from "./rail/nn-tab";
 import { span } from "./perf";
 import { getSettings, setSetting, hasStoredSetting } from "./settings";
 import { applyTheme } from "./themes";
+import { showToast } from "./toast";
 import packageJson from "../package.json";
 import {
   SimBridge,
   MAX_POP_FOR_SIM,
   CTRL_CONSUMED_SEQ,
   CTRL_CURRENT_SLOT,
+  CTRL_NN_STATS_EPOCH,
+  CTRL_PROFILE_REPORT_EPOCH,
   CTRL_SEQ,
   CREATURE_STRIDE,
   makeSlotLayout,
@@ -62,10 +65,32 @@ import {
   CTRL_CAMERA_VIEWPORT_H,
   type SlotLayout,
   type SimReplyBootReady,
+  type WorkerDebugFault,
   type WindowMetadata,
 } from "./sim/bridge";
 
 const APP_VERSION = packageJson.version;
+const WORKER_BOOT_TIMEOUT_MS = 15_000;
+const WORKER_STALL_TIMEOUT_MS = 3_500;
+const MAX_AUTO_RECOVERY_ATTEMPTS = 2;
+const RECOVERY_ATTEMPT_STABLE_MS = 2_000;
+
+type WorkerHealthState =
+  | "booting"
+  | "running"
+  | "paused"
+  | "stalled"
+  | "crashed"
+  | "restarting"
+  | "failed";
+
+type WorkerFaultKind = "boot_timeout" | "error" | "messageerror" | "stall";
+
+interface SpawnWorkerOptions {
+  debugFault?: WorkerDebugFault | null;
+  bootTimeoutMs?: number;
+  onWorkerFault?: (kind: Exclude<WorkerFaultKind, "boot_timeout">, detail: string) => void;
+}
 
 // v1.13 Wave 2: the `#status` span in the top bar is gone; the status line
 // lives inside the bottom perf panel and is updated via setPanelStatus()
@@ -207,7 +232,168 @@ async function main(): Promise<void> {
   // restarts always reroll (pendingWorldSeed is set fresh in restart() below).
   pendingWorldSeed = getWorldSeed();
 
-  let simBridge = await spawnSimWorker(urlSeed);
+  let simBridge: SimBridge;
+  let workerState: WorkerHealthState = "booting";
+  let workerGeneration = 0;
+  let nextDebugFault: WorkerDebugFault | null = null;
+  let recoveryInFlight = false;
+  let automaticRecoveryAttempts = 0;
+  let lastRecoveryStartedAtMs = -Infinity;
+  let lastWorkerProgressAtMs = performance.now();
+  let lastProgressSeq = -1;
+  let lastProgressProfileEpoch = -1;
+  let lastProgressNnEpoch = -1;
+
+  const workerStatusUi = installWorkerStatusUi(() => {
+    if (workerState !== "failed") return;
+    automaticRecoveryAttempts = 0;
+    void recoverWorker("boot_timeout", "manual retry");
+  });
+  const rail = installRail(setRailOpen);
+
+  function setWorkerState(state: WorkerHealthState, reason = ""): void {
+    workerState = state;
+    document.body.dataset.workerState = state;
+    workerStatusUi.update(state, reason);
+  }
+
+  function readProgressSignature(): [number, number, number] | null {
+    if (!controlI32) return null;
+    return [
+      Atomics.load(controlI32, CTRL_SEQ),
+      Atomics.load(controlI32, CTRL_PROFILE_REPORT_EPOCH),
+      Atomics.load(controlI32, CTRL_NN_STATS_EPOCH),
+    ];
+  }
+
+  function resetWatchdogProgress(now: number): void {
+    const sig = readProgressSignature();
+    lastProgressSeq = sig?.[0] ?? -1;
+    lastProgressProfileEpoch = sig?.[1] ?? -1;
+    lastProgressNnEpoch = sig?.[2] ?? -1;
+    lastWorkerProgressAtMs = now;
+  }
+
+  function observeWorkerProgress(now: number): void {
+    const sig = readProgressSignature();
+    if (!sig) return;
+    const [seq, profileEpoch, nnEpoch] = sig;
+    if (
+      seq !== lastProgressSeq ||
+      profileEpoch !== lastProgressProfileEpoch ||
+      nnEpoch !== lastProgressNnEpoch
+    ) {
+      lastProgressSeq = seq;
+      lastProgressProfileEpoch = profileEpoch;
+      lastProgressNnEpoch = nnEpoch;
+      lastWorkerProgressAtMs = now;
+      if (
+        automaticRecoveryAttempts > 0 &&
+        now - lastRecoveryStartedAtMs >= RECOVERY_ATTEMPT_STABLE_MS
+      ) {
+        automaticRecoveryAttempts = 0;
+      }
+    }
+  }
+
+  function checkWorkerWatchdog(now: number): void {
+    if (!controlI32 || recoveryInFlight || workerState === "failed") return;
+    observeWorkerProgress(now);
+    if (paused) {
+      if (workerState === "running") setWorkerState("paused");
+      lastWorkerProgressAtMs = now;
+      return;
+    }
+    if (workerState === "paused") {
+      resetWatchdogProgress(now);
+      setWorkerState("running");
+      return;
+    }
+    if (workerState !== "running") return;
+    if (now - lastWorkerProgressAtMs > WORKER_STALL_TIMEOUT_MS) {
+      void recoverWorker("stall", "worker stopped publishing snapshots or reports");
+    }
+  }
+
+  function bindWorkerFault(generation: number): SpawnWorkerOptions["onWorkerFault"] {
+    return (kind, detail) => {
+      if (generation !== workerGeneration || recoveryInFlight || workerState === "failed") return;
+      void recoverWorker(kind, detail);
+    };
+  }
+
+  async function spawnTrackedWorker(seed: string): Promise<SimBridge> {
+    const generation = ++workerGeneration;
+    const fault = nextDebugFault;
+    nextDebugFault = null;
+    setWorkerState(generation === 1 ? "booting" : "restarting");
+    const bridge = await spawnSimWorker(seed, {
+      debugFault: fault,
+      bootTimeoutMs: WORKER_BOOT_TIMEOUT_MS,
+      onWorkerFault: bindWorkerFault(generation),
+    });
+    if (generation !== workerGeneration) {
+      bridge.terminate();
+      throw new Error("[worker] stale boot_ready from superseded worker");
+    }
+    resetWatchdogProgress(performance.now());
+    setWorkerState(paused ? "paused" : "running");
+    return bridge;
+  }
+
+  function cleanupAfterWorkerSwap(rail: RailState): void {
+    setPanelBridge(simBridge);
+    resetPanelSamples();
+    resetInspectorSelection(rail);
+    highlights.clear();
+    lastPaintedSeq = -1;
+    lastPaintedAtMs = -Infinity;
+    lastPaintedCamX = NaN;
+    lastPaintedCamY = NaN;
+    lastPaintedCamZoom = NaN;
+    latestWindowMetadata = null;
+    hideWorldEndOverlay();
+  }
+
+  async function restartWorker(rail: RailState, automatic: boolean): Promise<void> {
+    let freshSeed = (Math.floor(Math.random() * 0xffff_fffe) + 1) >>> 0;
+    if (freshSeed === 0) freshSeed = 1;
+    pendingWorldSeed = freshSeed;
+    const oldBridge = simBridge;
+    const replacement = await spawnTrackedWorker("");
+    simBridge = replacement;
+    oldBridge.terminate();
+    cleanupAfterWorkerSwap(rail);
+    if (!automatic) automaticRecoveryAttempts = 0;
+  }
+
+  async function recoverWorker(kind: WorkerFaultKind, detail: string): Promise<void> {
+    if (recoveryInFlight || workerState === "failed") return;
+    automaticRecoveryAttempts++;
+    if (automaticRecoveryAttempts > MAX_AUTO_RECOVERY_ATTEMPTS) {
+      setWorkerState("failed", detail);
+      showToast("Simulation worker failed. Use Retry to start a new worker.", 6000);
+      return;
+    }
+
+    recoveryInFlight = true;
+    lastRecoveryStartedAtMs = performance.now();
+    setWorkerState(kind === "stall" ? "stalled" : "crashed", detail);
+    showToast("Simulation worker stopped. Restarting the simulation.", 3600);
+    try {
+      await restartWorker(rail, true);
+      showToast("Simulation worker recovered.", 2600);
+    } catch (err) {
+      const nextDetail = err instanceof Error ? err.message : String(err);
+      recoveryInFlight = false;
+      void recoverWorker("boot_timeout", nextDetail);
+      return;
+    }
+    recoveryInFlight = false;
+  }
+
+  setWorkerState("booting");
+  simBridge = await spawnTrackedWorker(urlSeed);
 
   const cam = makeCamera(latestSnapshotWorldSize());
   attachCameraControls(
@@ -216,8 +402,6 @@ async function main(): Promise<void> {
     () => ({ w: viewW, h: viewH }),
     () => latestSnapshotWorldSize(),
   );
-
-  const rail = installRail(setRailOpen);
 
   installCanvasClickHandler(canvas, cam, () => ({ w: viewW, h: viewH }), simBridge, rail);
   // v2.1 P1 e2e: expose window.__evosimE2E.selectFirstCreature() for headless
@@ -234,7 +418,12 @@ async function main(): Promise<void> {
   // v1.13 Wave 1: media-player top-bar buttons (play/pause, restart,
   // auto-restart, settings, perf). All share the `.iconbtn` CSS class.
   // Order in DOM matches left-to-right visual order.
-  installTopBarButtons(() => simBridge, () => restart(), rail);
+  installTopBarButtons(() => simBridge, () => restart(), rail, () => {
+    if (workerState === "running" || workerState === "paused") {
+      resetWatchdogProgress(performance.now());
+      setWorkerState(paused ? "paused" : "running");
+    }
+  });
 
   // v1.9.1: apply persisted rail open/closed state on boot. The class drives
   // the grid track collapse + #right-rail display:none (see styles.css).
@@ -249,26 +438,32 @@ async function main(): Promise<void> {
   // Restart always rerolls — see restart() below.
 
   async function restart(): Promise<void> {
-    // v2.0.5 S5: Restart ALWAYS rerolls the biome seed — fresh random world
-    // every time. Pick a non-zero u32 so the displayed seed is deterministic
-    // (0 means "let Rust randomize", which produces a displayed seed that
-    // differs from what was requested).
-    let freshSeed = (Math.floor(Math.random() * 0xffff_fffe) + 1) >>> 0;
-    if (freshSeed === 0) freshSeed = 1;
-    pendingWorldSeed = freshSeed;
-    const oldBridge = simBridge;
-    simBridge = await spawnSimWorker("");
-    oldBridge.terminate();
-    // v2.0 Wave 5: re-point the perf panel's species-table poll at the new
-    // bridge (the old one is now terminated, its species report frozen).
-    setPanelBridge(simBridge);
-    resetPanelSamples();
-    resetInspectorSelection(rail);
-    highlights.clear();
-    // v1.13 Wave 2: position interpolation between snapshots was removed —
-    // the seq-gate now forbids painting the same snapshot twice, and lerping
-    // requires painting duplicates by definition. Nothing to reset here.
-    hideWorldEndOverlay();
+    try {
+      await restartWorker(rail, false);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      setWorkerState("failed", detail);
+      showToast("Simulation restart failed. Use Retry to try again.", 6000);
+    }
+  }
+
+  {
+    const ns =
+      (window as unknown as { __evosimE2E?: Record<string, unknown> }).__evosimE2E ??
+      ((window as unknown as { __evosimE2E: Record<string, unknown> }).__evosimE2E = {});
+    ns["getWorkerState"] = (): WorkerHealthState => workerState;
+    ns["simulateWorkerCrash"] = (): void => {
+      nextDebugFault = "crash_after_boot";
+      void restart();
+    };
+    ns["simulateWorkerFreeze"] = (): void => {
+      nextDebugFault = "freeze_after_boot";
+      void restart();
+    };
+    ns["simulateWorkerBootTimeout"] = (): void => {
+      nextDebugFault = "boot_timeout";
+      void restart();
+    };
   }
 
   // World-end overlay wiring. Shown by the frame loop the first time a
@@ -342,6 +537,7 @@ async function main(): Promise<void> {
       requestAnimationFrame(frame);
       return;
     }
+    checkWorkerWatchdog(now);
 
     // v2.0.3 Stream 2b: write camera SAB lanes each RAF so the worker has an
     // up-to-date view of camera state when it calls write_snapshot.
@@ -543,12 +739,48 @@ function latestSnapshotWorldSize(): number {
   return latestWorldSize;
 }
 
-async function spawnSimWorker(seed: string): Promise<SimBridge> {
+async function spawnSimWorker(
+  seed: string,
+  options: SpawnWorkerOptions = {},
+): Promise<SimBridge> {
   const w = new Worker(new URL("./sim/worker.ts", import.meta.url), { type: "module" });
   const bridge = new SimBridge(w);
 
-  const bootReady = new Promise<SimReplyBootReady>((resolve) => {
-    bridge.onBootReady((reply) => resolve(reply));
+  let bootSettled = false;
+  let bootTimer: ReturnType<typeof window.setTimeout> | null = null;
+  const bootReady = new Promise<SimReplyBootReady>((resolve, reject) => {
+    const failBoot = (err: Error): void => {
+      if (bootSettled) return;
+      bootSettled = true;
+      if (bootTimer !== null) window.clearTimeout(bootTimer);
+      w.terminate();
+      reject(err);
+    };
+    bootTimer = window.setTimeout(() => {
+      failBoot(new Error(`[boot] sim worker did not become ready within ${options.bootTimeoutMs ?? WORKER_BOOT_TIMEOUT_MS} ms`));
+    }, options.bootTimeoutMs ?? WORKER_BOOT_TIMEOUT_MS);
+    bridge.onBootReady((reply) => {
+      if (bootSettled) return;
+      bootSettled = true;
+      if (bootTimer !== null) window.clearTimeout(bootTimer);
+      resolve(reply);
+    });
+    w.addEventListener("error", (event) => {
+      event.preventDefault();
+      const message = event.message || "worker error";
+      if (!bootSettled) {
+        failBoot(new Error(`[worker] ${message}`));
+        return;
+      }
+      options.onWorkerFault?.("error", message);
+    });
+    w.addEventListener("messageerror", () => {
+      if (!bootSettled) {
+        failBoot(new Error("[worker] messageerror during boot"));
+        return;
+      }
+      options.onWorkerFault?.("messageerror", "worker messageerror");
+    });
   });
 
   cachedSeed = seed === "" ? "(random)" : seed;
@@ -601,6 +833,7 @@ async function spawnSimWorker(seed: string): Promise<SimBridge> {
     // boot path (read during founder seeding, before initial_sliders).
     init_graze_boost: getInitGrazeBoost(),
     init_split_boost: getInitSplitBoost(),
+    debug_fault: options.debugFault ?? undefined,
   });
 
   const ready = await bootReady;
@@ -735,6 +968,47 @@ function makeTextBtn(id: string, label: string, title: string): HTMLButtonElemen
   return btn;
 }
 
+function installWorkerStatusUi(onRetry: () => void): {
+  update: (state: WorkerHealthState, reason: string) => void;
+} {
+  const setShown = (el: HTMLElement, shown: boolean): void => {
+    el.hidden = !shown;
+    el.style.display = shown ? "" : "none";
+  };
+  const bar = document.getElementById("top-bar");
+  const status = document.createElement("span");
+  status.id = "worker-status";
+  status.className = "topbar-btn";
+  setShown(status, false);
+
+  const retry = makeTextBtn("worker-retry-btn", "Retry worker", "Retry simulation worker");
+  setShown(retry, false);
+  retry.addEventListener("click", onRetry);
+
+  if (bar) bar.append(status, retry);
+
+  return {
+    update(state, reason) {
+      if (state === "running" || state === "paused") {
+        setShown(status, false);
+        setShown(retry, false);
+        return;
+      }
+      const labels: Record<Exclude<WorkerHealthState, "running" | "paused">, string> = {
+        booting: "Worker: booting",
+        stalled: "Worker: stalled",
+        crashed: "Worker: crashed",
+        restarting: "Worker: recovering",
+        failed: "Worker: failed",
+      };
+      status.textContent = labels[state as Exclude<WorkerHealthState, "running" | "paused">];
+      status.title = reason || status.textContent;
+      setShown(status, true);
+      setShown(retry, state === "failed");
+    },
+  };
+}
+
 function installAppBadge(): void {
   const wrap = document.getElementById("canvas-wrap");
   if (!wrap || document.getElementById("app-badge")) return;
@@ -758,6 +1032,7 @@ function installTopBarButtons(
   getBridge: () => SimBridge,
   onRestart: () => void,
   rail: RailState,
+  onPausedChange: () => void,
 ): void {
   const bar = document.getElementById("top-bar");
   if (!bar) return;
@@ -772,6 +1047,7 @@ function installTopBarButtons(
   playBtn.addEventListener("click", () => {
     paused = !paused;
     getBridge().setPaused(paused);
+    onPausedChange();
     refreshPlayLabel();
   });
   window.addEventListener("keydown", (e) => {
@@ -781,6 +1057,7 @@ function installTopBarButtons(
     e.preventDefault();
     paused = !paused;
     getBridge().setPaused(paused);
+    onPausedChange();
     refreshPlayLabel();
   });
 
@@ -916,6 +1193,19 @@ main().catch((err) => {
   // Surface in the perf panel's status line if it's already wired up;
   // otherwise users see the error in DevTools.
   try {
+    document.body.dataset.workerState = "failed";
+    const workerStatus = document.getElementById("worker-status");
+    if (workerStatus) {
+      workerStatus.textContent = "Worker: failed";
+      workerStatus.setAttribute("title", String(err));
+      workerStatus.hidden = false;
+      workerStatus.style.display = "";
+    }
+    const workerRetry = document.getElementById("worker-retry-btn") as HTMLButtonElement | null;
+    if (workerRetry) {
+      workerRetry.hidden = true;
+      workerRetry.style.display = "none";
+    }
     const statusLine = document.getElementById("perf-status-line");
     if (statusLine) statusLine.textContent = `Boot failed: ${err}`;
   } catch { /* ignore */ }

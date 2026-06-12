@@ -44,10 +44,11 @@ and app/version badge.
 - Right-rail tab routing: tab switching, default tab on boot, the
   switch-on-creature-click rule. Only two tabs exist: Settings and Inspector.
   NN editor and Profiler are settings categories, not rail tabs.
-- Which TS module installs into which DOM element. Installers run from
-  `main.ts` in the order: dev panel → profiler panel → NN tab → top-bar
-  buttons. Installation order matters because the devpanel sub-nav wiring
-  calls `setProfilerVisible` from the profiler panel installer.
+- Which TS module installs into which DOM element. `main.ts` installs the
+  dev panel first so `currentSliderState()` is ready for worker boot, then
+  creates the worker status UI and rail before spawning the worker. After
+  boot it wires canvas click handling, the profiler panel, NN tab, and
+  top-bar buttons.
 - The stage-then-apply pattern in the Settings panel: per-row dirty
   tracking, Apply / Cancel / Reset semantics, the live-vs-staged
   carve-out, the "construction-only" toast trigger.
@@ -74,6 +75,10 @@ and app/version badge.
   `#app-shell.rail-collapsed`, which collapses the grid track to `0`
   and hides `#right-rail`. The ⚙ button and the `~` hotkey both route
   through `setRailOpen` in `main.ts`.
+- Worker recovery status: the top bar normally shows only the primary
+  controls, but `#worker-status` appears while the sim worker is booting,
+  recovering, stalled/crashed, or failed. `#worker-retry-btn` appears only
+  after repeated automatic recovery fails.
 - Theming: `app/web/src/themes.ts` owns the palette map. `applyTheme(id)`
   writes inline custom properties onto `<html>`; shipped themes each define
   every CSS var listed in `styles.css`'s `:root` block.
@@ -101,7 +106,7 @@ and app/version badge.
 | `#app-shell` | Two-column grid. Carries `.rail-collapsed` when the rail is hidden. | CSS-only; class flipped by `main.ts → applyRailOpen`. |
 | `#left-col` | Top-bar + canvas + app badge + empty `#perf-box` placeholder. | CSS-only plus `main.ts → installAppBadge`. |
 | `#app-badge` | Top-left `evosim v<version>` badge. Version is imported from `app/web/package.json`. | `main.ts → installAppBadge`. |
-| `#top-bar` | Always-visible 4-control strip: play/pause, Restart (always rerolls seed), auto-restart, ⚙ settings rail toggle. | `main.ts → installTopBarButtons`. NN opener, Inspector opener, and perf-toggle opener were removed; all three surfaces now live inside the Settings panel or as rail tabs. |
+| `#top-bar` | Always-visible primary controls: play/pause, Restart (always rerolls seed), auto-restart, ⚙ settings rail toggle; conditional `#worker-status` and `#worker-retry-btn` appear during recovery/failure. | `main.ts → installTopBarButtons`, `installWorkerStatusUi`. NN opener, Inspector opener, and perf-toggle opener were removed; all three surfaces now live inside the Settings panel or as rail tabs. |
 | `#canvas-wrap > #aquarium` | The WebGL2 sim view. | `render/gl.ts`. |
 | `#perf-box` | Empty hidden placeholder (kept in DOM for resize-handle compat). The profiler content was relocated to `#settings-profiler-pane`. | DOM-only; `display:none`. |
 | `#right-rail` | Persistent right column, 420 px. | `rail/index.ts → installRail`. |
@@ -345,7 +350,7 @@ rationale on the major/minor split.
 
 - `app/web/index.html` → DOM skeleton, all element IDs in the table above.
 - `app/web/src/styles.css` → palette tokens, grid layout, sub-nav styles (`.settings-cat-btn`, `.settings-pane`), dirty-row accent, toast styling.
-- `app/web/src/main.ts` → `main`, `spawnSimWorker`, `installTopBarButtons` (4-control top bar), frame loop, camera-lane pre-seed + RAF writes, `makeSlotLayout` binding.
+- `app/web/src/main.ts` → `main`, `spawnSimWorker`, `installTopBarButtons`, `installWorkerStatusUi`, `checkWorkerWatchdog`, frame loop, camera-lane pre-seed + RAF writes, `makeSlotLayout` binding.
 - `app/web/src/rail/index.ts` → `installRail`, `pollRail`, `RailState`, `switchTab`. `RailTab` = `"inspector" | "settings"` only.
 - `app/web/src/rail/inspector.ts` → click→tab switch, empty-state toggle, SoA fast-path, `inspect_id` throttle, `#ins-nn-block` NN I/O block.
 - `app/web/src/rail/nn-tab.ts` → `installNnTab` (mounts into `#settings-nn-pane → #nn-tab-host`).

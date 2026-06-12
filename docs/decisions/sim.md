@@ -170,6 +170,27 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 - **Code anchors**: `app/web/src/main.ts → restart`,
   `app/web/src/main.ts → spawnSimWorker`.
 
+### Worker recovery is restart-first and progress-observed
+
+- **Decision**: Main detects boot timeout, worker `error` /
+  `messageerror`, and missing unpaused progress, then recovers by spawning
+  a fresh worker and terminating the old bridge. It does not restore the
+  dead worker's exact world state.
+- **Why**: The worker loop is intentionally synchronous and SAB-only, so a
+  frozen worker cannot be asked to tear itself down. Main can still observe
+  `CTRL_SEQ` plus cadence report epochs and can always kill the worker
+  from outside.
+- **Tradeoffs**: Recovery is a fresh world with current settings and the
+  normal restart seed semantics. Exact state restoration waits for the
+  persistence design.
+- **Applies to**: `architecture/worker-runtime.md`.
+- **Code anchors**: `app/web/src/main.ts → checkWorkerWatchdog`,
+  `restartWorker`, `recoverWorker`; `app/web/src/sim/bridge.ts →
+  WorkerDebugFault`.
+- **Revisit when**: world persistence ships, or a future protocol adds a
+  live-worker health heartbeat that is cheaper or more precise than the
+  snapshot/report epoch signature.
+
 ### Restart sources sliders from in-memory widget state, not localStorage
 
 - **Decision**: `boot.initial_sliders` is sourced from

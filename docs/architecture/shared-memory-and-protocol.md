@@ -282,7 +282,7 @@ Decode: `flash_tag = p & 0x7`, `flash_ticks = (p >> 3) & 0xF`, `species_id = (p
 
 | `kind` | Payload | Freq |
 |---|---|---|
-| `boot` | `{ seed, initial_grass_seed_count, energy_max, founder_count, full_grass_on_init, world_size, wrap_world, world_seed, species_mode, crossover_mode, starting_species_count, starting_species_member_count, starting_species_member_variance, grass_cell_size, grass_multisight, grass_clump_count, grass_clump_size, initial_sliders, initial_target_tps, initial_paused }` | once per worker lifetime |
+| `boot` | `{ seed, initial_grass_seed_count, energy_max, founder_count, full_grass_on_init, world_size, wrap_world, world_seed, species_mode, crossover_mode, starting_species_count, starting_species_member_count, starting_species_member_variance, grass_cell_size, grass_multisight, grass_clump_count, grass_clump_size, initial_sliders, initial_target_tps, initial_paused, debug_fault? }` | once per worker lifetime |
 
 Everything else is on the control SAB. The `boot` message carries
 `initial_target_tps` and `initial_paused` so the worker can seed those SAB lanes
@@ -302,7 +302,10 @@ before founder brains/topology are built, and the **`grass_clump_count: u32`** +
 after construction and cannot resize `WorldDims`, rebuild the NN input layout, or
 re-seed boot grass. These shape the world topology at construction, not as live
 sliders. `world_seed` is **separate** from the string `seed` (the RNG seed) — not
-coupled. `mating_cooldown_ticks` is live and rides the slider SAB.
+coupled. `mating_cooldown_ticks` is live and rides the slider SAB. The optional
+`debug_fault` field is test-only: Playwright sets it through
+`window.__evosimE2E` to simulate worker crash, freeze, or boot timeout on the
+next boot; production UI does not expose it.
 
 ## Worker → main replies (`SimReply`)
 
@@ -399,7 +402,8 @@ if it advanced, the bytes are guaranteed to be coherent.
 - [`app/web/src/sim/worker.ts`](../../app/web/src/sim/worker.ts) →
   `handleBoot`, `readControlSab`, `serveInspectRequest`,
   `maybeWriteProfileReport`, `maybeWriteNnStats`,
-  `writeSnapshotToSAB` (reads camera SAB lanes, calls `world.write_snapshot`), `simLoop`.
+  `writeSnapshotToSAB` (reads camera SAB lanes, calls `world.write_snapshot`),
+  `freezeForE2E`, `simLoop`.
 - [`app/web/src/main.ts`](../../app/web/src/main.ts) → `spawnSimWorker`
   (the `max_pop_for_sim` assert and SAB view construction); writes camera SAB lanes
   each RAF + first-tick init to `(worldSize/2, worldSize/2, zoom=1)`.

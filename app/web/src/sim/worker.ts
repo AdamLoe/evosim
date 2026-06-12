@@ -312,6 +312,10 @@ async function handleBoot(boot: SimMessageBoot): Promise<void> {
   world.step_n(1);
   lastPublishedSeq = writeSnapshotToSAB() ?? Atomics.load(ctrlI32, CTRL_SEQ);
 
+  if (boot.debug_fault === "boot_timeout") {
+    freezeForE2E();
+  }
+
   // v1.11 (A): hand main the wasm memory + snapshot byte offset/len so it
   // can build views over `wasm.memory.buffer` directly. WebAssembly.Memory
   // with shared memory enabled round-trips through postMessage and the
@@ -337,7 +341,25 @@ async function handleBoot(boot: SimMessageBoot): Promise<void> {
   };
   post(reply);
 
+  if (boot.debug_fault === "crash_after_boot") {
+    setTimeout(() => {
+      throw new Error("[sim:e2e] simulated worker crash after boot");
+    }, 0);
+    return;
+  }
+  if (boot.debug_fault === "freeze_after_boot") {
+    freezeForE2E();
+    return;
+  }
+
   simLoop();
+}
+
+function freezeForE2E(): never {
+  const frozen = new Int32Array(new SharedArrayBuffer(4));
+  for (;;) {
+    Atomics.wait(frozen, 0, 0, 60_000);
+  }
 }
 
 // ─── Per-tick control read ──────────────────────────────────────────────────

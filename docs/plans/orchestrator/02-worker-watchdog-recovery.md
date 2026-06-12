@@ -1,8 +1,8 @@
 ---
-status:        active
+status:        shipped
 owner:         orchestrator
 last_updated:  2026-06-12
-okay_to_delete: false
+okay_to_delete: true
 long_lived:    false
 owning_docs:
   - architecture/worker-runtime.md
@@ -124,6 +124,18 @@ Code routes:
 
 ## Migration Notes
 
-At ship time, update `worker-runtime.md` restart/watchdog sections,
-`app-shell.md` for visible recovery UI, and `decisions/sim.md` if the failure
-model becomes a durable design choice.
+Shipped 2026-06-12.
+
+- `architecture/worker-runtime.md` now owns the restart/watchdog model:
+  boot timeout, worker `error`/`messageerror`, unpaused snapshot/report
+  progress checks, pause exclusion, restart-first recovery, retry ceiling,
+  and the RAF seq-gate reset on worker swap.
+- `architecture/shared-memory-and-protocol.md` documents the optional
+  test-only `debug_fault` boot field and its lack of production UI exposure.
+- `architecture/app-shell.md` documents the conditional top-bar worker
+  status and Retry control.
+- `architecture/testing.md` lists `worker-watchdog.spec.ts` coverage.
+- `decisions/sim.md` records restart-first recovery as the durable failure
+  model until persistence exists.
+- `decisions/app-shell.md` records the conditional top-bar recovery UI
+  tradeoff.

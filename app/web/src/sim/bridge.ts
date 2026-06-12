@@ -79,6 +79,8 @@ export {
   CTRL_CONSUMED_SEQ,
   CTRL_CURRENT_SLOT,
   CTRL_FUTEX,
+  CTRL_NN_STATS_EPOCH,
+  CTRL_PROFILE_REPORT_EPOCH,
   CTRL_SEQ,
 };
 
@@ -87,6 +89,11 @@ export {
  *  boot_ready adds wrap_world/world_seed, and the snapshot grass region is now
  *  u8 (was f32). */
 export const SIM_BRIDGE_VERSION = 3;
+
+export type WorkerDebugFault =
+  | "crash_after_boot"
+  | "freeze_after_boot"
+  | "boot_timeout";
 
 /**
  * Maximum simulation population.
@@ -382,6 +389,8 @@ export interface SimMessageBoot {
    * (`mate_reach_multiplier` is live and flows through `initial_sliders`.) */
   init_graze_boost: number;
   init_split_boost: number;
+  /** Test-only fault injection. Main only sets this from window.__evosimE2E. */
+  debug_fault?: WorkerDebugFault;
 }
 
 /** Discriminated union of every main → worker message shape. v1.10: just boot. */
