@@ -10,7 +10,7 @@ A two-column shell that wraps the canvas and every non-canvas UI element.
 
 ```
 ┌──────────────────────────────────┬────────────────────────┐
-│ top-bar: ▶ Restart Auto-restart ⚙│ ┌────────┬───────────┐ │
+│ evosim vX.Y.Z     Pause Restart …│ ┌────────┬───────────┐ │
 │                                  │ │Settings│ Inspector │ │
 ├──────────────────────────────────┤ ├────────┴───────────┤ │
 │                                  │ │ ┌──sub-nav──┐ pane │ │
@@ -29,7 +29,8 @@ A two-column shell that wraps the canvas and every non-canvas UI element.
 
 The DOM tree lives in `app/web/index.html`. The CSS layout uses a top-level
 grid (`#app-shell { grid-template-columns: 1fr var(--rail-w); }`); the
-left column uses a row grid for top-bar / canvas.
+left column hosts the canvas plus absolute overlays for the top-bar controls
+and app/version badge.
 
 ## What it owns
 
@@ -50,6 +51,11 @@ left column uses a row grid for top-bar / canvas.
 - The stage-then-apply pattern in the Settings panel: per-row dirty
   tracking, Apply / Cancel / Reset semantics, the live-vs-staged
   carve-out, the "construction-only" toast trigger.
+- Settings row anatomy: each devpanel row has an effect dot, a top label line
+  with optional tooltip, and a flex-wrapped control line with the control(s),
+  value readout where present, and a per-row RESET button. Effect colors are
+  green for current-run updates, yellow for restart-needed construction
+  settings, and red is reserved for page-refresh-required settings.
 - The Settings panel left sub-nav: eight category buttons (`data-cat`
   attributes) activate the corresponding `#settings-<cat>-pane`. Sub-nav
   wiring lives in `devpanel.ts → installDevPanel`. Category row containers
@@ -91,7 +97,8 @@ left column uses a row grid for top-bar / canvas.
 | Element | Purpose | Installer / consumer |
 |---|---|---|
 | `#app-shell` | Two-column grid. Carries `.rail-collapsed` when the rail is hidden. | CSS-only; class flipped by `main.ts → applyRailOpen`. |
-| `#left-col` | Top-bar + canvas + empty `#perf-box` placeholder. | CSS-only. |
+| `#left-col` | Top-bar + canvas + app badge + empty `#perf-box` placeholder. | CSS-only plus `main.ts → installAppBadge`. |
+| `#app-badge` | Top-left `evosim v<version>` badge. Version is imported from `app/web/package.json`. | `main.ts → installAppBadge`. |
 | `#top-bar` | Always-visible 4-control strip: play/pause, Restart (always rerolls seed), auto-restart, ⚙ settings rail toggle. | `main.ts → installTopBarButtons`. NN opener, Inspector opener, and perf-toggle opener were removed; all three surfaces now live inside the Settings panel or as rail tabs. |
 | `#canvas-wrap > #aquarium` | The WebGL2 sim view. | `render/gl.ts`. |
 | `#perf-box` | Empty hidden placeholder (kept in DOM for resize-handle compat). The profiler content was relocated to `#settings-profiler-pane`. | DOM-only; `display:none`. |
@@ -101,7 +108,7 @@ left column uses a row grid for top-bar / canvas.
 | `#rail-settings` sub-nav | Eight `.settings-cat-btn` buttons (`data-cat`: energy, grass, lifecycle, world, equilibrium, display, profiler, nn). Wired in `installDevPanel`; active button + active pane kept in sync. | `widgets/devpanel.ts` sub-nav wiring. |
 | `#settings-<cat>-pane` | One `.settings-pane` per category (e.g. `#settings-energy-pane`). Only the active one is visible. Each `devpanel-<cat>` div inside is the mount for `categoryBox`. | `widgets/devpanel.ts → categoryBox`. |
 | `#devpanel-equilibrium` | Mount for the 6 equilibrium sliders (P3) inside `#settings-equilibrium-pane`. | `widgets/devpanel.ts`. |
-| `#settings-profiler-pane` | Profiler panel — status line, FPS/TPS chart, pop chart, CPU monitor, profile trees. Activated by selecting the Profiler sub-nav category. | `widgets/perf-panel.ts → installProfilerPanel`. |
+| `#settings-profiler-pane` | Padded profiler panel — status line, FPS/TPS chart, pop chart, CPU monitor, profile trees. Activated by selecting the Profiler sub-nav category. | `widgets/perf-panel.ts → installProfilerPanel`; CSS owns padding/box sizing. |
 | `#settings-nn-pane` | NN topology + mutation-bucket editors (`#nn-tab-host`). | `rail/nn-tab.ts → installNnTab`. |
 | `#rail-inspector` | Inspector body or empty-state. | `rail/inspector.ts` reads/writes `#inspector-empty` and `#ins-*` rows inside `#inspector-body`. Includes `#ins-nn-block` — the per-creature NN I/O block (inputs grouped by compass, outputs: vx/vy, 3 logit bars, highlighted chosen action). Shows a `#ins-species-block` (hidden by default) when inspect JSON carries species fields. |
 | `#toast-host` | Bottom-center transient notice slot. | `toast.ts → showToast`. |
@@ -161,7 +168,18 @@ navigation layout changed. Two interaction tiers live inside the same panel:
 Per staged widget, the dev panel keeps `{simName, settingKey,
 readWidget, writeWidget, snapshot, rowEl}`. A row is **dirty** iff
 `readWidget() !== snapshot`. Dirty rows get a `.is-dirty` class which
-the CSS renders as a left-border accent.
+the CSS renders as a left-border accent. The row helper also attaches the
+effect dot (`.devpanel-effect-instant`, `.devpanel-effect-restart`, or
+`.devpanel-effect-refresh`) and the row-local RESET button.
+
+Per-row RESET:
+
+- **Staged rows** — write that row's `DEFAULTS` value into the widget only,
+  then refresh dirty state and dependent row gating. This preserves the
+  staged contract: Apply must still persist/push, and Cancel can still return
+  to the last-applied snapshot.
+- **Live rows** — write that row's default through the live apply path, so
+  the setting and side effect update immediately.
 
 Footer buttons:
 

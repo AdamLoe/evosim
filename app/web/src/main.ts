@@ -40,6 +40,7 @@ import { installNnTab } from "./rail/nn-tab";
 import { span } from "./perf";
 import { getSettings, setSetting, hasStoredSetting } from "./settings";
 import { applyTheme } from "./themes";
+import packageJson from "../package.json";
 import {
   SimBridge,
   MAX_POP_FOR_SIM,
@@ -62,6 +63,8 @@ import {
   type SimReplyBootReady,
   type WindowMetadata,
 } from "./sim/bridge";
+
+const APP_VERSION = packageJson.version;
 
 // v1.13 Wave 2: the `#status` span in the top bar is gone; the status line
 // lives inside the bottom perf panel and is updated via setPanelStatus()
@@ -703,6 +706,16 @@ function makeTextBtn(id: string, label: string, title: string): HTMLButtonElemen
   return btn;
 }
 
+function installAppBadge(): void {
+  const wrap = document.getElementById("canvas-wrap");
+  if (!wrap || document.getElementById("app-badge")) return;
+  const badge = document.createElement("div");
+  badge.id = "app-badge";
+  badge.className = "topbar-btn app-badge";
+  badge.textContent = `evosim v${APP_VERSION}`;
+  wrap.appendChild(badge);
+}
+
 // v2.1 P4: Top bar trimmed to exactly four controls:
 //   1. Play/Pause (pacing)
 //   2. Restart (rerolls seed)
@@ -719,6 +732,7 @@ function installTopBarButtons(
 ): void {
   const bar = document.getElementById("top-bar");
   if (!bar) return;
+  installAppBadge();
 
   // 1. Play / pause — text swaps based on state.
   const playBtn = makeTextBtn("playpause-btn", paused ? "Play" : "Pause", "Play / pause (space)");

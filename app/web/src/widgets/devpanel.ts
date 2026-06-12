@@ -228,6 +228,12 @@ function settingToNumber(key: keyof Settings): number {
   return v as number;
 }
 
+function defaultToNumber(key: keyof Settings): number {
+  const v = DEFAULTS[key] as unknown;
+  if (typeof v === "boolean") return v ? 1 : 0;
+  return v as number;
+}
+
 function isDirty(h: StagedHandle): boolean {
   return Math.abs(h.readWidget() - h.snapshot) > 1e-9;
 }
@@ -282,8 +288,7 @@ function resetAll(getBridge: () => SimBridge): void {
   let anyConstructionOnly = false;
   resetSettings();
   for (const h of stagedHandles) {
-    const defaultVal = (DEFAULTS as unknown as Record<string, number | boolean>)[h.settingKey];
-    const v = typeof defaultVal === "boolean" ? (defaultVal ? 1 : 0) : (defaultVal as number);
+    const v = defaultToNumber(h.settingKey);
     h.writeWidget(v);
     // v2.0.5 S7: skip live slider push for construction-only settings (same
     // rationale as applyAll). They stage for the next boot payload only.
@@ -306,6 +311,76 @@ function resetAll(getBridge: () => SimBridge): void {
 const liveSyncers: Array<() => void> = [];
 
 // ─── Slider / toggle builders ─────────────────────────────────────────────
+
+type EffectKind = "instant" | "restart" | "refresh";
+
+const EFFECT_LABELS: Record<EffectKind, string> = {
+  instant: "Instant update",
+  restart: "Needs restart",
+  refresh: "Needs page refresh",
+};
+
+interface SettingRowOptions {
+  label: string;
+  effect: EffectKind;
+  effectLabel?: string;
+  tooltip?: string;
+  controls: HTMLElement[];
+  reset: () => void;
+  nextWorld?: boolean;
+  wide?: boolean;
+}
+
+function makeSettingRow(opts: SettingRowOptions): HTMLDivElement {
+  const row = document.createElement("div");
+  row.className = `devpanel-row devpanel-effect-${opts.effect}`;
+  if (opts.wide) row.classList.add("devpanel-row-wide");
+
+  const dot = document.createElement("span");
+  dot.className = "devpanel-effect-dot";
+  dot.title = opts.effectLabel ?? EFFECT_LABELS[opts.effect];
+  dot.setAttribute("aria-label", dot.title);
+
+  const body = document.createElement("div");
+  body.className = "devpanel-row-body";
+
+  const top = document.createElement("div");
+  top.className = "devpanel-row-top";
+
+  const labelEl = document.createElement("label");
+  labelEl.textContent = opts.label;
+  if (opts.nextWorld) labelEl.classList.add("next-world");
+  if (opts.tooltip) labelEl.title = opts.tooltip;
+  top.appendChild(labelEl);
+
+  if (opts.tooltip) {
+    const tip = document.createElement("span");
+    tip.className = "devpanel-tooltip";
+    tip.textContent = "?";
+    tip.title = opts.tooltip;
+    top.appendChild(tip);
+  }
+
+  const controls = document.createElement("div");
+  controls.className = "devpanel-row-controls";
+  for (const control of opts.controls) controls.appendChild(control);
+
+  const reset = document.createElement("button");
+  reset.type = "button";
+  reset.className = "devpanel-row-reset";
+  reset.textContent = "RESET";
+  reset.title = `Reset ${opts.label} to default`;
+  reset.addEventListener("click", opts.reset);
+  controls.appendChild(reset);
+
+  body.append(top, controls);
+  row.append(dot, body);
+  return row;
+}
+
+function settingEffect(nextWorld?: boolean): EffectKind {
+  return nextWorld ? "restart" : "instant";
+}
 
 interface SliderSpec {
   label: string;
@@ -335,12 +410,6 @@ function makeStagedSlider(
   hooks: SliderHooks = {},
 ): HTMLDivElement {
   const initial = settingToNumber(spec.settingKey);
-  const row = document.createElement("div");
-  row.className = "devpanel-row";
-
-  const labelEl = document.createElement("label");
-  labelEl.textContent = spec.label;
-  if (spec.nextWorld) labelEl.classList.add("next-world");
 
   const slider = document.createElement("input");
   slider.type = "range";
@@ -365,6 +434,7 @@ function makeStagedSlider(
     numInput.value = String(v);
     slider.value = String(Math.max(spec.min, Math.min(spec.max, v)));
     hooks.onApply?.(v);
+    hooks.onInput?.(v);
   };
 
   const onChange = (v: number, source: "slider" | "num"): void => {
@@ -377,6 +447,19 @@ function makeStagedSlider(
     hooks.onInput?.(v);
     refreshDirtyState();
   };
+
+  const row = makeSettingRow({
+    label: spec.label,
+    effect: settingEffect(spec.nextWorld),
+    effectLabel: spec.nextWorld ? EFFECT_LABELS.restart : "Applies on Apply",
+    nextWorld: spec.nextWorld,
+    controls: [slider, numInput, readout],
+    reset: () => {
+      writeWidget(defaultToNumber(spec.settingKey));
+      speciesGatingSync();
+      refreshDirtyState();
+    },
+  });
 
   slider.addEventListener("input", () => onChange(Number(slider.value), "slider"));
   numInput.addEventListener("input", () => {
@@ -396,7 +479,6 @@ function makeStagedSlider(
     });
   }
 
-  row.append(labelEl, slider, numInput, readout);
   return row;
 }
 
@@ -409,25 +491,29 @@ interface ToggleSpec {
 
 function makeStagedToggle(spec: ToggleSpec): HTMLDivElement {
   const initial = settingToNumber(spec.settingKey) !== 0;
-  const row = document.createElement("div");
-  row.className = "devpanel-row";
-
-  const labelEl = document.createElement("label");
-  labelEl.textContent = spec.label;
-  if (spec.nextWorld) labelEl.classList.add("next-world");
 
   const input = document.createElement("input");
   input.type = "checkbox";
   input.checked = initial;
-
-  const spacer1 = document.createElement("span");
-  const spacer2 = document.createElement("span");
 
   const writeWidget = (v: number): void => {
     input.checked = v !== 0;
   };
 
   input.addEventListener("change", () => refreshDirtyState());
+
+  const row = makeSettingRow({
+    label: spec.label,
+    effect: settingEffect(spec.nextWorld),
+    effectLabel: spec.nextWorld ? EFFECT_LABELS.restart : "Applies on Apply",
+    nextWorld: spec.nextWorld,
+    controls: [input],
+    reset: () => {
+      writeWidget(defaultToNumber(spec.settingKey));
+      speciesGatingSync();
+      refreshDirtyState();
+    },
+  });
 
   if (spec.simName) {
     registerWidget(spec.simName, () => (input.checked ? 1 : 0));
@@ -441,7 +527,6 @@ function makeStagedToggle(spec: ToggleSpec): HTMLDivElement {
     });
   }
 
-  row.append(labelEl, spacer1, spacer2, input);
   return row;
 }
 
@@ -459,12 +544,6 @@ interface DropdownSpec {
 
 function makeStagedDropdown(spec: DropdownSpec): HTMLDivElement {
   const initial = settingToNumber(spec.settingKey);
-  const row = document.createElement("div");
-  row.className = "devpanel-row devpanel-row-wide";
-
-  const labelEl = document.createElement("label");
-  labelEl.textContent = spec.label;
-  if (spec.nextWorld) labelEl.classList.add("next-world");
 
   const select = document.createElement("select");
   for (const o of spec.options) {
@@ -481,6 +560,20 @@ function makeStagedDropdown(spec: DropdownSpec): HTMLDivElement {
 
   select.addEventListener("change", () => refreshDirtyState());
 
+  const row = makeSettingRow({
+    label: spec.label,
+    effect: settingEffect(spec.nextWorld),
+    effectLabel: spec.nextWorld ? EFFECT_LABELS.restart : "Applies on Apply",
+    nextWorld: spec.nextWorld,
+    controls: [select],
+    reset: () => {
+      writeWidget(defaultToNumber(spec.settingKey));
+      speciesGatingSync();
+      refreshDirtyState();
+    },
+    wide: true,
+  });
+
   if (spec.simName) {
     registerWidget(spec.simName, () => Number(select.value));
     stagedHandles.push({
@@ -493,7 +586,6 @@ function makeStagedDropdown(spec: DropdownSpec): HTMLDivElement {
     });
   }
 
-  row.append(labelEl, select);
   return row;
 }
 
@@ -504,11 +596,6 @@ function makeLiveSlider(
   hooks: SliderHooks = {},
 ): HTMLDivElement {
   const initial = settingToNumber(spec.settingKey);
-  const row = document.createElement("div");
-  row.className = "devpanel-row";
-
-  const labelEl = document.createElement("label");
-  labelEl.textContent = spec.label;
 
   const slider = document.createElement("input");
   slider.type = "range";
@@ -528,19 +615,19 @@ function makeLiveSlider(
   const fmt = spec.formatValue ?? ((v: number) => v.toFixed(2));
   readout.textContent = fmt(initial);
 
-  const apply = (v: number, source: "slider" | "num") => {
+  const apply = (v: number) => {
     readout.textContent = fmt(v);
-    if (source === "slider") numInput.value = String(v);
-    else slider.value = String(Math.max(spec.min, Math.min(spec.max, v)));
+    numInput.value = String(v);
+    slider.value = String(Math.max(spec.min, Math.min(spec.max, v)));
     setSetting(spec.settingKey as keyof Settings, v as never);
     hooks.onApply?.(v);
     hooks.onInput?.(v);
   };
 
-  slider.addEventListener("input", () => apply(Number(slider.value), "slider"));
+  slider.addEventListener("input", () => apply(Number(slider.value)));
   numInput.addEventListener("input", () => {
     const v = Number(numInput.value);
-    if (Number.isFinite(v)) apply(v, "num");
+    if (Number.isFinite(v)) apply(v);
   });
 
   // Allow Reset to re-sync the widget if defaults change.
@@ -552,7 +639,12 @@ function makeLiveSlider(
     hooks.onApply?.(v);
   });
 
-  row.append(labelEl, slider, numInput, readout);
+  const row = makeSettingRow({
+    label: spec.label,
+    effect: "instant",
+    controls: [slider, numInput, readout],
+    reset: () => apply(defaultToNumber(spec.settingKey)),
+  });
   return row;
 }
 
@@ -563,12 +655,6 @@ function makeLiveSlider(
  * are pure CSS-var swaps.
  */
 function makeThemeRow(): HTMLDivElement {
-  const row = document.createElement("div");
-  row.className = "devpanel-row devpanel-row-wide";
-
-  const labelEl = document.createElement("label");
-  labelEl.textContent = "Theme";
-
   const select = document.createElement("select");
   for (const t of Object.values(THEMES)) {
     const opt = document.createElement("option");
@@ -588,7 +674,17 @@ function makeThemeRow(): HTMLDivElement {
     applyTheme(select.value);
   });
 
-  row.append(labelEl, select);
+  const row = makeSettingRow({
+    label: "Theme",
+    effect: "instant",
+    controls: [select],
+    reset: () => {
+      select.value = DEFAULTS.theme;
+      setSetting("theme", DEFAULTS.theme);
+      applyTheme(DEFAULTS.theme);
+    },
+    wide: true,
+  });
   return row;
 }
 
@@ -597,21 +693,19 @@ function makeLiveToggle(
   onApply: (v: boolean) => void,
 ): HTMLDivElement {
   const initial = settingToNumber(spec.settingKey) !== 0;
-  const row = document.createElement("div");
-  row.className = "devpanel-row";
-
-  const labelEl = document.createElement("label");
-  labelEl.textContent = spec.label;
 
   const input = document.createElement("input");
   input.type = "checkbox";
   input.checked = initial;
-  const spacer1 = document.createElement("span");
-  const spacer2 = document.createElement("span");
+
+  const apply = (v: boolean): void => {
+    input.checked = v;
+    setSetting(spec.settingKey as keyof Settings, v as never);
+    onApply(v);
+  };
 
   input.addEventListener("change", () => {
-    setSetting(spec.settingKey as keyof Settings, input.checked as never);
-    onApply(input.checked);
+    apply(input.checked);
   });
 
   // Apply initial state immediately so the UI matches the persisted setting.
@@ -623,7 +717,12 @@ function makeLiveToggle(
     onApply(v);
   });
 
-  row.append(labelEl, spacer1, spacer2, input);
+  const row = makeSettingRow({
+    label: spec.label,
+    effect: "instant",
+    controls: [input],
+    reset: () => apply(defaultToNumber(spec.settingKey) !== 0),
+  });
   return row;
 }
 

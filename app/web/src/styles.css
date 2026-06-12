@@ -157,6 +157,15 @@ button {
   border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 12%, var(--bg-panel-alt));
 }
+.app-badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 5;
+  pointer-events: none;
+  cursor: default;
+  font-variant-numeric: tabular-nums;
+}
 
 #canvas-wrap {
   position: relative;
@@ -281,9 +290,12 @@ button {
   color: var(--fg-muted);
   font-family: ui-monospace, monospace;
   font-size: 12px;
+  line-height: 1.35;
   white-space: nowrap;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: visible;
   text-overflow: ellipsis;
+  padding-top: 8px;
   padding-bottom: 6px;
   border-bottom: 1px solid var(--border);
   margin-bottom: 8px;
@@ -890,6 +902,8 @@ button {
    Stable mount-point id: #settings-profiler-pane */
 #settings-profiler-pane {
   overflow-y: auto;
+  box-sizing: border-box;
+  padding: 18px 16px 16px;
 }
 
 /* NN pane: hosts #nn-tab-host which the NN installer fills.
@@ -942,43 +956,58 @@ button {
 }
 
 .devpanel-row {
-  display: grid;
-  grid-template-columns: 130px 1fr 56px 60px;
-  gap: 8px;
-  align-items: center;
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
   font-size: 12px;
-  padding: 4px 0 4px 8px;
+  padding: 7px 0 7px 8px;
   margin-left: -8px;
   border-left: 3px solid transparent;
   transition: border-color 0.12s ease;
+  min-width: 0;
 }
-/* When the rail is dragged narrow there's no room for the slider track —
-   collapse to label + number input. The slider column (the 1fr middle)
-   gets display:none; the grid drops to 3 cols. The readout column also
-   goes since the typed number is the live readout. */
 #right-rail {
   container-type: inline-size;
   container-name: rightrail;
 }
-@container rightrail (max-width: 360px) {
-  .devpanel-row:not(.devpanel-row-wide) {
-    grid-template-columns: 1fr 60px;
-  }
-  .devpanel-row:not(.devpanel-row-wide) > input[type=range],
-  .devpanel-row:not(.devpanel-row-wide) > .devpanel-readout {
-    display: none;
-  }
-}
 .devpanel-row.is-dirty {
   border-left-color: var(--accent-dirty);
 }
-/* Wide variant for rows with a single control (e.g. theme picker) that
-   needs more horizontal room than the 60 px readout column. The label
-   keeps its 130 px column; the control fills the rest. */
-.devpanel-row.devpanel-row-wide {
-  grid-template-columns: 130px 1fr;
+.devpanel-effect-dot {
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
+  margin-top: 3px;
+  border-radius: 50%;
+  border: 1px solid rgba(0, 0, 0, 0.35);
+  box-shadow: 0 0 0 2px rgba(232, 227, 218, 0.05);
+}
+.devpanel-effect-instant .devpanel-effect-dot { background: var(--success); }
+.devpanel-effect-restart .devpanel-effect-dot { background: var(--warning); }
+.devpanel-effect-refresh .devpanel-effect-dot { background: var(--danger); }
+.devpanel-row-body {
+  flex: 1 1 220px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.devpanel-row-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.devpanel-row-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
 }
 .devpanel-row-wide select {
+  flex: 1 1 180px;
+  min-width: 120px;
   background: var(--bg-canvas);
   color: var(--fg);
   border: 1px solid var(--border-strong);
@@ -986,7 +1015,6 @@ button {
   padding: 5px 8px;
   font: inherit;
   font-size: 12px;
-  width: 100%;
   cursor: pointer;
 }
 .devpanel-row-wide select:focus {
@@ -994,20 +1022,41 @@ button {
   border-color: var(--accent);
 }
 .devpanel-row label {
+  min-width: 0;
   color: var(--fg-muted);
   font-size: 12px;
+  overflow-wrap: anywhere;
 }
 .devpanel-row label.next-world::after {
   content: " (next world)";
   color: var(--fg-faint);
   font-size: 10px;
 }
+.devpanel-tooltip {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  color: var(--fg-faint);
+  font-size: 10px;
+  line-height: 1;
+}
 .devpanel-row input[type=range] {
-  width: 100%;
+  flex: 1 1 160px;
+  min-width: 96px;
   accent-color: var(--accent);
 }
+.devpanel-row input[type=checkbox] {
+  flex: 0 0 auto;
+}
 .devpanel-numinput {
-  width: 100%;
+  flex: 0 0 64px;
+  width: 64px;
+  min-width: 0;
   font-size: 11px;
   font-family: ui-monospace, monospace;
   background: var(--bg-canvas);
@@ -1024,11 +1073,31 @@ button {
 .devpanel-numinput::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 .devpanel-numinput { -moz-appearance: textfield; }
 .devpanel-readout {
+  flex: 0 0 62px;
   text-align: right;
   font-variant-numeric: tabular-nums;
   font-family: ui-monospace, monospace;
   font-size: 11px;
   color: var(--fg-muted);
+}
+.devpanel-row-reset {
+  flex: 0 0 auto;
+  min-width: 48px;
+  height: 24px;
+  padding: 0 7px;
+  background: var(--bg-canvas);
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  color: var(--fg-muted);
+  cursor: pointer;
+  font: 10px ui-monospace, monospace;
+  letter-spacing: 0;
+  transition: color 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+}
+.devpanel-row-reset:hover {
+  color: var(--fg);
+  border-color: var(--fg-muted);
+  background: rgba(232, 227, 218, 0.04);
 }
 .devpanel-row.is-disabled {
   opacity: 0.4;
