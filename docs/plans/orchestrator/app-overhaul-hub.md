@@ -66,8 +66,8 @@ the pacing/snapshot plan, not as a hidden implementation detail.
 | Render hot path | WebGL renderer | Shipped | Commit `9fb9ea1` cached static biome uploads and added `trail_state` measurement. | Defer velocity lane as a protocol/layout research item. | Velocity lane likely changes stride/layout, not just one pad lane. |
 | Crash resilience | Worker runtime + app shell | Shipped | Plan `02-worker-watchdog-recovery.md` added boot timeout, worker `error`/`messageerror`, unpaused snapshot/report stall detection, restart-first recovery, visible top-bar status/toast/Retry, and focused e2e fault hooks. | None for this wave; exact world-state recovery remains persistence scope. | None. |
 | Telemetry/history | Sim + protocol + UI/export | Shipped | Plan `03-telemetry-history-export.md` added bounded in-memory aggregate samples, low-cardinality events, request-only CSV/JSON export, and worst-jank summary; review commit `9e14062` fixed SAB-size docs. | None for this wave; persistence integration remains plan `04` scope. | Phase attribution remains explicit `unknown` until per-jank traces exist. |
-| Persistence | Rust wasm API + IndexedDB | Draft plan | Only settings persist today; world save would touch `World`, `GrassGrid`, species, RNG, IDs, and selected `WorldHandle` layout state. | See `04-world-persistence-artifacts.md`. | Need format/versioning decision aligned with `WorldConfig`. |
-| Config/schema/presets | Rust + generated TS + app shell | Shipped | Plan `05-world-config-schema-presets.md` added Rust-owned `WorldConfig`, generated TS defaults/types/presets, config-object worker boot, settings migration, and master-seed derivation. | None for this wave; persistence should embed the shipped `WorldConfig`. | None. |
+| Persistence | Rust wasm API + IndexedDB | Active | Only settings persist today; world save would touch `World`, `GrassGrid`, species, RNG, IDs, selected `WorldHandle` layout state, telemetry policy, and the shipped `WorldConfig`. | Implement `04-world-persistence-artifacts.md` with artifact-specific validation/versioning. | Do not depend on `initial_sliders` for construction fields. |
+| Config/schema/presets | Rust + generated TS + app shell | Shipped | Plan `05-world-config-schema-presets.md` added Rust-owned `WorldConfig`, generated TS defaults/types/presets, config-object worker boot, settings migration, and master-seed derivation; review commit `d62a5d9` fixed founder boosts as construction-only. | None for this wave; persistence should embed the shipped `WorldConfig`. | Legacy wrapper/live slider lanes intentionally remain. |
 | Deterministic science mode | Sim core + grass | Draft plan | Threaded scatter uses relaxed cross-tile add/sub; docs already call out nondeterminism. | See `06-deterministic-science-mode.md`. | Needs config home, benchmark budget, and acceptance criteria. |
 | Docs drift automation | Docs + tests/CI | Shipped | Commit `d09cac2` added `scripts/docs-lint.mjs`, `pnpm docs:lint`, CI integration, and drift fixes. | Keep docs-lint green as later waves land. | None. |
 
@@ -167,6 +167,9 @@ the pacing/snapshot plan, not as a hidden implementation detail.
   generated bindings, Rust lib tests with and without `threads`, both clippy
   feature sets, web typecheck, docs lint, focused defaults/settings e2e, full
   e2e, web build, `cargo bench --no-run`, and `git diff --check` passed.
+- `d62a5d9` reviewed config and fixed founder boosts as construction-only.
+  Verification reported by reviewer: web typecheck, docs-lint, focused
+  defaults/settings e2e, and `cargo test --lib` passed.
 
 ## Migration Notes
 
