@@ -57,7 +57,7 @@ pre-migration `agent-context/maintaining-docs.md`; `web/` paths updated to
 | `app/crates/evosim/src/world/species.rs` or mating/seeding in `mod.rs` | `architecture/species.md` (registry, seeding, Mate mechanic, crossover) |
 | `app/crates/evosim/src/world/biome.rs` or `movement_penalty_for`/`biome_at` in `mod.rs` | `architecture/biome.md` (blob generation, static grid, effects) |
 | `app/crates/evosim/src/wasm_api/mod.rs` (added/removed/renamed an export) | `architecture/simulation-core.md` (interaction-with-neighbours block) AND `architecture/shared-memory-and-protocol.md` if it's part of the message protocol |
-| `app/crates/evosim/src/constants.rs` (any value quoted in a doc, esp. `MAX_POP_FOR_SIM`, `GRASS_CELL_COUNT`, `NN_*`, `FOUNDER_COUNT_DEFAULT`) | Wherever the constant is quoted; `decisions/cross-cutting.md` for `MAX_POP_FOR_SIM` |
+| `app/crates/evosim/src/constants.rs` (any value quoted in a doc, esp. `MAX_POP_FOR_SIM`, `GRASS_CELL_COUNT`, `NN_*`, `STARTING_POP_DEFAULT`) | Wherever the constant is quoted; `decisions/cross-cutting.md` for `MAX_POP_FOR_SIM` |
 | `app/crates/evosim/src/profiler.rs` API | `architecture/profiler.md`, `decisions/profiler.md` |
 | `app/crates/evosim/src/grass/mod.rs` step shape or per-row bitset semantics | `architecture/simulation-core.md`, `architecture/profiler.md` (grass_step tree) |
 | `app/crates/evosim/src/bin/gen_bindings.rs` (codegen of the TS mirror) | the generated files under `app/web/src/generated/`; `architecture/shared-memory-and-protocol.md` if the layout changes |
@@ -89,7 +89,7 @@ symbol's existence:
 - **Cross-language constants** match Rust ↔ TS (the doc quotes both, or
   says "derived from"): `MAX_POP_FOR_SIM`, `CREATURE_STRIDE`, `GRASS_BYTES`,
   `SNAPSHOT_HEADER_BYTES`, `CONTROL_SAB_I32_LEN`, the `CTRL_*` indices.
-  Also `GRASS_CELL_COUNT`, `NN_INPUTS`, `FOUNDER_COUNT_DEFAULT`.
+  Also `GRASS_CELL_COUNT`, `NN_INPUTS`, `STARTING_POP_DEFAULT`.
 - **Profiler spans:** `cd app/web && pnpm docs:lint` checks the profiler
   doc's top-level tree order against `app/web/src/widgets/perf-panel.ts`
   and verifies the documented `frame.*` / `sim_worker.*` / `tick.*` /

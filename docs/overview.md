@@ -20,7 +20,7 @@ every page load starts a fresh world.
               │ render loop   │  ── boot ──>     │ wasm + rayon   │
               │ (RAF)         │                  │ WorldHandle    │
               │ WebGL2        │  <-- snapshots-- │ step_n(1) loop │
-              │ DevPanel UI   │  -- messages --> │ message queue  │
+              │ DevPanel UI   │  -- control  --> │ control SAB    │
               └───────────────┘                  └────────────────┘
                       │                                   │
                       └──── shared SAB ─── snapshot + ctrl ┘
@@ -29,24 +29,24 @@ every page load starts a fresh world.
 - **One wasm instance**, in the sim worker. The main thread holds no wasm
   handle. All sim mutation funnels through `WorldHandle::set_slider(name,
   value)` and a small set of read-only inspect / report calls.
-- **One SharedArrayBuffer plus two wasm-memory regions** bridge the two
+- **One SharedArrayBuffer plus one wasm-memory snapshot region** bridge the two
   threads. The *control* SAB (≈30 KB) is the only real `SharedArrayBuffer`:
   it holds the double-buffer slot index, a sequence counter, a futex word, the
   slider lanes, and the length-prefixed request/response byte buffers. The
-  *snapshot* region (two slots, each a stats header + stride-32 creature SoA +
-  a u8 grass density region) and the static *biome* region (one u8 `Biome` tag
-  per grass cell) both live in **wasm linear memory** and are viewed directly
-  by main. All three are runtime-sized from `world_size` at boot — the grass +
-  biome regions are `grass_dim²` bytes each (≈3.7 MB at default).
+  *snapshot* region lives in **wasm linear memory** and is viewed directly by
+  main: two slots, each with a stats/window header, stride-32 creature SoA, a
+  u8 grass clipmap window, and a u8 biome window. Slot geometry is
+  runtime-sized from `world_size` at boot.
 - **Pacing is a synchronous `Atomics.wait` on the futex word.** Since v1.10 the
   control surface is entirely SAB-backed, so the only surviving postMessage is
   the one-shot `boot` handshake; the tick loop parks the worker thread on
   `Atomics.wait` (with a target-TPS timeout, `Infinity` when paused) and main
   wakes it via `Atomics.add` + `Atomics.notify` on the futex.
-- **One tick = one snapshot.** The worker calls `step_n(1)`, writes the
-  inactive snapshot slot, atomically flips `CTRL_CURRENT_SLOT`, and bumps
-  `CTRL_SEQ`. Main reads the live slot per RAF; the renderer always sees
-  the freshest snapshot vsync allows.
+- **One tick = one sim step; snapshots are ack-gated.** The worker calls
+  `step_n(1)` every loop while running, but writes a new inactive snapshot slot
+  only after main has painted and acknowledged the previous `CTRL_SEQ` through
+  `CTRL_CONSUMED_SEQ`. This bounds snapshot write volume to the configured App
+  FPS while the sim keeps ticking at target TPS.
 - **Restart is `worker.terminate()` + `new Worker(...)`.** Old SAB views
   are GC'd with the previous bridge; the renderer keeps painting the
   last-good frame during the ~500 ms blip.
