@@ -36,52 +36,33 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   batched because it shared the render thread, the worker doesn't).
 - **Code anchors**: `app/web/src/sim/worker.ts → simLoop`.
 
-### Pacing uses `Atomics.waitAsync` with a 1 ms floor on `timeoutMs`
+### Pacing uses synchronous `Atomics.wait` because steady-state control is SAB-only
 
-- **Decision**: The async tick loop awaits `Atomics.waitAsync(ctrl,
-  CTRL_FUTEX, before, timeoutMs)`. `timeoutMs` is clamped to
-  `max(1, 1000/targetTPS - elapsed)` when running and `Infinity` when
-  paused. Synchronous `Atomics.wait` is forbidden.
-- **Why**: `Atomics.wait` blocks the worker event loop and dark-holes
-  every `onmessage`. `Atomics.waitAsync(..., 0)` returns synchronously
-  with `{async: false, value: "timed-out"}` per the Web Atomics spec —
-  no Promise, no microtask, no event-loop yield — so a 0-timeout would
-  spin without yielding and reproduce the same dark-hole. The 1 ms
-  floor forces the async path; the sim was already underrunning when
-  the floor kicks in, so the throughput cost is zero.
-- **Tradeoffs**: 1 ms minimum loop period caps pacing-bound throughput
-  at ≤ 1000 iter/s. Only matters at target TPS > 1000, which the
-  slider does not expose.
+- **Decision**: The worker loop is synchronous and parks with
+  `Atomics.wait(ctrl, CTRL_FUTEX, before, timeoutMs)` while running, and
+  `Infinity` while paused. It does not use `Atomics.waitAsync`.
+- **Why**: The hot control path no longer depends on worker `onmessage`;
+  sliders, pause, target TPS, inspector, profile, camera, and snapshot
+  acknowledgement are all SAB lanes. With no steady-state macrotask queue to
+  drain, synchronous wait gives zero-CPU parking without the old
+  `waitAsync(..., 1ms)` throughput tax.
+- **Tradeoffs**: Any future feature that reintroduces steady-state
+  postMessage control must revisit the pacing primitive first.
 - **Applies to**: `architecture/worker-runtime.md`.
 - **Code anchors**: `app/web/src/sim/worker.ts → simLoop`,
-  `app/web/src/sim/bridge.ts → SimBridge.postMessage`.
-- **Revisit when**: a browser ships a different `Atomics.waitAsync(0)`
-  semantics, or a wholly different pacing primitive becomes available.
-
-### Macrotask yield on the `Atomics.waitAsync` not-equal path
-
-- **Decision**: When `Atomics.waitAsync` returns synchronously
-  (`r.async === false`, i.e., main mutated the futex between our load
-  and the wait call), the loop must `await new Promise(r =>
-  setTimeout(r, 0))` before continuing.
-- **Why**: `onmessage` dispatches as a macrotask, not a microtask. A
-  `await Promise.resolve()` would resolve before the postMessage task
-  runs, so the loop would loop back to `drainMessages()` with an empty
-  queue and lose the wake.
-- **Applies to**: `architecture/worker-runtime.md`.
-- **Code anchors**: `app/web/src/sim/worker.ts → simLoop`.
+  `app/web/src/sim/bridge.ts → SimBridge`.
 
 ### Slider drain ordering: drain at the top of every iteration
 
-- **Decision**: `drainMessages()` runs at the very top of every
+- **Decision**: SAB control reads run at the very top of every
   `simLoop` iteration, before `step_n` and before
-  `writeSnapshotToSAB`.
+  `maybeWriteSnapshotToSAB`.
 - **Why**: A slider sent at tick T takes effect for tick T+1
   deterministically. If the drain happened after `step_n`, the slider
   would skip a tick.
 - **Applies to**: `architecture/worker-runtime.md`.
 - **Code anchors**: `app/web/src/sim/worker.ts → simLoop`,
-  `app/web/src/sim/worker.ts → drainMessages`.
+  `app/web/src/sim/worker.ts → readControlSab`.
 
 ### `set_slider(name, value)` is the sole external mutation entry point
 

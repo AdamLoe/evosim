@@ -44,6 +44,7 @@ import packageJson from "../package.json";
 import {
   SimBridge,
   MAX_POP_FOR_SIM,
+  CTRL_CONSUMED_SEQ,
   CTRL_CURRENT_SLOT,
   CTRL_SEQ,
   CREATURE_STRIDE,
@@ -329,13 +330,14 @@ async function main(): Promise<void> {
   // semantics) is owned by the perf panel via setPanelStatus(); we no
   // longer count one FPS per RAF.
   let lastPaintedSeq = -1;
+  let lastPaintedAtMs = -Infinity;
   // Camera snapshot used to detect pans/zooms that need a repaint while
   // paused (seq frozen). Initialised to values that will never match the
   // real camera so the very first frame always paints.
   let lastPaintedCamX = NaN;
   let lastPaintedCamY = NaN;
   let lastPaintedCamZoom = NaN;
-  function frame(_now: number): void {
+  function frame(now: number): void {
     if (!controlI32 || !snapshotBuffer || !snapshotView || !slotLayout) {
       requestAnimationFrame(frame);
       return;
@@ -354,6 +356,9 @@ async function main(): Promise<void> {
     }
 
     const seq = Atomics.load(controlI32, CTRL_SEQ);
+    const appFPS = getSettings().appFPS;
+    const appFrameIntervalMs = 1000 / appFPS;
+    const dueForAppFrame = now - lastPaintedAtMs >= appFrameIntervalMs - 0.5;
     if (seq === lastPaintedSeq) {
       // No new snapshot since the last paint. Re-render only when the camera
       // moved (pan/zoom while paused) so the canvas reflects the new view.
@@ -365,7 +370,7 @@ async function main(): Promise<void> {
         cam.cx !== lastPaintedCamX ||
         cam.cy !== lastPaintedCamY ||
         cam.zoom !== lastPaintedCamZoom;
-      if (camMoved && slotLayout) {
+      if (paused && camMoved && slotLayout) {
         const layout = slotLayout;
         const rawSlot = Atomics.load(controlI32, CTRL_CURRENT_SLOT);
         const slot: 0 | 1 = rawSlot === 1 ? 1 : 0;
@@ -411,10 +416,23 @@ async function main(): Promise<void> {
           // v2.0.3 Stream 2c: pass latest window metadata for UV transform.
           latestWindowMetadata,
         );
+        Atomics.store(controlI32, CTRL_CONSUMED_SEQ, seq);
+        lastPaintedAtMs = now;
         lastPaintedCamX = cam.cx;
         lastPaintedCamY = cam.cy;
         lastPaintedCamZoom = cam.zoom;
+        setPanelStatus({
+          seed: cachedSeed,
+          tick: header.tick,
+          pop: header.pop,
+          tps: header.tps,
+          worldEnded: !!header.world_ended,
+        });
       }
+      requestAnimationFrame(frame);
+      return;
+    }
+    if (!dueForAppFrame) {
       requestAnimationFrame(frame);
       return;
     }
@@ -489,6 +507,8 @@ async function main(): Promise<void> {
       );
 
       lastPaintedSeq = seq;
+      Atomics.store(controlI32, CTRL_CONSUMED_SEQ, seq);
+      lastPaintedAtMs = now;
       lastPaintedCamX = cam.cx;
       lastPaintedCamY = cam.cy;
       lastPaintedCamZoom = cam.zoom;
@@ -649,6 +669,15 @@ async function spawnSimWorker(seed: string): Promise<SimBridge> {
     ready.sliders_defaults_json;
 
   bridge.attachControlSab(controlSab);
+  {
+    const ns =
+      (window as unknown as { __evosimE2E?: Record<string, unknown> }).__evosimE2E ??
+      ((window as unknown as { __evosimE2E: Record<string, unknown> }).__evosimE2E = {});
+    ns["getSnapshotSeq"] = (): number => controlI32 ? Atomics.load(controlI32, CTRL_SEQ) : -1;
+    ns["getConsumedSeq"] = (): number =>
+      controlI32 ? Atomics.load(controlI32, CTRL_CONSUMED_SEQ) : -1;
+    ns["getAppFPS"] = (): number => getSettings().appFPS;
+  }
   // Boot seeded initial paused / target TPS / sliders into the control SAB;
   // no post-boot mirror writes needed.
 

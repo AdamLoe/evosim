@@ -34,6 +34,7 @@ export const CTRL_CAMERA_CY_BITS = 137 as const;
 export const CTRL_CAMERA_ZOOM_BITS = 138 as const;
 export const CTRL_CAMERA_VIEWPORT_W = 139 as const;
 export const CTRL_CAMERA_VIEWPORT_H = 140 as const;
+export const CTRL_CONSUMED_SEQ = 141 as const;
 export const CTRL_I32_REGION_LEN = 256 as const;
 
 export const INSPECT_RESP_OFFSET = 1024 as const;

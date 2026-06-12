@@ -36,6 +36,7 @@ import {
   CTRL_CAMERA_VIEWPORT_H,
   CTRL_CAMERA_VIEWPORT_W,
   CTRL_CAMERA_ZOOM_BITS,
+  CTRL_CONSUMED_SEQ,
   CTRL_CONTROL_EPOCH,
   CTRL_INSPECT_REQ_EPOCH,
   CTRL_INSPECT_REQ_ID_HI,
@@ -154,6 +155,7 @@ let lastInspectReqEpoch = 0;
 // SAB carries the desired window each tick; we forward to wasm only when
 // it actually changes so we don't burn a wasm call every iter.
 let lastProfileWindowMs = 0;
+let lastPublishedSeq = 0;
 // Set true when a profile_clear request is observed. Consumed by
 // maybeWriteProfileReport on the next loop iteration to force an immediate
 // report write that overwrites the pre-reset SAB payload — otherwise the
@@ -308,7 +310,7 @@ async function handleBoot(boot: SimMessageBoot): Promise<void> {
   // First-paint handshake: run one tick + one snapshot before posting
   // boot_ready so main's first RAF sees a live slot.
   world.step_n(1);
-  writeSnapshotToSAB();
+  lastPublishedSeq = writeSnapshotToSAB() ?? Atomics.load(ctrlI32, CTRL_SEQ);
 
   // v1.11 (A): hand main the wasm memory + snapshot byte offset/len so it
   // can build views over `wasm.memory.buffer` directly. WebAssembly.Memory
@@ -495,8 +497,8 @@ function maybeWriteSpeciesTable(tickIdx: number): void {
 // SoA + stats header directly into its own `Vec<u8>` (no JS boundary). Main
 // reads via a view over `wasm.memory.buffer` at the offset shared in boot.
 
-function writeSnapshotToSAB(): void {
-  if (!world || !ctrlI32) return;
+function writeSnapshotToSAB(): number | null {
+  if (!world || !ctrlI32) return null;
   const current = Atomics.load(ctrlI32, CTRL_CURRENT_SLOT);
   const inactive: 0 | 1 = current === 0 ? 1 : 0;
 
@@ -507,7 +509,17 @@ function writeSnapshotToSAB(): void {
 
   // Publish: flip slot, then bump seq (store-before-add).
   Atomics.store(ctrlI32, CTRL_CURRENT_SLOT, inactive);
-  Atomics.add(ctrlI32, CTRL_SEQ, 1);
+  return Atomics.add(ctrlI32, CTRL_SEQ, 1) + 1;
+}
+
+function maybeWriteSnapshotToSAB(): boolean {
+  if (!ctrlI32) return false;
+  const consumedSeq = Atomics.load(ctrlI32, CTRL_CONSUMED_SEQ);
+  if (consumedSeq !== lastPublishedSeq) return false;
+  const seq = writeSnapshotToSAB();
+  if (seq === null) return false;
+  lastPublishedSeq = seq;
+  return true;
 }
 
 // ─── Tight synchronous tick loop ────────────────────────────────────────────
@@ -567,7 +579,7 @@ function simLoop(): void {
 
     // ─── sim_worker.write_output_sab ──────────────────────────────────────
     const writeStart = performance.now();
-    writeSnapshotToSAB();
+    maybeWriteSnapshotToSAB();
     serveInspectRequest();
     maybeWriteProfileReport(tickIdx);
     maybeWriteNnStats(tickIdx);

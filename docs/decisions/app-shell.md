@@ -11,8 +11,8 @@ that also bind the shell live in [`cross-cutting.md`](cross-cutting.md).
 - **Decision**: Sim sliders (Energy / Grass / Eat / Lifecycle /
   Curriculum groups) stage edits and reconcile via the Settings tab's
   Apply / Cancel / Reset footer. Run + Display widgets (`autoRun`,
-  `showProfiler`, `showPopGraph`, `showGrass`, `grassOpacity`) skip
-  staging and apply immediately.
+  `showProfiler`, `showGrass`, `grassOpacity`, `appFPS`, pure render
+  detail knobs, and theme) skip staging and apply immediately.
 - **Why**: Sim sliders perturb the running world; users want to set up
   a batch of changes (e.g. raise mut rate AND lower energy max) and
   commit them atomically. Display toggles are page-side render flips

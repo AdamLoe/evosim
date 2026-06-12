@@ -22,6 +22,7 @@
 
 import {
   CONTROL_SAB_BYTES,
+  CTRL_CONSUMED_SEQ,
   CTRL_CONTROL_EPOCH,
   CTRL_CURRENT_SLOT,
   CTRL_FUTEX,
@@ -75,6 +76,7 @@ import { GRASS_LOD_BUDGET_AXIS as GRASS_LOD_BUDGET_AXIS_GENERATED } from "../gen
 // Re-export hot SAB constants for the snapshot read path in main.ts.
 export {
   CONTROL_SAB_BYTES,
+  CTRL_CONSUMED_SEQ,
   CTRL_CURRENT_SLOT,
   CTRL_FUTEX,
   CTRL_SEQ,

@@ -13,11 +13,12 @@ loop. The snapshot region lives in wasm linear memory (a `Vec<u8>` inside
 
 **All main↔worker control is on SAB.** The only surviving `postMessage`
 path is the one-shot `boot` handshake and the one-shot `boot_ready` reply.
-Every other control signal — sliders, paused, target TPS, inspector
-requests, reset-jank, reset-profile, profile/NN report polls — is an
-`Atomics.store` + epoch bump on the control SAB, read at the top of each
-loop iteration. The loop body is synchronous; `Atomics.wait` (not
-`Atomics.waitAsync`) is the pacing primitive.
+Every other control signal — sliders, paused, target TPS, camera lanes,
+snapshot-consumed acknowledgement, inspector requests, reset-jank,
+reset-profile, profile/NN report polls — is an `Atomics.store` + epoch
+bump or direct SAB lane write, read at the top of each loop iteration.
+The loop body is synchronous; `Atomics.wait` (not `Atomics.waitAsync`) is
+the pacing primitive.
 
 ## What it owns
 
@@ -35,10 +36,10 @@ loop iteration. The loop body is synchronous; `Atomics.wait` (not
 - Per-tick SAB read of paused / target_tps / sliders (gated on
   `CTRL_CONTROL_EPOCH`) / inspector request (gated on
   `CTRL_INSPECT_REQ_EPOCH`) / profile-clear + reset-jank requests.
-- Per-tick SAB write of the snapshot (always) and the inspector
-  response (when a request fires). Periodic SAB write of the profile
-  report (every `PROFILE_REPORT_EVERY_N_TICKS` ticks) and the
-  NN-worker stats (every `NN_STATS_EVERY_N_TICKS` ticks).
+- Ack-gated snapshot publication: the worker writes a new snapshot only
+  when main has stored the last painted `CTRL_SEQ` into `CTRL_CONSUMED_SEQ`.
+  It continues to tick and write inspect/profile/NN/species reports even
+  while snapshot writes are skipped.
 - The three `sim_worker.*` profile spans —
   `sim_worker.read_input_sab`, `sim_worker.tick`,
   `sim_worker.write_output_sab` — measured with
@@ -84,10 +85,11 @@ pacing park:
   grass-only tick path so the canvas keeps filling while main shows the
   world-end popup.
 - **Tick phase**: `world.step_n(1)`. One tick per iteration; batching
-  would hurt snapshot freshness since the renderer reads the latest
-  snapshot on every RAF.
-- **Write phase**: snapshot (always), inspect response (if epoch advanced),
-  profile report and NN stats (every N ticks each).
+  would change sim timing and make control writes take effect less
+  predictably.
+- **Write phase**: snapshot only if `CTRL_CONSUMED_SEQ` equals the last
+  published `CTRL_SEQ`; inspect response (if epoch advanced), profile
+  report and NN stats (every N ticks each) are served regardless.
 - **Pacing**: `Atomics.wait` for `1000/targetTPS − elapsed` ms when
   `remainingMs > 0.25`. No floor — when the tick overshoots its slice the
   loop continues immediately (no event loop to feed). TPS is therefore
@@ -100,6 +102,11 @@ pacing park:
 - **Invariant — slider ordering**: SAB reads happen at the top of the
   iteration, so a slider value main wrote at wall-clock T takes effect for
   tick T+1 deterministically.
+- **Invariant — at most one unconsumed snapshot**: after boot, the worker
+  compares main's consumed-seq ack with its last published seq before
+  calling `write_snapshot`. A high target TPS can therefore continue to
+  advance sim state while snapshot write cost is bounded by main's paint
+  cadence.
 
 ## Boot handshake
 
@@ -174,6 +181,19 @@ notifies the futex to wake any in-progress pacing park).
 
 When paused, the worker calls `Atomics.wait(..., Infinity)` and burns
 zero CPU. Main wakes it via `Atomics.notify` on the unpause SAB write.
+
+## Snapshot publication
+
+Boot still writes one initial snapshot before `boot_ready` so main has a
+valid first frame. In steady state, `app/web/src/sim/worker.ts →
+maybeWriteSnapshotToSAB` is the gate: if `CTRL_CONSUMED_SEQ` is still
+behind the worker's `lastPublishedSeq`, the worker skips only
+`world.write_snapshot(...)`. It still serves SAB requests and cadence
+reports in the same write phase.
+
+Main advances `CTRL_CONSUMED_SEQ` only after it renders a snapshot. The
+render loop may run at browser RAF cadence, but expensive snapshot read
+and GL work is capped by the persisted App FPS setting.
 
 ## Code anchors
 

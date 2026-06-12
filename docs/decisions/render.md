@@ -96,34 +96,24 @@
 - **Code anchors**: `app/web/src/render/gl.ts → renderWorldImpl`
   (the highlight pass with the `idView` build), `app/web/src/rail/highlight.ts`.
 
-### Status bar updates every RAF; TPS + FPS rendered into `#status`
+### App FPS caps expensive paint work, not sim ticks
 
-- **Decision**: The top-left `#status` text rewrites unconditionally on
-  every RAF as
-  `seed: … · tick N · pop N · NN TPS · NN FPS[(world ended)]`. TPS
-  comes straight from `header.tps` in the per-frame SAB snapshot; FPS
-  is a 1 s rolling main-side counter (`framesThisSecond++` each RAF,
-  sampled and reset when `now - fpsWindowStart >= 1000`). FPS shows
-  `—` until the first 1 s window closes.
-- **Why**: Reading the tick from `header.tick` is a 4-byte
-  typed-array load — there is nothing to throttle. The canvas already
-  paints at full RAF cadence; throttling only the text was the lone
-  reason the tick counter visibly jumped. TPS belongs on the
-  always-visible bar because the bottom-left perf widget can scroll
-  off-screen; FPS belongs on main because the worker can't observe
-  RAF cadence. A "frames in the last 1 s" counter (not a rolling
-  average) matches the conventional games-industry meaning and lets
-  FPS trend naturally to 0 while paused or world-ended without a
-  misleading transient.
+- **Decision**: The Display setting `appFPS` is restricted to
+  `15 | 30 | 60 | 120` (default 60) and caps snapshot read, render, and
+  upload work in `main.ts`. The RAF callback still runs at browser cadence
+  for camera SAB writes and paused camera repaint. The perf status line's
+  FPS is counted from painted frames in the trailing 1 s window.
+- **Why**: The sim's target TPS and the app's paint budget are separate
+  controls. Users need high TPS for simulation throughput without forcing
+  main to read/upload/render snapshots the browser cannot display.
+- **Tradeoffs**: While running, camera-only visual response can wait for
+  the next configured app frame; while paused, camera movement bypasses the
+  cap so panning/zooming a frozen world still repaints.
 - **Applies to**: `architecture/render-pipeline.md`,
-  `architecture/worker-runtime.md`.
-- **Tradeoffs**: Writing `textContent` every RAF is essentially free
-  on a single DOM node with no layout impact; the throttle saved
-  nothing real. `#perf-tps` in the bottom-left perf widget stays as
-  belt-and-suspenders for heavy debugging.
-- **Code anchors**: `app/web/src/main.ts → frame` (the RAF loop,
-  `framesThisSecond` / `fpsWindowStart` / `lastFps` closure state),
-  `app/web/src/sim/bridge.ts → readSnapshotHeader` (`header.tps`).
+  `architecture/worker-runtime.md`, `architecture/app-shell.md`.
+- **Code anchors**: `app/web/src/main.ts → frame`,
+  `app/web/src/settings.ts → APP_FPS_CHOICES`,
+  `app/web/src/widgets/devpanel.ts → makeAppFpsRow`.
 
 ### Zoom-out survey: `MIN_ZOOM = 0.04` + min-1px survey points
 
@@ -315,14 +305,15 @@
   (the `vis_cells_y` derivation via the `aspect` variable);
   `app/web/tests/e2e/grass-lod-smoke.spec.ts` (updated assertion).
 
-### Grass and biome textures are fixed budget² R8; per-frame texSubImage2D of the window
+### Grass and biome textures are fixed budget² R8; static biome uploads are cached
 
 - **Decision**: Both the grass and biome textures are allocated once at
-  `GRASS_LOD_BUDGET_AXIS² = 4096×4096` (R8, `UNSIGNED_BYTE`). Per frame,
-  `texSubImage2D` uploads only the `win_w × win_h` window bytes into the `(0,0)`
-  corner of each texture (subarray-guarded). `NEAREST` filtering is used for
-  both min and mag (trilinear is reserved via the `u_lod_blend` uniform, always
-  `0.0` now). UV transform uniforms map the world-space quad into the window
+  `GRASS_LOD_BUDGET_AXIS² = 4096×4096` (R8, `UNSIGNED_BYTE`). Grass uploads
+  only the `win_w × win_h` window bytes into the `(0,0)` corner on each
+  painted frame. Biome uploads the same window only when the metadata key or
+  wasm-memory buffer changes, because the biome grid is static after boot.
+  `NEAREST` filtering is used for biome; grass uses its render-path filter.
+  UV transform uniforms map the world-space quad into the window
   sub-region: `u_uv_scale = world_size / (grass_cell_size * 2^mipLevel * BUDGET_AXIS)`,
   `u_uv_offset = -vec2(winOriginX, winOriginY) / BUDGET_AXIS`. `grass_cell_size`
   comes from `boot_ready` (not hard-coded 5.0) so non-default `grass_size`
@@ -331,9 +322,8 @@
   UV offset.
 - **Why**: A fixed allocation avoids per-frame `texImage2D` resize overhead.
   Uploading only the window avoids uploading the entire budget² texture when the
-  window is smaller. Nearest-mip first keeps the implementation simple; switching
-  to trilinear later requires only a `texParameteri` change and making `u_lod_blend`
-  non-zero.
+  window is smaller. Caching biome upload avoids repeating static bytes when
+  only grass density changed.
 - **Applies to**: `architecture/render-pipeline.md`.
 - **Code anchors**: `app/web/src/render/gl.ts → initRenderer` (texture allocation,
   `GRASS_LOD_BUDGET_AXIS`); `app/web/src/render/gl.ts → renderWorldImpl` (the

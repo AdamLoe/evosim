@@ -60,6 +60,7 @@ function variant(seed: 1 | 2): Settings {
   const s = clone(DEFAULTS);
   Object.assign(s, {
     targetTPS: seed === 1 ? 333 : 444,
+    appFPS: seed === 1 ? 15 : 120,
     autoRun: seed === 1,
     showProfiler: seed === 1,
     showGrass: seed !== 1,

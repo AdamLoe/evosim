@@ -29,7 +29,7 @@ the matching heading.
 | Need | Read |
 |---|---|
 | Single wasm owner, worker-only `WorldHandle` | [`sim.md`](sim.md) → `Single wasm instance, sim worker holds it` |
-| Worker pacing, `Atomics.waitAsync`, 1 ms floor, macrotask yield | [`sim.md`](sim.md) → `Pacing uses Atomics.waitAsync with a 1 ms floor on timeoutMs` + `Macrotask yield on the Atomics.waitAsync not-equal path` |
+| Worker pacing, synchronous `Atomics.wait`, SAB-only control | [`sim.md`](sim.md) → `Pacing uses synchronous Atomics.wait because steady-state control is SAB-only` |
 | One tick per worker loop iteration | [`sim.md`](sim.md) → `Sim runs step_n(1) per loop iteration` |
 | Slider protocol and mutation surface | [`sim.md`](sim.md) → `set_slider(name, value) is the sole external mutation entry point` |
 | Population cap and random cull | [`sim.md`](sim.md) → `MAX_POP_FOR_SIM is a hard sim invariant, enforced by random cull` |
@@ -50,7 +50,7 @@ the matching heading.
 | Snapshot worker (v2.0.7) NO-GO and unpark bar | [`perf.md`](perf.md) → `Snapshot worker (v2.0.7) parked` |
 | grass_step cadence/visibility gating deferred | [`perf.md`](perf.md) → `Grass grass_step cadence/visibility gating` |
 | `MAX_POP_FOR_SIM` Rust/TS duplication and boot assert | [`cross-cutting.md`](cross-cutting.md) → `MAX_POP_FOR_SIM is duplicated in Rust + TS and asserted at boot` |
-| Playwright `targetTPS = 1000` rule | [`cross-cutting.md`](cross-cutting.md) → `Every e2e Playwright test forces targetTPS = 1000 before interacting` |
+| Playwright `targetTPS = 1000` rule | [`cross-cutting.md`](cross-cutting.md) → `Worker-control e2e tests force targetTPS = 1000 before interacting` |
 | Rendering, camera, GL, direct SAB reads | [`render.md`](render.md) |
 | R8 grass texture, JS-side cull, highlight id decode, status bar | [`render.md`](render.md) |
 | Profiler four-tree shape, no-rollup rule, honest call counts | [`profiler.md`](profiler.md) |

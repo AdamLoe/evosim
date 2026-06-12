@@ -13,11 +13,12 @@ frame                ← outer RAF callback wall-clock (TS-side, main)
   frame.render_world
     frame.render_world.grass
     frame.render_world.creatures
+      frame.render_world.creatures.trail_state
 
 sim_worker           ← outer worker-loop iteration wall-clock (TS-side, worker)
   sim_worker.read_input_sab     ← drain CTRL_* SAB into worker locals
   sim_worker.tick               ← world.step_n(1)
-  sim_worker.write_output_sab   ← snapshot + inspect/profile/NN-stats responses
+  sim_worker.write_output_sab   ← ack-gated snapshot + inspect/profile/NN-stats responses
     sim_worker.write_output_sab.snapshot          ← total write_snapshot wall-clock
       sim_worker.write_output_sab.snapshot.creatures  ← creature SoA pack per-pop
       sim_worker.write_output_sab.snapshot.grass_copy ← pyramid window copy
@@ -166,7 +167,9 @@ grass_step           ← sum-busy across all rayon workers, per tick
   shared `dispatch_calls` counter records 1 per tick.
 - **`frame`** — TS-side `span("frame")` at the top of the RAF callback
   in `app/web/src/main.ts`, with inner spans in `app/web/src/render/gl.ts`.
-  Every TS span is one RAII invocation → `call_count = 1`.
+  The `trail_state` child measures the id-keyed previous/current map rebuild
+  used by velocity trails. Every TS span is one RAII invocation →
+  `call_count = 1`.
 
 ## JSON node shape
 

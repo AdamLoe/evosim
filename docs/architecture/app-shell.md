@@ -160,9 +160,11 @@ navigation layout changed. Two interaction tiers live inside the same panel:
   `grassDensityFloor` / `grassContrast` / `grassBrightness`, and the optional
   procedural-texture overlay `grassTexture` + `grassEdgeErosion` /
   `grassShadeVariation` / `grassBladeSize`; `biomeOpacity` ("World opacity",
-  fades the biome/terrain layer), `theme` (Display-group dropdown wired
-  through `applyTheme`). `grassSmoothing` + `biomeOpacity` are pure render
-  settings (no `simName`); the renderer reads `getSettings()` each frame.
+  fades the biome/terrain layer), `appFPS` (App FPS dropdown: 15/30/60/120,
+  default 60), and `theme` (Display-group dropdown wired through
+  `applyTheme`). `grassSmoothing`, `biomeOpacity`, and `appFPS` are pure
+  render settings (no `simName`); the renderer reads `getSettings()` each
+  frame.
 - **Stage-then-apply** (every other group: Energy, Grass, Eat,
   Lifecycle, Equilibrium). Edits update only the in-memory widget value.
   The Settings panel footer reconciles staged changes.

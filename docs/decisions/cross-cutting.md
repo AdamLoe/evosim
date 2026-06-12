@@ -64,18 +64,18 @@ Decisions that bind more than one architecture doc.
 - **Code anchors**: `app/web/src/widgets/perf-panel.ts → POLL_INTERVAL_MS`,
   `app/web/src/widgets/worker-stats.ts → POLL_INTERVAL_MS`.
 
-### Every e2e Playwright test forces `targetTPS = 1000` before interacting
+### Worker-control e2e tests force `targetTPS = 1000` before interacting
 
-- **Decision**: All Playwright tests under `web/tests/e2e/` set the
-  TPS dropdown to 1000 before exercising the message they cover.
-- **Why**: The `Atomics.waitAsync(0)` dark-hole regression class
-  surfaces only when `1000/targetTPS - elapsed` clamps to 0. Tests
-  at default TPS=60 pass on the buggy commit, missing the regression
-  entirely. The rule has caught the regression twice.
+- **Decision**: Worker-control Playwright tests under `app/web/tests/e2e/`
+  set target TPS to 1000 before exercising the control path they cover.
+- **Why**: High target TPS stresses pacing overshoot, futex wake handling,
+  SAB request delivery, and snapshot back-pressure. Tests at default TPS=60
+  can pass while high-throughput control is broken.
 - **Applies to**: `architecture/testing.md`,
   `architecture/worker-runtime.md`.
-- **Code anchors**: `web/tests/e2e/sim-bridge.spec.ts`,
-  `web/tests/README.md`.
+- **Code anchors**: `app/web/tests/e2e/sim-bridge.spec.ts`,
+  `app/web/tests/e2e/app-fps.spec.ts`,
+  `app/web/tests/README.md`.
 - **Revisit when**: a fundamentally different pacing primitive lands
   that no longer has the 0-timeout pathology; until then, the rule
   stays mandatory.

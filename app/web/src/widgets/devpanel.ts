@@ -21,7 +21,15 @@
 
 import type { SimBridge } from "../sim/bridge";
 import { getTargetTPS, setTpsChangeListener } from "../main";
-import { getSettings, setSetting, resetSettings, DEFAULTS, type Settings } from "../settings";
+import {
+  APP_FPS_CHOICES,
+  getSettings,
+  setSetting,
+  resetSettings,
+  DEFAULTS,
+  type AppFPS,
+  type Settings,
+} from "../settings";
 import { showToast } from "../toast";
 import { THEMES, applyTheme } from "../themes";
 import { setProfilerVisible } from "./perf-panel";
@@ -694,6 +702,40 @@ function makeThemeRow(): HTMLDivElement {
   return row;
 }
 
+function makeAppFpsRow(): HTMLDivElement {
+  const select = document.createElement("select");
+  select.id = "app-fps-select";
+  for (const fps of APP_FPS_CHOICES) {
+    const opt = document.createElement("option");
+    opt.value = String(fps);
+    opt.textContent = `${fps} FPS`;
+    select.appendChild(opt);
+  }
+  select.value = String(getSettings().appFPS);
+
+  const apply = (fps: AppFPS): void => {
+    select.value = String(fps);
+    setSetting("appFPS", fps);
+  };
+
+  select.addEventListener("change", () => {
+    const value = Number(select.value) as AppFPS;
+    apply(APP_FPS_CHOICES.includes(value) ? value : DEFAULTS.appFPS);
+  });
+
+  liveSyncers.push(() => {
+    select.value = String(getSettings().appFPS);
+  });
+
+  return makeSettingRow({
+    label: "App FPS",
+    effect: "instant",
+    controls: [select],
+    reset: () => apply(DEFAULTS.appFPS),
+    wide: true,
+  });
+}
+
 function makeLiveToggle(
   spec: ToggleSpec,
   onApply: (v: boolean) => void,
@@ -858,6 +900,7 @@ export function installDevPanel(getBridge: () => SimBridge): void {
     min: 0, max: 1, step: 0.05,
     formatValue: (v) => v.toFixed(2),
   }));
+  displaySec.appendChild(makeAppFpsRow());
   displaySec.appendChild(makeThemeRow());
   displayBox.appendChild(displaySec);
 

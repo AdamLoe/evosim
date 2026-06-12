@@ -606,6 +606,8 @@ interface GLState {
   // v2.0.3 Stream 2d: biome texture is now budget²-sized (same as grass).
   // biomeTexDim is kept for initial texImage2D allocation tracking only.
   biomeTexDim: number;
+  biomeUploadKey: string;
+  biomeUploadBuffer: ArrayBufferLike | null;
   grassProgram: WebGLProgram;
   grassU: {
     viewport: WebGLUniformLocation;
@@ -982,6 +984,8 @@ function initRenderer(gl: WebGL2RenderingContext): GLState {
     trailProgram, trailU, trailVao, trailInstanceBuf,
     trailScratch: new Float32Array(MAX_POP_FOR_SIM * TRAIL_FLOATS_PER_INSTANCE),
     biomeProgram, biomeU, biomeVao, biomeTex, biomeTexDim: 0,
+    biomeUploadKey: "",
+    biomeUploadBuffer: null,
     grassProgram, grassU, grassVao, grassTex,
     frameProgram, frameU, frameVao, frameBuf,
     instanceScratch: new Float32Array(4096 * FLOATS_PER_INSTANCE),
@@ -1242,16 +1246,32 @@ function renderWorldImpl(
 
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, s.biomeTex);
-    // Upload the windowed biome bytes into the (0,0) corner of the budget² texture.
-    // Fix minor #6: pass an explicit subarray of winW*winH bytes so the upload
-    // is correct if UNPACK_ROW_LENGTH is ever set (currently 0/unset, but
-    // this makes the call robust against that latent footgun).
-    gl.texSubImage2D(
-      gl.TEXTURE_2D, 0,
-      0, 0, winW, winH,
-      gl.RED, gl.UNSIGNED_BYTE,
-      biomeWin.subarray(0, winW * winH),
-    );
+    const texDimW = windowMeta ? windowMeta.texDimW : winW;
+    const texDimH = windowMeta ? windowMeta.texDimH : winH;
+    const wrapMode = windowMeta ? windowMeta.wrapMode : (wrap_world ? 1 : 0);
+    const biomeUploadKey = [
+      mipLevel,
+      winOriginX,
+      winOriginY,
+      winW,
+      winH,
+      texDimW,
+      texDimH,
+      wrapMode,
+      GRASS_LOD_BUDGET_AXIS,
+    ].join(":");
+    if (s.biomeUploadKey !== biomeUploadKey || s.biomeUploadBuffer !== biomeWin.buffer) {
+      // Static biome bytes only change when the published window/LOD/texture
+      // metadata changes, or when a restart swaps the wasm memory buffer.
+      gl.texSubImage2D(
+        gl.TEXTURE_2D, 0,
+        0, 0, winW, winH,
+        gl.RED, gl.UNSIGNED_BYTE,
+        biomeWin.subarray(0, winW * winH),
+      );
+      s.biomeUploadKey = biomeUploadKey;
+      s.biomeUploadBuffer = biomeWin.buffer;
+    }
 
     // UV transform — identical formula to the grass path (grass_cell_size × 2^mip × BUDGET).
     // v2.0.4 S2: uses the runtime cell size (not the legacy constant 5.0).
@@ -1438,17 +1458,22 @@ function renderWorldImpl(
       pop * stride * (creatures.BYTES_PER_ELEMENT / 4),
     );
     {
+      const trailStateSpan = span("frame.render_world.creatures.trail_state");
       const tmp = prevById;
-      prevById = currById;
-      currById = tmp;
-      currById.clear();
-      for (let i = 0; i < pop; i++) {
-        const base = i * stride;
-        // v2.0 Wave 2b: id halves moved to lanes 4/5 (were 6/7).
-        const idLo = idView[base + 4];
-        const idHi = idView[base + 5];
-        const cid = idHi * 4294967296 + idLo;
-        currById.set(cid, { x: creatures[base], y: creatures[base + 1] });
+      try {
+        prevById = currById;
+        currById = tmp;
+        currById.clear();
+        for (let i = 0; i < pop; i++) {
+          const base = i * stride;
+          // v2.0 Wave 2b: id halves moved to lanes 4/5 (were 6/7).
+          const idLo = idView[base + 4];
+          const idHi = idView[base + 5];
+          const cid = idHi * 4294967296 + idLo;
+          currById.set(cid, { x: creatures[base], y: creatures[base + 1] });
+        }
+      } finally {
+        trailStateSpan.close();
       }
     }
 

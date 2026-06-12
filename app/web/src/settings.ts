@@ -64,7 +64,15 @@ const SCHEMA_MAJOR = 3;
 // v2.1 P3 MINOR 0 → 1: added `crowdingStrength`, `crowdingRadius`,
 // `starvationThreshold`, `starvationDrainRate`, `grassCapacityScale`,
 // `grassRegrowthRate` (all six P3 equilibrium knobs) → minor bump within v3.
-const SCHEMA_MINOR = 1;
+// Runtime render pacing: added `appFPS` (15/30/60/120, default 60) → minor 2.
+const SCHEMA_MINOR = 2;
+
+export const APP_FPS_CHOICES = [15, 30, 60, 120] as const;
+export type AppFPS = (typeof APP_FPS_CHOICES)[number];
+
+function isAppFPS(value: number): value is AppFPS {
+  return APP_FPS_CHOICES.includes(value as AppFPS);
+}
 
 /** v1.12: one row of the 8-row mutation policy table. Mirrors the Rust
  * `Bucket` struct (`src/brain.rs`). `weight` is any non-negative float;
@@ -113,6 +121,9 @@ export interface Settings {
   vMajor: number;
   vMinor: number;
   targetTPS: number;
+  // Main-thread paint/render cap. Distinct from targetTPS: the worker keeps
+  // ticking at targetTPS while main consumes snapshots at this cadence.
+  appFPS: AppFPS;
   autoRun: boolean;
   // Display toggles (live-apply, page-side only)
   showProfiler: boolean;
@@ -271,6 +282,7 @@ export const DEFAULTS: Settings = {
   vMajor: SCHEMA_MAJOR,
   vMinor: SCHEMA_MINOR,
   targetTPS: 180,
+  appFPS: 60,
   autoRun: false,
   showProfiler: false,
   showGrass: true,
@@ -423,6 +435,11 @@ function pickKnown(raw: unknown): Partial<Settings> {
       if (sanitised) out[k] = sanitised;
       continue;
     }
+    if (k === "appFPS") {
+      const n = Number(v);
+      if (Number.isFinite(n) && isAppFPS(n)) out[k] = n;
+      continue;
+    }
     out[k] = v;
   }
   return out as Partial<Settings>;
@@ -523,6 +540,12 @@ export function getSettings(): Readonly<Settings> {
 }
 
 export function setSetting<K extends keyof Settings>(key: K, value: Settings[K]): void {
+  if (key === "appFPS") {
+    const n = Number(value);
+    current.appFPS = isAppFPS(n) ? n : DEFAULTS.appFPS;
+    persist();
+    return;
+  }
   current[key] = cloneSettingValue(key, value);
   persist();
 }

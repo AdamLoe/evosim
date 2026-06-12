@@ -26,9 +26,9 @@ to round-trip.
 - The list of test suites and what each one covers.
 - The convention that the threaded clippy run + the threaded test run
   are first-class gates, not opt-in.
-- The "every Playwright test forces `targetTPS = 1000` before
-  interacting" rule, because that is the regime where the worker's
-  pacing math degenerates and the message-path regressions surface.
+- The "worker-control Playwright tests force `targetTPS = 1000` before
+  interacting" rule, because that is the regime where worker pacing,
+  futex wake handling, and snapshot back-pressure regressions surface.
 - The `pnpm test:e2e` command name and how Playwright finds Vite.
 
 ## What it does NOT own
@@ -88,6 +88,10 @@ reused (`reuseExistingServer: true`).
 
 Key coverage:
 
+- `app-fps.spec.ts` verifies the Display App FPS selector exposes exactly
+  15/30/60/120, persists selection, and at high target TPS keeps snapshot
+  publication near the configured app FPS while worker TPS stays above the
+  render cap.
 - `sim-bridge.spec.ts` **fresh default world** — boots the default browser-sized
   world, runs it at high TPS for startup progress, and asserts it remains alive
   below the default population cap.
@@ -111,12 +115,10 @@ Key coverage:
 - `grass-lod-smoke.spec.ts` verifies the default grass window/LOD metadata and
   grass evolution path.
 
-**Every test forces `targetTPS = 1000` before interacting.** That is
-the regime where `1000/targetTPS - elapsed` clamps to 0 and
-`Atomics.waitAsync(.., 0)` returns synchronously without yielding to
-the event loop — the regression class the suite exists to catch. A
-test at default TPS=60 passes on a buggy commit; the suite exists
-because that bug class has shipped twice.
+**Every worker-control test forces `targetTPS = 1000` before interacting.**
+That is the regime where pacing overshoot, futex wake handling, and
+snapshot back-pressure are most stressed. A test at default TPS=60 can
+pass while high-throughput control is broken.
 
 This suite is the strongest safety net for the worker's pacing math.
 If you touch `simLoop()` in `app/web/src/sim/worker.ts`, run it.
@@ -126,6 +128,8 @@ If you touch `simLoop()` in `app/web/src/sim/worker.ts`, run it.
 - `crates/evosim/Cargo.toml` → `[features] threads`.
 - `app/web/package.json` → `"test:e2e": "playwright test"`.
 - `app/web/playwright.config.ts` → `webServer`, `reuseExistingServer`.
+- `app/web/tests/e2e/app-fps.spec.ts` → App FPS choices, persistence, and
+  snapshot back-pressure under high target TPS.
 - `app/web/tests/e2e/sim-bridge.spec.ts` → worker control-path smoke tests.
 - `app/web/tests/e2e/defaults-drift.spec.ts` → Rust↔TS slider default drift guard.
 - `app/web/tests/e2e/settings-persistence.spec.ts` → Settings localStorage and
@@ -142,8 +146,9 @@ If you touch `simLoop()` in `app/web/src/sim/worker.ts`, run it.
 - The Playwright suite gains, loses, or renames a spec file.
 - The `pnpm test:e2e` command name changes (must stay in sync with
   `app/web/tests/README.md` and `app/web/package.json`).
-- The "every test at TPS=1000" rule is relaxed (would need a separate
-  doc + reason, because the rule exists to catch a specific bug class).
+- The worker-control `targetTPS = 1000` rule is relaxed (would need a
+  separate doc + reason, because the rule exists to catch high-throughput
+  pacing and back-pressure regressions).
 - The determinism guard in `clippy.toml` changes scope.
 
 ## Why is it shaped this way

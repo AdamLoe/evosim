@@ -117,6 +117,53 @@ drove the choice — so future optimization passes start from facts, not guesses
   provably costs less than the source staging copy. The unpark bar is: snapshot
   write > ~2.35 ms irreducible in the existing worker.
 
+### Snapshot output is back-pressured by consumed seq
+
+- **Decision**: Main stores the last painted `CTRL_SEQ` in
+  `CTRL_CONSUMED_SEQ`; the worker writes at most one fresh unconsumed snapshot
+  while continuing to tick and serve SAB reports. App FPS caps expensive main
+  paint work separately from target TPS.
+- **Why**: High target TPS should advance the sim, not force the worker to
+  copy grass/creature/biome windows that main cannot display. The e2e
+  `app-fps.spec.ts` keeps the regression concrete: at target TPS 1000 and
+  App FPS 15, snapshot seq growth stays near the render cap while reported
+  TPS remains above the app FPS.
+- **Tradeoffs**: Intermediate sim states are intentionally skipped by the
+  renderer. The renderer consumes the newest published snapshot; historical
+  snapshots are never queued.
+- **Applies to**: `architecture/worker-runtime.md`,
+  `architecture/shared-memory-and-protocol.md`,
+  `architecture/render-pipeline.md`.
+- **Code anchors**: `app/crates/evosim/src/control_sab.rs → CTRL_CONSUMED_SEQ`;
+  `app/web/src/sim/worker.ts → maybeWriteSnapshotToSAB`;
+  `app/web/src/main.ts → frame`;
+  `app/web/tests/e2e/app-fps.spec.ts`.
+
+### Static biome texture uploads are metadata-cached
+
+- **Decision**: The renderer skips biome `texSubImage2D` when the published
+  window/LOD/texture metadata and wasm-memory buffer identity match the last
+  upload. Grass still uploads each painted frame.
+- **Why**: Biome bytes are static after boot, but grass density changes as the
+  sim runs. Caching by window metadata removes repeated static uploads without
+  risking biome/grass UV misalignment after pan, zoom, LOD, wrap, or restart.
+- **Applies to**: `architecture/render-pipeline.md`.
+- **Code anchors**: `app/web/src/render/gl.ts → renderWorldImpl`.
+
+### Velocity lanes remain deferred
+
+- **Decision**: Do not add velocity or previous-position lanes to the snapshot
+  layout. Measure the current id-keyed trail map path under
+  `frame.render_world.creatures.trail_state` first.
+- **Why**: Snapshot decimation and biome-upload caching reduce the larger
+  repeated work without widening the hot protocol. The trail map now has a
+  named profiler row, so a later change can justify a layout expansion from
+  measured dominance rather than assumption.
+- **Applies to**: `architecture/render-pipeline.md`,
+  `architecture/profiler.md`,
+  `architecture/shared-memory-and-protocol.md`.
+- **Code anchors**: `app/web/src/render/gl.ts → renderWorldImpl`.
+
 ### Grass `grass_step` cadence/visibility gating: deferred as the next 10× lever
 
 - **Decision**: Cadence/visibility-gated `grass_step` (idea #1 in

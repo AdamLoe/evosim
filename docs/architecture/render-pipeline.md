@@ -75,7 +75,8 @@ is correctly aspect-matched.
   renderer reads `CREATURE_STRIDE` and the slot-offset helpers from
   `sim/bridge.ts`.
 - **The sim tick rate or any sim mutation** — owned by
-  [`worker-runtime.md`](worker-runtime.md). The render rate is just RAF.
+  [`worker-runtime.md`](worker-runtime.md). The render loop is main-thread
+  RAF capped by the persisted App FPS setting.
 - **The profile-tree shape** — owned by [`profiler.md`](profiler.md).
   The renderer only opens spans by name.
 - **The dev-panel UI, the rail tabs, the inspector** — those live in
@@ -89,21 +90,22 @@ RAF callback (wrapped in `span("frame")`):
   1. early-return if SAB handles aren't bound yet OR slotLayout is null
      (e.g., during restart). `slotLayout` is built once per boot from the
      boot-time `grass_dim` (see shared-memory-and-protocol.md).
-  2. open `frame.snapshot.read` span
+  2. write camera SAB lanes, then read `CTRL_SEQ`.
+     If no new seq, repaint only for paused camera movement.
+     If there is a new seq but the configured App FPS interval has not elapsed,
+     skip snapshot read/render and do not ack the seq yet.
+  3. open `frame.snapshot.read` span
      2a. seq  = Atomics.load(controlI32, CTRL_SEQ)
      2b. slot = Atomics.load(controlI32, CTRL_CURRENT_SLOT)
      2c. header = readSnapshotHeader(snapshotView, slotOffset(layout, slot))
      2d. creatures = new Float32Array(snapshotBuffer, creatureSoAOffset(layout, slot), pop * CREATURE_STRIDE)
      2e. grass    = new Uint8Array(snapshotBuffer, grassOffset(layout, slot),    layout.grassRegionBytes)
          biomeWin = new Uint8Array(snapshotBuffer, biomeWinOffset(layout, slot), layout.biomeWinBytes)
-         // grass: u8 clipmap window, min(grass_dim,2048)² bytes per slot
+         // grass: u8 clipmap window, min(grass_dim,4096)² bytes per slot
          // biomeWin: mode-downsampled biome window, same allocation size
          // windowMeta = readWindowMetadata(snapshotView, slotBaseOff)
          // snapshotBuffer is wasm.memory.buffer (wasm linear memory, not a separate SAB)
-  3. close `frame.snapshot.read`
-  4. If seq === lastPaintedSeq AND camera unchanged → skip paint (seq-gated: FPS ≤ TPS).
-     Exception: if the camera moved (pan/zoom while paused), repaint with the
-     existing snapshot so the canvas reflects the new view without needing a new tick.
+  4. close `frame.snapshot.read`
   5. (auto-restart on world_ended if enabled)
   6. pollRail(rail, header, simBridge, creatures, pop)
   7. renderWorld(gl, cam, viewW, viewH, creatures, grass,
@@ -115,18 +117,20 @@ RAF callback (wrapped in `span("frame")`):
      // wrap mode; consumed each frame to drive the UV transform + texSubImage2D.
      // Also writes camera SAB lanes (cx/cy/zoom as f32-bits at slots 136-138;
      // viewport_w/h as u32 at slots 139-140) so the worker knows the view.
-  8. update top-left status strip (world_seed) + perf-panel status line
+  8. Atomics.store(CTRL_CONSUMED_SEQ, seq), update perf-panel status line
 ```
 
 `renderWorld` opens `frame.render_world` and inside it
-`frame.render_world.grass` and `frame.render_world.creatures` children.
+`frame.render_world.grass` and `frame.render_world.creatures` children;
+the creature path also records `frame.render_world.creatures.trail_state`
+around the id-keyed trail map rebuild.
 `frame` is a real RAII span (not a rollup), so any unaccounted-for RAF
 overhead shows up as `frame.total - sum(frame.*.total)`.
 
-## Top-left status bar
+## Perf status line and App FPS
 
-The `#status` div is rewritten every RAF with the freshest snapshot
-header. The format is:
+The bottom perf-panel status line is updated on every painted frame with
+the freshest consumed snapshot header. The format is:
 
 ```text
 seed: <cachedSeed>  ·  tick <N>  ·  pop <N>  ·  <TPS> TPS  ·  <FPS> FPS[  (world ended)]
@@ -135,16 +139,14 @@ seed: <cachedSeed>  ·  tick <N>  ·  pop <N>  ·  <TPS> TPS  ·  <FPS> FPS[  (w
 - **TPS** is rounded from `header.tps` (the worker's rolling-avg TPS
   written into the SAB header each snapshot). Shows `—` until the
   first positive non-NaN value lands.
-- **FPS** is a "frames in the last 1 s" counter maintained entirely on
-  main: `framesThisSecond++` each RAF; when
-  `now - fpsWindowStart >= 1000`, sample → `lastFps`, reset counter
-  and window. Shows `—` until the first 1 s window closes; naturally
-  trends toward 0 while paused or world-ended without a misleading
-  transient.
+- **FPS** is the count of painted-frame timestamps in the trailing 1 s
+  window, maintained entirely on main. It naturally follows the App FPS
+  cap and can be lower when render work is slower than the selected cap.
 
-The `#perf-tps` readout inside the bottom-left perf widget is kept
-deliberately as belt-and-suspenders — the always-visible top bar is
-the discoverable surface, the perf widget is for heavy debugging.
+The App FPS setting is a Display setting with exactly `15`, `30`, `60`,
+and `120` choices (default `60`). It caps expensive snapshot read,
+render, and upload work; the RAF callback still runs at browser cadence
+to write camera lanes and handle paused camera repaint.
 
 ## Per-creature instance pack
 
@@ -240,52 +242,30 @@ bodies → highlight ring. Halo runs first so each body paints over its
 own glow; trails run between halo and body so the body's leading edge
 always covers the trail's lead-in pixel.
 
-## Snapshot interpolation
-
-The renderer interpolates body positions between sim snapshot flips so
-motion is smooth at any TPS. State is module-level in `render/gl.ts`:
+## Trail state
 
 - `prevById: Map<id, {x, y}>` — positions at the previous snapshot.
 - `currById: Map<id, {x, y}>` — positions at the current snapshot.
-- `flipTimeMs: number` — `performance.now()` when the seq counter last
-  bumped.
-- `lastSeenSeq: number` — for flip detection. Starts at `-1`.
 
-Per RAF: main reads `seq = Atomics.load(controlI32, CTRL_SEQ)` and the
-configured `targetTPS`, both passed to `renderWorld`. Inside
-`renderWorld`:
+The renderer does **not** interpolate duplicate snapshot frames. Main
+paints a snapshot once, stores `CTRL_CONSUMED_SEQ`, and waits for either
+a new seq or a paused camera repaint. Inside `renderWorldImpl`, each
+paint pointer-swaps `prevById` and `currById`, clears the new current map,
+and walks the current SoA once to populate id → position entries. Bodies
+render at their raw current positions.
 
-1. If `seq !== lastSeenSeq`: pointer-swap `prevById ↔ currById`, clear
-   the new curr, then walk the SoA once to populate it (id-decode +
-   `Map.set`). On the very first flip (`lastSeenSeq === -1`), also
-   clear prev so the first frame after boot renders curr verbatim
-   instead of lerping from zero.
-2. `expectedIntervalMs = clamp(1000 / targetTPS, 16, 250)`. The lower
-   bound keeps a `targetTPS = 1000` setting from collapsing alpha to
-   zero between RAFs; the upper bound keeps very low TPS from gliding
-   for seconds at a time.
-3. `alpha = clamp((now - flipTimeMs) / expectedIntervalMs, 0, 1)`.
-4. Per creature: `prev = prevById.get(id)`. If present, render at
-   `lerp(prev, curr, alpha)`; else render at curr (newborn). Dead
-   creatures drop automatically because the loop iterates the current
-   SoA.
-
-Cost: the per-flip Map rebuild is ~1–2 ms at 32 k entries; the per-RAF
-`Map.get` lookup is ~0.5 ms at 32 k. Both maps are reused across flips
-(clear, don't recreate) so the heap doesn't churn.
-
-`resetInterpolation()` is exported from `render/gl.ts` and called by
-`main.ts → restart()` after `resetStats()`. It clears both maps,
-resets `lastSeenSeq` to `-1`, and stamps `flipTimeMs = now()` so the
-first post-restart frame doesn't lerp from positions in the dead
-worker's last snapshot.
+The map rebuild is measured as
+`frame.render_world.creatures.trail_state` so future optimization passes
+can decide from profiler data whether the id-keyed map remains a scaling
+problem. Both maps are reused across flips (clear, don't recreate) so the
+heap does not churn.
 
 ### Velocity trails
 
-A thin quad-as-line per moving creature draws from `prev` (one full
-tick ago) to the current interpolated body position. The fragment
-fades alpha from 0 at the back to `v_color.a` at the front, so the
-body looks like it's dragging a comet tail one tick long. Implementation: a
+A thin quad-as-line per moving creature draws from `prev` (one painted
+snapshot ago) to the current body position. The fragment fades alpha
+from 0 at the back to `v_color.a` at the front, so the body looks like
+it's dragging a comet tail one snapshot long. Implementation: a
 dedicated `TRAIL_VS` / `TRAIL_FS` program with its own VAO and
 instance buffer (per-instance: start xy, end xy, color rgba, thickness
 in px). The instance buffer is pre-allocated to the
@@ -358,10 +338,13 @@ set to 1 at init; R8 is a normalized unorm format so the shader's
 
 **Biome.** The per-slot biome window (mode-downsampled, same `win_w × win_h`
 as grass) is appended immediately after the grass region in the slot
-(`biomeWinOffset`). It is uploaded the same way — `texSubImage2D` of
-`win_w × win_h` bytes into the `(0, 0)` corner of its own 4096² R8 texture
-— every frame. The biome texture uses `NEAREST` filtering so each cell
-renders as a flat color. For biome semantics (id-to-type mapping), see
+(`biomeWinOffset`). The renderer uploads it with `texSubImage2D` only
+when the biome upload key changes: mip/window origin and dimensions,
+published texture dimensions, wrap mode, budget axis, or wasm-memory
+buffer identity after restart. The biome grid is static, so identical
+metadata means the already-uploaded texture bytes are still valid. The
+biome texture uses `NEAREST` filtering so each cell renders as a flat
+color. For biome semantics (id-to-type mapping), see
 [`architecture/biome.md`](biome.md).
 
 **LOD level.** The sim's Rust worker computes the pyramid level and window
@@ -518,7 +501,8 @@ fully on top.
 - The clipmap window metadata layout changes (snapshot header bytes
   [32..64); `readWindowMetadata`; the `u_uv_scale`/`u_uv_offset`/`u_uv_wrap`
   derivation in `renderWorldImpl` + `windowUvWrap`; the `GRASS_CELL_SIZE`
-  constant; or the camera SAB lanes at control-SAB slots **136–140**).
+  constant; the camera SAB lanes at control-SAB slots **136–140**; or
+  the consumed-seq ack lane at slot **141**).
 - A new per-frame span is added (must nest under `frame` to avoid
   orphaning).
 - The id encoding changes (currently raw u32 pair via `f32::from_bits`

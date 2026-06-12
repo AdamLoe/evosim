@@ -121,6 +121,9 @@ pub const CTRL_CAMERA_ZOOM_BITS: usize = 138;
 pub const CTRL_CAMERA_VIEWPORT_W: usize = 139;
 /// v2.0.3 Stream 2b: camera lane — viewport height in CSS pixels (u32).
 pub const CTRL_CAMERA_VIEWPORT_H: usize = 140;
+/// Last `CTRL_SEQ` value the main thread painted/consumed. Worker uses this
+/// to keep at most one fresh unconsumed snapshot published while ticking.
+pub const CTRL_CONSUMED_SEQ: usize = 141;
 
 /// Length of the leading i32 region in i32 slots. Byte buffers start
 /// at `CTRL_I32_REGION_LEN * 4`.
@@ -173,6 +176,6 @@ const _: () = assert!(
     "i32 region must end before the inspect-response byte buffer starts",
 );
 const _: () = assert!(
-    CTRL_CAMERA_VIEWPORT_H < CTRL_I32_REGION_LEN,
+    CTRL_CONSUMED_SEQ < CTRL_I32_REGION_LEN,
     "camera lanes must fit within the i32 region",
 );

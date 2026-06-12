@@ -45,8 +45,10 @@ equal at boot — drift is a thrown error pointing at "rebuild wasm".
   `wasm_memory.buffer` at the `snapshot_buf_byte_offset` from `boot_ready`
   — no separate SharedArrayBuffer.
 - The creature SoA stride: `CREATURE_STRIDE = 8` (= 32 bytes). World-size independent.
-- The snapshot atomic-flip ordering (write inactive slot → flip
-  `CTRL_CURRENT_SLOT` → bump `CTRL_SEQ`).
+- The snapshot publication contract: main stores the last painted
+  `CTRL_SEQ` in `CTRL_CONSUMED_SEQ`; the worker writes a new inactive
+  slot only when that ack equals the last published seq, then flips
+  `CTRL_CURRENT_SLOT` and bumps `CTRL_SEQ`.
 - The epoch protocol for SAB request/response: producer writes
   payload bytes first, then bumps the response epoch; consumer reads
   the epoch first, then payload, then re-checks epoch to detect a
@@ -111,6 +113,7 @@ length-prefixed payloads).
 | 138 | `CTRL_CAMERA_ZOOM_BITS` | Camera zoom (px/world-unit), `f32::to_bits`. |
 | 139 | `CTRL_CAMERA_VIEWPORT_W` | Viewport width in CSS pixels (u32). |
 | 140 | `CTRL_CAMERA_VIEWPORT_H` | Viewport height in CSS pixels (u32). |
+| 141 | `CTRL_CONSUMED_SEQ` | Last `CTRL_SEQ` value main has painted/consumed. Worker uses it to keep at most one unconsumed fresh snapshot published. |
 
 Slots not listed are reserved; do not read or write them.
 
@@ -315,15 +318,17 @@ geometry — `grassRegionBytes`, `biomeWinBytes`, `slotBytes` — from the singl
 `grass_dim` source of truth. Inspector / profile / NN stats responses remain SAB byte
 buffers polled at 60 Hz via `SimBridge`.
 
-## Atomic-flip ordering
+## Snapshot publication and atomic-flip ordering
 
-The worker's `writeSnapshotToSAB()` follows a strict order:
+The worker calls `writeSnapshotToSAB()` only when main's
+`CTRL_CONSUMED_SEQ` ack equals the worker's last published seq. When it
+does publish, the flip still follows a strict order:
 
 ```ts
 const current = Atomics.load(ctrl, CTRL_CURRENT_SLOT);
 const inactive: 0 | 1 = current === 0 ? 1 : 0;
 
-world.write_snapshot(inactive);  // Rust writes bytes into wasm linear memory
+world.write_snapshot(inactive, camCx, camCy, camZoom, viewportW, viewportH);
 
 Atomics.store(ctrl, CTRL_CURRENT_SLOT, inactive);   // FLIP  (TS, not Rust)
 Atomics.add(ctrl, CTRL_SEQ, 1);                     // BUMP  (TS, not Rust)
@@ -331,7 +336,9 @@ Atomics.add(ctrl, CTRL_SEQ, 1);                     // BUMP  (TS, not Rust)
 
 Store before add: if main observes the seq bump, the next
 `Atomics.load(CTRL_CURRENT_SLOT)` is guaranteed to see the new value.
-The inactive slot is owned exclusively by the worker between flips.
+The inactive slot is owned exclusively by the worker between flips. Main
+acks after paint by storing the consumed seq into `CTRL_CONSUMED_SEQ`;
+until then, worker ticks continue but snapshot writes are skipped.
 
 The response-buffer epoch protocol mirrors this — payload bytes are
 written first via `Uint8Array.set`, then `CTRL_..._LEN` is stored,
@@ -361,7 +368,10 @@ if it advanced, the bytes are guaranteed to be coherent.
   — defined in `app/crates/evosim/src/control_sab.rs`; re-exported from `app/web/src/sim/bridge.ts`.
   Main writes all five each RAF; the worker reads them in `write_snapshot` and
   passes them as arguments. A compile-time assert in `control_sab.rs` checks that
-  slot 140 < `CTRL_I32_REGION_LEN` (256).
+  the camera + consumed-seq lanes fit below `CTRL_I32_REGION_LEN` (256).
+- `CTRL_CONSUMED_SEQ` (slot **141**) — main writes the last painted
+  `CTRL_SEQ`; the worker reads it before `write_snapshot` to avoid
+  publishing more than one unconsumed snapshot.
 - `CREATURE_STRIDE = 8` — renderer-side guard `if (stride !== 8) throw`.
 - **Grass + biome region sizes** — derived at boot from `grass_dim` (see
   computed-dims-equality above). `grassRegionBytes = biomeWinBytes = min(grass_dim, 4096)²`;
@@ -371,7 +381,8 @@ if it advanced, the bytes are guaranteed to be coherent.
 
 - [`crates/evosim/src/control_sab.rs`](../../app/crates/evosim/src/control_sab.rs) — canonical control SAB layout;
   every `CTRL_*` constant including camera lanes `CTRL_CAMERA_CX_BITS` …
-  `CTRL_CAMERA_VIEWPORT_H` (slots **136–140**).
+  `CTRL_CAMERA_VIEWPORT_H` (slots **136–140**) and `CTRL_CONSUMED_SEQ`
+  (slot **141**).
 - [`app/crates/evosim/src/wasm_api/mod.rs`](../../app/crates/evosim/src/wasm_api/mod.rs) → `SLIDER_NAMES`, `SLIDER_COUNT`,
   `SNAPSHOT_HEADER_BYTES`, `GRASS_LOD_BUDGET_AXIS`, `GRASS_LOD_MARGIN_FACTOR`,
   `SnapshotLayout`, `WorldHandle::set_slider`, `WorldHandle::set_slider_by_index`,
@@ -425,17 +436,18 @@ if it advanced, the bytes are guaranteed to be coherent.
   MODE-downsampled u8 Biome tags).
 - The grass region encoding (u8 density), biome window encoding, or the
   `WorldDims` derivation (`GRASS_CELL_SIZE`, `world_size` default) changes.
-- The snapshot atomic-flip ordering changes (currently store-before-add).
+- The snapshot ack/atomic-flip ordering changes (currently
+  consumed-seq gate, then store-before-add).
 - `MAX_POP_FOR_SIM` or `CREATURE_STRIDE` changes value.
 
 ## Why is it shaped this way
 
 See [`../decisions/sim.md`](../decisions/sim.md) for the all-SAB
-control decision: why postMessage moved off the hot path (the
-`Atomics.waitAsync(0)` floor capping TPS), why restart still uses
-`worker.terminate()`, why the TS slider mirror is code-generated
-rather than hand-mirrored, why the response buffer sizes are sized
-as they are, and the SAB-vs-postMessage + double-buffer rationale.
+control decision: why postMessage moved off the hot path, why synchronous
+`Atomics.wait` is now valid for pacing, why restart still uses
+`worker.terminate()`, why the TS slider mirror is code-generated rather
+than hand-mirrored, why the response buffer sizes are sized as they are,
+and the SAB-vs-postMessage + double-buffer rationale.
 
 ## See also
 
