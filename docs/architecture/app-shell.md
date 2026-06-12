@@ -222,8 +222,9 @@ for them. They reach the next boot via `widgetReaders` /
 `world_seed`, `wrap_world`, the species-construction knobs
 `species_mode`, `crossover_mode`, `starting_species_count`,
 `starting_species_member_count`, `starting_species_member_variance`,
-`grass_size`, `grass_multisight`, `grass_clump_count`, and
-`grass_clump_size`. Labelled `(next world)` via the CSS rule
+`grass_size`, `grass_multisight`, `grass_clump_count`,
+`grass_clump_size`, `init_graze_boost`, and `init_split_boost`.
+Labelled `(next world)` via the CSS rule
 `.devpanel-row label.next-world::after`. Apply fires the
 construction-only toast.
 

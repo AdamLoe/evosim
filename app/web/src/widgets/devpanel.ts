@@ -62,6 +62,9 @@ const CONSTRUCTION_ONLY_SLIDERS = new Set<string>([
   // v2.0.6 S3: seeded grass clumps (run at world construction → restart required).
   "grass_clump_count",
   "grass_clump_size",
+  // Founder action-output boosts are applied only when founder brains are built.
+  "init_graze_boost",
+  "init_split_boost",
 ]);
 
 const TOAST_CONSTRUCTION =
