@@ -78,6 +78,7 @@ import { SLIDER_INDEX } from "../generated/slider-ids";
 // gen-bindings → lod-constants.ts. Import here and re-export so consumers of
 // sim-bridge get it without touching the generated file directly.
 import { GRASS_LOD_BUDGET_AXIS as GRASS_LOD_BUDGET_AXIS_GENERATED } from "../generated/lod-constants";
+import type { WorldConfig } from "../generated/world-config";
 
 // Re-export hot SAB constants for the snapshot read path in main.ts.
 export {
@@ -90,11 +91,8 @@ export {
   CTRL_SEQ,
 };
 
-/** Protocol version. Bump on a breaking change to either message union.
- *  v3 (v2.0 Wave 1c): boot carries world_size/wrap_world/world_seed,
- *  boot_ready adds wrap_world/world_seed, and the snapshot grass region is now
- *  u8 (was f32). */
-export const SIM_BRIDGE_VERSION = 3;
+/** Protocol version. Bump on a breaking change to either message union. */
+export const SIM_BRIDGE_VERSION = 4;
 
 export type WorkerDebugFault =
   | "crash_after_boot"
@@ -345,56 +343,10 @@ export function readSnapshotHeader(view: DataView, byteOffset: number): Snapshot
  */
 export interface SimMessageBoot {
   kind: "boot";
-  seed: string;
-  initial_grass_seed_count: number;
-  energy_max: number;
-  founder_count: number;
-  full_grass_on_init: boolean;
+  world_config: WorldConfig;
   initial_sliders: Record<string, number>;
   initial_target_tps: number;
   initial_paused: boolean;
-  /** v1.12: JSON-encoded `{hidden_sizes, activations}`. Empty string means
-   * "use Rust-side legacy default" (32→48→24→5). The worker passes this
-   * verbatim into `WorldHandle.newWithFounderCount`. */
-  nn_topology_json: string;
-  /** v2.0 Wave 1a: construction-only world shape. `world_size` is the world
-   * extent in world-units (default 9600). `wrap_world` selects torus vs
-   * walled. `world_seed` seeds the biome generator (0 ⇒ Rust picks a random
-   * one and reports it back). All three feed `newWithFounderCount`'s new
-   * trailing args. */
-  world_size: number;
-  wrap_world: boolean;
-  world_seed: number;
-  /** v2.0 Wave 3b: species + sexual-mating construction settings. These shape
-   * world seeding at construction, so — like the world-shape args above — they
-   * ride `newWithFounderCount`'s explicit construction args (not the live slider SAB).
-   * `crossover_mode` is the Rust f32 encoding (0 = average, 1 = fifty_fifty).
-   * (`mating_cooldown_ticks` is live and flows through `initial_sliders`.) */
-  species_mode: boolean;
-  crossover_mode: number;
-  starting_species_count: number;
-  starting_species_member_count: number;
-  starting_species_member_variance: number;
-  /** v2.0.4 S2 / v2.0.5 S4: grass cell size at construction (default 5.0).
-   * Must ride the explicit construction path (not initial_sliders) because
-   * initial_sliders is applied AFTER World construction and cannot affect dims. */
-  grass_cell_size: number;
-  /** v2.0.4 S6 / Wave 2: multi-band grass NN sight at construction (default ON).
-   * Must ride the explicit construction path because it changes the NN input
-   * layout before topology/founder-brain construction. */
-  grass_multisight: boolean;
-  /** v2.0.6 S3: seeded grass clumps at construction. Must ride the explicit
-   * construction path (same constraint as grass_cell_size). clump_count=0 falls
-   * back to the old uniform-scatter behaviour. Default 40. */
-  grass_clump_count: number;
-  /** v2.0.6 S3: clump radius in grass cells. Default 8. */
-  grass_clump_size: number;
-  /** Founder action-output boosts. Construction-scoped — applied once to founder
-   * brains at world build, not per birth. Must ride the explicit construction
-   * path (read during founder seeding, before initial_sliders). 1.0 = neutral.
-   * (`mate_reach_multiplier` is live and flows through `initial_sliders`.) */
-  init_graze_boost: number;
-  init_split_boost: number;
   /** Test-only fault injection. Main only sets this from window.__evosimE2E. */
   debug_fault?: WorkerDebugFault;
 }
@@ -422,6 +374,8 @@ export interface SimReplyBootReady {
   /** v2.0 Wave 1a: numeric biome seed actually used (Rust resolves 0 → random
    * and reports the resolved value so a restart can reuse it). */
   world_seed: number;
+  /** Resolved master seed used to derive construction-time streams. */
+  master_seed: number;
   threads: number;
   rayon_ok: boolean;
   max_pop_for_sim: number;

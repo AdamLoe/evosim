@@ -15,24 +15,8 @@ import {
 } from "./widgets/perf-panel";
 import {
   installDevPanel,
-  getInitialGrassSeedCount,
-  getEnergyMax,
-  getFounderCount,
-  getFullGrassOnInit,
-  getWorldSize,
-  getWrapWorld,
   getWorldSeed,
-  getSpeciesMode,
-  getCrossoverMode,
-  getStartingSpeciesCount,
-  getStartingSpeciesMemberCount,
-  getStartingSpeciesMemberVariance,
-  getGrassMultisight,
-  getGrassSize,
-  getGrassClumpCount,
-  getGrassClumpSize,
-  getInitGrazeBoost,
-  getInitSplitBoost,
+  currentWorldConfig,
   currentSliderState,
 } from "./widgets/devpanel";
 import { installCanvasClickHandler, resetInspectorSelection, installInspectorE2EHook, refreshInspector } from "./rail/inspector";
@@ -182,9 +166,6 @@ let slotLayout: SlotLayout | null = null;
 // biomeView + biomeDirty approach is superseded — biomeWin is read from the
 // snapshot slot each frame using biomeWinOffset(). No module-level state needed.
 let cachedSeed = "";
-// v2.0.5 S5: latestWorldSeed removed — the status strip that displayed it is
-// gone. The world seed is still captured in pendingWorldSeed (for reuse by
-// the boot payload path) but no longer surfaced in the DOM.
 let latestWrapWorld = true;
 
 async function main(): Promise<void> {
@@ -225,12 +206,10 @@ async function main(): Promise<void> {
   // after a manual restart.
   installDevPanel(() => simBridge);
 
-  // v2.0 Wave 1a: seed the next-world biome seed from the persisted Settings
-  // value (0 ⇒ Rust randomizes on first boot and reports it back, which we
-  // then capture so restarts reuse the same biome until the user rerolls).
-  // v2.0.5 S5: first-boot still uses the persisted worldSeed; subsequent
-  // restarts always reroll (pendingWorldSeed is set fresh in restart() below).
-  pendingWorldSeed = getWorldSeed();
+  // Settings keeps the historical `worldSeed` key, but it now stores the
+  // WorldConfig master seed. Zero means Rust resolves a random master seed and
+  // reports it back for plain restarts.
+  pendingMasterSeed = getWorldSeed();
 
   let simBridge: SimBridge;
   let workerState: WorkerHealthState = "booting";
@@ -358,7 +337,7 @@ async function main(): Promise<void> {
   async function restartWorker(rail: RailState, automatic: boolean): Promise<void> {
     let freshSeed = (Math.floor(Math.random() * 0xffff_fffe) + 1) >>> 0;
     if (freshSeed === 0) freshSeed = 1;
-    pendingWorldSeed = freshSeed;
+    pendingMasterSeed = freshSeed;
     const oldBridge = simBridge;
     const replacement = await spawnTrackedWorker("");
     simBridge = replacement;
@@ -730,13 +709,19 @@ let latestWorldSize = 0;
 let latestGrassDim = 0;
 // v2.0.4 S2: runtime grass cell size (default 5.0; non-default when grass_size slider is moved).
 let latestGrassCellSize = 5.0;
-// v2.0 Wave 1a: the numeric biome seed to construct the NEXT world with. The
-// status strip's reroll button and the Settings world_seed row write this;
-// boot reads it (0 ⇒ Rust picks + reports a fresh one, which we then capture
-// so subsequent restarts reuse the same biome unless the user rerolls).
-let pendingWorldSeed = 0;
+// Master seed for the next world. Zero means Rust resolves one at construction.
+let pendingMasterSeed = 0;
 function latestSnapshotWorldSize(): number {
   return latestWorldSize;
+}
+
+function hashSeedString(seed: string): number {
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < seed.length; i++) {
+    h ^= seed.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return h === 0 ? 1 : h;
 }
 
 async function spawnSimWorker(
@@ -783,56 +768,20 @@ async function spawnSimWorker(
     });
   });
 
-  cachedSeed = seed === "" ? "(random)" : seed;
-
-  // v1.12: hand the persisted NN topology to the worker as a JSON string.
-  // Rust side parses `{hidden_sizes, activations}`; "" falls back to legacy.
-  const t = getSettings().nnTopology;
-  const nn_topology_json = JSON.stringify({
-    hidden_sizes: t.layerSizes,
-    activations: t.activations,
-  });
+  const pinnedSettingSeed = getWorldSeed();
+  const masterSeed =
+    seed !== ""
+      ? hashSeedString(seed)
+      : pinnedSettingSeed !== 0
+        ? pinnedSettingSeed
+        : pendingMasterSeed;
+  cachedSeed = masterSeed === 0 ? "(random)" : String(masterSeed);
   bridge.sendBoot({
     kind: "boot",
-    seed,
-    initial_grass_seed_count: getInitialGrassSeedCount(),
-    energy_max: getEnergyMax(),
-    founder_count: getFounderCount(),
-    full_grass_on_init: getFullGrassOnInit(),
+    world_config: currentWorldConfig(masterSeed),
     initial_sliders: currentSliderState(),
     initial_target_tps: targetTPS,
     initial_paused: paused,
-    nn_topology_json,
-    // v2.0 Wave 1a: construction-only world shape. A non-zero `world_seed` in
-    // Settings means the user pinned a specific biome seed — honor it. A 0
-    // means "auto": reuse the last resolved/rerolled seed (`pendingWorldSeed`)
-    // so the same biome returns across plain restarts, or 0 on the very first
-    // boot (Rust then picks one and reports it back, which we capture).
-    world_size: getWorldSize(),
-    wrap_world: getWrapWorld(),
-    world_seed: getWorldSeed() !== 0 ? getWorldSeed() : pendingWorldSeed,
-    // v2.0 Wave 3b: species + sexual-mating construction settings (the 5 new
-    // trailing `newWithFounderCount` args). `mating_cooldown_ticks` is a live
-    // slider and rides `initial_sliders`, not this construction path.
-    species_mode: getSpeciesMode(),
-    crossover_mode: getCrossoverMode(),
-    starting_species_count: getStartingSpeciesCount(),
-    starting_species_member_count: getStartingSpeciesMemberCount(),
-    starting_species_member_variance: getStartingSpeciesMemberVariance(),
-    // v2.0.4 S2 / v2.0.5 S4: grass cell size — must ride the explicit
-    // construction path so dims are correct at World construction. Default 5.0.
-    grass_cell_size: getGrassSize(),
-    // v2.0.4 S6 / Wave 2: multi-band grass sight changes NN input layout, so it
-    // must ride the explicit construction path before topology construction.
-    grass_multisight: getGrassMultisight(),
-    // v2.0.6 S3: seeded grass clumps — must ride the explicit construction path
-    // (clump seeding runs during World construction, before initial_sliders).
-    grass_clump_count: getGrassClumpCount(),
-    grass_clump_size: getGrassClumpSize(),
-    // Founder action-output boosts — construction-scoped, must ride the explicit
-    // boot path (read during founder seeding, before initial_sliders).
-    init_graze_boost: getInitGrazeBoost(),
-    init_split_boost: getInitSplitBoost(),
     debug_fault: options.debugFault ?? undefined,
   });
 
@@ -887,11 +836,8 @@ async function spawnSimWorker(
   // v2.0.4 S2: store the construction-time cell size so the renderer UV transform is correct.
   latestGrassCellSize = ready.grass_cell_size;
   latestWrapWorld = ready.wrap_world;
-  // v2.0.5 S5: world seed is captured into pendingWorldSeed below. The
-  // former latestWorldSeed variable (for the removed status strip) is gone.
-  // Reuse the resolved numeric seed on the next restart so the same biome
-  // layout returns; a reroll/edit in Settings overrides `pendingWorldSeed`.
-  pendingWorldSeed = ready.world_seed;
+  pendingMasterSeed = ready.master_seed;
+  cachedSeed = String(ready.master_seed);
   // v2.0 Wave 1a/2d: build the runtime slot geometry from the reported grass_dim
   // (the single source of truth). Biome tint comes from the per-slot biome
   // window appended after grass in each snapshot slot.

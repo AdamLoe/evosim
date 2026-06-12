@@ -18,6 +18,32 @@ pub const WRAP_WORLD_DEFAULT: bool = true;
 /// Creature body radius scale in world-units.
 pub const BODY_RADIUS_PER_SIZE: f32 = 1.0;
 
+/// Version of the Rust-owned world-construction payload accepted by the wasm
+/// boot constructor and mirrored into TypeScript by `gen-bindings`.
+pub const WORLD_CONFIG_SCHEMA_VERSION: u32 = 1;
+
+/// Named construction-time streams derived from one master seed. The numeric
+/// discriminants are stable protocol material: changing one changes replay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum WorldSeedStream {
+    SimRng = 0x5349_4D31,
+    Biome = 0x4249_4F31,
+    GrassClumps = 0x4752_5331,
+    SpeciesFounders = 0x5350_4331,
+}
+
+/// Derive a reproducible u32 sub-seed from a resolved non-zero master seed.
+/// SplitMix-style avalanching keeps adjacent master seeds and stream ids from
+/// producing visibly related world layouts.
+pub fn derive_world_seed(master_seed: u32, stream: WorldSeedStream) -> u32 {
+    let mut x = (master_seed as u64) << 32 | stream as u64;
+    x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    ((x ^ (x >> 31)) as u32).max(1)
+}
+
 // ---- Spatial hash ----
 // HASH_CELL is the only compile-time knob; the per-axis cell count
 // `hash_dim = ceil(world_size / HASH_CELL)` is computed at construction

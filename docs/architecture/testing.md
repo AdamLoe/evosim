@@ -16,8 +16,8 @@ Three gate surfaces:
    routing, ownership paths, Rust↔TS generated constants, worker pacing
    invariants, and profiler tree/span drift.
 3. **Playwright e2e** — `cd app/web && pnpm test:e2e`. Specs under
-   `app/web/tests/e2e/` cover the main↔worker control path, Rust↔TS slider
-   defaults drift, settings persistence, grass LOD/window metadata,
+  `app/web/tests/e2e/` cover the main↔worker control path, generated
+  Rust↔TS config/defaults drift, settings persistence, grass LOD/window metadata,
    restart-time grass sizing, and worker watchdog recovery. Playwright
    boots Vite via its `webServer` hook so the suite is one command.
 
@@ -133,11 +133,14 @@ Key coverage:
   round-trips.
 - `inspector-nn.spec.ts` verifies paused NN inspection through the SAB
   inspector path.
-- `defaults-drift.spec.ts` compares Rust `sliders_defaults_json()` against
-  `settings.ts → DEFAULTS` for every Settings-mirrored Rust slider lane.
+- `defaults-drift.spec.ts` compares generated `DEFAULT_LIVE_SLIDER_VALUES`
+  against Rust `sliders_defaults_json()`, checks Settings defaults derive from
+  generated config/default mirrors, and asserts generated presets are complete
+  `WorldConfig` payloads.
 - `settings-persistence.spec.ts` seeds localStorage, verifies every
-  `Settings` key loads/saves/reloads, and asserts `currentSliderState()` emits
-  every persisted Rust slider setting needed to seed worker boot.
+  `Settings` key loads/saves/reloads, asserts `currentSliderState()` emits
+  every persisted Rust slider setting needed to seed worker boot, and asserts
+  persisted construction settings build a complete boot `WorldConfig`.
 - `grass-size-restart.spec.ts` verifies `grass_size` changes `grass_dim` only
   after restart.
 - `grass-lod-smoke.spec.ts` verifies the default grass window/LOD metadata and
@@ -166,9 +169,9 @@ If you touch `simLoop()` in `app/web/src/sim/worker.ts`, run it.
 - `app/web/tests/e2e/sim-bridge.spec.ts` → worker control-path smoke tests.
 - `app/web/tests/e2e/worker-watchdog.spec.ts` → worker crash/freeze recovery
   and paused no-false-positive coverage.
-- `app/web/tests/e2e/defaults-drift.spec.ts` → Rust↔TS slider default drift guard.
+- `app/web/tests/e2e/defaults-drift.spec.ts` → generated Rust↔TS config/default drift guard.
 - `app/web/tests/e2e/settings-persistence.spec.ts` → Settings localStorage and
-  boot slider-state persistence guard.
+  boot slider-state / WorldConfig persistence guard.
 - `app/web/tests/README.md` → onboarding pointer; the authoritative
   command/coverage list lives here and in
   [`../agent-context/testing-how-to.md`](../agent-context/testing-how-to.md).

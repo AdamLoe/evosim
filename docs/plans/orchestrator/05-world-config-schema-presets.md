@@ -1,8 +1,8 @@
 ---
-status:        active
+status:        shipped
 owner:         orchestrator
 last_updated:  2026-06-12
-okay_to_delete: false
+okay_to_delete: true
 long_lived:    false
 owning_docs:
   - architecture/simulation-core.md
@@ -143,7 +143,28 @@ Code routes:
 
 ## Migration Notes
 
-At ship time, update construction/slider sections in `simulation-core.md`,
-boot handshake docs in `worker-runtime.md` and `shared-memory-and-protocol.md`,
-settings docs in `app-shell.md`, and cross-language default rationale in
-`decisions/cross-cutting.md`.
+Shipped in the current implementation branch:
+
+- `architecture/simulation-core.md` now documents Rust-owned `WorldConfig`,
+  generated TypeScript defaults/presets, construction/live/app setting
+  boundaries, and master-seed derivation.
+- `architecture/worker-runtime.md` and
+  `architecture/shared-memory-and-protocol.md` now describe the boot
+  `world_config` payload, `WorldHandle.newWithConfigJson`, generated config
+  mirrors, and `boot_ready.master_seed`.
+- `architecture/app-shell.md` now documents settings staging into
+  `WorldConfig`, live slider fallback injection, generated defaults, and the
+  compatibility migration of the historical `worldSeed` setting into
+  `WorldConfig.master_seed`.
+- `architecture/testing.md` now records generated default/config drift tests
+  and complete-preset coverage.
+- `decisions/cross-cutting.md`, `decisions/app-shell.md`, and
+  `decisions/sim.md` now capture the Rust-owned config/default source of
+  truth, staged construction settings, and current live `set_slider` examples.
+
+One intentional legacy boundary remains: the external TS/wasm boot path now
+uses `WorldConfig`, but Rust `World` internals still accept a single internal
+`world_seed`. The master seed derives the sim RNG string and that internal
+world seed; biome, grass, and species construction therefore still share the
+legacy internal lane until a future `World` constructor split can consume the
+named stream derivations directly.

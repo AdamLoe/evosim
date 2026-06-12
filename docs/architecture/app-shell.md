@@ -217,7 +217,7 @@ edits — re-opening Settings shows them still dirty.
 **Construction-only set** — these knobs persist via `setSetting` and
 shape the next world only. Apply does NOT push a live `set_slider` call
 for them. They reach the next boot via `widgetReaders` /
-`currentSliderState()`: `founder_count`, `energy_max`,
+`currentWorldConfig()`: `founder_count`, `energy_max`,
 `grass_initial_seed_count`, the world-shape knobs `world_size`,
 `world_seed`, `wrap_world`, the species-construction knobs
 `species_mode`, `crossover_mode`, `starting_species_count`,
@@ -227,10 +227,11 @@ for them. They reach the next boot via `widgetReaders` /
 `.devpanel-row label.next-world::after`. Apply fires the
 construction-only toast.
 
-`currentSliderState()` also injects the live `max_population` value from
-persisted settings because its control lives in the Profiler category pane
-rather than the staged Settings widgets. This makes the cap effective at boot
-and gives the worker a nonzero value for its slider lane.
+`currentSliderState()` also injects live values from persisted settings when
+their controls live outside the staged Settings widgets: `max_population` from
+the Profiler category pane, the hidden legacy Blur grass knobs, the six
+equilibrium sliders, and the NN mutation buckets unless the NN tab has
+registered widget readers. This makes every SAB lane nonzero/canonical at boot.
 
 **Unexposed sliders:** `grass_in_cell_growth_r` and
 `grass_propagation_rate_k` are not exposed in the Settings UI. They are
@@ -286,14 +287,19 @@ re-calls `applyTheme` on change.
 ## Boot-payload accessors
 
 The dev panel exposes typed reader functions that `main.ts → spawnSimWorker`
-consumes to build the boot payload so a mid-drag restart carries dragged
-values. See `app/crates/evosim/src/wasm_api/mod.rs → WorldHandle::newWithFounderCount`
-for the full argument order and types (the boot payload). The key
+consumes to build `WorldConfig` so a mid-drag restart carries dragged
+values. See `app/crates/evosim/src/wasm_api/mod.rs → WorldConfig` and
+`WorldHandle::newWithConfigJson` for the Rust-owned schema. The key
 invariant: construction-only args (`world_size`, `grass_cell_size`,
-`grass_multisight`, `grass_clump_count`, `grass_clump_size`, and the species
-args) must ride this explicit path because `initial_sliders` is applied after
-construction and cannot resize the already-built `WorldDims`, rebuild the NN
-input layout, or re-seed boot grass.
+`grass_multisight`, `grass_clump_count`, `grass_clump_size`, founder boosts,
+NN topology, and the species args) must ride `WorldConfig` because
+`initial_sliders` is applied after construction and cannot resize the
+already-built `WorldDims`, rebuild the NN input layout, or re-seed boot grass.
+
+`app/web/src/generated/world-config.ts` is produced by
+`cargo run --bin gen-bindings` and supplies `DEFAULT_WORLD_CONFIG`,
+`WORLD_CONFIG_PRESETS`, and `DEFAULT_LIVE_SLIDER_VALUES`. Settings defaults use
+those generated values rather than hand-maintained copies.
 
 `currentSliderState()` snapshots the in-memory widget value for every
 registered staged widget; the worker applies it via `set_slider` after
@@ -301,8 +307,8 @@ construction (this is the path the live `mating_cooldown_ticks` slider
 takes). It also injects persisted sim settings whose controls live outside
 the staged Settings widgets: `max_population` from the perf panel, the hidden
 legacy Blur grass knobs `grass_propagation_rate_k` /
-`grass_in_cell_growth_r`, and the mutation bucket table from the NN tab unless
-that tab has registered live widget readers.
+`grass_in_cell_growth_r`, the equilibrium live sliders, and the mutation bucket
+table from the NN tab unless that tab has registered live widget readers.
 
 ## Runtime-dims SAB view binding
 
@@ -317,7 +323,7 @@ window are no longer fixed-size constants. After `boot_ready`,
 - pre-seeds the camera SAB lanes to world-center (`ready.world_size / 2`)
   and zoom `1.0` so the first snapshot the worker writes uses a sensible
   window rather than the SAB-default `cx=cy=0, zoom=0`.
-- stores `latestWrapWorld` / `latestWorldSeed` from the reply.
+- stores `latestWrapWorld` and the resolved `master_seed` from the reply.
 
 The biome window is read from the snapshot slot each frame
 (`biomeWinOffset(layout, slot)`) rather than from a separately bound
@@ -346,6 +352,12 @@ On persist the live copy always restamps `vMajor`/`vMinor` to the current
 values. See [`decisions/app-shell.md`](../decisions/app-shell.md) for
 rationale on the major/minor split.
 
+The historical `worldSeed` settings key is retained for localStorage
+compatibility, but it now stores the `WorldConfig.master_seed`. Existing
+numeric values are preserved on minor-version migration; the exact old biome
+layout is not promised because the new constructor derives the internal
+`world_seed` from the master seed.
+
 ## Code anchors
 
 - `app/web/index.html` → DOM skeleton, all element IDs in the table above.
@@ -358,19 +370,19 @@ rationale on the major/minor split.
 - `app/web/src/widgets/devpanel.ts` → Settings panel installer, `categoryBox`, sub-nav wiring (category-select → `showProfiler` coupling), staged/live tier helpers, dirty tracking, Apply/Cancel/Reset wiring, construction-only toast.
 - `app/web/src/widgets/worker-stats.ts` → polled NN thread health table.
 - `app/web/src/toast.ts` → `showToast(message, durationMs)`.
-- `app/web/src/settings.ts` → `Settings` interface, `DEFAULTS`, `getSettings` / `setSetting` / `resetSettings`, major/minor schema migration.
+- `app/web/src/settings.ts` → `Settings` interface, generated-default-backed `DEFAULTS`, `getSettings` / `setSetting` / `resetSettings`, major/minor schema migration.
 - `app/web/src/sim/bridge.ts` → `CTRL_CAMERA_*` constants, `CTRL_INSPECT_REQ_KIND`, `requestNnInspectId`, `readWindowMetadata`, `WindowMetadata`, `SlotLayout`, `makeSlotLayout`, `biomeWinOffset`.
 - `app/web/src/themes.ts` → `Theme`, `THEMES`, `DEFAULT_THEME_ID`, `applyTheme`, `REQUIRED_TOKENS`.
-- `app/crates/evosim/src/wasm_api/mod.rs` → `WorldHandle::newWithFounderCount` (boot payload arg order + types).
+- `app/crates/evosim/src/wasm_api/mod.rs` → `WorldConfig`, `WorldHandle::newWithConfigJson`.
 
 ## Update when
 
 - A new tab is added to the rail (update DOM map + routing rules).
 - A new settings sub-nav category is added (update the DOM map, sub-nav wiring in `devpanel.ts`, and the ASCII diagram above).
 - A new live-apply widget is added (update the live-vs-staged carve-out list).
-- A new construction-only slider is added (update the construction-only set + boot-payload accessors).
+- A new construction-only slider is added (update the construction-only set + `WorldConfig` builder).
 - A widget moves between live and staged tiers.
-- `Settings` interface gains or loses a key (and the corresponding Rust `*_DEFAULT` — also update the drift-guard fixture in `tests/e2e/defaults-drift.spec.ts`).
+- `Settings` interface gains or loses a key (and the corresponding generated Rust default source).
 
 ## See also
 

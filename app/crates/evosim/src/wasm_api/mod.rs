@@ -4,7 +4,7 @@
 use crate::brain::{Activation, NnTopology};
 use crate::constants::*;
 use crate::world::World;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use wasm_bindgen::prelude::*;
 
@@ -39,6 +39,189 @@ const TELEMETRY_SAMPLE_PERIOD_TICKS: u32 = 120;
 const TELEMETRY_SAMPLE_CAP: usize = 2048;
 const TELEMETRY_EVENT_CAP: usize = 256;
 const LARGE_JANK_EVENT_MS: f64 = 64.0;
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct WorldConfig {
+    pub schema_version: u32,
+    pub master_seed: u32,
+    pub world: WorldShapeConfig,
+    pub grass: GrassConstructionConfig,
+    pub population: PopulationConstructionConfig,
+    pub species: SpeciesConstructionConfig,
+    pub founders: FounderConstructionConfig,
+    pub nn_topology: NnTopologyConstructionConfig,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct WorldShapeConfig {
+    pub size: f32,
+    pub wrap: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct GrassConstructionConfig {
+    pub initial_seed_count: u32,
+    pub full_on_init: bool,
+    pub cell_size: f32,
+    pub clump_count: u32,
+    pub clump_size: u32,
+    pub multisight: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct PopulationConstructionConfig {
+    pub founder_count: u32,
+    pub energy_max: f32,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SpeciesConstructionConfig {
+    pub enabled: bool,
+    pub crossover_mode: WorldConfigCrossoverMode,
+    pub starting_species_count: u32,
+    pub starting_species_member_count: u32,
+    pub starting_species_member_variance: f32,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct FounderConstructionConfig {
+    pub init_graze_boost: f32,
+    pub init_split_boost: f32,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct NnTopologyConstructionConfig {
+    pub hidden_sizes: Vec<usize>,
+    pub activations: Vec<String>,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorldConfigCrossoverMode {
+    Average,
+    FiftyFifty,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct WorldConfigPreset {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub description: &'static str,
+    pub config: WorldConfig,
+}
+
+impl From<CrossoverMode> for WorldConfigCrossoverMode {
+    fn from(value: CrossoverMode) -> Self {
+        match value {
+            CrossoverMode::Average => Self::Average,
+            CrossoverMode::FiftyFifty => Self::FiftyFifty,
+        }
+    }
+}
+
+impl From<WorldConfigCrossoverMode> for CrossoverMode {
+    fn from(value: WorldConfigCrossoverMode) -> Self {
+        match value {
+            WorldConfigCrossoverMode::Average => Self::Average,
+            WorldConfigCrossoverMode::FiftyFifty => Self::FiftyFifty,
+        }
+    }
+}
+
+impl WorldConfig {
+    pub fn defaults() -> Self {
+        let sliders = crate::world::DevSliders::default();
+        Self {
+            schema_version: WORLD_CONFIG_SCHEMA_VERSION,
+            master_seed: 0,
+            world: WorldShapeConfig {
+                size: sliders.world_size,
+                wrap: sliders.wrap_world,
+            },
+            grass: GrassConstructionConfig {
+                initial_seed_count: sliders.grass_initial_seed_count,
+                full_on_init: sliders.full_grass_on_init,
+                cell_size: sliders.grass_cell_size,
+                clump_count: sliders.grass_clump_count,
+                clump_size: sliders.grass_clump_size,
+                multisight: sliders.grass_multisight,
+            },
+            population: PopulationConstructionConfig {
+                founder_count: sliders.founder_count,
+                energy_max: sliders.energy_max,
+            },
+            species: SpeciesConstructionConfig {
+                enabled: sliders.species_mode,
+                crossover_mode: sliders.crossover_mode.into(),
+                starting_species_count: sliders.starting_species_count,
+                starting_species_member_count: sliders.starting_species_member_count,
+                starting_species_member_variance: sliders.starting_species_member_variance,
+            },
+            founders: FounderConstructionConfig {
+                init_graze_boost: sliders.init_graze_boost,
+                init_split_boost: sliders.init_split_boost,
+            },
+            nn_topology: NnTopologyConstructionConfig {
+                hidden_sizes: LEGACY_HIDDEN_SIZES.to_vec(),
+                activations: vec!["lrelu".to_string(), "lrelu".to_string()],
+            },
+        }
+    }
+
+    pub fn presets() -> Vec<WorldConfigPreset> {
+        let default = Self::defaults();
+        let mut compact = default.clone();
+        compact.world.size = 4800.0;
+        compact.population.founder_count = 24;
+        compact.grass.clump_count = 24;
+
+        let mut species = default.clone();
+        species.species.enabled = true;
+        species.population.founder_count = 100;
+        species.founders.init_graze_boost = 1.25;
+        species.founders.init_split_boost = 1.15;
+
+        vec![
+            WorldConfigPreset {
+                id: "default",
+                label: "Default",
+                description: "Large toroidal single-pool world using canonical defaults.",
+                config: default,
+            },
+            WorldConfigPreset {
+                id: "compact",
+                label: "Compact",
+                description: "Smaller world with lighter boot cost.",
+                config: compact,
+            },
+            WorldConfigPreset {
+                id: "species",
+                label: "Species",
+                description: "Complete species-mode construction config.",
+                config: species,
+            },
+        ]
+    }
+}
+
+fn random_nonzero_u32() -> u32 {
+    let mut bytes = [0u8; 4];
+    getrandom::getrandom(&mut bytes).ok();
+    let n = u32::from_le_bytes(bytes);
+    if n == 0 {
+        1
+    } else {
+        n
+    }
+}
+
+fn parse_nn_topology_config(config: &NnTopologyConstructionConfig) -> Result<NnTopology, String> {
+    let mut acts = Vec::with_capacity(config.activations.len());
+    for a in &config.activations {
+        acts.push(Activation::parse(a).ok_or_else(|| format!("unknown activation: {a}"))?);
+    }
+    NnTopology::new(config.hidden_sizes.clone(), acts)
+}
 
 #[derive(Clone, Serialize)]
 struct TelemetrySample {
@@ -552,6 +735,7 @@ pub struct WorldHandle {
     /// 3 = L2, 4 = L3, 5 = L4. When non-zero, overrides lod_bias entirely.
     /// Live-settable — affects the very next write_snapshot call.
     lod_step: u32,
+    master_seed: u32,
 }
 
 #[wasm_bindgen]
@@ -570,7 +754,7 @@ impl WorldHandle {
             seed.to_string()
         };
         let inner = World::new_with_sliders(actual_seed, crate::world::DevSliders::default());
-        Self::from_world(inner)
+        Self::from_world_with_master_seed(inner, 0)
     }
 
     /// Allocate the runtime-sized snapshot buffer from a constructed world's
@@ -578,6 +762,10 @@ impl WorldHandle {
     /// biome windows per slot; the old full-field biome buffer is gone.
     /// v2.0.6 S9: also builds the biome mode-pyramid (one-time, static).
     fn from_world(inner: World) -> Self {
+        Self::from_world_with_master_seed(inner, 0)
+    }
+
+    fn from_world_with_master_seed(inner: World, master_seed: u32) -> Self {
         let grass_cell_count = inner.dims.grass_cell_count;
         let layout = SnapshotLayout::from_grass_cell_count(grass_cell_count);
         debug_assert_eq!(
@@ -617,6 +805,7 @@ impl WorldHandle {
             telemetry,
             lod_bias: 0.0,
             lod_step: 0,
+            master_seed,
         }
     }
 
@@ -631,6 +820,61 @@ impl WorldHandle {
     /// for the legacy 32→48→24→5 default. Returns `Err` (throws on JS side)
     /// if the JSON is malformed or fails `NnTopology::new` validation —
     /// surfaces a typo immediately instead of silently falling back.
+    #[wasm_bindgen(js_name = newWithConfigJson)]
+    pub fn new_with_config_json(config_json: &str) -> Result<WorldHandle, JsValue> {
+        let config: WorldConfig = serde_json::from_str(config_json)
+            .map_err(|e| JsValue::from_str(&format!("world_config parse error: {e}")))?;
+        Self::new_from_world_config(config)
+    }
+
+    fn new_from_world_config(config: WorldConfig) -> Result<WorldHandle, JsValue> {
+        if config.schema_version != WORLD_CONFIG_SCHEMA_VERSION {
+            return Err(JsValue::from_str(&format!(
+                "unsupported WorldConfig schema_version {} (expected {})",
+                config.schema_version, WORLD_CONFIG_SCHEMA_VERSION
+            )));
+        }
+        let master_seed = if config.master_seed == 0 {
+            random_nonzero_u32()
+        } else {
+            config.master_seed
+        };
+        let sim_seed = derive_world_seed(master_seed, WorldSeedStream::SimRng);
+        let world_seed = derive_world_seed(master_seed, WorldSeedStream::Biome);
+        let actual_seed = format!("master-{master_seed:08x}-sim-{sim_seed:08x}");
+        let sliders = crate::world::DevSliders {
+            grass_initial_seed_count: config.grass.initial_seed_count,
+            energy_max: config.population.energy_max.max(1.0),
+            founder_count: config
+                .population
+                .founder_count
+                .clamp(1, MAX_POP_FOR_SIM as u32),
+            full_grass_on_init: config.grass.full_on_init,
+            world_size: config.world.size,
+            wrap_world: config.world.wrap,
+            world_seed,
+            species_mode: config.species.enabled,
+            crossover_mode: config.species.crossover_mode.into(),
+            starting_species_count: config.species.starting_species_count.max(1),
+            starting_species_member_count: config.species.starting_species_member_count.max(1),
+            starting_species_member_variance: config
+                .species
+                .starting_species_member_variance
+                .max(0.0),
+            grass_cell_size: config.grass.cell_size.max(1.0),
+            grass_multisight: config.grass.multisight,
+            grass_clump_count: config.grass.clump_count,
+            grass_clump_size: config.grass.clump_size,
+            init_graze_boost: config.founders.init_graze_boost.max(0.0),
+            init_split_boost: config.founders.init_split_boost.max(0.0),
+            ..Default::default()
+        };
+        let topology = parse_nn_topology_config(&config.nn_topology)
+            .map_err(|e| JsValue::from_str(&format!("nn_topology error: {e}")))?;
+        let inner = World::new_with_sliders_topology(actual_seed, sliders, topology);
+        Ok(Self::from_world_with_master_seed(inner, master_seed))
+    }
+
     #[wasm_bindgen(js_name = newWithFounderCount)]
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_founder_count(
@@ -963,6 +1207,11 @@ impl WorldHandle {
     #[wasm_bindgen(getter)]
     pub fn world_seed(&self) -> u32 {
         self.inner.world_seed
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn master_seed(&self) -> u32 {
+        self.master_seed
     }
 
     // ─── Grass render API (P1g) ──────────────────────────────────────────────

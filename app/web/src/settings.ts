@@ -1,3 +1,15 @@
+import {
+  DEFAULT_LIVE_SLIDER_VALUES,
+  DEFAULT_WORLD_CONFIG,
+  WORLD_CONFIG_SCHEMA_VERSION,
+  WORLD_CONFIG_PRESETS,
+  type WorldConfig,
+  type WorldConfigPreset,
+} from "./generated/world-config";
+
+export type { WorldConfig, WorldConfigPreset };
+export { WORLD_CONFIG_PRESETS, WORLD_CONFIG_SCHEMA_VERSION };
+
 // Persistent dev-panel + pacing settings. Single JSON blob under one
 // localStorage key. The Settings shape mirrors the live-tunable sliders in
 // the dev panel; defaults must agree with the Rust `*_DEFAULT` constants
@@ -64,8 +76,9 @@ const SCHEMA_MAJOR = 3;
 // v2.1 P3 MINOR 0 → 1: added `crowdingStrength`, `crowdingRadius`,
 // `starvationThreshold`, `starvationDrainRate`, `grassCapacityScale`,
 // `grassRegrowthRate` (all six P3 equilibrium knobs) → minor bump within v3.
-// Runtime render pacing: added `appFPS` (15/30/60/120, default 60) → minor 2.
-const SCHEMA_MINOR = 2;
+// WorldConfig migration: construction defaults now come from generated Rust
+// output; existing user values are preserved by name where semantics still match.
+const SCHEMA_MINOR = 3;
 
 export const APP_FPS_CHOICES = [15, 30, 60, 120] as const;
 export type AppFPS = (typeof APP_FPS_CHOICES)[number];
@@ -94,22 +107,23 @@ export interface NnTopology {
 export type ActivationName = "lrelu" | "relu" | "tanh" | "sigmoid" | "linear";
 
 export const MUTATION_BUCKET_COUNT = 8 as const;
+const GENERATED_SLIDER_DEFAULTS: Readonly<Record<string, number>> = DEFAULT_LIVE_SLIDER_VALUES;
 
 export const DEFAULT_MUTATION_BUCKETS: MutationBucket[] = (() => {
   const out: MutationBucket[] = [];
-  // Three equal-weight buckets: 1/3 no change, 1/3 small/medium, 1/3 big.
-  out.push({ weight: 1.0, rate: 0.0, sigma: 0.0 });
-  out.push({ weight: 1.0, rate: 0.05, sigma: 0.05 });
-  out.push({ weight: 1.0, rate: 0.30, sigma: 0.20 });
-  for (let i = 3; i < MUTATION_BUCKET_COUNT; i++) {
-    out.push({ weight: 0, rate: 0, sigma: 0 });
+  for (let i = 0; i < MUTATION_BUCKET_COUNT; i++) {
+    out.push({
+      weight: GENERATED_SLIDER_DEFAULTS[`bucket_${i}_weight`] ?? 0,
+      rate: GENERATED_SLIDER_DEFAULTS[`bucket_${i}_rate`] ?? 0,
+      sigma: GENERATED_SLIDER_DEFAULTS[`bucket_${i}_sigma`] ?? 0,
+    });
   }
   return out;
 })();
 
 export const DEFAULT_NN_TOPOLOGY: NnTopology = {
-  layerSizes: [48, 24],
-  activations: ["lrelu", "lrelu"],
+  layerSizes: DEFAULT_WORLD_CONFIG.nn_topology.hidden_sizes.slice(),
+  activations: DEFAULT_WORLD_CONFIG.nn_topology.activations.slice() as ActivationName[],
 };
 
 const VALID_ACTIVATIONS: ReadonlySet<string> = new Set([
@@ -302,86 +316,86 @@ export const DEFAULTS: Settings = {
   theme: "midnight",
   railW: 420,
   profilerH: 240,
-  upkeepMultiplier: 1.0,
-  moveCostMultiplier: 1.0,
-  energyMax: 100,
-  eatBiteFrac: 0.5,
-  grassPropagK: 0.003,
-  grassGrowthR: 0.01,
-  grassEnergyPerBite: 10,
-  grassBitesPerBlock: 2,
-  digestionCooldown: 0,
-  repulsionMax: 0.1,
-  maxPopulation: 8_000,
-  initialGrassSeedCount: 8000,
-  mutRate: 1.0,
+  upkeepMultiplier: DEFAULT_LIVE_SLIDER_VALUES.upkeep_multiplier,
+  moveCostMultiplier: DEFAULT_LIVE_SLIDER_VALUES.move_cost_multiplier,
+  energyMax: DEFAULT_WORLD_CONFIG.population.energy_max,
+  eatBiteFrac: DEFAULT_LIVE_SLIDER_VALUES.eat_bite_fraction,
+  grassPropagK: DEFAULT_LIVE_SLIDER_VALUES.grass_propagation_rate_k,
+  grassGrowthR: DEFAULT_LIVE_SLIDER_VALUES.grass_in_cell_growth_r,
+  grassEnergyPerBite: DEFAULT_LIVE_SLIDER_VALUES.grass_energy_per_bite,
+  grassBitesPerBlock: DEFAULT_LIVE_SLIDER_VALUES.grass_bites_per_block,
+  digestionCooldown: DEFAULT_LIVE_SLIDER_VALUES.digestion_cooldown,
+  repulsionMax: DEFAULT_LIVE_SLIDER_VALUES.repulsion_max,
+  maxPopulation: DEFAULT_LIVE_SLIDER_VALUES.max_population,
+  initialGrassSeedCount: DEFAULT_WORLD_CONFIG.grass.initial_seed_count,
+  mutRate: DEFAULT_LIVE_SLIDER_VALUES.mutation_rate_multiplier,
   mutationBuckets: DEFAULT_MUTATION_BUCKETS.map((b) => ({ ...b })),
   nnTopology: {
     layerSizes: DEFAULT_NN_TOPOLOGY.layerSizes.slice(),
     activations: DEFAULT_NN_TOPOLOGY.activations.slice(),
   },
-  maxAge: 5000,
-  splitThreshold: 99,
-  splitGift: 30,
-  splitJitter: 1,
-  founderCount: 32,
+  maxAge: DEFAULT_LIVE_SLIDER_VALUES.max_age,
+  splitThreshold: DEFAULT_LIVE_SLIDER_VALUES.split_threshold,
+  splitGift: DEFAULT_LIVE_SLIDER_VALUES.split_gift,
+  splitJitter: DEFAULT_LIVE_SLIDER_VALUES.split_jitter,
+  founderCount: DEFAULT_WORLD_CONFIG.population.founder_count,
   // v2.0 Wave 1a: construction-only world shape. Must match Rust
   // WORLD_SIZE_DEFAULT / WRAP_WORLD_DEFAULT. `worldSeed` 0 ⇒ "let Rust pick".
-  worldSize: 9600,
-  worldSeed: 0,
-  wrapWorld: true,
+  worldSize: DEFAULT_WORLD_CONFIG.world.size,
+  worldSeed: DEFAULT_WORLD_CONFIG.master_seed,
+  wrapWorld: DEFAULT_WORLD_CONFIG.world.wrap,
   // v2.0 Wave 3b: species + sexual-mating construction settings. Must match the
   // Rust DevSliders defaults: SPECIES_MODE_DEFAULT (false), CROSSOVER_MODE_DEFAULT
   // (FiftyFifty ⇒ slider 1), STARTING_SPECIES_COUNT_DEFAULT (10),
   // STARTING_SPECIES_MEMBER_COUNT_DEFAULT (10),
   // STARTING_SPECIES_MEMBER_VARIANCE_DEFAULT (3.0).
-  speciesMode: false,
-  crossoverMode: 1,
-  startingSpeciesCount: 10,
-  startingSpeciesMemberCount: 10,
-  startingSpeciesMemberVariance: 3.0,
+  speciesMode: DEFAULT_WORLD_CONFIG.species.enabled,
+  crossoverMode: (DEFAULT_WORLD_CONFIG.species.crossover_mode as string) === "average" ? 0 : 1,
+  startingSpeciesCount: DEFAULT_WORLD_CONFIG.species.starting_species_count,
+  startingSpeciesMemberCount: DEFAULT_WORLD_CONFIG.species.starting_species_member_count,
+  startingSpeciesMemberVariance: DEFAULT_WORLD_CONFIG.species.starting_species_member_variance,
   // v2.0 Wave 3b: live mating cooldown. Must match Rust
   // MATING_COOLDOWN_TICKS_DEFAULT (200).
-  matingCooldownTicks: 200,
+  matingCooldownTicks: DEFAULT_LIVE_SLIDER_VALUES.mating_cooldown_ticks,
   // v2.0.2 Stream 1d: scatter kernel defaults. Must match Rust constants:
   // GRASS_DECAY_PCT_DEFAULT (0.04), GRASS_DECAY_AMOUNT_DEFAULT (0.008),
   // GRASS_SPREAD_PCT_DEFAULT (0.55), GRASS_SPREAD_AMOUNT_DEFAULT (0.05),
   // GRASS_SPREAD_RING1_PCT_DEFAULT (0.70), GRASS_SPREAD_RING2_PCT_DEFAULT (0.22).
   // v2.0.6 S3: grassDecayPct corrected from 0.02 → 0.04 to match Rust
   // GRASS_DECAY_PCT_DEFAULT (raised in v2.0.2 S4 tuning, TS side lagged).
-  grassDecayPct: 0.04,
-  grassDecayAmount: 0.008,
-  grassSpreadPct: 0.55,
-  grassSpreadAmount: 0.05,
-  grassSpreadRing1Pct: 0.70,
-  grassSpreadRing2Pct: 0.22,
+  grassDecayPct: DEFAULT_LIVE_SLIDER_VALUES.grass_decay_pct,
+  grassDecayAmount: DEFAULT_LIVE_SLIDER_VALUES.grass_decay_amount,
+  grassSpreadPct: DEFAULT_LIVE_SLIDER_VALUES.grass_spread_pct,
+  grassSpreadAmount: DEFAULT_LIVE_SLIDER_VALUES.grass_spread_amount,
+  grassSpreadRing1Pct: DEFAULT_LIVE_SLIDER_VALUES.grass_spread_ring1_pct,
+  grassSpreadRing2Pct: DEFAULT_LIVE_SLIDER_VALUES.grass_spread_ring2_pct,
   // v2.0.4 S1: LOD bias. Default 0.0 (no bias = computed level is used as-is).
-  lodBias: 0.0,
+  lodBias: DEFAULT_LIVE_SLIDER_VALUES.lod_bias,
   // v2.0.4 S6: multi-band grass sight. Must match Rust GRASS_MULTISIGHT_DEFAULT (true).
-  grassMultisight: true,
+  grassMultisight: DEFAULT_WORLD_CONFIG.grass.multisight,
   // v2.0.4 S2: grass cell size. Must match Rust GRASS_CELL_SIZE_DEFAULT (5.0).
-  grassSize: 5.0,
+  grassSize: DEFAULT_WORLD_CONFIG.grass.cell_size,
   // v2.0.6 S3: seeded grass clumps. Must match Rust GRASS_CLUMP_COUNT_DEFAULT (40)
   // and GRASS_CLUMP_SIZE_DEFAULT (8). clumpCount=0 → old uniform-scatter fallback.
-  grassClumpCount: 40,
-  grassClumpSize: 8,
+  grassClumpCount: DEFAULT_WORLD_CONFIG.grass.clump_count,
+  grassClumpSize: DEFAULT_WORLD_CONFIG.grass.clump_size,
   // v2.0.6 S10: discrete LOD stepper. Default 0 (Auto = use formula + lodBias).
-  grassLodStep: 0,
+  grassLodStep: DEFAULT_LIVE_SLIDER_VALUES.grass_lod_step,
   // Mating reach + founder action-output boosts. All default 1.0 (neutral) so
   // behaviour is unchanged until dialed. Must match the Rust *_DEFAULT consts.
-  mateReachMultiplier: 1.0,
-  initGrazeBoost: 1.0,
-  initSplitBoost: 1.0,
+  mateReachMultiplier: DEFAULT_LIVE_SLIDER_VALUES.mate_reach_multiplier,
+  initGrazeBoost: DEFAULT_WORLD_CONFIG.founders.init_graze_boost,
+  initSplitBoost: DEFAULT_WORLD_CONFIG.founders.init_split_boost,
   // v2.1 P3: food-limited equilibrium knobs. Must match Rust *_DEFAULT consts:
   // CROWDING_STRENGTH_DEFAULT (0.010), CROWDING_RADIUS_DEFAULT (20.0),
   // STARVATION_THRESHOLD_DEFAULT (15.0), STARVATION_DRAIN_RATE_DEFAULT (0.30),
   // GRASS_CAPACITY_SCALE_DEFAULT (0.7), GRASS_REGROWTH_RATE_DEFAULT (1.0).
-  crowdingStrength: 0.010,
-  crowdingRadius: 20.0,
-  starvationThreshold: 15.0,
-  starvationDrainRate: 0.30,
-  grassCapacityScale: 0.7,
-  grassRegrowthRate: 1.0,
+  crowdingStrength: DEFAULT_LIVE_SLIDER_VALUES.crowding_strength,
+  crowdingRadius: DEFAULT_LIVE_SLIDER_VALUES.crowding_radius,
+  starvationThreshold: DEFAULT_LIVE_SLIDER_VALUES.starvation_threshold,
+  starvationDrainRate: DEFAULT_LIVE_SLIDER_VALUES.starvation_drain_rate,
+  grassCapacityScale: DEFAULT_LIVE_SLIDER_VALUES.grass_capacity_scale,
+  grassRegrowthRate: DEFAULT_LIVE_SLIDER_VALUES.grass_regrowth_rate,
 };
 
 export const SETTINGS_KEYS = Object.freeze(Object.keys(DEFAULTS)) as readonly (keyof Settings)[];

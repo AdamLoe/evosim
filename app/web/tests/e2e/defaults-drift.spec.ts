@@ -1,91 +1,37 @@
-// Wave D drift-guard. Asserts that the Rust-side `sliders_defaults_json()`
-// values (the canonical `DevSliders::default()` map) agree with the
-// `web/src/settings.ts` DEFAULTS for every shared slider name.
-//
-// The Rust side is the source of truth; settings.ts mirrors it for
-// localStorage. This test fails fast if either side moves so a divergence
-// can't silently ship a fresh world that behaves differently from a
-// reloaded one.
-
 import { test, expect } from "@playwright/test";
+import {
+  DEFAULT_LIVE_SLIDER_VALUES,
+  DEFAULT_WORLD_CONFIG,
+  WORLD_CONFIG_PRESETS,
+  WORLD_CONFIG_SCHEMA_VERSION,
+  type WorldConfig,
+} from "../../src/generated/world-config";
 import { DEFAULTS } from "../../src/settings";
 
-// Map Rust slider name → settings.ts key for the shared sliders.
-const RUST_TO_SETTINGS: Record<string, keyof typeof DEFAULTS> = {
-  mutation_rate_multiplier: "mutRate",
-  // v1.12: legacy nn_mutation_sigma reserved no-op on the Rust side, no
-  // Settings mirror. Bucket sliders (bucket_k_*) are validated separately
-  // in this spec below.
-  eat_bite_fraction: "eatBiteFrac",
-  grass_propagation_rate_k: "grassPropagK",
-  grass_in_cell_growth_r: "grassGrowthR",
-  upkeep_multiplier: "upkeepMultiplier",
-  move_cost_multiplier: "moveCostMultiplier",
-  energy_max: "energyMax",
-  grass_energy_per_bite: "grassEnergyPerBite",
-  grass_bites_per_block: "grassBitesPerBlock",
-  digestion_cooldown: "digestionCooldown",
-  repulsion_max: "repulsionMax",
-  max_age: "maxAge",
-  split_threshold: "splitThreshold",
-  split_gift: "splitGift",
-  split_jitter: "splitJitter",
-  founder_count: "founderCount",
-  grass_initial_seed_count: "initialGrassSeedCount",
-  // v2.0 Wave 1c: `full_grass_on_init` was removed from both the Rust
-  // sliders_defaults_json map and the settings.ts blob. Added world-shape
-  // sliders below mirror the new Rust DevSliders defaults.
-  world_size: "worldSize",
-  world_seed: "worldSeed",
-  wrap_world: "wrapWorld",
-  species_mode: "speciesMode",
-  crossover_mode: "crossoverMode",
-  starting_species_count: "startingSpeciesCount",
-  starting_species_member_count: "startingSpeciesMemberCount",
-  starting_species_member_variance: "startingSpeciesMemberVariance",
-  mating_cooldown_ticks: "matingCooldownTicks",
-  // v2.0.6 S3: scatter-kernel sliders now included so decay drift is caught.
-  grass_decay_pct: "grassDecayPct",
-  grass_decay_amount: "grassDecayAmount",
-  grass_spread_pct: "grassSpreadPct",
-  grass_spread_amount: "grassSpreadAmount",
-  grass_spread_ring1_pct: "grassSpreadRing1Pct",
-  grass_spread_ring2_pct: "grassSpreadRing2Pct",
-  lod_bias: "lodBias",
-  grass_multisight: "grassMultisight",
-  grass_size: "grassSize",
-  grass_lod_step: "grassLodStep",
-  grass_clump_count: "grassClumpCount",
-  grass_clump_size: "grassClumpSize",
-  // Mating reach + founder action-output boosts (sim sliders; all default 1.0).
-  mate_reach_multiplier: "mateReachMultiplier",
-  init_graze_boost: "initGrazeBoost",
-  init_split_boost: "initSplitBoost",
-  // v2.1 P3: food-limited equilibrium knobs (all live sliders).
-  crowding_strength: "crowdingStrength",
-  crowding_radius: "crowdingRadius",
-  starvation_threshold: "starvationThreshold",
-  starvation_drain_rate: "starvationDrainRate",
-  grass_capacity_scale: "grassCapacityScale",
-  grass_regrowth_rate: "grassRegrowthRate",
-};
-
-function settingsValueAsNumber(key: keyof typeof DEFAULTS): number {
-  const v = DEFAULTS[key];
-  if (typeof v === "boolean") return v ? 1 : 0;
-  return v as number;
+function sliderDefault(name: string): number {
+  return DEFAULT_LIVE_SLIDER_VALUES[name] ?? Number.NaN;
 }
 
-test("Rust DevSliders defaults match settings.ts DEFAULTS", async ({ page }) => {
-  // Clear localStorage so the worker boots under canonical defaults; the
-  // stashed JSON is always sourced from Rust so this is belt-and-braces.
+function completeWorldConfigShape(config: WorldConfig): unknown {
+  return {
+    schema_version: config.schema_version,
+    master_seed: typeof config.master_seed,
+    world: Object.keys(config.world).sort(),
+    grass: Object.keys(config.grass).sort(),
+    population: Object.keys(config.population).sort(),
+    species: Object.keys(config.species).sort(),
+    founders: Object.keys(config.founders).sort(),
+    nn_topology: Object.keys(config.nn_topology).sort(),
+  };
+}
+
+test("generated live slider defaults match Rust runtime defaults", async ({ page }) => {
   await page.addInitScript(() => {
     try { localStorage.clear(); } catch { /* ignore */ }
   });
 
   await page.goto("/");
 
-  // Wait for boot — the stash lands inside spawnSimWorker after boot_ready.
   await expect
     .poll(
       async () =>
@@ -106,37 +52,57 @@ test("Rust DevSliders defaults match settings.ts DEFAULTS", async ({ page }) => 
   const rust = JSON.parse(rustJson) as Record<string, number>;
 
   const mismatches: string[] = [];
-  for (const [rustName, settingsKey] of Object.entries(RUST_TO_SETTINGS)) {
-    if (!(rustName in rust)) {
-      mismatches.push(`${rustName}: missing from Rust JSON`);
+  for (const [name, expected] of Object.entries(DEFAULT_LIVE_SLIDER_VALUES)) {
+    if (!(name in rust)) {
+      mismatches.push(`${name}: missing from Rust JSON`);
       continue;
     }
-    const r = rust[rustName];
-    const t = settingsValueAsNumber(settingsKey);
-    if (Math.abs(r - t) > 1e-6) {
-      mismatches.push(
-        `${rustName}: Rust=${r}, settings.ts.${String(settingsKey)}=${t}`,
-      );
+    if (Math.abs(rust[name] - expected) > 1e-6) {
+      mismatches.push(`${name}: Rust=${rust[name]}, generated=${expected}`);
     }
   }
 
-  // v1.12: bucket defaults — Rust emits flat bucket_k_{weight,rate,sigma}
-  // keys; settings.ts mirrors as a structured array.
-  for (let k = 0; k < DEFAULTS.mutationBuckets.length; k++) {
-    const b = DEFAULTS.mutationBuckets[k];
-    for (const field of ["weight", "rate", "sigma"] as const) {
-      const rustKey = `bucket_${k}_${field}`;
-      if (!(rustKey in rust)) {
-        mismatches.push(`${rustKey}: missing from Rust JSON`);
-        continue;
-      }
-      const r = rust[rustKey];
-      const t = b[field];
-      if (Math.abs(r - t) > 1e-6) {
-        mismatches.push(`${rustKey}: Rust=${r}, settings.ts.mutationBuckets[${k}].${field}=${t}`);
-      }
-    }
-  }
+  expect(mismatches, "Rust live slider defaults drifted from generated TS").toEqual([]);
+});
 
-  expect(mismatches, "Rust ↔ settings.ts defaults drift").toEqual([]);
+test("settings defaults are derived from generated world config and live defaults", () => {
+  expect(DEFAULTS.worldSize).toBe(DEFAULT_WORLD_CONFIG.world.size);
+  expect(DEFAULTS.worldSeed).toBe(DEFAULT_WORLD_CONFIG.master_seed);
+  expect(DEFAULTS.wrapWorld).toBe(DEFAULT_WORLD_CONFIG.world.wrap);
+  expect(DEFAULTS.initialGrassSeedCount).toBe(DEFAULT_WORLD_CONFIG.grass.initial_seed_count);
+  expect(DEFAULTS.grassSize).toBe(DEFAULT_WORLD_CONFIG.grass.cell_size);
+  expect(DEFAULTS.grassClumpCount).toBe(DEFAULT_WORLD_CONFIG.grass.clump_count);
+  expect(DEFAULTS.grassClumpSize).toBe(DEFAULT_WORLD_CONFIG.grass.clump_size);
+  expect(DEFAULTS.grassMultisight).toBe(DEFAULT_WORLD_CONFIG.grass.multisight);
+  expect(DEFAULTS.founderCount).toBe(DEFAULT_WORLD_CONFIG.population.founder_count);
+  expect(DEFAULTS.energyMax).toBe(DEFAULT_WORLD_CONFIG.population.energy_max);
+  expect(DEFAULTS.speciesMode).toBe(DEFAULT_WORLD_CONFIG.species.enabled);
+  expect(DEFAULTS.crossoverMode).toBe(
+    DEFAULT_WORLD_CONFIG.species.crossover_mode === "average" ? 0 : 1,
+  );
+  expect(DEFAULTS.startingSpeciesCount).toBe(
+    DEFAULT_WORLD_CONFIG.species.starting_species_count,
+  );
+  expect(DEFAULTS.startingSpeciesMemberCount).toBe(
+    DEFAULT_WORLD_CONFIG.species.starting_species_member_count,
+  );
+  expect(DEFAULTS.startingSpeciesMemberVariance).toBe(
+    DEFAULT_WORLD_CONFIG.species.starting_species_member_variance,
+  );
+  expect(DEFAULTS.initGrazeBoost).toBe(DEFAULT_WORLD_CONFIG.founders.init_graze_boost);
+  expect(DEFAULTS.initSplitBoost).toBe(DEFAULT_WORLD_CONFIG.founders.init_split_boost);
+  expect(DEFAULTS.mutRate).toBe(sliderDefault("mutation_rate_multiplier"));
+  expect(DEFAULTS.maxPopulation).toBe(sliderDefault("max_population"));
+  expect(DEFAULTS.matingCooldownTicks).toBe(sliderDefault("mating_cooldown_ticks"));
+  expect(DEFAULTS.crowdingStrength).toBe(sliderDefault("crowding_strength"));
+});
+
+test("generated presets are complete WorldConfig payloads", () => {
+  expect(DEFAULT_WORLD_CONFIG.schema_version).toBe(WORLD_CONFIG_SCHEMA_VERSION);
+  const expectedShape = completeWorldConfigShape(DEFAULT_WORLD_CONFIG);
+  expect(WORLD_CONFIG_PRESETS.length).toBeGreaterThan(0);
+  for (const preset of WORLD_CONFIG_PRESETS) {
+    expect(preset.config.schema_version).toBe(WORLD_CONFIG_SCHEMA_VERSION);
+    expect(completeWorldConfigShape(preset.config)).toEqual(expectedShape);
+  }
 });

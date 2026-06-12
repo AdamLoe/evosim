@@ -124,22 +124,26 @@ Decisions that bind more than one architecture doc.
   `architecture/shared-memory-and-protocol.md`.
 - **Code anchors**: `app/web/src/sim/worker.ts → handleBoot`.
 
-### Rust owns canonical slider defaults; settings.ts mirrors them; drift is asserted at e2e time
+### Rust owns WorldConfig and live defaults; TypeScript consumes generated mirrors
 
-- **Decision**: `app/crates/evosim/src/world/mod.rs → DevSliders::default()` is the
-  single source of truth for every slider default. `settings.ts →
-  DEFAULTS` mirrors them so localStorage has something to write before
-  the worker exists. `WorldHandle::sliders_defaults_json()` exposes
-  the Rust map; a Playwright e2e (`tests/e2e/defaults-drift.spec.ts`)
-  asserts the two sides agree.
-- **Why**: Rust tests construct `World` directly without the boot
-  payload and need defaults *somewhere*; moving the source of truth to
-  TS would force noisy test-only fallbacks. The drift guard makes the
-  mirror provable instead of relying on convention.
+- **Decision**: Rust owns the versioned `WorldConfig` construction schema,
+  complete config presets, and `DevSliders::default()`. `cargo run --bin
+  gen-bindings` emits `app/web/src/generated/world-config.ts` with
+  `DEFAULT_WORLD_CONFIG`, `WORLD_CONFIG_PRESETS`, and
+  `DEFAULT_LIVE_SLIDER_VALUES`. `settings.ts → DEFAULTS` derives sim defaults
+  from those generated values instead of carrying an independent table.
+  `WorldHandle::sliders_defaults_json()` remains the runtime Rust map; the
+  Playwright defaults-drift spec asserts it matches the generated live defaults.
+- **Why**: Rust tests construct `World` directly and need canonical defaults
+  without the web shell. Generating TS mirrors removes the silent-drift path
+  while preserving a localStorage default object before the worker exists.
 - **Applies to**: `architecture/simulation-core.md`,
   `architecture/app-shell.md`,
   `architecture/shared-memory-and-protocol.md`.
 - **Code anchors**: `app/crates/evosim/src/world/mod.rs → DevSliders::default`,
+  `app/crates/evosim/src/wasm_api/mod.rs → WorldConfig`,
+  `app/crates/evosim/src/bin/gen_bindings.rs → render_world_config`,
+  `app/web/src/generated/world-config.ts`,
   `app/crates/evosim/src/wasm_api/mod.rs → sliders_defaults_json`,
   `app/web/src/settings.ts → DEFAULTS`,
   `web/tests/e2e/defaults-drift.spec.ts`.
@@ -186,27 +190,31 @@ Decisions that bind more than one architecture doc.
 - **Revisit when**: a feature needs the world to resize *after* boot (today
   nothing resizes after boot — restart rebuilds the world).
 
-### Two seeds, deliberately: `world_seed` (map) is separate from the sim RNG (run)
+### Master seed derives construction-time seeds; internal world_seed remains shared
 
-- **Decision**: `world_seed` (a u32 construction slider, random default,
-  pinnable) drives **biome generation + species seeding only**, via two
-  *dedicated* PRNG streams (a SplitMix64 for the biome grid; a
-  `SimRng::from_u64(world_seed ^ SEEDING_PRNG_SALT)` for species anchors /
-  founders) that are **independent of the string-seeded sim RNG**. The sim RNG
-  stays independent and random per run.
-- **Why**: The sim is fully deterministic, so a single master seed would make
-  an entire run replay identically every time — which we do *not* want. Keeping
-  the seeds separate means a pinned `world_seed` fixes the *map* (and the tick-0
-  species layout) byte-for-byte across restarts of the same build, while the run
-  still plays out differently each launch. Without map reproducibility no two
-  maps could be compared and no test could pin biome layout; the Wave-1 repro
-  test therefore pins only the biome SAB, never the whole run. Same-machine
-  determinism only — no cross-platform byte-identity is promised or tested.
+- **Decision**: The external construction payload uses `WorldConfig.master_seed`.
+  A zero master seed resolves to a random nonzero seed at wasm construction and
+  is reported in `boot_ready.master_seed`. Rust derives the sim RNG seed string
+  and the internal numeric `world_seed` via `derive_world_seed`. The internal
+  `world_seed` still feeds biome generation, grass clump boot/scatter, and
+  species/founder setup inside `World`.
+- **Why**: One external seed makes fresh-world construction reproducible and
+  gives persistence/share artifacts a single config field to carry. The current
+  `World` constructor still accepts one numeric `world_seed`; splitting biome,
+  grass, and species into separate internal sub-seed fields would require a
+  broader sim-core constructor migration. Keeping the internal shared lane
+  preserves behavior while making the external contract coherent.
+- **Tradeoffs**: Biome, grass clumps/scatter, and species/founders are all
+  controlled by the master seed, but not yet independent internal streams.
+  `WorldSeedStream` names the intended stream split for a later sim-core change.
 - **Applies to**: `architecture/simulation-core.md` (biome gen + species
-  seeding), `architecture/app-shell.md` (the status-strip seed + reroll),
+  seeding), `architecture/app-shell.md` (settings master seed),
   `decisions/sim.md` (biome / seeding entries).
-- **Code anchors**: `DevSliders.world_seed`, `app/crates/evosim/src/world/biome.rs`
-  (SplitMix64), `app/crates/evosim/src/constants.rs → SEEDING_PRNG_SALT`.
+- **Code anchors**: `app/crates/evosim/src/wasm_api/mod.rs → WorldConfig`,
+  `WorldHandle::new_with_config_json`,
+  `app/crates/evosim/src/constants.rs → derive_world_seed`, `WorldSeedStream`,
+  `app/crates/evosim/src/world/mod.rs → World::new_with_sliders_topology`
+  (internal `world_seed` consumers).
 
 ### NN input layout is derived from construction settings → SAB/topology implications
 

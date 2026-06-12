@@ -23,23 +23,23 @@ that also bind the shell live in [`cross-cutting.md`](cross-cutting.md).
 - **Code anchors**: `app/web/src/widgets/devpanel.ts → makeStagedSlider`,
   `makeLiveSlider`, `CONSTRUCTION_ONLY_SLIDERS`.
 
-### Construction-only sliders are committed via `set_slider` but only shape the next world
+### Construction-only settings stage into the next WorldConfig
 
-- **Decision**: `founder_count`, `energy_max`,
-  `grass_initial_seed_count`, and `full_grass_on_init` ride the same
-  staged path as live-tunable sliders. Apply persists + pushes them to
-  the worker's `DevSliders`, but the *current* world keeps whatever
-  values it spawned with — a manual restart is needed to see them.
-  The Settings tab fires a toast ("Some changes only take effect on
-  new simulations.") whenever any construction-only knob commits.
-- **Why**: Mid-run construction changes can't safely re-shape the
-  running world (e.g. founder_count is meaningless after pop ≠
-  founder_count). Surfacing the constraint via the toast keeps the
-  user aware without forcing an auto-restart.
+- **Decision**: Construction-only settings ride the same staged UI path as
+  live-tunable sliders, but Apply persists them without pushing a live
+  `set_slider` update. They shape the next world through
+  `devpanel.ts → currentWorldConfig()`, and a manual restart is needed to see
+  them. The Settings tab fires the restart-needed toast whenever any
+  construction-only knob commits.
+- **Why**: Mid-run construction changes can't safely re-shape the running
+  world: dimensions, grass cell size, clump boot, species topology, founder
+  boosts, and NN topology are all consumed before the first tick. Staging them
+  into `WorldConfig` keeps the current world stable and keeps restart behavior
+  explicit.
 - **Applies to**: `architecture/app-shell.md`.
 - **Code anchors**: `app/web/src/widgets/devpanel.ts →
   CONSTRUCTION_ONLY_SLIDERS`, `TOAST_CONSTRUCTION`,
-  `applyAll`, `resetAll`.
+  `applyAll`, `resetAll`, `currentWorldConfig`.
 
 ### Settings schema is `major.minor`; major resets, minor merges
 

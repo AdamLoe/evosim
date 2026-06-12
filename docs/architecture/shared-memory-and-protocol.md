@@ -298,39 +298,32 @@ Decode: `flash_tag = p & 0x7`, `flash_ticks = (p >> 3) & 0xF`, `species_id = (p
 
 | `kind` | Payload | Freq |
 |---|---|---|
-| `boot` | `{ seed, initial_grass_seed_count, energy_max, founder_count, full_grass_on_init, world_size, wrap_world, world_seed, species_mode, crossover_mode, starting_species_count, starting_species_member_count, starting_species_member_variance, grass_cell_size, grass_multisight, grass_clump_count, grass_clump_size, initial_sliders, initial_target_tps, initial_paused, debug_fault? }` | once per worker lifetime |
+| `boot` | `{ world_config, initial_sliders, initial_target_tps, initial_paused, debug_fault? }` | once per worker lifetime |
 
 Everything else is on the control SAB. The `boot` message carries
 `initial_target_tps` and `initial_paused` so the worker can seed those SAB lanes
 before posting `boot_ready` — main's first reads see canonical state.
-`WorldHandle.newWithFounderCount` accepts world-shape args (`world_size: f32`,
-`wrap_world: bool`, `world_seed: u32`; a `world_seed` of 0 → the Rust side picks
-a random one and reports it back), species/mating construction args
-(`species_mode: bool`, `crossover_mode: f32` (0=average, non-zero=fifty_fifty),
-`starting_species_count: u32`, `starting_species_member_count: u32`,
-`starting_species_member_variance: f32`), the **`grass_cell_size: f32`**
-(default 5.0) which determines `grass_dim` and all grass/biome buffer sizes at
-construction, **`grass_multisight: bool`** which changes the NN input layout
-before founder brains/topology are built, and the **`grass_clump_count: u32`** +
-**`grass_clump_size: u32`** (defaults 40 / 8) which control boot grass seeding.
-`grass_cell_size`, `grass_multisight`, `grass_clump_count`, and
-`grass_clump_size` must travel this explicit path — `initial_sliders` is applied
-after construction and cannot resize `WorldDims`, rebuild the NN input layout, or
-re-seed boot grass. These shape the world topology at construction, not as live
-sliders. `world_seed` is **separate** from the string `seed` (the RNG seed) — not
-coupled. `mating_cooldown_ticks` is live and rides the slider SAB. The optional
-`debug_fault` field is test-only: Playwright sets it through
-`window.__evosimE2E` to simulate worker crash, freeze, or boot timeout on the
-next boot; production UI does not expose it.
+`world_config` is the versioned Rust-owned construction payload mirrored in
+`app/web/src/generated/world-config.ts`. It carries dimensions/wrap,
+`master_seed`, grass boot settings, population/energy, species construction,
+founder boosts, and NN topology. The worker passes it to
+`WorldHandle.newWithConfigJson`; `initial_sliders` is applied only after
+construction to seed the live SAB lanes. Construction fields must not depend
+on `initial_sliders`, because that path cannot resize `WorldDims`, rebuild the
+NN input layout, or re-seed boot grass. `mating_cooldown_ticks` and other live
+knobs continue to ride the slider SAB. The optional `debug_fault` field is
+test-only: Playwright sets it through `window.__evosimE2E` to simulate worker
+crash, freeze, or boot timeout on the next boot; production UI does not expose it.
 
 ## Worker → main replies (`SimReply`)
 
 | `kind` | Payload | Notes |
 |---|---|---|
-| `boot_ready` | `{ world_size, wrap_world, world_seed, grass_dim, grass_cell_size, threads, rayon_ok, max_pop_for_sim, wasm_memory, snapshot_buf_byte_offset, snapshot_buf_byte_len, control_sab, sliders_defaults_json }` | Posted **after** the worker runs one tick + writes one snapshot to slot 0, guaranteeing main a valid first frame. |
+| `boot_ready` | `{ world_size, wrap_world, world_seed, master_seed, grass_dim, grass_cell_size, threads, rayon_ok, max_pop_for_sim, wasm_memory, snapshot_buf_byte_offset, snapshot_buf_byte_len, control_sab, sliders_defaults_json }` | Posted **after** the worker runs one tick + writes one snapshot to slot 0, guaranteeing main a valid first frame. |
 
 The reply carries the **runtime `grass_dim`** (so main sizes its views correctly),
-`grass_cell_size` (so render UVs match construction), and `wrap_world` + `world_seed`.
+`grass_cell_size` (so render UVs match construction), `wrap_world`, resolved
+`master_seed`, and the derived internal `world_seed`.
 `snapshot_buf_byte_len` is a runtime value: `2 × (SNAPSHOT_HEADER_BYTES + SNAPSHOT_CREATURE_BYTES + grassRegionBytes + biomeWinBytes)`.
 Main calls `makeSlotLayout(grass_dim)` (from `app/web/src/sim/bridge.ts`) to derive all slot
 geometry — `grassRegionBytes`, `biomeWinBytes`, `slotBytes` — from the single
@@ -383,6 +376,11 @@ if it advanced, the bytes are guaranteed to be coherent.
   Indices 67–72 are the 6 equilibrium knobs (crowding, starvation, grass
   capacity, regrowth). Authoritative list: `SLIDER_NAMES` in
   `app/crates/evosim/src/wasm_api/mod.rs`.
+- `WorldConfig` + defaults/presets — Rust `WorldConfig::defaults()` /
+  `WorldConfig::presets()` and `DevSliders::default()` are emitted to
+  `app/web/src/generated/world-config.ts` by `gen_bindings`. The generated file
+  carries `DEFAULT_WORLD_CONFIG`, `WORLD_CONFIG_PRESETS`, and
+  `DEFAULT_LIVE_SLIDER_VALUES`.
 - Camera lanes (`CTRL_CAMERA_CX_BITS` … `CTRL_CAMERA_VIEWPORT_H`, slots **136–140**)
   — defined in `app/crates/evosim/src/control_sab.rs`; re-exported from `app/web/src/sim/bridge.ts`.
   Main writes all five each RAF; the worker reads them in `write_snapshot` and
@@ -411,7 +409,8 @@ if it advanced, the bytes are guaranteed to be coherent.
   binary + drift unit test.
 - [`app/web/src/generated/control-sab.ts`](../../app/web/src/generated/control-sab.ts) +
   [`app/web/src/generated/slider-ids.ts`](../../app/web/src/generated/slider-ids.ts) —
-  generated TS mirrors (committed).
+  generated TS mirrors (committed). `app/web/src/generated/world-config.ts`
+  is the generated construction/defaults mirror.
 - [`app/web/src/sim/bridge.ts`](../../app/web/src/sim/bridge.ts) → `SNAPSHOT_HEADER_BYTES`,
   `GRASS_LOD_BUDGET_AXIS`, `SlotLayout`, `makeSlotLayout`, `grassOffset`,
   `biomeWinOffset`, `readWindowMetadata`, `WindowMetadata`, `SimBridge` runtime,

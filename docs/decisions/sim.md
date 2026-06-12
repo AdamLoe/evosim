@@ -68,9 +68,8 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 
 - **Decision**: One wasm-bindgen method dispatches every dev-panel
   slider by string name. There are no per-typed `set_max_age` /
-  `set_split_threshold` / etc. exports. Bools (`full_grass_on_init`)
-  ride the same path as `0|1` via the `try_set_slider`
-  `"full_grass_on_init" => apply_full_grass_on_init(value != 0.0)` arm.
+  `set_split_threshold` / etc. exports. Bools such as `wrap_world`,
+  `species_mode`, and `grass_multisight` ride the same path as `0|1`.
 - **Why**: One small protocol surface, no per-slider message type, no
   carve-out for bools. Adding a slider is a 1-line
   `apply_X` + 1-line `try_set_slider` arm + a TS widget — no protocol

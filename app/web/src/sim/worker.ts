@@ -86,28 +86,7 @@ const rayonCurrentNumThreads = (_wasmMod as unknown as Record<string, unknown>)[
 ] as (() => number) | undefined;
 
 type WorldHandleBootCtor = {
-  newWithFounderCount(
-    seed: string,
-    initialGrassSeedCount: number,
-    energyMax: number,
-    founderCount: number,
-    fullGrassOnInit: boolean,
-    nnTopologyJson: string,
-    worldSize: number,
-    wrapWorld: boolean,
-    worldSeed: number,
-    speciesMode: boolean,
-    crossoverMode: number,
-    startingSpeciesCount: number,
-    startingSpeciesMemberCount: number,
-    startingSpeciesMemberVariance: number,
-    grassCellSize: number,
-    grassMultisight: boolean,
-    grassClumpCount: number,
-    grassClumpSize: number,
-    initGrazeBoost: number,
-    initSplitBoost: number,
-  ): WorldHandle;
+  newWithConfigJson(configJson: string): WorldHandle;
 };
 
 type TelemetryWorldHandle = WorldHandle & {
@@ -234,40 +213,8 @@ async function handleBoot(boot: SimMessageBoot): Promise<void> {
   }
 
   const bootCtor = WorldHandle as unknown as WorldHandleBootCtor;
-  world = bootCtor.newWithFounderCount(
-    boot.seed,
-    boot.initial_grass_seed_count,
-    boot.energy_max,
-    boot.founder_count,
-    boot.full_grass_on_init,
-    boot.nn_topology_json ?? "",
-    // v2.0 Wave 1a: construction-only world shape.
-    boot.world_size,
-    boot.wrap_world,
-    boot.world_seed,
-    // v2.0 Wave 3b: species + sexual-mating construction settings. `crossover_mode`
-    // is the Rust f32 encoding (0 = average, 1 = fifty_fifty).
-    boot.species_mode,
-    boot.crossover_mode,
-    boot.starting_species_count,
-    boot.starting_species_member_count,
-    boot.starting_species_member_variance,
-    // v2.0.4 S2 / v2.0.5 S4: grass cell size — explicit construction arg so
-    // dims are computed before initial_sliders is applied.
-    boot.grass_cell_size ?? 5.0,
-    // v2.0.4 S6 / Wave 2: multi-band grass NN sight changes the NN layout, so
-    // it must be applied before founder-brain/topology construction.
-    boot.grass_multisight ?? true,
-    // v2.0.6 S3: seeded grass clumps — explicit construction args.
-    // clump_count=0 falls back to old uniform-scatter.
-    boot.grass_clump_count ?? 40,
-    boot.grass_clump_size ?? 8,
-    // Founder action-output boosts — explicit construction args (read during
-    // founder-brain seeding, before initial_sliders). 1.0 = neutral.
-    boot.init_graze_boost ?? 1.0,
-    boot.init_split_boost ?? 1.0,
-  );
-  speciesMode = !!boot.species_mode;
+  world = bootCtor.newWithConfigJson(JSON.stringify(boot.world_config));
+  speciesMode = !!boot.world_config.species.enabled;
   world.profile_enable(true);
 
   // Apply persisted slider state by name (initial_sliders is name→value).
@@ -342,6 +289,7 @@ async function handleBoot(boot: SimMessageBoot): Promise<void> {
     // v2.0 Wave 1a: torus flag + resolved numeric biome seed.
     wrap_world: world.wrap_world,
     world_seed: world.world_seed,
+    master_seed: (world as WorldHandle & { master_seed: number }).master_seed,
     threads,
     rayon_ok: rayonOk,
     max_pop_for_sim: max_pop_for_sim(),

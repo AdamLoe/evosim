@@ -19,7 +19,8 @@ runs one tick by sequentially executing the numbered phases below.
 `crates/evosim/src/world/mod.rs` → `World`
 
 The world is **runtime-sized**. `world_size`, `wrap_world`, and
-`grass_cell_size` are construction settings on `DevSliders`.
+`grass_cell_size` are construction fields in the Rust-owned `WorldConfig`
+payload that the worker passes to wasm at boot.
 `WorldDims::from_world_size_with_cell_size` computes and caches the
 per-axis dims: `grass_dim = round(world_size / grass_cell_size)` and
 `hash_dim = ceil(world_size / HASH_CELL)`. Every bounds/clamp/wrap/spawn
@@ -27,8 +28,39 @@ site reads `self.dims`.
 
 Construction-only sizing knobs: `grass_cell_size` (controls grass grid
 resolution), `grass_clump_count` + `grass_clump_size` (boot grass
-seeding), `world_size` + `wrap_world` + `world_seed`. See
-`crates/evosim/src/constants.rs` for the default values of each.
+seeding), `world_size` + `wrap_world`, and `master_seed`. See
+`crates/evosim/src/constants.rs` for the default values and schema version.
+
+## WorldConfig, defaults, and seeds
+
+`app/crates/evosim/src/wasm_api/mod.rs` → `WorldConfig`,
+`WorldHandle::new_with_config_json`
+`app/crates/evosim/src/bin/gen_bindings.rs` → `render_world_config`
+
+World construction is versioned by `WORLD_CONFIG_SCHEMA_VERSION` and enters
+wasm as one JSON `WorldConfig` object. The config owns dimensions/wrap,
+master seed, grass boot settings, initial population/energy cap,
+species/mating construction settings, founder action-output boosts, and NN
+topology. The worker still applies `initial_sliders` after construction so
+live slider lanes are seeded, but construction fields are not sourced from
+those lanes.
+
+TypeScript consumes generated mirrors in
+`app/web/src/generated/world-config.ts`: `DEFAULT_WORLD_CONFIG`,
+`WORLD_CONFIG_PRESETS`, and `DEFAULT_LIVE_SLIDER_VALUES`. Settings defaults
+derive construction values from `DEFAULT_WORLD_CONFIG` and live slider values
+from `DEFAULT_LIVE_SLIDER_VALUES`; the Playwright defaults-drift spec compares
+the generated live defaults against `WorldHandle::sliders_defaults_json()`.
+
+`WorldConfig.master_seed = 0` means "resolve a random nonzero master seed".
+The wasm constructor derives a string sim-RNG seed and a numeric internal
+`world_seed` from that master seed via `derive_world_seed`. Biome, grass
+clump boot, grass scatter, and species/founder setup currently share the
+derived internal `world_seed` lane inside `World`; the stream names exist in
+`WorldSeedStream`, but splitting those internal lanes requires a future
+`World` constructor change. The old `world_seed` slider lane remains in the
+SAB/default table for compatibility; externally, the Settings key stores the
+master seed.
 
 **Wrap-awareness** (gated on `dims.wrap_world`): position/movement step,
 `SpatialGrid` rebuild + neighbour queries, proximity sector distances +
@@ -55,7 +87,7 @@ for the shape and additions is in `decisions/sim.md`.
 | 0–16 | core creature/energy knobs | mostly live |
 | 17 | `max_population` | live |
 | 18 | `world_size` | construction |
-| 19 | `world_seed` | construction |
+| 19 | `world_seed` | construction compatibility lane; external config uses `master_seed` |
 | 20 | `wrap_world` | construction |
 | 21 | `_reserved_legacy_water_movement_penalty` | no-op |
 | 22 | `_reserved_legacy_desert_movement_penalty` | no-op |
@@ -86,9 +118,10 @@ for the shape and additions is in `decisions/sim.md`.
 `SLIDER_NAMES`. `set_slider(name, value)` is the sole mutation entry
 point; bools ride the same path as `0|1`.
 
-`grass_cell_size` (idx 62) and the clump knobs are threaded as explicit
-arguments to `newWithFounderCount` because `initial_sliders` is applied
-after construction and cannot resize the already-built `WorldDims`.
+`grass_cell_size` (idx 62), the clump knobs, species construction knobs,
+world shape, founder boosts, and NN topology ride `WorldConfig` because
+`initial_sliders` is applied after construction and cannot resize the
+already-built `WorldDims` or rebuild founder brains.
 
 ## What it owns
 
@@ -142,6 +175,7 @@ The `WorldHandle` wasm-bindgen surface (`app/crates/evosim/src/wasm_api/mod.rs`)
 ```text
 WorldHandle::step_n(n: u32) -> bool
 WorldHandle::write_snapshot(slot: u32)
+WorldHandle::newWithConfigJson(config_json: &str) -> Result<WorldHandle>
 WorldHandle::set_slider(name: &str, value: f32)
 WorldHandle::sliders_defaults_json() -> String
 WorldHandle::creature_at(wx, wy, tol) -> Option<f64>

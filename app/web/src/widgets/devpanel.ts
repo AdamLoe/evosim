@@ -10,10 +10,8 @@
 //    persists to `localStorage`; Cancel restores widgets to the last-applied
 //    snapshot; Reset restores to `DEFAULTS` and pushes/persists those.
 //
-// Construction-only knobs (`founder_count`, `energy_max`,
-// `initial_grass_seed_count`, `full_grass_on_init`) ride the same staged
-// path but only shape the *next* world — Apply/Reset fire a toast when any
-// were committed.
+// Construction-only widgets stage into the next `WorldConfig`; Apply/Reset
+// persist them and fire a restart-needed toast when any were committed.
 //
 // `currentSliderState()` snapshots the live widget values for the boot
 // payload (`initial_sliders`), so a mid-drag restart carries the dragged
@@ -27,8 +25,10 @@ import {
   setSetting,
   resetSettings,
   DEFAULTS,
+  WORLD_CONFIG_SCHEMA_VERSION,
   type AppFPS,
   type Settings,
+  type WorldConfig,
 } from "../settings";
 import { showToast } from "../toast";
 import { THEMES, applyTheme } from "../themes";
@@ -97,11 +97,9 @@ export function getWorldSeed(): number {
   const v = widgetReaders.get("world_seed")?.();
   return Math.max(0, Math.round(v ?? getSettings().worldSeed)) >>> 0;
 }
-// v2.0 Wave 3b: species + sexual-mating construction accessors for the boot
-// payload. These ride `newWithFounderCount`'s 5 trailing args (not the live
-// slider SAB). Each falls back to the persisted setting if its widget is not
-// installed (e.g. when species_mode is staged off, the species rows are hidden
-// but the readers stay registered, so this mostly reads the live widget value).
+// Species + sexual-mating construction accessors for the WorldConfig boot
+// payload. Each falls back to the persisted setting if its widget is not
+// installed.
 export function getSpeciesMode(): boolean {
   const v = widgetReaders.get("species_mode")?.();
   if (v !== undefined) return v !== 0;
@@ -154,6 +152,49 @@ export function getInitSplitBoost(): number {
   return widgetReaders.get("init_split_boost")?.() ?? getSettings().initSplitBoost;
 }
 
+function crossoverModeName(value: number): WorldConfig["species"]["crossover_mode"] {
+  return value === 0 ? "average" : "fifty_fifty";
+}
+
+export function currentWorldConfig(masterSeed: number): WorldConfig {
+  const settings = getSettings();
+  return {
+    schema_version: WORLD_CONFIG_SCHEMA_VERSION,
+    master_seed: Math.max(0, Math.round(masterSeed)) >>> 0,
+    world: {
+      size: getWorldSize(),
+      wrap: getWrapWorld(),
+    },
+    grass: {
+      initial_seed_count: getInitialGrassSeedCount(),
+      full_on_init: getFullGrassOnInit(),
+      cell_size: getGrassSize(),
+      clump_count: getGrassClumpCount(),
+      clump_size: getGrassClumpSize(),
+      multisight: getGrassMultisight(),
+    },
+    population: {
+      founder_count: getFounderCount(),
+      energy_max: getEnergyMax(),
+    },
+    species: {
+      enabled: getSpeciesMode(),
+      crossover_mode: crossoverModeName(getCrossoverMode()),
+      starting_species_count: getStartingSpeciesCount(),
+      starting_species_member_count: getStartingSpeciesMemberCount(),
+      starting_species_member_variance: getStartingSpeciesMemberVariance(),
+    },
+    founders: {
+      init_graze_boost: getInitGrazeBoost(),
+      init_split_boost: getInitSplitBoost(),
+    },
+    nn_topology: {
+      hidden_sizes: settings.nnTopology.layerSizes.slice(),
+      activations: settings.nnTopology.activations.slice(),
+    },
+  };
+}
+
 // ─── Live widget state (drives currentSliderState) ────────────────────────
 
 type SliderReader = () => number;
@@ -187,6 +228,20 @@ export function currentSliderState(): Record<string, number> {
   }
   if (!("grass_in_cell_growth_r" in out)) {
     out.grass_in_cell_growth_r = getSettings().grassGrowthR;
+  }
+  if (!("crowding_strength" in out)) out.crowding_strength = getSettings().crowdingStrength;
+  if (!("crowding_radius" in out)) out.crowding_radius = getSettings().crowdingRadius;
+  if (!("starvation_threshold" in out)) {
+    out.starvation_threshold = getSettings().starvationThreshold;
+  }
+  if (!("starvation_drain_rate" in out)) {
+    out.starvation_drain_rate = getSettings().starvationDrainRate;
+  }
+  if (!("grass_capacity_scale" in out)) {
+    out.grass_capacity_scale = getSettings().grassCapacityScale;
+  }
+  if (!("grass_regrowth_rate" in out)) {
+    out.grass_regrowth_rate = getSettings().grassRegrowthRate;
   }
 
   // v1.12: fan persisted mutation buckets into bucket_k_<field> sliders so
@@ -1485,8 +1540,10 @@ if (import.meta.env?.DEV && typeof window !== "undefined") {
   (window as unknown as {
     __evosimDevPanelForTests?: {
       currentSliderState: typeof currentSliderState;
+      currentWorldConfig: typeof currentWorldConfig;
     };
   }).__evosimDevPanelForTests = {
     currentSliderState,
+    currentWorldConfig,
   };
 }

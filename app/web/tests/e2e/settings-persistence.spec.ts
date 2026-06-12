@@ -5,6 +5,7 @@ import {
   SETTINGS_STORAGE_KEY,
   SETTINGS_USER_KEYS,
   type Settings,
+  type WorldConfig,
 } from "../../src/settings";
 
 const RUST_SLIDER_TO_SETTING: Record<string, keyof Settings> = {
@@ -50,6 +51,12 @@ const RUST_SLIDER_TO_SETTING: Record<string, keyof Settings> = {
   mate_reach_multiplier: "mateReachMultiplier",
   init_graze_boost: "initGrazeBoost",
   init_split_boost: "initSplitBoost",
+  crowding_strength: "crowdingStrength",
+  crowding_radius: "crowdingRadius",
+  starvation_threshold: "starvationThreshold",
+  starvation_drain_rate: "starvationDrainRate",
+  grass_capacity_scale: "grassCapacityScale",
+  grass_regrowth_rate: "grassRegrowthRate",
 };
 
 function clone<T>(value: T): T {
@@ -122,6 +129,12 @@ function variant(seed: 1 | 2): Settings {
     mateReachMultiplier: seed === 1 ? 3 : 4,
     initGrazeBoost: seed === 1 ? 1.7 : 2.7,
     initSplitBoost: seed === 1 ? 1.8 : 2.8,
+    crowdingStrength: seed === 1 ? 0.015 : 0.025,
+    crowdingRadius: seed === 1 ? 15 : 18,
+    starvationThreshold: seed === 1 ? 12 : 18,
+    starvationDrainRate: seed === 1 ? 0.25 : 0.35,
+    grassCapacityScale: seed === 1 ? 0.65 : 0.85,
+    grassRegrowthRate: seed === 1 ? 0.8 : 1.2,
   } satisfies Partial<Settings>);
   s.mutationBuckets = Array.from({ length: DEFAULTS.mutationBuckets.length }, (_, i) => ({
     weight: seed + i,
@@ -237,4 +250,61 @@ test("boot slider state includes every persisted Rust slider setting", async ({ 
   }
 
   expect(mismatches, "persisted sim settings must seed every Rust slider lane").toEqual([]);
+});
+
+test("boot world config includes every persisted construction setting", async ({ page }) => {
+  const initial = variant(1);
+  await page.addInitScript(({ key, value }) => {
+    if (localStorage.getItem("__evosim_settings_seeded") === "1") return;
+    localStorage.clear();
+    localStorage.setItem(key, JSON.stringify(value));
+    localStorage.setItem("__evosim_settings_seeded", "1");
+  }, { key: SETTINGS_STORAGE_KEY, value: initial });
+
+  await page.goto("/");
+
+  const config = await page.evaluate(() => {
+    const hook = (window as unknown as {
+      __evosimDevPanelForTests?: {
+        currentWorldConfig: (masterSeed: number) => WorldConfig;
+      };
+    }).__evosimDevPanelForTests;
+    if (!hook) throw new Error("missing devpanel test hook");
+    return hook.currentWorldConfig(987654);
+  });
+
+  expect(config).toMatchObject({
+    master_seed: 987654,
+    world: {
+      size: initial.worldSize,
+      wrap: initial.wrapWorld,
+    },
+    grass: {
+      initial_seed_count: initial.initialGrassSeedCount,
+      full_on_init: false,
+      cell_size: initial.grassSize,
+      clump_count: initial.grassClumpCount,
+      clump_size: initial.grassClumpSize,
+      multisight: initial.grassMultisight,
+    },
+    population: {
+      founder_count: initial.founderCount,
+      energy_max: initial.energyMax,
+    },
+    species: {
+      enabled: initial.speciesMode,
+      crossover_mode: initial.crossoverMode === 0 ? "average" : "fifty_fifty",
+      starting_species_count: initial.startingSpeciesCount,
+      starting_species_member_count: initial.startingSpeciesMemberCount,
+      starting_species_member_variance: initial.startingSpeciesMemberVariance,
+    },
+    founders: {
+      init_graze_boost: initial.initGrazeBoost,
+      init_split_boost: initial.initSplitBoost,
+    },
+    nn_topology: {
+      hidden_sizes: initial.nnTopology.layerSizes,
+      activations: initial.nnTopology.activations,
+    },
+  });
 });
