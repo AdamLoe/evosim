@@ -62,14 +62,14 @@ the pacing/snapshot plan, not as a hidden implementation detail.
 
 | Stream | Area | Status | Last observed fact | Next action | Blockers |
 |---|---|---|---|---|---|
-| Pacing/FPS snapshots | Worker runtime + app shell | Active | `app/web/src/sim/worker.ts` writes one snapshot per tick; main has `lastPaintedSeq` but no worker-visible consumed-seq lane; there is target TPS but no target FPS. | Implement `01-runtime-fps-snapshot-render.md` using a consumed-seq ack lane. | Runtime implementer owns `main.ts` coordination for wave 1. |
-| Render hot path | WebGL renderer | Draft plan | `app/web/src/render/gl.ts` uploads static biome windows per frame; interpolation Maps are now trail state, not old interpolation. | Covered by `01-runtime-fps-snapshot-render.md`; defer velocity lane as a protocol/layout research item. | Velocity lane likely changes stride/layout, not just one pad lane. |
-| Crash resilience | Worker runtime + app shell | Draft/ready | Main RAF loop can observe `CTRL_SEQ`; pause intentionally freezes seq; restart path already exists. | Start after `01` lands, or assign to the same `main.ts` owner. | Watchdog semantics depend on consumed-seq ack and app FPS behavior. |
+| Pacing/FPS snapshots | Worker runtime + app shell | Shipped | Commit `9fb9ea1` added app FPS choices, consumed-seq ack lane, snapshot decimation, and docs migration. | None for this wave; velocity lanes remain a later research item. | None. |
+| Render hot path | WebGL renderer | Shipped | Commit `9fb9ea1` cached static biome uploads and added `trail_state` measurement. | Defer velocity lane as a protocol/layout research item. | Velocity lane likely changes stride/layout, not just one pad lane. |
+| Crash resilience | Worker runtime + app shell | Active | Runtime ack/FPS semantics now exist; main can observe seq, consumed seq, pause, and restart state. | Implement `02-worker-watchdog-recovery.md`. | Need threshold semantics around low TPS, app FPS, hidden tab, and explicit pause. |
 | Telemetry/history | Sim + protocol + UI/export | Draft plan | Existing cadence report carries profile/TPS/jank/grass; no per-N aggregate history/export surface yet. | See `03-telemetry-history-export.md`. | Needs control-SAB byte-buffer ownership if streamed through existing report family. |
 | Persistence | Rust wasm API + IndexedDB | Draft plan | Only settings persist today; world save would touch `World`, `GrassGrid`, species, RNG, IDs, and selected `WorldHandle` layout state. | See `04-world-persistence-artifacts.md`. | Need format/versioning decision aligned with `WorldConfig`. |
 | Config/schema/presets | Rust + generated TS + app shell | Draft plan | `DevSliders`, `SLIDER_NAMES`, TS settings, construction-only slider set, and positional `new_with_founder_count` all define config pieces. | See `05-world-config-schema-presets.md`. | Broad protocol migration; should not overlap other protocol edits. |
 | Deterministic science mode | Sim core + grass | Draft plan | Threaded scatter uses relaxed cross-tile add/sub; docs already call out nondeterminism. | See `06-deterministic-science-mode.md`. | Needs config home, benchmark budget, and acceptance criteria. |
-| Docs drift automation | Docs + tests/CI | Active | Verified drifts: `waitAsync` references, profiler tree count/list, possible stale e2e filename, path consistency. | Implement `07-docs-drift-lint.md` as a repo-root Node script exposed through `app/web/package.json` and CI. | Avoid runtime migration docs while `01` is active. |
+| Docs drift automation | Docs + tests/CI | Shipped | Commit `d09cac2` added `scripts/docs-lint.mjs`, `pnpm docs:lint`, CI integration, and drift fixes. | Keep docs-lint green as later waves land. | None. |
 
 ## Phase Tracker
 
@@ -134,7 +134,13 @@ the pacing/snapshot plan, not as a hidden implementation detail.
 
 ## Implementation Evidence
 
-Pending.
+- `9fb9ea1` shipped `01-runtime-fps-snapshot-render.md`.
+  Verification reported by implementer: generated bindings, Rust lib tests
+  with and without `threads`, web typecheck, focused app-FPS e2e, full e2e,
+  and diff check all passed.
+- `d09cac2` shipped `07-docs-drift-lint.md`.
+  Verification reported by implementer: `cd app/web && pnpm docs:lint`,
+  `cd app/web && pnpm typecheck`, and `git diff --check` passed.
 
 ## Migration Notes
 

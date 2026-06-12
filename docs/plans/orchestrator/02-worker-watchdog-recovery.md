@@ -1,5 +1,5 @@
 ---
-status:        draft
+status:        active
 owner:         orchestrator
 last_updated:  2026-06-12
 okay_to_delete: false
