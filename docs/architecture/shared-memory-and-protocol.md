@@ -77,9 +77,10 @@ equal at boot — drift is a thrown error pointing at "rebuild wasm".
 ## Control SAB layout
 
 Allocated as `new SharedArrayBuffer(CONTROL_SAB_BYTES)` at worker boot
-(currently ≈30 KB). Three views: `Int32Array` (atomic operations and
-i32 fields), `Float32Array` (slider / TPS / inspector-param values
-written and read by lane), `Uint8Array` (byte buffers for
+(currently ≈802 KB, mostly the request-only telemetry export buffer).
+Three views: `Int32Array` (atomic operations and i32 fields),
+`Float32Array` (slider / TPS / inspector-param values written and read
+by lane), `Uint8Array` (byte buffers for
 length-prefixed payloads).
 
 ### Leading i32 region
