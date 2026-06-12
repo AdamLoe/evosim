@@ -14,11 +14,11 @@ loop. The snapshot region lives in wasm linear memory (a `Vec<u8>` inside
 **All main↔worker control is on SAB.** The only surviving `postMessage`
 path is the one-shot `boot` handshake and the one-shot `boot_ready` reply.
 Every other control signal — sliders, paused, target TPS, camera lanes,
-snapshot-consumed acknowledgement, inspector requests, reset-jank,
-reset-profile, profile/NN report polls — is an `Atomics.store` + epoch
-bump or direct SAB lane write, read at the top of each loop iteration.
-The loop body is synchronous; `Atomics.wait` (not `Atomics.waitAsync`) is
-the pacing primitive.
+snapshot-consumed acknowledgement, inspector requests, telemetry export
+requests, reset-jank, reset-profile, profile/NN report polls — is an
+`Atomics.store` + epoch bump or direct SAB lane write, read at the top of
+each loop iteration. The loop body is synchronous; `Atomics.wait` (not
+`Atomics.waitAsync`) is the pacing primitive.
 
 ## What it owns
 
@@ -39,7 +39,8 @@ the pacing primitive.
   `await`, no `setTimeout` — by design.
 - Per-tick SAB read of paused / target_tps / sliders (gated on
   `CTRL_CONTROL_EPOCH`) / inspector request (gated on
-  `CTRL_INSPECT_REQ_EPOCH`) / profile-clear + reset-jank requests.
+  `CTRL_INSPECT_REQ_EPOCH`) / telemetry export request / profile-clear +
+  reset-jank requests.
 - Ack-gated snapshot publication: the worker writes a new snapshot only
   when main has stored the last painted `CTRL_SEQ` into `CTRL_CONSUMED_SEQ`.
   It continues to tick and write inspect/profile/NN/species reports even
@@ -92,8 +93,9 @@ pacing park:
   would change sim timing and make control writes take effect less
   predictably.
 - **Write phase**: snapshot only if `CTRL_CONSUMED_SEQ` equals the last
-  published `CTRL_SEQ`; inspect response (if epoch advanced), profile
-  report and NN stats (every N ticks each) are served regardless.
+  published `CTRL_SEQ`; inspect and telemetry responses (if their request
+  epochs advanced), profile report and NN stats (every N ticks each) are
+  served regardless.
 - **Pacing**: `Atomics.wait` for `1000/targetTPS − elapsed` ms when
   `remainingMs > 0.25`. No floor — when the tick overshoots its slice the
   loop continues immediately (no event loop to feed). TPS is therefore
@@ -220,6 +222,7 @@ and GL work is capped by the persisted App FPS setting.
 
 - [`app/web/src/sim/worker.ts`](../../app/web/src/sim/worker.ts) →
   `handleBoot`, `readControlSab`, `serveInspectRequest`,
+  `serveTelemetryRequest`,
   `maybeWriteProfileReport`, `maybeWriteNnStats`,
   `maybeWriteSpeciesTable`, `writeSnapshotToSAB`, `freezeForE2E`, `simLoop`,
   `TARGET_RAYON_WORKERS`, `PROFILE_REPORT_EVERY_N_TICKS`,

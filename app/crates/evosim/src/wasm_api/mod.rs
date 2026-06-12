@@ -4,6 +4,8 @@
 use crate::brain::{Activation, NnTopology};
 use crate::constants::*;
 use crate::world::World;
+use serde::Serialize;
+use std::collections::VecDeque;
 use wasm_bindgen::prelude::*;
 
 /// v1.12: parse the boot payload's `nn_topology_json`. Empty string → legacy
@@ -31,6 +33,114 @@ pub const JANK_BUDGET_MS: f64 = 16.0;
 
 /// Rolling window size (in ticks) for the TPS average.
 const TPS_WINDOW: usize = 10;
+
+const TELEMETRY_SCHEMA_VERSION: u32 = 1;
+const TELEMETRY_SAMPLE_PERIOD_TICKS: u32 = 120;
+const TELEMETRY_SAMPLE_CAP: usize = 2048;
+const TELEMETRY_EVENT_CAP: usize = 256;
+const LARGE_JANK_EVENT_MS: f64 = 64.0;
+
+#[derive(Clone, Serialize)]
+struct TelemetrySample {
+    tick_start: u32,
+    tick_end: u32,
+    at_ms: f64,
+    wall_elapsed_ms: f64,
+    population: u32,
+    tps: f32,
+    jank_count_delta: u32,
+    jank_count_total: u32,
+    live_grass_cell_count: u32,
+    total_grass_density: f32,
+}
+
+#[derive(Clone, Serialize)]
+struct TelemetryEvent {
+    seq: u64,
+    tick: u32,
+    at_ms: f64,
+    kind: String,
+    payload: serde_json::Value,
+}
+
+#[derive(Clone, Serialize)]
+struct JankPhaseAttribution {
+    phase: String,
+    confidence: String,
+    reason: String,
+}
+
+#[derive(Clone, Serialize)]
+struct WorstJank {
+    tick: u32,
+    duration_ms: f64,
+    population: u32,
+    phase: JankPhaseAttribution,
+}
+
+#[derive(Serialize)]
+struct JankSummary {
+    budget_ms: f64,
+    large_event_threshold_ms: f64,
+    count: u32,
+    worst: Option<WorstJank>,
+}
+
+struct TelemetryState {
+    created_at_ms: f64,
+    last_sample_tick: u32,
+    last_sample_ms: f64,
+    last_sample_jank_count: u32,
+    samples: VecDeque<TelemetrySample>,
+    sample_dropped_count: u64,
+    events: VecDeque<TelemetryEvent>,
+    event_dropped_count: u64,
+    next_event_seq: u64,
+    world_end_logged: bool,
+    worst_jank: Option<WorstJank>,
+}
+
+impl TelemetryState {
+    fn new(now_ms: f64) -> Self {
+        Self {
+            created_at_ms: now_ms,
+            last_sample_tick: 0,
+            last_sample_ms: now_ms,
+            last_sample_jank_count: 0,
+            samples: VecDeque::with_capacity(TELEMETRY_SAMPLE_CAP),
+            sample_dropped_count: 0,
+            events: VecDeque::with_capacity(TELEMETRY_EVENT_CAP),
+            event_dropped_count: 0,
+            next_event_seq: 0,
+            world_end_logged: false,
+            worst_jank: None,
+        }
+    }
+
+    fn push_sample(&mut self, sample: TelemetrySample) {
+        if self.samples.len() == TELEMETRY_SAMPLE_CAP {
+            self.samples.pop_front();
+            self.sample_dropped_count = self.sample_dropped_count.saturating_add(1);
+        }
+        self.samples.push_back(sample);
+    }
+
+    fn push_event(&mut self, tick: u32, at_ms: f64, kind: &str, payload: serde_json::Value) {
+        if self.events.len() == TELEMETRY_EVENT_CAP {
+            self.events.pop_front();
+            self.event_dropped_count = self.event_dropped_count.saturating_add(1);
+        }
+        let event = TelemetryEvent {
+            seq: self.next_event_seq,
+            tick,
+            at_ms,
+            kind: kind.to_string(),
+            payload,
+        };
+        self.next_event_seq = self.next_event_seq.saturating_add(1);
+        self.events.push_back(event);
+    }
+}
 
 /// Canonical ordered list of dev-panel slider names. Indices are stable across
 /// the SAB transport: TS writes `value` into `CTRL_SLIDERS[idx]` + bumps
@@ -426,6 +536,8 @@ pub struct WorldHandle {
     last_tick_end_ms: Option<f64>,
     /// Count of ticks whose wall-clock duration exceeded JANK_BUDGET_MS.
     jank_count: u32,
+    /// Bounded run-history samples, lifecycle events, and worst-jank summary.
+    telemetry: TelemetryState,
     /// v2.0.4 S1: LOD bias — subtracted from the computed mip level so the
     /// renderer picks a finer pyramid level than the budget-threshold formula
     /// alone would choose. Clamped to [0, max_level] after subtraction so it
@@ -479,6 +591,21 @@ impl WorldHandle {
         // correct row stride for each level.
         let level_dims = &inner.grass.pyramid.level_dims;
         let biome_pyramid = BiomePyramid::build(inner.biome_grid_bytes(), level_dims);
+        let now_ms = wasm_now_ms();
+        let mut telemetry = TelemetryState::new(now_ms);
+        telemetry.push_event(
+            inner.tick,
+            now_ms,
+            "world_start",
+            serde_json::json!({
+                "seed": &inner.seed,
+                "world_seed": inner.world_seed,
+                "world_size": inner.world_size(),
+                "wrap_world": inner.dims.wrap_world,
+                "species_mode": inner.sliders.species_mode,
+                "reason": "boot_or_restart",
+            }),
+        );
         Self {
             inner,
             snapshot_buf: vec![0u8; layout.buf_bytes],
@@ -487,6 +614,7 @@ impl WorldHandle {
             tick_intervals_ms: std::collections::VecDeque::new(),
             last_tick_end_ms: None,
             jank_count: 0,
+            telemetry,
             lod_bias: 0.0,
             lod_step: 0,
         }
@@ -611,6 +739,124 @@ impl WorldHandle {
         self.inner.tick_once()
     }
 
+    fn unknown_phase_attribution() -> JankPhaseAttribution {
+        JankPhaseAttribution {
+            phase: "unknown".to_string(),
+            confidence: "unavailable".to_string(),
+            reason: "whole-tick jank is measured around WorldHandle::step_n; profiler spans are rolling aggregates, not per-jank-tick traces".to_string(),
+        }
+    }
+
+    fn grass_aggregate(&self) -> (u32, f32) {
+        let mut live = 0u32;
+        let mut total = 0.0f32;
+        for c in 0..self.inner.grass.density.len() {
+            let byte = self.inner.grass.dget_u8(c);
+            if byte > 0 {
+                live = live.saturating_add(1);
+            }
+            total += self.inner.grass.dget(c);
+        }
+        (live, total)
+    }
+
+    fn maybe_sample_telemetry(&mut self, now_ms: f64) {
+        let tick = self.inner.tick;
+        if tick == 0 || !tick.is_multiple_of(TELEMETRY_SAMPLE_PERIOD_TICKS) {
+            return;
+        }
+        let (live_grass_cell_count, total_grass_density) = self.grass_aggregate();
+        let prev_jank = self.telemetry.last_sample_jank_count;
+        let jank_delta = self.jank_count.saturating_sub(prev_jank);
+        let sample = TelemetrySample {
+            tick_start: self.telemetry.last_sample_tick,
+            tick_end: tick,
+            at_ms: now_ms,
+            wall_elapsed_ms: (now_ms - self.telemetry.last_sample_ms).max(0.0),
+            population: self.inner.population(),
+            tps: self.tps(),
+            jank_count_delta: jank_delta,
+            jank_count_total: self.jank_count,
+            live_grass_cell_count,
+            total_grass_density,
+        };
+        self.telemetry.last_sample_tick = tick;
+        self.telemetry.last_sample_ms = now_ms;
+        self.telemetry.last_sample_jank_count = self.jank_count;
+        self.telemetry.push_sample(sample);
+    }
+
+    fn observe_completed_tick(
+        &mut self,
+        tick_started_at_ms: f64,
+        tick_ended_at_ms: f64,
+        alive: bool,
+    ) {
+        let work_dur_ms = (tick_ended_at_ms - tick_started_at_ms).max(0.0);
+        if let Some(prev) = self.last_tick_end_ms {
+            let interval_ms = tick_ended_at_ms - prev;
+            if self.tick_intervals_ms.len() >= TPS_WINDOW {
+                self.tick_intervals_ms.pop_front();
+            }
+            self.tick_intervals_ms.push_back(interval_ms);
+        }
+        self.last_tick_end_ms = Some(tick_ended_at_ms);
+
+        if work_dur_ms > JANK_BUDGET_MS {
+            self.jank_count = self.jank_count.saturating_add(1);
+            let worst_replaced = self
+                .telemetry
+                .worst_jank
+                .as_ref()
+                .is_none_or(|worst| work_dur_ms > worst.duration_ms);
+            if worst_replaced {
+                let worst = WorstJank {
+                    tick: self.inner.tick,
+                    duration_ms: work_dur_ms,
+                    population: self.inner.population(),
+                    phase: Self::unknown_phase_attribution(),
+                };
+                self.telemetry.worst_jank = Some(worst.clone());
+                self.telemetry.push_event(
+                    self.inner.tick,
+                    tick_ended_at_ms,
+                    "jank_worst",
+                    serde_json::json!({
+                        "duration_ms": work_dur_ms,
+                        "population": self.inner.population(),
+                        "phase": &worst.phase,
+                    }),
+                );
+            } else if work_dur_ms >= LARGE_JANK_EVENT_MS {
+                self.telemetry.push_event(
+                    self.inner.tick,
+                    tick_ended_at_ms,
+                    "jank_large",
+                    serde_json::json!({
+                        "duration_ms": work_dur_ms,
+                        "population": self.inner.population(),
+                        "phase": Self::unknown_phase_attribution(),
+                    }),
+                );
+            }
+        }
+
+        if !alive && !self.telemetry.world_end_logged {
+            self.telemetry.world_end_logged = true;
+            self.telemetry.push_event(
+                self.inner.tick,
+                tick_ended_at_ms,
+                "world_ended",
+                serde_json::json!({
+                    "reason": if self.inner.population() == 0 { "extinction" } else { "ended" },
+                    "population": self.inner.population(),
+                }),
+            );
+        }
+
+        self.maybe_sample_telemetry(tick_ended_at_ms);
+    }
+
     /// Run multiple ticks; stops early on game-over.
     /// Tracks per-tick wall-clock duration for TPS and jank accounting.
     #[wasm_bindgen]
@@ -619,21 +865,7 @@ impl WorldHandle {
             let t0 = wasm_now_ms();
             let alive = self.inner.tick_once();
             let now = wasm_now_ms();
-            let work_dur_ms = now - t0;
-            // TPS uses the wall-clock interval between consecutive tick
-            // completions so it correctly reflects pacing waits, not just
-            // computation time. Skip the very first tick (no prior anchor).
-            if let Some(prev) = self.last_tick_end_ms {
-                let interval_ms = now - prev;
-                if self.tick_intervals_ms.len() >= TPS_WINDOW {
-                    self.tick_intervals_ms.pop_front();
-                }
-                self.tick_intervals_ms.push_back(interval_ms);
-            }
-            self.last_tick_end_ms = Some(now);
-            if work_dur_ms > JANK_BUDGET_MS {
-                self.jank_count = self.jank_count.saturating_add(1);
-            }
+            self.observe_completed_tick(t0, now, alive);
             if !alive {
                 return false;
             }
@@ -667,6 +899,17 @@ impl WorldHandle {
     #[wasm_bindgen]
     pub fn reset_jank(&mut self) {
         self.jank_count = 0;
+        self.telemetry.worst_jank = None;
+        self.telemetry.last_sample_jank_count = 0;
+        let now_ms = wasm_now_ms();
+        self.telemetry.push_event(
+            self.inner.tick,
+            now_ms,
+            "jank_reset",
+            serde_json::json!({
+                "history_preserved": true,
+            }),
+        );
     }
 
     /// v1.10: publish a worker-side JS-measured span into the always-on Rust
@@ -1918,6 +2161,60 @@ impl WorldHandle {
         });
         serde_json::to_string(&obj).unwrap_or_else(|_| "{\"tick\":0,\"species\":[]}".into())
     }
+
+    /// Bounded longitudinal telemetry export. Unlike the profiler report, this
+    /// is request-driven by the UI because the payload can be hundreds of KB
+    /// once the in-memory history ring fills.
+    #[wasm_bindgen]
+    pub fn telemetry_report_json(&self) -> String {
+        let w = &self.inner;
+        let report = serde_json::json!({
+            "schema_version": TELEMETRY_SCHEMA_VERSION,
+            "truncated": false,
+            "generated_at_ms": wasm_now_ms(),
+            "meta": {
+                "app_version": serde_json::Value::Null,
+                "seed": &w.seed,
+                "world_seed": w.world_seed,
+                "world_size": w.world_size(),
+                "wrap_world": w.dims.wrap_world,
+                "grass_dim": w.dims.grass_dim,
+                "grass_cell_size": w.dims.grass_cell_size,
+                "started_at_ms": self.telemetry.created_at_ms,
+            },
+            "config": {
+                "species_mode": w.sliders.species_mode,
+                "max_population": w.sliders.max_population,
+                "founder_count": w.sliders.founder_count,
+                "energy_max": w.sliders.energy_max,
+                "target_sample_period_ticks": TELEMETRY_SAMPLE_PERIOD_TICKS,
+            },
+            "caps": {
+                "sample_period_ticks": TELEMETRY_SAMPLE_PERIOD_TICKS,
+                "sample_cap": TELEMETRY_SAMPLE_CAP,
+                "event_cap": TELEMETRY_EVENT_CAP,
+                "samples_dropped": self.telemetry.sample_dropped_count,
+                "events_dropped": self.telemetry.event_dropped_count,
+            },
+            "current": {
+                "tick": w.tick,
+                "population": w.population(),
+                "world_ended": w.world_ended,
+                "tps": self.tps(),
+                "jank_count": self.jank_count,
+            },
+            "samples": &self.telemetry.samples,
+            "events": &self.telemetry.events,
+            "jank": JankSummary {
+                budget_ms: JANK_BUDGET_MS,
+                large_event_threshold_ms: LARGE_JANK_EVENT_MS,
+                count: self.jank_count,
+                worst: self.telemetry.worst_jank.clone(),
+            },
+        });
+        serde_json::to_string(&report)
+            .unwrap_or_else(|_| "{\"schema_version\":1,\"truncated\":true}".into())
+    }
 }
 
 // ─── v1.6 S A1: shared snapshot byte writer ─────────────────────────────────
@@ -2147,6 +2444,17 @@ pub fn rayon_current_num_threads() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tiny_handle(seed: &str) -> WorldHandle {
+        let mut handle = WorldHandle::new_with_founder_count(
+            seed, 0, 1000.0, 1, true, "", 120.0, true, 1, false, 1.0, 1, 1, 0.0, 20.0, false, 0, 0,
+            1.0, 1.0,
+        )
+        .unwrap();
+        handle.try_set_slider("upkeep_multiplier", 0.0);
+        handle.try_set_slider("move_cost_multiplier", 0.0);
+        handle
+    }
 
     /// v1.6 S A1: `write_snapshot_to_native` produces bytes that match the
     /// documented stride-8 layout. Exercises the same writer the wasm path
@@ -2450,6 +2758,98 @@ mod tests {
             total >= 0.0,
             "total_grass_density must be non-negative, got {total}"
         );
+    }
+
+    #[test]
+    fn telemetry_samples_on_fixed_cadence_and_exports_shape() {
+        let mut handle = tiny_handle("telemetry-cadence");
+        handle.step_n(TELEMETRY_SAMPLE_PERIOD_TICKS - 1);
+        assert_eq!(handle.telemetry.samples.len(), 0);
+
+        handle.step_n(1);
+        assert_eq!(handle.telemetry.samples.len(), 1);
+
+        let report: serde_json::Value =
+            serde_json::from_str(&handle.telemetry_report_json()).expect("telemetry report parses");
+        assert_eq!(
+            report["schema_version"].as_u64(),
+            Some(TELEMETRY_SCHEMA_VERSION as u64)
+        );
+        assert_eq!(report["truncated"], false);
+        assert_eq!(
+            report["caps"]["sample_period_ticks"].as_u64(),
+            Some(TELEMETRY_SAMPLE_PERIOD_TICKS as u64)
+        );
+        let samples = report["samples"].as_array().expect("samples array");
+        assert_eq!(samples.len(), 1);
+        let sample = &samples[0];
+        assert_eq!(
+            sample["tick_end"].as_u64(),
+            Some(TELEMETRY_SAMPLE_PERIOD_TICKS as u64)
+        );
+        assert!(sample.get("population").is_some());
+        assert!(sample.get("jank_count_delta").is_some());
+        assert!(sample.get("live_grass_cell_count").is_some());
+        assert!(report["events"]
+            .as_array()
+            .expect("events array")
+            .iter()
+            .any(|event| event["kind"] == "world_start"));
+    }
+
+    #[test]
+    fn telemetry_worst_jank_replaces_only_when_duration_increases() {
+        let mut handle = tiny_handle("telemetry-worst-jank");
+        handle.inner.tick = 1;
+        handle.observe_completed_tick(0.0, 20.0, true);
+        handle.inner.tick = 2;
+        handle.observe_completed_tick(20.0, 38.0, true);
+        handle.inner.tick = 3;
+        handle.observe_completed_tick(38.0, 63.0, true);
+
+        let report: serde_json::Value =
+            serde_json::from_str(&handle.telemetry_report_json()).expect("telemetry report parses");
+        assert_eq!(report["jank"]["count"].as_u64(), Some(3));
+        assert_eq!(report["jank"]["worst"]["tick"].as_u64(), Some(3));
+        assert_eq!(report["jank"]["worst"]["duration_ms"].as_f64(), Some(25.0));
+        assert_eq!(report["jank"]["worst"]["phase"]["phase"], "unknown");
+
+        let worst_events = report["events"]
+            .as_array()
+            .expect("events array")
+            .iter()
+            .filter(|event| event["kind"] == "jank_worst")
+            .count();
+        assert_eq!(
+            worst_events, 2,
+            "20ms and 25ms replace worst; 18ms only increments count"
+        );
+    }
+
+    #[test]
+    fn reset_jank_preserves_history_samples_and_clears_summary() {
+        let mut handle = tiny_handle("telemetry-reset-jank");
+        handle.step_n(TELEMETRY_SAMPLE_PERIOD_TICKS);
+        assert_eq!(handle.telemetry.samples.len(), 1);
+
+        handle.inner.tick = TELEMETRY_SAMPLE_PERIOD_TICKS + 1;
+        handle.observe_completed_tick(1000.0, 1030.0, true);
+        assert!(handle.telemetry.worst_jank.is_some());
+        handle.reset_jank();
+
+        let report: serde_json::Value =
+            serde_json::from_str(&handle.telemetry_report_json()).expect("telemetry report parses");
+        assert_eq!(report["jank"]["count"].as_u64(), Some(0));
+        assert!(report["jank"]["worst"].is_null());
+        assert_eq!(
+            report["samples"].as_array().expect("samples array").len(),
+            1
+        );
+        assert!(report["events"]
+            .as_array()
+            .expect("events array")
+            .iter()
+            .any(|event| event["kind"] == "jank_reset"));
     }
 
     /// S17: try_set_slider returns true for all known names. Uses the inner

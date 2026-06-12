@@ -62,7 +62,7 @@ Notable coverage by file:
 
 | File | What it covers |
 |---|---|
-| `app/crates/evosim/src/wasm_api/mod.rs` | `write_snapshot_to_native` layout matches the documented byte stride; `max_pop_for_sim()` mirrors the constant; `creature_at` returns stable ids; `set_slider` dispatch round-trip. |
+| `app/crates/evosim/src/wasm_api/mod.rs` | `write_snapshot_to_native` layout matches the documented byte stride; `max_pop_for_sim()` mirrors the constant; `creature_at` returns stable ids; `set_slider` dispatch round-trip; telemetry sample cadence/export shape/worst-jank/reset behavior. |
 | `crates/evosim/src/world/mod.rs` | Tick step body, slider effects on world construction, multi-founder spawn placement. |
 | `crates/evosim/src/world/tick.rs` | Per-phase invariants — graze energy conservation, eat per-bite math, repulsion clamping, death/birth bookkeeping. |
 | `crates/evosim/src/world/nn.rs` | NN input layout, slot offsets, threaded NN matches sequential NN bit-for-bit (when seeded), chunk-range partition invariants. |

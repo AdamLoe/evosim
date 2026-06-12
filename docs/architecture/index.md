@@ -19,7 +19,7 @@ follow the doc's `Why is it shaped this way` link into `decisions/`.
 | Every main <-> worker message kind, SAB layout, snapshot stride | [`shared-memory-and-protocol.md`](shared-memory-and-protocol.md) |
 | GL renderer, camera, frustum cull, snapshot read | [`render-pipeline.md`](render-pipeline.md) |
 | Main-thread UI shell: DOM layout, right-rail tabs, Settings stage-then-apply | [`app-shell.md`](app-shell.md) |
-| Profiler shape, no-rollup rule, four-tree layout | [`profiler.md`](profiler.md) |
+| Profiler shape, no-rollup rule, telemetry history/export | [`profiler.md`](profiler.md) |
 | wasm-pack incantation, COOP/COEP, threaded-bundle invariants | [`build-and-deploy.md`](build-and-deploy.md) |
 | Test suites and what each covers | [`testing.md`](testing.md) |
 

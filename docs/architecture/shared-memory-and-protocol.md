@@ -13,8 +13,8 @@ plus a one-shot `boot` message in each direction.
 All main↔worker control is on SAB; the only postMessage payloads are
 the `boot` handshake and its `boot_ready` reply. Every other control
 signal (sliders, paused, target TPS, inspector requests, profile/NN
-stats polls, reset-jank, reset-profile, camera position/zoom) is an
-`Atomics.store` + epoch bump on the control SAB.
+stats polls, telemetry export requests, reset-jank, reset-profile, camera
+position/zoom) is an `Atomics.store` + epoch bump on the control SAB.
 
 The canonical SAB byte layout lives in
 [`app/crates/evosim/src/control_sab.rs`](../../app/crates/evosim/src/control_sab.rs). The TS mirror
@@ -114,6 +114,10 @@ length-prefixed payloads).
 | 139 | `CTRL_CAMERA_VIEWPORT_W` | Viewport width in CSS pixels (u32). |
 | 140 | `CTRL_CAMERA_VIEWPORT_H` | Viewport height in CSS pixels (u32). |
 | 141 | `CTRL_CONSUMED_SEQ` | Last `CTRL_SEQ` value main has painted/consumed. Worker uses it to keep at most one unconsumed fresh snapshot published. |
+| 144 | `CTRL_TELEMETRY_REQ_EPOCH` | Bumped by main when the user requests a telemetry export. |
+| 145 | `CTRL_TELEMETRY_REPORT_EPOCH` | Bumped by worker after writing the telemetry report JSON. |
+| 146 | `CTRL_TELEMETRY_REPORT_LEN` | Length of telemetry report JSON in bytes. |
+| 147 | `CTRL_TELEMETRY_REPORT_REQ_EPOCH` | Echo of the telemetry request epoch being answered. |
 
 Slots not listed are reserved; do not read or write them.
 
@@ -125,6 +129,17 @@ Slots not listed are reserved; do not read or write them.
 | `PROFILE_REPORT_OFFSET` (9216) | `PROFILE_REPORT_CAP` (16 KB) | Profile-report JSON, UTF-8. |
 | `NN_STATS_OFFSET` (25600) | `NN_STATS_CAP` (4 KB) | NN-worker stats JSON, UTF-8. |
 | `SPECIES_TABLE_OFFSET` (29696) | `SPECIES_TABLE_CAP` (4 KB) | Species-table JSON, UTF-8. Length in `CTRL_SPECIES_TABLE_LEN`. |
+| `TELEMETRY_REPORT_OFFSET` | `TELEMETRY_REPORT_CAP` (768 KB) | Request-only telemetry export JSON, UTF-8. Length in `CTRL_TELEMETRY_REPORT_LEN`. |
+
+**Telemetry report.** Main requests it with `SimBridge.requestTelemetryReport`,
+which bumps `CTRL_TELEMETRY_REQ_EPOCH` and futex-notifies the worker. The worker
+serves the request in both running and paused loop branches by calling
+`WorldHandle::telemetry_report_json`, writing bytes into the telemetry report
+buffer, echoing the request epoch, and bumping `CTRL_TELEMETRY_REPORT_EPOCH`.
+The report contains schema/version metadata, bounded aggregate samples, bounded
+events, and jank summary. If serialization ever exceeds the fixed report
+buffer, the worker writes a small explicit `truncated: true` error payload
+instead of clipping bytes silently.
 
 **Polled species table.** A cadence-written report (mirrors the
 NN-stats producer — no request side) exposing every **live** species as
@@ -385,12 +400,12 @@ if it advanced, the bytes are guaranteed to be coherent.
 - [`crates/evosim/src/control_sab.rs`](../../app/crates/evosim/src/control_sab.rs) — canonical control SAB layout;
   every `CTRL_*` constant including camera lanes `CTRL_CAMERA_CX_BITS` …
   `CTRL_CAMERA_VIEWPORT_H` (slots **136–140**) and `CTRL_CONSUMED_SEQ`
-  (slot **141**).
+  (slot **141**) plus the telemetry request/report slots.
 - [`app/crates/evosim/src/wasm_api/mod.rs`](../../app/crates/evosim/src/wasm_api/mod.rs) → `SLIDER_NAMES`, `SLIDER_COUNT`,
   `SNAPSHOT_HEADER_BYTES`, `GRASS_LOD_BUDGET_AXIS`, `GRASS_LOD_MARGIN_FACTOR`,
   `SnapshotLayout`, `WorldHandle::set_slider`, `WorldHandle::set_slider_by_index`,
   `WorldHandle::record_profile_sample`, `WorldHandle::write_snapshot`,
-  `max_pop_for_sim` free function.
+  `WorldHandle::telemetry_report_json`, `max_pop_for_sim` free function.
 - [`crates/evosim/src/bin/gen_bindings.rs`](../../app/crates/evosim/src/bin/gen_bindings.rs) — codegen
   binary + drift unit test.
 - [`app/web/src/generated/control-sab.ts`](../../app/web/src/generated/control-sab.ts) +
@@ -398,10 +413,12 @@ if it advanced, the bytes are guaranteed to be coherent.
   generated TS mirrors (committed).
 - [`app/web/src/sim/bridge.ts`](../../app/web/src/sim/bridge.ts) → `SNAPSHOT_HEADER_BYTES`,
   `GRASS_LOD_BUDGET_AXIS`, `SlotLayout`, `makeSlotLayout`, `grassOffset`,
-  `biomeWinOffset`, `readWindowMetadata`, `WindowMetadata`, `SimBridge` runtime.
+  `biomeWinOffset`, `readWindowMetadata`, `WindowMetadata`, `SimBridge` runtime,
+  `SimBridge.requestTelemetryReport`.
 - [`app/web/src/sim/worker.ts`](../../app/web/src/sim/worker.ts) →
   `handleBoot`, `readControlSab`, `serveInspectRequest`,
   `maybeWriteProfileReport`, `maybeWriteNnStats`,
+  `serveTelemetryRequest`,
   `writeSnapshotToSAB` (reads camera SAB lanes, calls `world.write_snapshot`),
   `freezeForE2E`, `simLoop`.
 - [`app/web/src/main.ts`](../../app/web/src/main.ts) → `spawnSimWorker`

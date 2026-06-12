@@ -55,6 +55,7 @@ the matching heading.
 | R8 grass texture, JS-side cull, highlight id decode, status bar | [`render.md`](render.md) |
 | Profiler four-tree shape, no-rollup rule, honest call counts | [`profiler.md`](profiler.md) |
 | Worker-sum profiler trees and `_calls` atomics | [`profiler.md`](profiler.md) |
+| Telemetry sampling/export and worst-jank attribution | [`perf.md`](perf.md) + [`profiler.md`](profiler.md) |
 | Threaded wasm default, `panic = "abort"`, link args, COOP/COEP | [`build.md`](build.md) |
 | Gitignored `web/wasm/`, Vite worker format, CI threaded gates, dev port | [`build.md`](build.md) |
 

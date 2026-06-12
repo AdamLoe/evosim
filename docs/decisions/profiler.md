@@ -207,6 +207,21 @@
   `app/web/src/sim/worker.ts → handle` (the `request_profile_report`
   arm).
 
+### Worst-jank phase attribution stays honest until per-tick traces exist
+
+- **Decision**: Telemetry records worst jank by tick, duration, and population,
+  but reports phase attribution as `unknown` with an explicit reason.
+- **Why**: `jank_count` is measured around a whole `WorldHandle::step_n` call.
+  The profiler trees are rolling aggregate windows, so mining them after the
+  fact would produce a plausible-looking but unreliable phase for a specific
+  tick.
+- **Applies to**: `architecture/profiler.md`.
+- **Tradeoffs**: The summary is actionable enough to identify when and at what
+  population the worst spike happened; exact phase attribution waits for a real
+  per-tick trace or a jank-triggered one-shot profiler sample.
+- **Code anchors**: `app/crates/evosim/src/wasm_api/mod.rs → observe_completed_tick`,
+  `telemetry_report_json`.
+
 ## See also
 
 - [`../architecture/profiler.md`](../architecture/profiler.md)

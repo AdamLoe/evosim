@@ -1,8 +1,8 @@
 ---
-status:        active
+status:        shipped
 owner:         orchestrator
 last_updated:  2026-06-12
-okay_to_delete: false
+okay_to_delete: true
 long_lived:    false
 owning_docs:
   - architecture/simulation-core.md
@@ -141,3 +141,23 @@ At ship time, update `profiler.md` for the jank/report relationship,
 `worker-runtime.md` and `shared-memory-and-protocol.md` for any new report
 transport, `app-shell.md` for export UI, and `decisions/perf.md` for sampling
 cadence tradeoffs.
+
+Shipped migration:
+
+- `architecture/profiler.md` owns telemetry history/export shape and the
+  honest `unknown` phase-attribution rule for worst jank.
+- `architecture/shared-memory-and-protocol.md` owns the telemetry request/report
+  SAB slots and fixed report buffer, including explicit overflow payload
+  behavior.
+- `architecture/worker-runtime.md` records that telemetry requests are served
+  in the synchronous worker loop while running or paused.
+- `architecture/simulation-core.md` records `WorldHandle::telemetry_report_json`
+  and the bounded runtime-only telemetry state.
+- `architecture/app-shell.md` records the Profiler-pane CSV/JSON export actions.
+- `architecture/testing.md` records the focused Rust coverage for cadence,
+  export shape, worst-jank replacement, and reset behavior.
+- `decisions/perf.md` records the fixed-cadence/request-only export tradeoff.
+- `decisions/profiler.md` records why worst-jank phase attribution remains
+  `unknown` until a real per-tick trace exists.
+- `_meta/ownership.json` now routes the telemetry-history concept to
+  `architecture/profiler.md`.

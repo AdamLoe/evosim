@@ -151,6 +151,7 @@ WorldHandle::creature_nn_inspect_json(idx: u32) -> Option<String>
 WorldHandle::profile_enable(on: bool)
 WorldHandle::profile_clear()
 WorldHandle::profile_report_json() -> String
+WorldHandle::telemetry_report_json() -> String
 WorldHandle::nn_worker_stats_json() -> String
 WorldHandle::tps / jank_count / tick / population / world_ended / world_size
 // Free functions:
@@ -163,6 +164,12 @@ input vector (group, label, value per slot) and the current output (vx, vy,
 logits for graze/attack/split_or_mate, chosen action). Implemented via
 `crates/evosim/src/world/nn.rs` → `build_labeled_nn_inspect`. Used by the
 per-creature inspector UI.
+
+`WorldHandle` also owns bounded, in-memory run telemetry: aggregate samples
+every fixed sampling period, a capped low-cardinality event log, and the
+worst whole-tick jank observation since the last jank reset. It remains
+runtime-only: no IndexedDB, save/load, or per-creature trace is part of the
+sim core.
 
 ## Tick step order
 

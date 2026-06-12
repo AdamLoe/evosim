@@ -60,6 +60,10 @@ import {
   CTRL_SPECIES_TABLE_EPOCH,
   CTRL_SPECIES_TABLE_LEN,
   CTRL_TARGET_TPS_BITS,
+  CTRL_TELEMETRY_REPORT_EPOCH,
+  CTRL_TELEMETRY_REPORT_LEN,
+  CTRL_TELEMETRY_REPORT_REQ_EPOCH,
+  CTRL_TELEMETRY_REQ_EPOCH,
   INSPECT_RESP_CAP,
   INSPECT_RESP_OFFSET,
   NN_STATS_CAP,
@@ -68,6 +72,8 @@ import {
   PROFILE_REPORT_OFFSET,
   SPECIES_TABLE_CAP,
   SPECIES_TABLE_OFFSET,
+  TELEMETRY_REPORT_CAP,
+  TELEMETRY_REPORT_OFFSET,
 } from "../generated/control-sab";
 import { SLIDER_COUNT, SLIDER_NAMES } from "../generated/slider-ids";
 
@@ -102,6 +108,10 @@ type WorldHandleBootCtor = {
     initGrazeBoost: number,
     initSplitBoost: number,
   ): WorldHandle;
+};
+
+type TelemetryWorldHandle = WorldHandle & {
+  telemetry_report_json(): string;
 };
 
 /** Target rayon worker count (kept from v1.9; see worker-runtime.md). */
@@ -151,6 +161,7 @@ let lastControlEpoch = 0;
 let lastProfileClearEpoch = 0;
 let lastResetJankEpoch = 0;
 let lastInspectReqEpoch = 0;
+let lastTelemetryReqEpoch = 0;
 // Last profile window_ms value we applied to the Rust profiler. The control
 // SAB carries the desired window each tick; we forward to wasm only when
 // it actually changes so we don't burn a wasm call every iter.
@@ -306,6 +317,7 @@ async function handleBoot(boot: SimMessageBoot): Promise<void> {
   lastProfileClearEpoch = Atomics.load(ctrlI32, CTRL_PROFILE_CLEAR_EPOCH);
   lastResetJankEpoch = Atomics.load(ctrlI32, CTRL_RESET_JANK_EPOCH);
   lastInspectReqEpoch = Atomics.load(ctrlI32, CTRL_INSPECT_REQ_EPOCH);
+  lastTelemetryReqEpoch = Atomics.load(ctrlI32, CTRL_TELEMETRY_REQ_EPOCH);
 
   // First-paint handshake: run one tick + one snapshot before posting
   // boot_ready so main's first RAF sees a live slot.
@@ -512,6 +524,32 @@ function maybeWriteSpeciesTable(tickIdx: number): void {
   Atomics.add(ctrlI32, CTRL_SPECIES_TABLE_EPOCH, 1);
 }
 
+function serveTelemetryRequest(): void {
+  if (!world || !ctrlI32 || !ctrlBytes) return;
+  const reqEpoch = Atomics.load(ctrlI32, CTRL_TELEMETRY_REQ_EPOCH);
+  if (reqEpoch === lastTelemetryReqEpoch) return;
+  lastTelemetryReqEpoch = reqEpoch;
+
+  const telemetryWorld = world as TelemetryWorldHandle;
+  const json = telemetryWorld.telemetry_report_json();
+  let encoded = new TextEncoder().encode(json);
+  if (encoded.length > TELEMETRY_REPORT_CAP) {
+    const fallback = JSON.stringify({
+      schema_version: 1,
+      truncated: true,
+      error: "telemetry report exceeded control SAB capacity",
+      encoded_len: encoded.length,
+      cap: TELEMETRY_REPORT_CAP,
+    });
+    encoded = new TextEncoder().encode(fallback);
+  }
+  const len = Math.min(encoded.length, TELEMETRY_REPORT_CAP);
+  ctrlBytes.set(encoded.subarray(0, len), TELEMETRY_REPORT_OFFSET);
+  Atomics.store(ctrlI32, CTRL_TELEMETRY_REPORT_LEN, len);
+  Atomics.store(ctrlI32, CTRL_TELEMETRY_REPORT_REQ_EPOCH, reqEpoch);
+  Atomics.add(ctrlI32, CTRL_TELEMETRY_REPORT_EPOCH, 1);
+}
+
 // ─── Snapshot write ─────────────────────────────────────────────────────────
 //
 // v1.11 (A+D): the snapshot region lives in wasm linear memory. The worker
@@ -582,6 +620,7 @@ function simLoop(): void {
       // The futex notify from issueInspect wakes this Atomics.wait, so after
       // serve the loop re-reads control, sees paused still true, and parks again.
       serveInspectRequest();
+      serveTelemetryRequest();
       const before = Atomics.load(ctrlI32, CTRL_FUTEX);
       Atomics.wait(ctrlI32, CTRL_FUTEX, before, Infinity);
       continue;
@@ -606,6 +645,7 @@ function simLoop(): void {
     maybeWriteProfileReport(tickIdx);
     maybeWriteNnStats(tickIdx);
     maybeWriteSpeciesTable(tickIdx);
+    serveTelemetryRequest();
     const writeEnd = performance.now();
     world.record_profile_sample(
       "sim_worker",

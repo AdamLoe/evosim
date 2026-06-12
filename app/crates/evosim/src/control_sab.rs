@@ -125,6 +125,17 @@ pub const CTRL_CAMERA_VIEWPORT_H: usize = 140;
 /// to keep at most one fresh unconsumed snapshot published while ticking.
 pub const CTRL_CONSUMED_SEQ: usize = 141;
 
+/// Telemetry export request epoch. Main bumps this when the user asks for a
+/// history export; the worker responds by serializing the bounded telemetry
+/// report into `TELEMETRY_REPORT_OFFSET`.
+pub const CTRL_TELEMETRY_REQ_EPOCH: usize = 144;
+/// Telemetry report response epoch, bumped after payload bytes are written.
+pub const CTRL_TELEMETRY_REPORT_EPOCH: usize = 145;
+/// Length of the telemetry report JSON in bytes.
+pub const CTRL_TELEMETRY_REPORT_LEN: usize = 146;
+/// Echo of the request epoch the telemetry response is answering.
+pub const CTRL_TELEMETRY_REPORT_REQ_EPOCH: usize = 147;
+
 /// Length of the leading i32 region in i32 slots. Byte buffers start
 /// at `CTRL_I32_REGION_LEN * 4`.
 pub const CTRL_I32_REGION_LEN: usize = 256;
@@ -153,9 +164,16 @@ pub const SPECIES_TABLE_OFFSET: usize = NN_STATS_OFFSET + NN_STATS_CAP;
 /// fixed 10 and well into v2.1 split territory. The producer clamps to this.
 pub const SPECIES_TABLE_CAP: usize = 4 * 1024;
 
+/// Byte offset of the telemetry export report payload.
+pub const TELEMETRY_REPORT_OFFSET: usize = SPECIES_TABLE_OFFSET + SPECIES_TABLE_CAP;
+/// Maximum telemetry export payload size in bytes. The producer keeps history
+/// bounded so this should fit; if it does not, the worker writes an explicit
+/// non-silent truncation/error JSON instead of clipping bytes.
+pub const TELEMETRY_REPORT_CAP: usize = 768 * 1024;
+
 /// Total control SAB size in bytes. Includes some trailing padding so future
 /// fields can be added without breaking on-disk SAB shape assumptions.
-pub const CONTROL_SAB_BYTES: usize = SPECIES_TABLE_OFFSET + SPECIES_TABLE_CAP + 1024;
+pub const CONTROL_SAB_BYTES: usize = TELEMETRY_REPORT_OFFSET + TELEMETRY_REPORT_CAP + 1024;
 
 // ─── Compile-time sanity ────────────────────────────────────────────────────
 
@@ -172,10 +190,14 @@ const _: () = assert!(
     "species-table buffer must fit within the control SAB",
 );
 const _: () = assert!(
+    TELEMETRY_REPORT_OFFSET + TELEMETRY_REPORT_CAP <= CONTROL_SAB_BYTES,
+    "telemetry-report buffer must fit within the control SAB",
+);
+const _: () = assert!(
     CTRL_I32_REGION_LEN * 4 <= INSPECT_RESP_OFFSET,
     "i32 region must end before the inspect-response byte buffer starts",
 );
 const _: () = assert!(
-    CTRL_CONSUMED_SEQ < CTRL_I32_REGION_LEN,
-    "camera lanes must fit within the i32 region",
+    CTRL_TELEMETRY_REPORT_REQ_EPOCH < CTRL_I32_REGION_LEN,
+    "telemetry lanes must fit within the i32 region",
 );

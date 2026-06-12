@@ -70,8 +70,8 @@ grass_step           ← sum-busy across all rayon workers, per tick
   recording (called once with `true` at boot, left on).
   `WorldHandle::profile_clear()` zeroes every per-node ring buffer
   and resets the epoch without touching the enabled flag — used by
-  the panel's "Reset profiler + jank" button alongside
-  `resetFrameTree()` on the TS side.
+  the panel's "Reset profiler + jank" button alongside `reset_jank`
+  and `resetFrameTree()` on the TS side.
 - The honest-call-count contract: every sample carries an underlying
   invocation count so `ms/call` reflects per-creature / per-row cost,
   not per-tick cost. RAII spans contribute 1; sum-of-workers drains
@@ -220,6 +220,24 @@ nodes (every tree gets one drained sample per tick), so one number
 describes the whole panel and `tick.total_ms = 40 s` is interpretable
 without guessing what window backed it.
 
+## Telemetry History And Jank Summary
+
+Profiler data stays a short-window diagnostic tree. Longitudinal run history
+is a separate bounded telemetry buffer owned by `WorldHandle` and exported
+only on request through `SimBridge.requestTelemetryReport`. Samples are compact
+aggregate rows, not creature snapshots: tick range, wall elapsed time,
+population, TPS, jank-count delta/total, live grass cell count, and total grass
+density. The event log is also capped and low-cardinality: world start/end,
+jank-worst replacement, large-jank observations, and jank reset.
+
+`jank_count` remains the existing cumulative counter in the snapshot/profile
+surfaces. The telemetry jank summary adds the worst observed tick since the
+last jank reset: duration, tick, population, and phase attribution. Phase is
+reported as `unknown` with an explicit reason because the whole-tick timer is
+measured around `WorldHandle::step_n`, while profiler spans are rolling
+aggregates rather than a per-jank-tick trace. The reset button clears the
+counter and worst-jank summary but preserves historical aggregate samples.
+
 ## Worker-side spans
 
 The worker's TS perf module is a separate instance from main's —
@@ -253,7 +271,8 @@ span that wants to reach the perf panel should too.
   `clock_now_us_threadsafe`, `SpanGuard`, `ROOT_TICK`,
   `ROOT_FRAME`, `WINDOW_MS`, `SAMPLES_PER_NODE`, `MAX_NODES`.
 - `app/crates/evosim/src/wasm_api/mod.rs` → `WorldHandle::profile_enable`,
-  `WorldHandle::profile_clear`, `WorldHandle::profile_report_json`.
+  `WorldHandle::profile_clear`, `WorldHandle::profile_report_json`,
+  `WorldHandle::telemetry_report_json`.
 - `crates/evosim/src/world/mod.rs` → the `record_under_root("grass_step", ...)` calls
   (passing paired `_us` + `_calls`) and the `tick.color_ema` sibling
   lift.
@@ -279,8 +298,8 @@ span that wants to reach the perf panel should too.
 - `app/web/src/widgets/perf-panel.ts` → `installProfilerPanel` (mounts
   into `#settings-profiler-pane`), `setProfilerVisible` (called by
   devpanel sub-nav wiring on Profiler category select/deselect),
-  `TREE_ORDER`, the `total_call_count` divisor in the `ms/call` formula,
-  the `window: X.X s` header render.
+  `TREE_ORDER`, telemetry CSV/JSON export actions, the `total_call_count`
+  divisor in the `ms/call` formula, the `window: X.X s` header render.
 - `app/web/src/sim/worker.ts` → the `sim_worker.*` span calls and the
   `WorldHandle::record_profile_sample` invocations.
 - `app/crates/evosim/src/wasm_api/mod.rs` → `record_under_root("sim_worker", "write_output_sab.snapshot*", ...)`

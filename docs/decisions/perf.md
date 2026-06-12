@@ -139,6 +139,31 @@ drove the choice — so future optimization passes start from facts, not guesses
   `app/web/src/main.ts → frame`;
   `app/web/tests/e2e/app-fps.spec.ts`.
 
+### Telemetry history is fixed-cadence and exported on request
+
+- **Decision**: Keep longitudinal telemetry in bounded in-memory rings:
+  aggregate samples every fixed tick period, a capped low-cardinality event
+  log, and a worst-jank summary. Serialize the full telemetry payload only when
+  main requests export through the telemetry SAB response buffer.
+- **Why**: The profiler already handles short-window diagnostics; per-frame or
+  cadence-written full-history JSON would add avoidable worker cost and
+  pressure the old small report buffers. Fixed-cadence samples bound memory and
+  CPU, while request-only export keeps steady-state cost to cheap aggregate
+  sampling.
+- **Tradeoffs**: CSV/JSON export can be a few seconds stale only until the
+  request is served on the next worker loop iteration. Phase attribution for
+  worst jank is deliberately `unknown` because the available profiler data is a
+  rolling aggregate, not a per-jank-tick trace.
+- **Applies to**: `architecture/profiler.md`,
+  `architecture/shared-memory-and-protocol.md`,
+  `architecture/worker-runtime.md`,
+  `architecture/app-shell.md`.
+- **Code anchors**: `app/crates/evosim/src/wasm_api/mod.rs → telemetry_report_json`;
+  `app/crates/evosim/src/control_sab.rs → TELEMETRY_REPORT_CAP`;
+  `app/web/src/sim/worker.ts → serveTelemetryRequest`;
+  `app/web/src/sim/bridge.ts → SimBridge.requestTelemetryReport`;
+  `app/web/src/widgets/perf-panel.ts → exportTelemetry`.
+
 ### Static biome texture uploads are metadata-cached
 
 - **Decision**: The renderer skips biome `texSubImage2D` when the published

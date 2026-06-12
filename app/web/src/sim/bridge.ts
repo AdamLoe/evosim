@@ -49,6 +49,10 @@ import {
   CTRL_SPECIES_TABLE_EPOCH,
   CTRL_SPECIES_TABLE_LEN,
   CTRL_TARGET_TPS_BITS,
+  CTRL_TELEMETRY_REPORT_EPOCH,
+  CTRL_TELEMETRY_REPORT_LEN,
+  CTRL_TELEMETRY_REPORT_REQ_EPOCH,
+  CTRL_TELEMETRY_REQ_EPOCH,
   INSPECT_RESP_CAP,
   INSPECT_RESP_OFFSET,
   NN_STATS_CAP,
@@ -57,6 +61,8 @@ import {
   PROFILE_REPORT_OFFSET,
   SPECIES_TABLE_CAP,
   SPECIES_TABLE_OFFSET,
+  TELEMETRY_REPORT_CAP,
+  TELEMETRY_REPORT_OFFSET,
 } from "../generated/control-sab";
 // v2.0.3 Stream 2b: re-export camera lane constants so worker + main can import
 // them from sim-bridge without going through the generated file directly.
@@ -452,6 +458,7 @@ interface DebouncedSliderEntry {
 
 /** Resolves to a JSON string (the inspector response) or null on timeout. */
 type PendingInspect = (json: string | null) => void;
+type PendingTelemetry = (json: string | null) => void;
 
 /** Max time main will wait for a worker response before resolving to null. */
 const REQUEST_TIMEOUT_MS = 5_000;
@@ -484,11 +491,17 @@ export class SimBridge {
   private lastProfileReportEpoch = 0;
   private lastNnStatsEpoch = 0;
   private lastSpeciesTableEpoch = 0;
+  private lastTelemetryReportEpoch = 0;
 
   // Cached latest payload bytes per response slot. Filled by the response poller.
   private latestProfileReportJson: string | null = null;
   private latestNnStatsJson: string | null = null;
   private latestSpeciesTableJson: string | null = null;
+  private telemetryPending: {
+    reqEpoch: number;
+    resolve: PendingTelemetry;
+    deadlineMs: number;
+  } | null = null;
 
   // Drives the per-frame poll of all SAB response slots. Started on attach,
   // stopped on terminate. Uses `setInterval` at 60 Hz so inspector responses
@@ -529,6 +542,7 @@ export class SimBridge {
     this.lastProfileReportEpoch = Atomics.load(this.ctrlI32, CTRL_PROFILE_REPORT_EPOCH);
     this.lastNnStatsEpoch = Atomics.load(this.ctrlI32, CTRL_NN_STATS_EPOCH);
     this.lastSpeciesTableEpoch = Atomics.load(this.ctrlI32, CTRL_SPECIES_TABLE_EPOCH);
+    this.lastTelemetryReportEpoch = Atomics.load(this.ctrlI32, CTRL_TELEMETRY_REPORT_EPOCH);
     this.responsePoller = setInterval(() => this.pollResponses(), 1000 / 60);
   }
 
@@ -711,6 +725,25 @@ export class SimBridge {
     return this.latestSpeciesTableJson;
   }
 
+  requestTelemetryReport(): Promise<string | null> {
+    if (!this.ctrlI32) return Promise.resolve(null);
+    if (this.telemetryPending !== null) {
+      this.telemetryPending.resolve(null);
+      this.telemetryPending = null;
+    }
+    const reqEpoch = Atomics.load(this.ctrlI32, CTRL_TELEMETRY_REQ_EPOCH) + 1;
+    Atomics.store(this.ctrlI32, CTRL_TELEMETRY_REQ_EPOCH, reqEpoch);
+    Atomics.add(this.ctrlI32, CTRL_FUTEX, 1);
+    Atomics.notify(this.ctrlI32, CTRL_FUTEX, 1);
+    return new Promise<string | null>((resolve) => {
+      this.telemetryPending = {
+        reqEpoch,
+        resolve,
+        deadlineMs: performance.now() + REQUEST_TIMEOUT_MS,
+      };
+    });
+  }
+
   // ─── Tear-down ──────────────────────────────────────────────────────────
 
   terminate(): void {
@@ -725,6 +758,10 @@ export class SimBridge {
     if (this.inspectPending !== null) {
       this.inspectPending.resolve(null);
       this.inspectPending = null;
+    }
+    if (this.telemetryPending !== null) {
+      this.telemetryPending.resolve(null);
+      this.telemetryPending = null;
     }
     this.ctrlI32 = null;
     this.ctrlF32 = null;
@@ -776,10 +813,31 @@ export class SimBridge {
       this.lastSpeciesTableEpoch = speciesEpoch;
     }
 
+    const telemetryEpoch = Atomics.load(this.ctrlI32, CTRL_TELEMETRY_REPORT_EPOCH);
+    if (telemetryEpoch !== this.lastTelemetryReportEpoch) {
+      const respReqEpoch = Atomics.load(this.ctrlI32, CTRL_TELEMETRY_REPORT_REQ_EPOCH);
+      const len = Atomics.load(this.ctrlI32, CTRL_TELEMETRY_REPORT_LEN) >>> 0;
+      const json = this.decodeBytes(
+        TELEMETRY_REPORT_OFFSET,
+        TELEMETRY_REPORT_CAP,
+        len,
+      );
+      this.lastTelemetryReportEpoch = telemetryEpoch;
+      const pending = this.telemetryPending;
+      if (pending !== null && pending.reqEpoch === respReqEpoch) {
+        this.telemetryPending = null;
+        pending.resolve(len === 0 ? null : json);
+      }
+    }
+
     // GC stale inspect request.
     if (this.inspectPending !== null && this.inspectPending.deadlineMs < performance.now()) {
       this.inspectPending.resolve(null);
       this.inspectPending = null;
+    }
+    if (this.telemetryPending !== null && this.telemetryPending.deadlineMs < performance.now()) {
+      this.telemetryPending.resolve(null);
+      this.telemetryPending = null;
     }
   }
 

@@ -31,6 +31,7 @@ import {
 import { getSettings, setSetting } from "../settings";
 import { getTargetTPS, setTpsChangeListener, setExternalTargetTPS } from "../main";
 import { installWorkerStatsPanel } from "./worker-stats";
+import packageJson from "../../package.json";
 
 const POLL_INTERVAL_MS = 1000;
 const FPS_TPS_SAMPLE_CAP = 240;     // ~4s at 60 fps, ~12s at 20 fps
@@ -73,6 +74,30 @@ interface BundledProfile {
   jank_count: number;
   live_grass_cell_count: number;
   total_grass_density: number;
+}
+
+interface TelemetrySample {
+  tick_start: number;
+  tick_end: number;
+  at_ms: number;
+  wall_elapsed_ms: number;
+  population: number;
+  tps: number;
+  jank_count_delta: number;
+  jank_count_total: number;
+  live_grass_cell_count: number;
+  total_grass_density: number;
+}
+
+interface TelemetryReport {
+  schema_version: number;
+  truncated?: boolean;
+  meta?: { app_version?: string | null };
+  current?: { tick?: number };
+  caps?: { samples_dropped?: number; events_dropped?: number };
+  samples: TelemetrySample[];
+  events?: unknown[];
+  jank?: unknown;
 }
 
 // ─── Module state ─────────────────────────────────────────────────────────
@@ -133,6 +158,7 @@ let tpsNumInput: HTMLInputElement | null = null;
 let tpsPillButtons: HTMLButtonElement[] = [];
 let maxPopNumInput: HTMLInputElement | null = null;
 let maxPopPillButtons: HTMLButtonElement[] = [];
+let telemetryExportStatus: HTMLDivElement | null = null;
 
 // CPU Process Monitor teardown.
 let workerStatsTeardown: (() => void) | null = null;
@@ -415,6 +441,39 @@ function buildPanelDom(box: HTMLDivElement, simBridge: SimBridge): void {
   selectorsRow.appendChild(buildTpsSelector(simBridge));
   selectorsRow.appendChild(buildMaxPopSelector(simBridge));
 
+  const telemetrySec = document.createElement("div");
+  telemetrySec.className = "perf-section";
+  const telemetryHeader = document.createElement("div");
+  telemetryHeader.className = "perf-section-title perf-profile-header";
+  const telemetryTitle = document.createElement("span");
+  telemetryTitle.textContent = "Telemetry export";
+  telemetryHeader.appendChild(telemetryTitle);
+
+  const csvBtn = document.createElement("button");
+  csvBtn.id = "telemetry-export-csv";
+  csvBtn.type = "button";
+  csvBtn.className = "perf-pill";
+  csvBtn.textContent = "CSV";
+  csvBtn.addEventListener("click", () => void exportTelemetry(simBridge, "csv"));
+  telemetryHeader.appendChild(csvBtn);
+
+  const jsonBtn = document.createElement("button");
+  jsonBtn.id = "telemetry-export-json";
+  jsonBtn.type = "button";
+  jsonBtn.className = "perf-pill";
+  jsonBtn.textContent = "JSON";
+  jsonBtn.addEventListener("click", () => void exportTelemetry(simBridge, "json"));
+  telemetryHeader.appendChild(jsonBtn);
+
+  telemetrySec.appendChild(telemetryHeader);
+  telemetryExportStatus = document.createElement("div");
+  telemetryExportStatus.id = "telemetry-export-status";
+  telemetryExportStatus.className = "profiler-stabilizing";
+  telemetryExportStatus.style.display = "block";
+  telemetryExportStatus.textContent = "bounded in-memory samples";
+  telemetrySec.appendChild(telemetryExportStatus);
+  box.appendChild(telemetrySec);
+
   // 4. CPU Process Monitor.
   const cpuSec = document.createElement("div");
   cpuSec.className = "perf-section perf-cpu-section";
@@ -522,6 +581,94 @@ function buildPanelDom(box: HTMLDivElement, simBridge: SimBridge): void {
   popResizeObserver.observe(popCanvas);
   resizeChartCanvas(fpsTpsCanvas);
   resizeChartCanvas(popCanvas);
+}
+
+async function exportTelemetry(simBridge: SimBridge, format: "csv" | "json"): Promise<void> {
+  if (telemetryExportStatus) telemetryExportStatus.textContent = "preparing export...";
+  const raw = await simBridge.requestTelemetryReport();
+  if (!raw) {
+    if (telemetryExportStatus) telemetryExportStatus.textContent = "export unavailable";
+    return;
+  }
+
+  let report: TelemetryReport;
+  try {
+    report = JSON.parse(raw) as TelemetryReport;
+  } catch {
+    if (telemetryExportStatus) telemetryExportStatus.textContent = "export parse failed";
+    return;
+  }
+
+  if (format === "json") {
+    const enriched = {
+      ...report,
+      meta: {
+        ...(report.meta ?? {}),
+        app_version: packageJson.version,
+      },
+    };
+    const tick = report.current?.tick ?? "unknown";
+    downloadText(
+      `evosim-telemetry-t${tick}.json`,
+      "application/json",
+      `${JSON.stringify(enriched, null, 2)}\n`,
+    );
+  } else {
+    downloadText(
+      `evosim-telemetry-samples.csv`,
+      "text/csv",
+      telemetrySamplesToCsv(report.samples ?? []),
+    );
+  }
+
+  const dropped = report.caps
+    ? `, dropped ${report.caps.samples_dropped ?? 0}/${report.caps.events_dropped ?? 0}`
+    : "";
+  if (telemetryExportStatus) {
+    telemetryExportStatus.textContent =
+      `exported ${report.samples?.length ?? 0} samples${dropped}`;
+  }
+}
+
+function telemetrySamplesToCsv(samples: TelemetrySample[]): string {
+  const cols: (keyof TelemetrySample)[] = [
+    "tick_start",
+    "tick_end",
+    "at_ms",
+    "wall_elapsed_ms",
+    "population",
+    "tps",
+    "jank_count_delta",
+    "jank_count_total",
+    "live_grass_cell_count",
+    "total_grass_density",
+  ];
+  const lines = [cols.join(",")];
+  for (const sample of samples) {
+    lines.push(cols.map((col) => csvCell(sample[col])).join(","));
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+function csvCell(value: number | string | boolean | null | undefined): string {
+  if (value === null || value === undefined) return "";
+  const raw = String(value);
+  if (/[",\n\r]/.test(raw)) {
+    return `"${raw.replace(/"/g, '""')}"`;
+  }
+  return raw;
+}
+
+function downloadText(filename: string, mime: string, text: string): void {
+  const blob = new Blob([text], { type: `${mime};charset=utf-8` });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 // ─── Selector builders ────────────────────────────────────────────────────

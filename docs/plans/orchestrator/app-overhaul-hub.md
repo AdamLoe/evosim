@@ -65,7 +65,7 @@ the pacing/snapshot plan, not as a hidden implementation detail.
 | Pacing/FPS snapshots | Worker runtime + app shell | Shipped | Commit `9fb9ea1` added app FPS choices, consumed-seq ack lane, snapshot decimation, and docs migration. | None for this wave; velocity lanes remain a later research item. | None. |
 | Render hot path | WebGL renderer | Shipped | Commit `9fb9ea1` cached static biome uploads and added `trail_state` measurement. | Defer velocity lane as a protocol/layout research item. | Velocity lane likely changes stride/layout, not just one pad lane. |
 | Crash resilience | Worker runtime + app shell | Shipped | Plan `02-worker-watchdog-recovery.md` added boot timeout, worker `error`/`messageerror`, unpaused snapshot/report stall detection, restart-first recovery, visible top-bar status/toast/Retry, and focused e2e fault hooks. | None for this wave; exact world-state recovery remains persistence scope. | None. |
-| Telemetry/history | Sim + protocol + UI/export | Active | Existing cadence report carries profile/TPS/jank/grass; no per-N aggregate history/export surface yet. | Implement `03-telemetry-history-export.md` as in-memory bounded history/export; do not add IndexedDB. | Needs control-SAB byte-buffer ownership if streamed through existing report family. |
+| Telemetry/history | Sim + protocol + UI/export | Shipped | Plan `03-telemetry-history-export.md` added bounded in-memory aggregate samples, low-cardinality events, request-only CSV/JSON export, and worst-jank summary. | None for this wave; persistence integration remains plan `04` scope. | None. |
 | Persistence | Rust wasm API + IndexedDB | Draft plan | Only settings persist today; world save would touch `World`, `GrassGrid`, species, RNG, IDs, and selected `WorldHandle` layout state. | See `04-world-persistence-artifacts.md`. | Need format/versioning decision aligned with `WorldConfig`. |
 | Config/schema/presets | Rust + generated TS + app shell | Draft plan | `DevSliders`, `SLIDER_NAMES`, TS settings, construction-only slider set, and positional `new_with_founder_count` all define config pieces. | See `05-world-config-schema-presets.md`. | Broad protocol migration; should not overlap other protocol edits. |
 | Deterministic science mode | Sim core + grass | Draft plan | Threaded scatter uses relaxed cross-tile add/sub; docs already call out nondeterminism. | See `06-deterministic-science-mode.md`. | Needs config home, benchmark budget, and acceptance criteria. |
@@ -151,6 +151,12 @@ the pacing/snapshot plan, not as a hidden implementation detail.
   `cd app/web && pnpm typecheck`, and focused
   `cd app/web && pnpm test:e2e -- app-fps.spec.ts worker-watchdog.spec.ts`
   passed.
+- `03-telemetry-history-export.md` shipped bounded telemetry/history/export.
+  Verification reported by implementer: focused Rust telemetry tests,
+  `cargo test --lib`, `cargo test --lib --features threads`, `cargo fmt --all --check`,
+  both clippy feature sets, `cargo bench --no-run`, `cd app/web && pnpm typecheck`,
+  `cd app/web && pnpm docs:lint`, `cd app/web && pnpm build`, local threaded
+  wasm rebuild, and `git diff --check` passed.
 
 ## Migration Notes
 

@@ -39,6 +39,12 @@
       "references": ["architecture/*"]
     },
     {
+      "id": "telemetry-history",
+      "summary": "Bounded longitudinal telemetry samples, lifecycle event log, export shape, and jank summary",
+      "owner": "architecture/profiler.md",
+      "references": ["architecture/simulation-core.md", "architecture/shared-memory-and-protocol.md", "architecture/worker-runtime.md", "architecture/app-shell.md"]
+    },
+    {
       "id": "build-and-deploy",
       "summary": "wasm-pack incantation, .cargo/config.toml link args, COOP/COEP headers, threaded-bundle invariants",
       "owner": "architecture/build-and-deploy.md",
