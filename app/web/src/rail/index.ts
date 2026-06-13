@@ -8,7 +8,7 @@ import { refreshInspector, updateLatestSoA } from "./inspector";
 import { pruneHighlights, highlights } from "./highlight";
 import { getSettings } from "../settings";
 
-export type RailTab = "inspector" | "settings";
+export type RailTab = "inspector" | "settings" | "menu";
 
 export interface RailState {
   switchTab(name: RailTab): void;

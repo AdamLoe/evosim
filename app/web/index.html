@@ -24,9 +24,9 @@
            logic and any legacy references stay intact; the profiler content
            is now rendered inside the Settings rail's Profiler category pane. -->
       <div id="left-col">
-        <!-- Top-bar controls: play/pause, Restart,
-             auto-restart, and the ⚙ settings rail toggle. NN / Inspector /
-             perf-toggle openers removed from the top bar. -->
+        <!-- Top-bar controls: play/pause, Restart, and the ⚙ settings rail
+             toggle. Auto-restart and the saved-world actions live in the Menu
+             rail tab; NN / Inspector / perf-toggle openers removed earlier. -->
         <div id="top-bar">
         </div>
 
@@ -59,6 +59,13 @@
             <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <circle cx="11" cy="11" r="7"></circle>
               <path d="M21 21l-5-5"></path>
+            </svg>
+          </button>
+          <button data-tab="menu" class="rail-tab" title="Menu" aria-label="Menu">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M4 6h16"></path>
+              <path d="M4 12h16"></path>
+              <path d="M4 18h16"></path>
             </svg>
           </button>
         </nav>
@@ -178,6 +185,14 @@
               </dl>
             </div>
           </div>
+        </section>
+
+        <!-- Menu tab: game options relocated off the top bar — run control
+             (auto-restart) and the saved-world actions (Save / Resume / Fork /
+             Export / Import) plus the save-status line. Populated by
+             installMenuTab. -->
+        <section id="rail-menu" class="rail-panel">
+          <div id="menu-inner"></div>
         </section>
       </aside>
     </div>

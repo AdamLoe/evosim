@@ -15,6 +15,16 @@ async function readTick(page: Page): Promise<number> {
   return m ? Number(m[1]) : NaN;
 }
 
+// v2.1: the saved-world actions moved from the always-visible top bar into the
+// Menu rail tab. The rail starts collapsed (its tab buttons are display:none
+// until it opens), so open the rail via the ⚙ top-bar button first, then
+// switch to the Menu tab and wait for its buttons to be actionable.
+async function openMenuTab(page: Page): Promise<void> {
+  await page.locator("#settings-rail-btn").click();
+  await page.locator('.rail-tab[data-tab="menu"]').click();
+  await expect(page.locator("#world-save-btn")).toBeVisible();
+}
+
 async function waitForBoot(page: Page): Promise<void> {
   await expect
     .poll(async () => (await readStatus(page)).match(/tick \d+/) !== null, {
@@ -83,6 +93,7 @@ test.afterEach(async ({ page }) => {
 
 test("save, resume, fork, export, and import world artifacts", async ({ page }) => {
   await page.waitForTimeout(500);
+  await openMenuTab(page);
   await page.locator("#world-save-btn").click();
   await expect(page.locator("#save-status")).toContainText(/saved t\d+/, { timeout: 10_000 });
   const saved = await latestSave(page);

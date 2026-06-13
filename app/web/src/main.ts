@@ -421,10 +421,9 @@ async function main(): Promise<void> {
   // edits are live-applied through getBridge() inside the installer.
   installNnTab(() => simBridge, () => restart());
 
-  // v1.13 Wave 1: media-player top-bar buttons (play/pause, restart,
-  // auto-restart, settings, perf). All share the `.iconbtn` CSS class.
-  // Order in DOM matches left-to-right visual order.
-  const persistenceUi = installPersistenceUi(
+  // v2.1: the Menu rail tab (auto-restart + saved-world actions). Installed
+  // before installTopBarButtons so #save-status exists for autosave reporting.
+  const persistenceUi = installMenuTab(
     () => simBridge,
     (artifact, mode) => loadWorldArtifact(artifact, mode),
   );
@@ -985,11 +984,14 @@ function downloadText(filename: string, mime: string, text: string): void {
   URL.revokeObjectURL(url);
 }
 
-function installPersistenceUi(
+// v2.1: the Menu rail tab. Holds the game options moved off the top bar —
+// the auto-restart run toggle and the saved-world actions (Save / Resume /
+// Fork / Export / Import) plus the save-status line. Mounts into #menu-inner.
+function installMenuTab(
   getBridge: () => SimBridge,
   loadArtifact: (artifactJson: string, mode: "resume" | "fork") => Promise<void>,
 ): { setStatus: (message: string) => void } {
-  const bar = document.getElementById("top-bar");
+  const mount = document.getElementById("menu-inner");
   const status = document.createElement("span");
   status.id = "save-status";
   status.className = "topbar-btn";
@@ -1098,8 +1100,36 @@ function installPersistenceUi(
       });
   });
 
-  if (bar) bar.append(saveBtn, resumeBtn, forkBtn, exportBtn, importBtn, status, importInput);
+  // Run control: auto-restart toggle (relocated from the top bar). Reflects
+  // and writes the `autoRun` setting, whose only other reader is the
+  // world-end auto-restart path.
+  const autoBtn = makeTextBtn("auto-restart-btn", "Auto-restart", "Auto-restart on world end");
+  autoBtn.classList.toggle("is-active", getSettings().autoRun);
+  autoBtn.addEventListener("click", () => {
+    const next = !getSettings().autoRun;
+    setSetting("autoRun", next);
+    autoBtn.classList.toggle("is-active", next);
+  });
+
+  if (mount) {
+    mount.append(
+      menuSection("Run", autoBtn),
+      menuSection("Saved worlds", saveBtn, resumeBtn, forkBtn, exportBtn, importBtn, status),
+      importInput,
+    );
+  }
   return { setStatus };
+}
+
+// One labelled group inside the Menu tab: a heading over a column of controls.
+function menuSection(title: string, ...children: HTMLElement[]): HTMLElement {
+  const section = document.createElement("div");
+  section.className = "menu-section";
+  const heading = document.createElement("div");
+  heading.className = "menu-section-title";
+  heading.textContent = title;
+  section.append(heading, ...children);
+  return section;
 }
 
 function installWorkerStatusUi(onRetry: () => void): {
@@ -1153,15 +1183,15 @@ function installAppBadge(): void {
   wrap.appendChild(badge);
 }
 
-// v2.1 P4: Top bar trimmed to exactly four controls:
+// v2.1: Top bar trimmed to exactly three controls:
 //   1. Play/Pause (pacing)
 //   2. Restart (rerolls seed)
-//   3. Auto-restart toggle
-//   4. ⚙ Settings rail toggle (opens/closes the right rail)
+//   3. ⚙ Settings rail toggle (opens/closes the right rail)
 //
-// Removed from top bar: NN opener, Inspector opener, perf-toggle opener.
-// NN is now a Settings category; Inspector stays click-to-open (creature click);
-// Profiler is now a Settings category (no standalone toggle button needed).
+// Auto-restart and the saved-world actions moved to the Menu rail tab
+// (installMenuTab). NN opener, Inspector opener, and the perf-toggle opener
+// were removed earlier: NN is a Settings category, Inspector stays
+// click-to-open, and the Profiler is a Settings category.
 function installTopBarButtons(
   getBridge: () => SimBridge,
   onRestart: () => void,
@@ -1199,15 +1229,7 @@ function installTopBarButtons(
   const restartBtn = makeTextBtn("restart-btn", "Restart", "Restart simulation (r)");
   restartBtn.addEventListener("click", onRestart);
 
-  // 3. Auto-restart toggle.
-  const autoBtn = makeTextBtn("auto-restart-btn", "Auto-restart", "Auto-restart on world end");
-  autoBtn.addEventListener("click", () => {
-    const next = !getSettings().autoRun;
-    setSetting("autoRun", next);
-    autoBtn.classList.toggle("is-active", next);
-  });
-
-  // 4. ⚙ Settings rail toggle. Toggles the rail open/closed (same as `~`
+  // 3. ⚙ Settings rail toggle. Toggles the rail open/closed (same as `~`
   //    hotkey). When the rail is open on the Settings tab a second click
   //    collapses it; otherwise it opens the rail and switches to Settings.
   const settingsBtn = makeIconBtn("settings-rail-btn", "Settings (~)", ICON_SETTINGS);
@@ -1220,11 +1242,10 @@ function installTopBarButtons(
     }
   });
 
-  bar.append(playBtn, restartBtn, autoBtn, settingsBtn);
+  bar.append(playBtn, restartBtn, settingsBtn);
 
   const refreshHighlights = (): void => {
     const railOpen = getSettings().railOpen;
-    autoBtn.classList.toggle("is-active", getSettings().autoRun);
     settingsBtn.classList.toggle("is-active", railOpen && rail.activeTab === "settings");
   };
   refreshPlayLabel();

@@ -10,9 +10,9 @@ A two-column shell that wraps the canvas and every non-canvas UI element.
 
 ```
 ┌──────────────────────────────────┬────────────────────────┐
-│ evosim vX.Y.Z     Pause Restart …│ ┌────────┬───────────┐ │
-│                                  │ │Settings│ Inspector │ │
-├──────────────────────────────────┤ ├────────┴───────────┤ │
+│ evosim vX.Y.Z  Pause Restart ⚙   │ ┌──────┬─────────┬───┐ │
+│                                  │ │Settin│Inspector│Mnu│ │
+├──────────────────────────────────┤ ├──────┴─────────┴───┤ │
 │                                  │ │ ┌──sub-nav──┐ pane │ │
 │ canvas                           │ │ │ Energy    │      │ │
 │                                  │ │ │ Grass     │      │ │
@@ -42,8 +42,8 @@ and app/version badge.
   `--accent-dirty`, `--danger`, …) — single source of truth for color in
   `app/web/src/styles.css`.
 - Right-rail tab routing: tab switching, default tab on boot, the
-  switch-on-creature-click rule. Only two tabs exist: Settings and Inspector.
-  NN editor and Profiler are settings categories, not rail tabs.
+  switch-on-creature-click rule. Three tabs exist: Settings, Inspector, and
+  Menu. NN editor and Profiler are settings categories, not rail tabs.
 - Which TS module installs into which DOM element. `main.ts` installs the
   dev panel first so `currentSliderState()` is ready for worker boot, then
   creates the worker status UI and rail before spawning the worker. After
@@ -75,15 +75,20 @@ and app/version badge.
   `#app-shell.rail-collapsed`, which collapses the grid track to `0`
   and hides `#right-rail`. The ⚙ button and the `~` hotkey both route
   through `setRailOpen` in `main.ts`.
-- Worker recovery status: the top bar normally shows the run and persistence
-  controls, but `#worker-status` appears while the sim worker is booting,
+- Worker recovery status: the top bar holds play/pause, Restart, and the ⚙
+  rail toggle, but `#worker-status` appears while the sim worker is booting,
   recovering, stalled/crashed, or failed. `#worker-retry-btn` appears only
   after repeated automatic recovery fails.
-- World persistence controls: top-bar Save, Resume, Fork, Export, and Import
-  actions request a saved-world artifact from the worker, store named/autosave
-  records in IndexedDB, or boot a replacement worker from an imported/exported
-  artifact. `#save-status` reports save/autosave/import/export errors and the
-  last successful action.
+- The Menu rail tab (`#rail-menu` → `#menu-inner`, installed by
+  `main.ts → installMenuTab`): the game options relocated off the top bar so
+  the canvas chrome stays minimal. A "Run" section with the `Auto-restart`
+  toggle (writes the `autoRun` setting) and a "Saved worlds" section with the
+  persistence actions below.
+- World persistence controls: the Menu tab's Save, Resume, Fork, Export, and
+  Import actions request a saved-world artifact from the worker, store
+  named/autosave records in IndexedDB, or boot a replacement worker from an
+  imported/exported artifact. `#save-status` (in the Menu tab) reports
+  save/autosave/import/export errors and the last successful action.
 - Theming: `app/web/src/themes.ts` owns the palette map. `applyTheme(id)`
   writes inline custom properties onto `<html>`; shipped themes each define
   every CSS var listed in `styles.css`'s `:root` block.
@@ -111,11 +116,11 @@ and app/version badge.
 | `#app-shell` | Two-column grid. Carries `.rail-collapsed` when the rail is hidden. | CSS-only; class flipped by `main.ts → applyRailOpen`. |
 | `#left-col` | Top-bar + canvas + app badge + empty `#perf-box` placeholder. | CSS-only plus `main.ts → installAppBadge`. |
 | `#app-badge` | Top-left `evosim v<version>` badge. Version is imported from `app/web/package.json`. | `main.ts → installAppBadge`. |
-| `#top-bar` | Always-visible primary controls: play/pause, Restart (always rerolls seed), auto-restart, saved-world Save/Resume/Fork/Export/Import, save status, ⚙ settings rail toggle; conditional `#worker-status` and `#worker-retry-btn` appear during recovery/failure. | `main.ts → installTopBarButtons`, `installPersistenceUi`, `installWorkerStatusUi`. NN opener, Inspector opener, and perf-toggle opener were removed; all three surfaces now live inside the Settings panel or as rail tabs. |
+| `#top-bar` | Always-visible primary controls: play/pause, Restart (always rerolls seed), ⚙ settings rail toggle; conditional `#worker-status` and `#worker-retry-btn` appear during recovery/failure. Auto-restart and the saved-world actions moved to the Menu tab. | `main.ts → installTopBarButtons`, `installWorkerStatusUi`. NN opener, Inspector opener, and perf-toggle opener were removed; those surfaces now live inside the Settings panel or as rail tabs. |
 | `#canvas-wrap > #aquarium` | The WebGL2 sim view. | `render/gl.ts`. |
 | `#perf-box` | Empty hidden placeholder (kept in DOM for resize-handle compat). The profiler content was relocated to `#settings-profiler-pane`. | DOM-only; `display:none`. |
 | `#right-rail` | Persistent right column, 420 px. | `rail/index.ts → installRail`. |
-| `#rail-tabs` | Two tab buttons: Settings / Inspector (DOM order; Settings is default active). The NN tab was removed; NN editor is a Settings sub-nav category. | `rail/index.ts`. |
+| `#rail-tabs` | Three tab buttons: Settings / Inspector / Menu (DOM order; Settings is default active). The NN tab was removed; NN editor is a Settings sub-nav category. | `rail/index.ts`. |
 | `#rail-settings` | Settings panel: left sub-nav + right category pane area + Apply/Cancel/Reset footer. | `widgets/devpanel.ts → installDevPanel`. |
 | `#rail-settings` sub-nav | Eight `.settings-cat-btn` buttons (`data-cat`: energy, grass, lifecycle, world, equilibrium, display, profiler, nn). Wired in `installDevPanel`; active button + active pane kept in sync. | `widgets/devpanel.ts` sub-nav wiring. |
 | `#settings-<cat>-pane` | One `.settings-pane` per category (e.g. `#settings-energy-pane`). Only the active one is visible. Each `devpanel-<cat>` div inside is the mount for `categoryBox`. | `widgets/devpanel.ts → categoryBox`. |
@@ -123,12 +128,15 @@ and app/version badge.
 | `#settings-profiler-pane` | Padded profiler panel — status line, FPS/TPS chart, pop chart, telemetry CSV/JSON export actions, CPU monitor, profile trees. Activated by selecting the Profiler sub-nav category. | `widgets/perf-panel.ts → installProfilerPanel`; CSS owns padding/box sizing. |
 | `#settings-nn-pane` | NN topology + mutation-bucket editors (`#nn-tab-host`). | `rail/nn-tab.ts → installNnTab`. |
 | `#rail-inspector` | Inspector body or empty-state. | `rail/inspector.ts` reads/writes `#inspector-empty` and `#ins-*` rows inside `#inspector-body`. Includes `#ins-nn-block` — the per-creature NN I/O block (inputs grouped by compass, outputs: vx/vy, 3 logit bars, highlighted chosen action). Shows a `#ins-species-block` (hidden by default) when inspect JSON carries species fields. |
+| `#rail-menu` → `#menu-inner` | Menu tab body: a "Run" section (`#auto-restart-btn`) and a "Saved worlds" section (`#world-save-btn`, `#world-resume-btn`, `#world-fork-btn`, `#world-export-btn`, `#world-import-btn`, `#save-status`, hidden `#world-import-input`). | `main.ts → installMenuTab` (+ `menuSection` helper). |
 | `#toast-host` | Bottom-center transient notice slot. | `toast.ts → showToast`. |
 
 ## Tab routing rules
 
-There are two rail tabs: Settings and Inspector. The NN editor is a category
-inside the Settings panel; the Profiler is also a Settings category.
+There are three rail tabs: Settings, Inspector, and Menu. The NN editor is a
+category inside the Settings panel; the Profiler is also a Settings category.
+The Menu tab holds the run/persistence game options (see the DOM map row) and
+has no special routing beyond the generic tab-click rules below.
 
 - **Default tab on boot:** Settings (`activeTab = "settings"` inside
   `installRail`). The rail defaults to closed (see `railOpen`), so a
@@ -319,7 +327,9 @@ table from the NN tab unless that tab has registered live widget readers.
 ## World persistence UI
 
 The app shell owns the browser storage and user-facing artifact actions; Rust
-owns the artifact format and validation. `app/web/src/storage/world-saves.ts`
+owns the artifact format and validation. The user-facing actions live in the
+Menu rail tab (`installMenuTab`), not the top bar.
+`app/web/src/storage/world-saves.ts`
 wraps IndexedDB database `evosim.world-saves`, store `saves`, with autosave,
 named, and imported records. Autosave is coarse (`30 s` minimum cadence and no
 same-tick rewrite), requests the same worker artifact as manual Save, and
@@ -386,8 +396,8 @@ layout is not promised because the new constructor derives the internal
 
 - `app/web/index.html` → DOM skeleton, all element IDs in the table above.
 - `app/web/src/styles.css` → palette tokens, grid layout, sub-nav styles (`.settings-cat-btn`, `.settings-pane`), dirty-row accent, toast styling.
-- `app/web/src/main.ts` → `main`, `spawnSimWorker`, `installTopBarButtons`, `installWorkerStatusUi`, `checkWorkerWatchdog`, frame loop, camera-lane pre-seed + RAF writes, `makeSlotLayout` binding.
-- `app/web/src/rail/index.ts` → `installRail`, `pollRail`, `RailState`, `switchTab`. `RailTab` = `"inspector" | "settings"` only.
+- `app/web/src/main.ts` → `main`, `spawnSimWorker`, `installTopBarButtons`, `installMenuTab` (+ `menuSection`), `installWorkerStatusUi`, `checkWorkerWatchdog`, frame loop, camera-lane pre-seed + RAF writes, `makeSlotLayout` binding.
+- `app/web/src/rail/index.ts` → `installRail`, `pollRail`, `RailState`, `switchTab`. `RailTab` = `"inspector" | "settings" | "menu"`.
 - `app/web/src/rail/inspector.ts` → click→tab switch, empty-state toggle, SoA fast-path, `inspect_id` throttle, `#ins-nn-block` NN I/O block.
 - `app/web/src/rail/nn-tab.ts` → `installNnTab` (mounts into `#settings-nn-pane → #nn-tab-host`).
 - `app/web/src/widgets/perf-panel.ts` → `installProfilerPanel` (mounts into `#settings-profiler-pane`), `setProfilerVisible`, pop-graph sampler + species paint.
