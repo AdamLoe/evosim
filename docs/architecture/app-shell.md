@@ -328,10 +328,11 @@ writes only the latest autosave record. Named Save creates a timestamped record.
 Resume and Fork load the latest saved record into a fresh worker lifetime.
 Resume preserves the saved run identity and records resumed lineage metadata;
 Fork creates a new run id with the saved run as parent. Export downloads the
-current artifact JSON; Import validates the file, stores it as an imported
-record, and resumes it. All actions surface success/failure through
-`#save-status` and toasts; corrupt or unsupported artifacts fail before the
-old worker is terminated.
+current artifact JSON; Import shallow-checks the file, resumes it through the
+Rust-validated artifact boot path, and stores an imported record only after the
+resume succeeds. All actions surface success/failure through `#save-status`
+and toasts; corrupt or unsupported artifacts fail before the old worker is
+terminated and before they become the latest saved record.
 
 ## Runtime-dims SAB view binding
 

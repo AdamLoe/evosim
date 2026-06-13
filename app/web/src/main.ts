@@ -1082,9 +1082,15 @@ function installPersistenceUi(
       .then(async (text) => {
         const artifact = withAppMetadata(text, APP_VERSION);
         const meta = metadataFromArtifact(artifact);
-        await putNamedSave(artifact, APP_VERSION, `Imported t${meta.tick}`, "imported");
-        setStatus(`imported t${meta.tick}`);
+        setStatus(`loading t${meta.tick}...`);
         await loadArtifact(artifact, "resume");
+        try {
+          await putNamedSave(artifact, APP_VERSION, `Imported t${meta.tick}`, "imported");
+          setStatus(`imported t${meta.tick}`);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          setStatus(`import loaded; save failed: ${message}`);
+        }
       })
       .catch((err) => {
         const message = err instanceof Error ? err.message : String(err);
