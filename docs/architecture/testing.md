@@ -17,13 +17,14 @@ Three gate surfaces:
    invariants, and profiler tree/span drift.
 3. **Playwright e2e** — `cd app/web && pnpm test:e2e`. Specs under
   `app/web/tests/e2e/` cover the main↔worker control path, generated
-  Rust↔TS config/defaults drift, settings persistence, grass LOD/window metadata,
-   restart-time grass sizing, and worker watchdog recovery. Playwright
+  Rust↔TS config/defaults drift, settings persistence, world persistence,
+  grass LOD/window metadata, restart-time grass sizing, and worker watchdog
+  recovery. Playwright
    boots Vite via its `webServer` hook so the suite is one command.
 
-There is no Rust integration-test crate, no goldens, no snapshot-hash
-acceptance, no save-load round-trip. The sim has no persistence layer
-to round-trip.
+There is no Rust integration-test crate, no goldens, and no snapshot-hash
+acceptance. Saved-world artifacts have focused Rust round-trip tests and a
+Playwright save/resume/fork/export/import smoke path.
 
 ## What it owns
 
@@ -62,7 +63,7 @@ Notable coverage by file:
 
 | File | What it covers |
 |---|---|
-| `app/crates/evosim/src/wasm_api/mod.rs` | `write_snapshot_to_native` layout matches the documented byte stride; `max_pop_for_sim()` mirrors the constant; `creature_at` returns stable ids; `set_slider` dispatch round-trip; telemetry sample cadence/export shape/worst-jank/reset behavior. |
+| `app/crates/evosim/src/wasm_api/mod.rs` | `write_snapshot_to_native` layout matches the documented byte stride; `max_pop_for_sim()` mirrors the constant; `creature_at` returns stable ids; `set_slider` dispatch round-trip; telemetry sample cadence/export shape/worst-jank/reset behavior; saved-world artifact round-trip and fork identity semantics. |
 | `crates/evosim/src/world/mod.rs` | Tick step body, slider effects on world construction, multi-founder spawn placement. |
 | `crates/evosim/src/world/tick.rs` | Per-phase invariants — graze energy conservation, eat per-bite math, repulsion clamping, death/birth bookkeeping. |
 | `crates/evosim/src/world/nn.rs` | NN input layout, slot offsets, threaded NN matches sequential NN bit-for-bit (when seeded), chunk-range partition invariants. |
@@ -148,6 +149,9 @@ Key coverage:
 - `worker-watchdog.spec.ts` uses the test-only worker fault hook to verify
   crash recovery, frozen-worker recovery while unpaused, and no stall false
   positive while paused.
+- `world-persistence.spec.ts` verifies named save, resume, fork identity,
+  export, and import through the production top-bar controls and IndexedDB
+  save store.
 
 **Every worker-control test forces `targetTPS = 1000` before interacting.**
 That is the regime where pacing overshoot, futex wake handling, and
@@ -169,6 +173,8 @@ If you touch `simLoop()` in `app/web/src/sim/worker.ts`, run it.
 - `app/web/tests/e2e/sim-bridge.spec.ts` → worker control-path smoke tests.
 - `app/web/tests/e2e/worker-watchdog.spec.ts` → worker crash/freeze recovery
   and paused no-false-positive coverage.
+- `app/web/tests/e2e/world-persistence.spec.ts` → saved-world Save/Resume/Fork/
+  Export/Import coverage.
 - `app/web/tests/e2e/defaults-drift.spec.ts` → generated Rust↔TS config/default drift guard.
 - `app/web/tests/e2e/settings-persistence.spec.ts` → Settings localStorage and
   boot slider-state / WorldConfig persistence guard.

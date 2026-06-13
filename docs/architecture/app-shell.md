@@ -75,10 +75,15 @@ and app/version badge.
   `#app-shell.rail-collapsed`, which collapses the grid track to `0`
   and hides `#right-rail`. The ⚙ button and the `~` hotkey both route
   through `setRailOpen` in `main.ts`.
-- Worker recovery status: the top bar normally shows only the primary
+- Worker recovery status: the top bar normally shows the run and persistence
   controls, but `#worker-status` appears while the sim worker is booting,
   recovering, stalled/crashed, or failed. `#worker-retry-btn` appears only
   after repeated automatic recovery fails.
+- World persistence controls: top-bar Save, Resume, Fork, Export, and Import
+  actions request a saved-world artifact from the worker, store named/autosave
+  records in IndexedDB, or boot a replacement worker from an imported/exported
+  artifact. `#save-status` reports save/autosave/import/export errors and the
+  last successful action.
 - Theming: `app/web/src/themes.ts` owns the palette map. `applyTheme(id)`
   writes inline custom properties onto `<html>`; shipped themes each define
   every CSS var listed in `styles.css`'s `:root` block.
@@ -106,7 +111,7 @@ and app/version badge.
 | `#app-shell` | Two-column grid. Carries `.rail-collapsed` when the rail is hidden. | CSS-only; class flipped by `main.ts → applyRailOpen`. |
 | `#left-col` | Top-bar + canvas + app badge + empty `#perf-box` placeholder. | CSS-only plus `main.ts → installAppBadge`. |
 | `#app-badge` | Top-left `evosim v<version>` badge. Version is imported from `app/web/package.json`. | `main.ts → installAppBadge`. |
-| `#top-bar` | Always-visible primary controls: play/pause, Restart (always rerolls seed), auto-restart, ⚙ settings rail toggle; conditional `#worker-status` and `#worker-retry-btn` appear during recovery/failure. | `main.ts → installTopBarButtons`, `installWorkerStatusUi`. NN opener, Inspector opener, and perf-toggle opener were removed; all three surfaces now live inside the Settings panel or as rail tabs. |
+| `#top-bar` | Always-visible primary controls: play/pause, Restart (always rerolls seed), auto-restart, saved-world Save/Resume/Fork/Export/Import, save status, ⚙ settings rail toggle; conditional `#worker-status` and `#worker-retry-btn` appear during recovery/failure. | `main.ts → installTopBarButtons`, `installPersistenceUi`, `installWorkerStatusUi`. NN opener, Inspector opener, and perf-toggle opener were removed; all three surfaces now live inside the Settings panel or as rail tabs. |
 | `#canvas-wrap > #aquarium` | The WebGL2 sim view. | `render/gl.ts`. |
 | `#perf-box` | Empty hidden placeholder (kept in DOM for resize-handle compat). The profiler content was relocated to `#settings-profiler-pane`. | DOM-only; `display:none`. |
 | `#right-rail` | Persistent right column, 420 px. | `rail/index.ts → installRail`. |
@@ -246,8 +251,8 @@ dropdown (`makeStagedDropdown`; options `fifty_fifty=1` / `average=0`, the
 Rust f32 slider encoding), the three construction-only species-seeding
 sliders, and the live `mating_cooldown_ticks` slider (NOT in the
 construction-only set — it applies to the running world). The five
-construction-only species knobs ride `newWithFounderCount`'s trailing args,
-not the live SAB; `mating_cooldown_ticks` flows through
+construction-only species knobs ride the boot `WorldConfig`, not the live SAB;
+`mating_cooldown_ticks` flows through
 `currentSliderState()` like any live slider.
 
 `refreshSpeciesGating()` shows/hides rows based on the staged
@@ -310,6 +315,23 @@ the staged Settings widgets: `max_population` from the perf panel, the hidden
 legacy Blur grass knobs `grass_propagation_rate_k` /
 `grass_in_cell_growth_r`, the equilibrium live sliders, and the mutation bucket
 table from the NN tab unless that tab has registered live widget readers.
+
+## World persistence UI
+
+The app shell owns the browser storage and user-facing artifact actions; Rust
+owns the artifact format and validation. `app/web/src/storage/world-saves.ts`
+wraps IndexedDB database `evosim.world-saves`, store `saves`, with autosave,
+named, and imported records. Autosave is coarse (`30 s` minimum cadence and no
+same-tick rewrite), requests the same worker artifact as manual Save, and
+writes only the latest autosave record. Named Save creates a timestamped record.
+
+Resume and Fork load the latest saved record into a fresh worker lifetime.
+Resume preserves the saved run identity and records resumed lineage metadata;
+Fork creates a new run id with the saved run as parent. Export downloads the
+current artifact JSON; Import validates the file, stores it as an imported
+record, and resumes it. All actions surface success/failure through
+`#save-status` and toasts; corrupt or unsupported artifacts fail before the
+old worker is terminated.
 
 ## Runtime-dims SAB view binding
 

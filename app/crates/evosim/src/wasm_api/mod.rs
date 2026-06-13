@@ -3,7 +3,7 @@
 
 use crate::brain::{Activation, NnTopology};
 use crate::constants::*;
-use crate::world::World;
+use crate::world::{World, WorldRuntimeStateV1};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use wasm_bindgen::prelude::*;
@@ -39,6 +39,8 @@ const TELEMETRY_SAMPLE_PERIOD_TICKS: u32 = 120;
 const TELEMETRY_SAMPLE_CAP: usize = 2048;
 const TELEMETRY_EVENT_CAP: usize = 256;
 const LARGE_JANK_EVENT_MS: f64 = 64.0;
+const WORLD_ARTIFACT_SCHEMA_VERSION: u32 = 1;
+const WORLD_ARTIFACT_KIND: &str = "evosim.world";
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct WorldConfig {
@@ -108,6 +110,136 @@ pub struct WorldConfigPreset {
     pub label: &'static str,
     pub description: &'static str,
     pub config: WorldConfig,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct WorldArtifactMeta {
+    app_version: Option<String>,
+    build_profile: Option<String>,
+    wasm_crate_version: String,
+    created_at_ms: f64,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WorldArtifactLineage {
+    Original,
+    Resumed,
+    Fork,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct WorldArtifactIdentity {
+    artifact_id: String,
+    run_id: String,
+    parent_run_id: Option<String>,
+    source_artifact_id: Option<String>,
+    lineage: WorldArtifactLineage,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct WorldArtifactTelemetryPolicy {
+    includes_samples: bool,
+    policy: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct WorldArtifactV1 {
+    kind: String,
+    schema_version: u32,
+    meta: WorldArtifactMeta,
+    identity: WorldArtifactIdentity,
+    world_config: WorldConfig,
+    master_seed: u32,
+    state: WorldRuntimeStateV1,
+    telemetry: WorldArtifactTelemetryPolicy,
+    compatibility_flags: Vec<String>,
+}
+
+fn make_artifact_id(prefix: &str, tick: u32) -> String {
+    let rnd = random_nonzero_u32();
+    let ms = wasm_now_ms().max(0.0) as u64;
+    format!("{prefix}-{ms:012x}-{tick:08x}-{rnd:08x}")
+}
+
+fn fresh_original_identity() -> WorldArtifactIdentity {
+    let run_id = make_artifact_id("run", 0);
+    WorldArtifactIdentity {
+        artifact_id: make_artifact_id("artifact", 0),
+        run_id,
+        parent_run_id: None,
+        source_artifact_id: None,
+        lineage: WorldArtifactLineage::Original,
+    }
+}
+
+fn validate_artifact_config_matches_state(
+    config: &WorldConfig,
+    master_seed: u32,
+    state: &WorldRuntimeStateV1,
+) -> Result<(), String> {
+    if config.schema_version != WORLD_CONFIG_SCHEMA_VERSION {
+        return Err(format!(
+            "unsupported embedded WorldConfig schema_version {} (expected {})",
+            config.schema_version, WORLD_CONFIG_SCHEMA_VERSION
+        ));
+    }
+    if config.master_seed != master_seed {
+        return Err(format!(
+            "artifact master_seed {} does not match embedded WorldConfig master_seed {}",
+            master_seed, config.master_seed
+        ));
+    }
+    let expected_world_seed = derive_world_seed(master_seed, WorldSeedStream::Biome);
+    if state.world_seed != expected_world_seed {
+        return Err(format!(
+            "artifact world_seed {} does not match master-derived world_seed {}",
+            state.world_seed, expected_world_seed
+        ));
+    }
+    let s = &state.sliders;
+    if config.world.size != s.world_size
+        || config.world.wrap != s.wrap_world
+        || config.grass.initial_seed_count != s.grass_initial_seed_count
+        || config.grass.full_on_init != s.full_grass_on_init
+        || config.grass.cell_size.max(1.0) != s.grass_cell_size
+        || config.grass.clump_count != s.grass_clump_count
+        || config.grass.clump_size != s.grass_clump_size
+        || config.grass.multisight != s.grass_multisight
+        || config
+            .population
+            .founder_count
+            .clamp(1, MAX_POP_FOR_SIM as u32)
+            != s.founder_count
+        || config.population.energy_max.max(1.0) != s.energy_max
+        || config.species.enabled != s.species_mode
+        || CrossoverMode::from(config.species.crossover_mode) != s.crossover_mode
+        || config.species.starting_species_count.max(1) != s.starting_species_count
+        || config.species.starting_species_member_count.max(1) != s.starting_species_member_count
+        || config.species.starting_species_member_variance.max(0.0)
+            != s.starting_species_member_variance
+        || config.founders.init_graze_boost.max(0.0) != s.init_graze_boost
+        || config.founders.init_split_boost.max(0.0) != s.init_split_boost
+    {
+        return Err("embedded WorldConfig construction fields do not match runtime state".into());
+    }
+    if config.nn_topology.hidden_sizes != state.nn_topology.hidden_sizes() {
+        return Err(
+            "embedded WorldConfig nn_topology.hidden_sizes does not match runtime state".into(),
+        );
+    }
+    let activations: Vec<String> = state
+        .nn_topology
+        .activations()
+        .iter()
+        .map(|a| a.as_str().to_string())
+        .collect();
+    if config.nn_topology.activations != activations {
+        return Err(
+            "embedded WorldConfig nn_topology.activations does not match runtime state".into(),
+        );
+    }
+    Ok(())
 }
 
 impl From<CrossoverMode> for WorldConfigCrossoverMode {
@@ -736,6 +868,8 @@ pub struct WorldHandle {
     /// Live-settable — affects the very next write_snapshot call.
     lod_step: u32,
     master_seed: u32,
+    world_config: WorldConfig,
+    artifact_identity: WorldArtifactIdentity,
 }
 
 #[wasm_bindgen]
@@ -762,10 +896,22 @@ impl WorldHandle {
     /// biome windows per slot; the old full-field biome buffer is gone.
     /// v2.0.6 S9: also builds the biome mode-pyramid (one-time, static).
     fn from_world(inner: World) -> Self {
-        Self::from_world_with_master_seed(inner, 0)
+        let config = WorldConfig::defaults();
+        Self::from_world_with_config(inner, 0, config, fresh_original_identity())
     }
 
     fn from_world_with_master_seed(inner: World, master_seed: u32) -> Self {
+        let mut config = WorldConfig::defaults();
+        config.master_seed = master_seed;
+        Self::from_world_with_config(inner, master_seed, config, fresh_original_identity())
+    }
+
+    fn from_world_with_config(
+        inner: World,
+        master_seed: u32,
+        world_config: WorldConfig,
+        artifact_identity: WorldArtifactIdentity,
+    ) -> Self {
         let grass_cell_count = inner.dims.grass_cell_count;
         let layout = SnapshotLayout::from_grass_cell_count(grass_cell_count);
         debug_assert_eq!(
@@ -806,6 +952,8 @@ impl WorldHandle {
             lod_bias: 0.0,
             lod_step: 0,
             master_seed,
+            world_config,
+            artifact_identity,
         }
     }
 
@@ -872,7 +1020,70 @@ impl WorldHandle {
         let topology = parse_nn_topology_config(&config.nn_topology)
             .map_err(|e| JsValue::from_str(&format!("nn_topology error: {e}")))?;
         let inner = World::new_with_sliders_topology(actual_seed, sliders, topology);
-        Ok(Self::from_world_with_master_seed(inner, master_seed))
+        let mut resolved_config = config;
+        resolved_config.master_seed = master_seed;
+        Ok(Self::from_world_with_config(
+            inner,
+            master_seed,
+            resolved_config,
+            fresh_original_identity(),
+        ))
+    }
+
+    #[wasm_bindgen(js_name = newFromArtifactJson)]
+    pub fn new_from_artifact_json(
+        artifact_json: &str,
+        load_mode: &str,
+    ) -> Result<WorldHandle, JsValue> {
+        let artifact: WorldArtifactV1 = serde_json::from_str(artifact_json)
+            .map_err(|e| JsValue::from_str(&format!("world artifact parse error: {e}")))?;
+        if artifact.kind != WORLD_ARTIFACT_KIND {
+            return Err(JsValue::from_str(&format!(
+                "unsupported artifact kind {}",
+                artifact.kind
+            )));
+        }
+        if artifact.schema_version != WORLD_ARTIFACT_SCHEMA_VERSION {
+            return Err(JsValue::from_str(&format!(
+                "unsupported world artifact schema_version {} (expected {})",
+                artifact.schema_version, WORLD_ARTIFACT_SCHEMA_VERSION
+            )));
+        }
+        validate_artifact_config_matches_state(
+            &artifact.world_config,
+            artifact.master_seed,
+            &artifact.state,
+        )
+        .map_err(|e| JsValue::from_str(&format!("world artifact validation error: {e}")))?;
+        let inner = World::from_runtime_state_v1(artifact.state)
+            .map_err(|e| JsValue::from_str(&format!("world artifact state error: {e}")))?;
+        let identity = match load_mode {
+            "fork" => WorldArtifactIdentity {
+                artifact_id: make_artifact_id("artifact", inner.tick),
+                run_id: make_artifact_id("run", inner.tick),
+                parent_run_id: Some(artifact.identity.run_id),
+                source_artifact_id: Some(artifact.identity.artifact_id),
+                lineage: WorldArtifactLineage::Fork,
+            },
+            "resume" | "" => WorldArtifactIdentity {
+                artifact_id: make_artifact_id("artifact", inner.tick),
+                run_id: artifact.identity.run_id,
+                parent_run_id: artifact.identity.parent_run_id,
+                source_artifact_id: Some(artifact.identity.artifact_id),
+                lineage: WorldArtifactLineage::Resumed,
+            },
+            other => {
+                return Err(JsValue::from_str(&format!(
+                    "unsupported world artifact load mode {other}"
+                )))
+            }
+        };
+        Ok(Self::from_world_with_config(
+            inner,
+            artifact.master_seed,
+            artifact.world_config,
+            identity,
+        ))
     }
 
     #[wasm_bindgen(js_name = newWithFounderCount)]
@@ -2464,6 +2675,40 @@ impl WorldHandle {
         serde_json::to_string(&report)
             .unwrap_or_else(|_| "{\"schema_version\":1,\"truncated\":true}".into())
     }
+
+    #[wasm_bindgen]
+    pub fn world_artifact_json(&self) -> String {
+        let mut identity = self.artifact_identity.clone();
+        identity.artifact_id = make_artifact_id("artifact", self.inner.tick);
+        let artifact = WorldArtifactV1 {
+            kind: WORLD_ARTIFACT_KIND.to_string(),
+            schema_version: WORLD_ARTIFACT_SCHEMA_VERSION,
+            meta: WorldArtifactMeta {
+                app_version: None,
+                build_profile: None,
+                wasm_crate_version: env!("CARGO_PKG_VERSION").to_string(),
+                created_at_ms: wasm_now_ms(),
+            },
+            identity,
+            world_config: self.world_config.clone(),
+            master_seed: self.master_seed,
+            state: self.inner.to_runtime_state_v1(),
+            telemetry: WorldArtifactTelemetryPolicy {
+                includes_samples: false,
+                policy: "telemetry samples are exported separately by telemetry_report_json"
+                    .to_string(),
+            },
+            compatibility_flags: vec![
+                "threaded_grass_future_replay_not_bit_exact".to_string(),
+                "telemetry_samples_excluded".to_string(),
+            ],
+        };
+        serde_json::to_string(&artifact).unwrap_or_else(|e| {
+            format!(
+                "{{\"kind\":\"{WORLD_ARTIFACT_KIND}\",\"schema_version\":{WORLD_ARTIFACT_SCHEMA_VERSION},\"error\":\"serialize failed: {e}\"}}"
+            )
+        })
+    }
 }
 
 // ─── v1.6 S A1: shared snapshot byte writer ─────────────────────────────────
@@ -3099,6 +3344,67 @@ mod tests {
             .expect("events array")
             .iter()
             .any(|event| event["kind"] == "jank_reset"));
+    }
+
+    #[test]
+    fn world_artifact_round_trip_restores_runtime_state() {
+        let mut config = WorldConfig::defaults();
+        config.master_seed = 1234;
+        config.world.size = 1200.0;
+        config.grass.cell_size = 20.0;
+        config.grass.clump_count = 2;
+        config.grass.clump_size = 2;
+        config.population.founder_count = 4;
+        let mut handle =
+            WorldHandle::new_from_world_config(config).expect("test config should construct");
+        handle.set_slider("max_population", 128.0).unwrap();
+        handle.step_n(12);
+
+        let artifact = handle.world_artifact_json();
+        let loaded =
+            WorldHandle::new_from_artifact_json(&artifact, "resume").expect("artifact should load");
+
+        assert_eq!(loaded.tick(), handle.tick());
+        assert_eq!(loaded.population(), handle.population());
+        assert_eq!(loaded.world_size(), handle.world_size());
+        assert_eq!(loaded.grass_dim(), handle.grass_dim());
+        assert_eq!(loaded.world_seed(), handle.world_seed());
+        assert_eq!(
+            loaded.inner.grass.density_u8_snapshot(),
+            handle.inner.grass.density_u8_snapshot()
+        );
+        assert_eq!(loaded.inner.creatures.id, handle.inner.creatures.id);
+        assert_eq!(loaded.inner.next_creature_id, handle.inner.next_creature_id);
+    }
+
+    #[test]
+    fn world_artifact_fork_gets_new_run_identity() {
+        let mut config = WorldConfig::defaults();
+        config.master_seed = 4321;
+        config.world.size = 1200.0;
+        config.grass.cell_size = 20.0;
+        config.grass.clump_count = 1;
+        config.population.founder_count = 2;
+        let handle =
+            WorldHandle::new_from_world_config(config).expect("test config should construct");
+        let artifact = handle.world_artifact_json();
+        let source: serde_json::Value = serde_json::from_str(&artifact).unwrap();
+
+        let fork =
+            WorldHandle::new_from_artifact_json(&artifact, "fork").expect("artifact should fork");
+        let fork_artifact: serde_json::Value =
+            serde_json::from_str(&fork.world_artifact_json()).unwrap();
+
+        assert_eq!(fork.tick(), handle.tick());
+        assert_eq!(fork_artifact["identity"]["lineage"], "fork");
+        assert_eq!(
+            fork_artifact["identity"]["parent_run_id"],
+            source["identity"]["run_id"]
+        );
+        assert_ne!(
+            fork_artifact["identity"]["run_id"],
+            source["identity"]["run_id"]
+        );
     }
 
     /// S17: try_set_slider returns true for all known names. Uses the inner

@@ -5,7 +5,7 @@ the main ↔ sim-worker boundary.
 
 ## What it is
 
-A `controlSab` (≈30 KB), the wasm-memory-resident snapshot region
+A `controlSab` (≈65 MiB, dominated by the saved-world artifact buffer), the wasm-memory-resident snapshot region
 (runtime-sized; at the 9600u default ≈ 2 × (≈1 MB creatures + 3.69 MB u8
 grass window + 3.69 MB u8 biome window) ≈ 17 MB — grass/biome regions are
 `min(grass_dim, 4096)²` each, sized from `GRASS_LOD_BUDGET_AXIS = 4096`),
@@ -13,8 +13,9 @@ plus a one-shot `boot` message in each direction.
 All main↔worker control is on SAB; the only postMessage payloads are
 the `boot` handshake and its `boot_ready` reply. Every other control
 signal (sliders, paused, target TPS, inspector requests, profile/NN
-stats polls, telemetry export requests, reset-jank, reset-profile, camera
-position/zoom) is an `Atomics.store` + epoch bump on the control SAB.
+stats polls, telemetry export requests, saved-world artifact requests,
+reset-jank, reset-profile, camera position/zoom) is an `Atomics.store` +
+epoch bump on the control SAB.
 
 The canonical SAB byte layout lives in
 [`app/crates/evosim/src/control_sab.rs`](../../app/crates/evosim/src/control_sab.rs). The TS mirror
@@ -29,10 +30,12 @@ equal at boot — drift is a thrown error pointing at "rebuild wasm".
 
 ## What it owns
 
-- The single `boot` / `boot_ready` postMessage pair.
-- The `controlSab` byte layout: leading 256-i32 control region + three
-  length-prefixed byte buffers (inspector response, profile report,
-  NN stats).
+- The single `boot` / `boot_ready` postMessage pair. Boot can carry either a
+  fresh `world_config` or a `saved_state_json` artifact plus a `resume|fork`
+  load mode.
+- The `controlSab` byte layout: leading 256-i32 control region +
+  length-prefixed byte buffers for inspector response, profile report, NN
+  stats, species table, telemetry export, and saved-world artifacts.
 - The slider canonical-index table (`SLIDER_NAMES`), its TS mirror,
   and the codegen + drift-test that keep them in sync.
 - The **wasm-memory-resident snapshot region**: two double-buffered slots
@@ -77,7 +80,8 @@ equal at boot — drift is a thrown error pointing at "rebuild wasm".
 ## Control SAB layout
 
 Allocated as `new SharedArrayBuffer(CONTROL_SAB_BYTES)` at worker boot
-(currently ≈802 KB, mostly the request-only telemetry export buffer).
+(currently `67,930,112` bytes, mostly the request-only saved-world artifact
+buffer).
 Three views: `Int32Array` (atomic operations and i32 fields),
 `Float32Array` (slider / TPS / inspector-param values written and read
 by lane), `Uint8Array` (byte buffers for
@@ -119,6 +123,10 @@ length-prefixed payloads).
 | 145 | `CTRL_TELEMETRY_REPORT_EPOCH` | Bumped by worker after writing the telemetry report JSON. |
 | 146 | `CTRL_TELEMETRY_REPORT_LEN` | Length of telemetry report JSON in bytes. |
 | 147 | `CTRL_TELEMETRY_REPORT_REQ_EPOCH` | Echo of the telemetry request epoch being answered. |
+| 148 | `CTRL_WORLD_ARTIFACT_REQ_EPOCH` | Bumped by main when autosave/named-save/export needs a saved-world artifact. |
+| 149 | `CTRL_WORLD_ARTIFACT_RESP_EPOCH` | Bumped by worker after writing the artifact JSON. |
+| 150 | `CTRL_WORLD_ARTIFACT_RESP_LEN` | Length of saved-world artifact JSON in bytes. |
+| 151 | `CTRL_WORLD_ARTIFACT_RESP_REQ_EPOCH` | Echo of the artifact request epoch being answered. |
 
 Slots not listed are reserved; do not read or write them.
 
@@ -131,6 +139,7 @@ Slots not listed are reserved; do not read or write them.
 | `NN_STATS_OFFSET` (25600) | `NN_STATS_CAP` (4 KB) | NN-worker stats JSON, UTF-8. |
 | `SPECIES_TABLE_OFFSET` (29696) | `SPECIES_TABLE_CAP` (4 KB) | Species-table JSON, UTF-8. Length in `CTRL_SPECIES_TABLE_LEN`. |
 | `TELEMETRY_REPORT_OFFSET` | `TELEMETRY_REPORT_CAP` (768 KB) | Request-only telemetry export JSON, UTF-8. Length in `CTRL_TELEMETRY_REPORT_LEN`. |
+| `WORLD_ARTIFACT_OFFSET` (820224) | `WORLD_ARTIFACT_CAP` (64 MB) | Request-only saved-world artifact JSON, UTF-8. Length in `CTRL_WORLD_ARTIFACT_RESP_LEN`. |
 
 **Telemetry report.** Main requests it with `SimBridge.requestTelemetryReport`,
 which bumps `CTRL_TELEMETRY_REQ_EPOCH` and futex-notifies the worker. The worker
@@ -140,6 +149,18 @@ buffer, echoing the request epoch, and bumping `CTRL_TELEMETRY_REPORT_EPOCH`.
 The report contains schema/version metadata, bounded aggregate samples, bounded
 events, and jank summary. If serialization ever exceeds the fixed report
 buffer, the worker writes a small explicit `truncated: true` error payload
+instead of clipping bytes silently.
+
+**Saved-world artifact report.** Main requests it with
+`SimBridge.requestWorldArtifact`, which bumps `CTRL_WORLD_ARTIFACT_REQ_EPOCH`
+and futex-notifies the worker. The worker serves the request in both running
+and paused loop branches by calling `WorldHandle::world_artifact_json`, writing
+bytes into the world-artifact buffer, echoing the request epoch, and bumping
+`CTRL_WORLD_ARTIFACT_RESP_EPOCH`. The artifact is a versioned `evosim.world`
+JSON payload with embedded `WorldConfig`, runtime world state, identity/lineage
+metadata, compatibility flags, and telemetry policy metadata. It deliberately
+does not include telemetry samples/events by default. If serialization exceeds
+`WORLD_ARTIFACT_CAP`, the worker writes a small explicit artifact error payload
 instead of clipping bytes silently.
 
 **Polled species table.** A cadence-written report (mirrors the

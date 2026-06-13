@@ -224,8 +224,9 @@ Decisions that bind more than one architecture doc.
   8 in `[8, MAX_NN_INPUTS = 48]`); it feeds the first matmul's `fan_in`. The
   four (wrap × species) compositions pad to widths **32 / 40 / 40 / 48**. The
   old compile-time `NN_INPUTS == 32` hard assert is replaced by runtime checks
-  in `NnTopology::with_input_width`. Old brains are discarded on any settings
-  change (no save/load to migrate).
+  in `NnTopology::with_input_width`. Saved-world artifact load validates the
+  embedded topology against the construction config instead of migrating
+  arbitrary settings changes onto old brains.
 - **Why**: Inputs constant for a brain's whole run waste weights and train
   against a dishonest surface; a settings-derived layout always trains against
   the honest input surface for the current world (see the fuller rationale in
@@ -239,6 +240,23 @@ Decisions that bind more than one architecture doc.
   `app/crates/evosim/src/brain/mod.rs → NnTopology::with_input_width`,
   `app/crates/evosim/src/constants.rs → MAX_NN_INPUTS = 48`,
   `app/crates/evosim/src/brain/tests/width.rs`.
+
+### Saved-world artifacts use SAB request/response with a fixed cap
+
+- **Decision**: The worker serves saved-world artifact exports over the control
+  SAB request/response protocol, using `WORLD_ARTIFACT_OFFSET` and a fixed
+  `WORLD_ARTIFACT_CAP` of 64 MiB. Oversized artifacts return an explicit JSON
+  error payload rather than clipped bytes.
+- **Why**: The app already routes long-running worker control through SAB, and
+  artifact requests must be served while running or paused without adding a
+  second postMessage control plane. A fixed cap keeps the worker transport
+  bounded and makes quota/size failure visible to the UI.
+- **Applies to**: `architecture/shared-memory-and-protocol.md`,
+  `architecture/worker-runtime.md`, `architecture/app-shell.md`.
+- **Code anchors**: `app/crates/evosim/src/control_sab.rs →
+  WORLD_ARTIFACT_OFFSET`, `WORLD_ARTIFACT_CAP`;
+  `app/web/src/sim/worker.ts → serveWorldArtifactRequest`;
+  `app/web/src/sim/bridge.ts → requestWorldArtifact`.
 
 ## See also
 

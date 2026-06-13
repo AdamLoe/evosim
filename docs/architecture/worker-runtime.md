@@ -28,10 +28,11 @@ each loop iteration. The loop body is synchronous; `Atomics.wait` (not
   from [`../../app/crates/evosim/src/control_sab.rs`](../../app/crates/evosim/src/control_sab.rs). The
   snapshot bytes live in wasm linear memory (`WorldHandle::snapshot_buf`,
   a `Vec<u8>`); no separate snapshot SAB is allocated.
-- The boot handshake: construct from `boot.world_config`, apply persisted
-  sliders, seed SAB slider / paused / target_tps values, run one tick, write
-  one snapshot to slot 0, post `boot_ready`. Main's first RAF then reads a
-  populated slot.
+- The boot handshake: construct from `boot.world_config` for a fresh world or
+  `boot.saved_state_json` for a resumed/forked artifact, apply persisted
+  sliders only for fresh worlds, seed SAB slider / paused / target_tps values,
+  run one tick, write one snapshot to slot 0, post `boot_ready`. Main's first
+  RAF then reads a populated slot.
 - Main-side worker health: boot timeout, worker `error` /
   `messageerror`, and missing snapshot/report progress while unpaused
   are detected in `main.ts`; recovery uses the same respawn path as
@@ -40,8 +41,8 @@ each loop iteration. The loop body is synchronous; `Atomics.wait` (not
   `await`, no `setTimeout` — by design.
 - Per-tick SAB read of paused / target_tps / sliders (gated on
   `CTRL_CONTROL_EPOCH`) / inspector request (gated on
-  `CTRL_INSPECT_REQ_EPOCH`) / telemetry export request / profile-clear +
-  reset-jank requests.
+  `CTRL_INSPECT_REQ_EPOCH`) / telemetry export request / saved-world artifact
+  request / profile-clear + reset-jank requests.
 - Ack-gated snapshot publication: the worker writes a new snapshot only
   when main has stored the last painted `CTRL_SEQ` into `CTRL_CONSUMED_SEQ`.
   It continues to tick and write inspect/profile/NN/species reports even
@@ -94,9 +95,9 @@ pacing park:
   would change sim timing and make control writes take effect less
   predictably.
 - **Write phase**: snapshot only if `CTRL_CONSUMED_SEQ` equals the last
-  published `CTRL_SEQ`; inspect and telemetry responses (if their request
-  epochs advanced), profile report and NN stats (every N ticks each) are
-  served regardless.
+  published `CTRL_SEQ`; inspect, telemetry, and saved-world artifact responses
+  (if their request epochs advanced), profile report and NN stats (every N
+  ticks each) are served regardless.
 - **Pacing**: `Atomics.wait` for `1000/targetTPS − elapsed` ms when
   `remainingMs > 0.25`. No floor — when the tick overshoots its slice the
   loop continues immediately (no event loop to feed). TPS is therefore
@@ -121,19 +122,25 @@ pacing park:
 2. `await init()`. Mirror `crossOriginIsolated` log line.
 3. `initThreadPool(min(TARGET_RAYON_WORKERS, hardwareConcurrency))`.
 4. `rayon_current_num_threads()` sanity log (loud warn if `<= 1`).
-5. Construct `WorldHandle` via `newWithConfigJson(JSON.stringify(boot.world_config))`.
+5. Construct `WorldHandle` via `newWithConfigJson(JSON.stringify(boot.world_config))`
+   for fresh worlds, or `newFromArtifactJson(boot.saved_state_json,
+   boot.saved_state_load_mode)` for resume/fork loads. Artifact loads create
+   a fresh worker/world lifetime rather than mutating an existing `World`.
 6. Apply every entry in `boot.initial_sliders` via
-   `world.set_slider(name, value)` (still uses the name-keyed entry
-   for forward compatibility with stale localStorage keys).
+   `world.set_slider(name, value)` for fresh worlds only (still uses the
+   name-keyed entry for forward compatibility with stale localStorage keys).
+   Artifact boots use the saved state's embedded slider block so construction
+   fields and live values are not overwritten by current app settings.
 7. Allocate `controlSab` (`CONTROL_SAB_BYTES`). (The snapshot region is
    already resident in wasm linear memory — `WorldHandle::snapshot_buf` —
    no separate SAB is needed.)
 8. Seed the control SAB: `CTRL_PAUSED`, `CTRL_TARGET_TPS_BITS`, and every
-   `CTRL_SLIDERS[i]` lane from `boot.initial_sliders[name]` with
-   `world.sliders_defaults_json()[name]` as the required fallback. The
-   worker drains every slider lane whenever the control epoch advances, so
-   leaving any lane at zero would reapply zero on the next Apply. Stamp the
-   epoch counters so the first loop iteration is a no-op read.
+   `CTRL_SLIDERS[i]` lane from either the saved artifact's `state.sliders`
+   block or `boot.initial_sliders[name]`, with `world.sliders_defaults_json()[name]`
+   as the required fallback. The worker drains every slider lane whenever the
+   control epoch advances, so leaving any lane at zero would reapply zero on
+   the next Apply. Stamp the epoch counters so the first loop iteration is a
+   no-op read.
 9. Run one tick + write one snapshot to slot 0 (into wasm memory).
 10. Post `boot_ready` with the resolved `master_seed`, derived `world_seed`,
     `controlSab`, `wasm_memory` handle,
@@ -194,8 +201,12 @@ dead worker's exact world state. After repeated automatic failures
 (`MAX_AUTO_RECOVERY_ATTEMPTS`), main switches to `failed` and exposes a
 manual Retry control in the top bar.
 
-The e2e-only `debug_fault` boot field can simulate crash, freeze, or boot
-timeout via `window.__evosimE2E`; no production UI exposes it.
+Saved-world resume/fork follows the same replacement-worker shape as restart:
+main boots the replacement worker from the artifact, waits for `boot_ready`,
+then terminates the previous bridge. A malformed or unsupported artifact fails
+before old worker termination, so there is no half-loaded running world. The
+e2e-only `debug_fault` boot field can simulate crash, freeze, or boot timeout
+via `window.__evosimE2E`; no production UI exposes it.
 
 ## Pacing
 
@@ -224,7 +235,7 @@ and GL work is capped by the persisted App FPS setting.
 
 - [`app/web/src/sim/worker.ts`](../../app/web/src/sim/worker.ts) →
   `handleBoot`, `readControlSab`, `serveInspectRequest`,
-  `serveTelemetryRequest`,
+  `serveTelemetryRequest`, `serveWorldArtifactRequest`,
   `maybeWriteProfileReport`, `maybeWriteNnStats`,
   `maybeWriteSpeciesTable`, `writeSnapshotToSAB`, `freezeForE2E`, `simLoop`,
   `TARGET_RAYON_WORKERS`, `PROFILE_REPORT_EVERY_N_TICKS`,

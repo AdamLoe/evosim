@@ -64,6 +64,10 @@ import {
   CTRL_TELEMETRY_REPORT_LEN,
   CTRL_TELEMETRY_REPORT_REQ_EPOCH,
   CTRL_TELEMETRY_REQ_EPOCH,
+  CTRL_WORLD_ARTIFACT_REQ_EPOCH,
+  CTRL_WORLD_ARTIFACT_RESP_EPOCH,
+  CTRL_WORLD_ARTIFACT_RESP_LEN,
+  CTRL_WORLD_ARTIFACT_RESP_REQ_EPOCH,
   INSPECT_RESP_CAP,
   INSPECT_RESP_OFFSET,
   NN_STATS_CAP,
@@ -74,6 +78,8 @@ import {
   SPECIES_TABLE_OFFSET,
   TELEMETRY_REPORT_CAP,
   TELEMETRY_REPORT_OFFSET,
+  WORLD_ARTIFACT_CAP,
+  WORLD_ARTIFACT_OFFSET,
 } from "../generated/control-sab";
 import { SLIDER_COUNT, SLIDER_NAMES } from "../generated/slider-ids";
 
@@ -87,11 +93,36 @@ const rayonCurrentNumThreads = (_wasmMod as unknown as Record<string, unknown>)[
 
 type WorldHandleBootCtor = {
   newWithConfigJson(configJson: string): WorldHandle;
+  newFromArtifactJson(artifactJson: string, loadMode: string): WorldHandle;
 };
 
 type TelemetryWorldHandle = WorldHandle & {
   telemetry_report_json(): string;
 };
+type ArtifactWorldHandle = WorldHandle & {
+  world_artifact_json(): string;
+};
+
+function sliderMapFromArtifact(artifactJson: string): Record<string, number> {
+  const parsed = JSON.parse(artifactJson) as {
+    state?: { sliders?: Record<string, unknown> };
+  };
+  const sliders = parsed.state?.sliders ?? {};
+  const out: Record<string, number> = {};
+  for (const [key, value] of Object.entries(sliders)) {
+    if (typeof value === "number" && Number.isFinite(value)) out[key] = value;
+    if (typeof value === "boolean") out[key] = value ? 1 : 0;
+  }
+  if (typeof sliders["digestion_cooldown_ticks"] === "number") {
+    out["digestion_cooldown"] = sliders["digestion_cooldown_ticks"] as number;
+  }
+  if (typeof sliders["grass_cell_size"] === "number") {
+    out["grass_size"] = sliders["grass_cell_size"] as number;
+  }
+  if (sliders["crossover_mode"] === "Average") out["crossover_mode"] = 0;
+  if (sliders["crossover_mode"] === "FiftyFifty") out["crossover_mode"] = 1;
+  return out;
+}
 
 /** Target rayon worker count (kept from v1.9; see worker-runtime.md). */
 const TARGET_RAYON_WORKERS = 12;
@@ -141,6 +172,7 @@ let lastProfileClearEpoch = 0;
 let lastResetJankEpoch = 0;
 let lastInspectReqEpoch = 0;
 let lastTelemetryReqEpoch = 0;
+let lastWorldArtifactReqEpoch = 0;
 // Last profile window_ms value we applied to the Rust profiler. The control
 // SAB carries the desired window each tick; we forward to wasm only when
 // it actually changes so we don't burn a wasm call every iter.
@@ -213,18 +245,30 @@ async function handleBoot(boot: SimMessageBoot): Promise<void> {
   }
 
   const bootCtor = WorldHandle as unknown as WorldHandleBootCtor;
-  world = bootCtor.newWithConfigJson(JSON.stringify(boot.world_config));
+  const savedSliderState = boot.saved_state_json
+    ? sliderMapFromArtifact(boot.saved_state_json)
+    : null;
+  if (boot.saved_state_json) {
+    world = bootCtor.newFromArtifactJson(
+      boot.saved_state_json,
+      boot.saved_state_load_mode ?? "resume",
+    );
+  } else {
+    world = bootCtor.newWithConfigJson(JSON.stringify(boot.world_config));
+  }
   speciesMode = !!boot.world_config.species.enabled;
   world.profile_enable(true);
 
   // Apply persisted slider state by name (initial_sliders is name→value).
   // After this point the canonical values live in the SAB; main writes only
   // through the SAB transport for the rest of the worker's lifetime.
-  for (const [name, value] of Object.entries(boot.initial_sliders)) {
-    try {
-      world.set_slider(name, value);
-    } catch (err) {
-      console.warn(`[sim] set_slider("${name}", ${value}) rejected:`, err);
+  if (!boot.saved_state_json) {
+    for (const [name, value] of Object.entries(boot.initial_sliders)) {
+      try {
+        world.set_slider(name, value);
+      } catch (err) {
+        console.warn(`[sim] set_slider("${name}", ${value}) rejected:`, err);
+      }
     }
   }
 
@@ -254,7 +298,7 @@ async function handleBoot(boot: SimMessageBoot): Promise<void> {
   const sliderDefaults: Record<string, number> = JSON.parse(world.sliders_defaults_json());
   for (let i = 0; i < SLIDER_COUNT; i++) {
     const name = SLIDER_NAMES[i];
-    const v = boot.initial_sliders[name] ?? sliderDefaults[name];
+    const v = savedSliderState?.[name] ?? boot.initial_sliders[name] ?? sliderDefaults[name];
     if (v !== undefined) {
       ctrlF32[CTRL_SLIDERS_BASE + i] = v;
     }
@@ -265,6 +309,7 @@ async function handleBoot(boot: SimMessageBoot): Promise<void> {
   lastResetJankEpoch = Atomics.load(ctrlI32, CTRL_RESET_JANK_EPOCH);
   lastInspectReqEpoch = Atomics.load(ctrlI32, CTRL_INSPECT_REQ_EPOCH);
   lastTelemetryReqEpoch = Atomics.load(ctrlI32, CTRL_TELEMETRY_REQ_EPOCH);
+  lastWorldArtifactReqEpoch = Atomics.load(ctrlI32, CTRL_WORLD_ARTIFACT_REQ_EPOCH);
 
   // First-paint handshake: run one tick + one snapshot before posting
   // boot_ready so main's first RAF sees a live slot.
@@ -498,6 +543,33 @@ function serveTelemetryRequest(): void {
   Atomics.add(ctrlI32, CTRL_TELEMETRY_REPORT_EPOCH, 1);
 }
 
+function serveWorldArtifactRequest(): void {
+  if (!world || !ctrlI32 || !ctrlBytes) return;
+  const reqEpoch = Atomics.load(ctrlI32, CTRL_WORLD_ARTIFACT_REQ_EPOCH);
+  if (reqEpoch === lastWorldArtifactReqEpoch) return;
+  lastWorldArtifactReqEpoch = reqEpoch;
+
+  const artifactWorld = world as ArtifactWorldHandle;
+  const json = artifactWorld.world_artifact_json();
+  let encoded = new TextEncoder().encode(json);
+  if (encoded.length > WORLD_ARTIFACT_CAP) {
+    const fallback = JSON.stringify({
+      kind: "evosim.world",
+      schema_version: 1,
+      error: "world artifact exceeded control SAB capacity",
+      encoded_len: encoded.length,
+      cap: WORLD_ARTIFACT_CAP,
+      truncated: true,
+    });
+    encoded = new TextEncoder().encode(fallback);
+  }
+  const len = Math.min(encoded.length, WORLD_ARTIFACT_CAP);
+  ctrlBytes.set(encoded.subarray(0, len), WORLD_ARTIFACT_OFFSET);
+  Atomics.store(ctrlI32, CTRL_WORLD_ARTIFACT_RESP_LEN, len);
+  Atomics.store(ctrlI32, CTRL_WORLD_ARTIFACT_RESP_REQ_EPOCH, reqEpoch);
+  Atomics.add(ctrlI32, CTRL_WORLD_ARTIFACT_RESP_EPOCH, 1);
+}
+
 // ─── Snapshot write ─────────────────────────────────────────────────────────
 //
 // v1.11 (A+D): the snapshot region lives in wasm linear memory. The worker
@@ -569,6 +641,7 @@ function simLoop(): void {
       // serve the loop re-reads control, sees paused still true, and parks again.
       serveInspectRequest();
       serveTelemetryRequest();
+      serveWorldArtifactRequest();
       const before = Atomics.load(ctrlI32, CTRL_FUTEX);
       Atomics.wait(ctrlI32, CTRL_FUTEX, before, Infinity);
       continue;
@@ -594,6 +667,7 @@ function simLoop(): void {
     maybeWriteNnStats(tickIdx);
     maybeWriteSpeciesTable(tickIdx);
     serveTelemetryRequest();
+    serveWorldArtifactRequest();
     const writeEnd = performance.now();
     world.record_profile_sample(
       "sim_worker",

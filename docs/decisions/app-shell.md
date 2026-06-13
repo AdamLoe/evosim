@@ -81,12 +81,13 @@ that also bind the shell live in [`cross-cutting.md`](cross-cutting.md).
 - **Revisit when**: a feature needs the world to resize *after* boot (today
   nothing resizes after boot — restart rebuilds the world).
 
-### Settings panel = one navigable surface with left sub-nav; 4-control top bar
+### Settings panel = one navigable surface with left sub-nav; compact top bar
 
 - **Decision**: The settings panel uses a single navigable surface with a
   vertical left sub-nav of categories (Energy, Grass, Lifecycle, World,
-  Equilibrium, Display, Profiler, NN). The top bar has four primary
-  controls: play/pause, Restart, Auto-restart, ⚙ rail toggle.
+  Equilibrium, Display, Profiler, NN). The top bar keeps run controls
+  (play/pause, Restart, Auto-restart), persistence actions
+  (Save/Resume/Fork/Export/Import + status), and the ⚙ rail toggle.
   Removed from the top bar: NN opener, Inspector opener, perf-toggle opener.
   Inspector is still accessible via creature click (auto-opens the rail to
   the inspector tab). NN editor and Profiler are settings categories.
@@ -100,7 +101,24 @@ that also bind the shell live in [`cross-cutting.md`](cross-cutting.md).
   is creature-contextual — it has no meaningful empty state.
 - **Applies to**: `architecture/app-shell.md`.
 - **Code anchors**: `app/web/src/main.ts → installTopBarButtons`,
+  `app/web/src/main.ts → installPersistenceUi`,
   `app/web/index.html → #rail-tabs`, `app/web/src/rail/index.ts → RailTab`.
+
+### World saves live in IndexedDB; settings remain preferences
+
+- **Decision**: Saved-world storage uses IndexedDB database
+  `evosim.world-saves`, not the settings localStorage schema. Autosave writes
+  the latest autosave record on a coarse 30-second cadence, named saves create
+  timestamped records, import stores the file as an imported record, and
+  resume/fork load the latest saved record through a replacement worker.
+- **Why**: World state is large, versioned, and validated separately from UI
+  preferences. Keeping it outside settings avoids treating app settings
+  migration as artifact validation and leaves construction settings free to
+  stage for future fresh worlds without corrupting resumes.
+- **Applies to**: `architecture/app-shell.md`,
+  `architecture/worker-runtime.md`.
+- **Code anchors**: `app/web/src/storage/world-saves.ts`;
+  `app/web/src/main.ts → installPersistenceUi`, `loadWorldArtifact`.
 
 ### Worker recovery uses conditional top-bar status and Retry
 

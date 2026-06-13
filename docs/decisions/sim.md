@@ -414,20 +414,32 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 - **Revisit when**: interaction fidelity near bucket boundaries matters more
   than the two avoided rebuilds, or movement/query ranges change materially.
 
-### No save/load, no events, no Hall of Fame
+### Saved worlds are versioned Rust-owned artifacts; no Hall of Fame
 
-- **Decision**: Every page load is a fresh world. No persistence, no
-  event log, no eulogy.
-- **Why**: All three cost surface area without delivering observable
-  benefits. Removing them lets the rest of the system get smaller.
-- **Applies to**: `architecture/simulation-core.md`.
-- **Note**: a **species** registry now exists in `species_mode`
-  (`World.species`) — but it's still in-memory, fresh per world; there's
-  no cross-session persistence. The decision covers per-session durable
-  lineage, which still doesn't exist (species-history breadcrumb is
-  plumbed-but-empty until V2.1 splits).
-- **Revisit when**: a use case appears that genuinely needs durable
-  per-creature identity or cross-session continuity.
+- **Decision**: Durable worlds use a versioned `evosim.world` JSON artifact
+  produced and validated at the Rust wasm boundary. The artifact embeds
+  resolved `WorldConfig`, identity/lineage metadata, runtime world state,
+  compatibility flags, and telemetry policy metadata. It does not serialize
+  every telemetry sample/event by default, and it does not create a Hall of
+  Fame or cross-run lineage archive.
+- **Why**: Resume/fork/import/export need the actual sim state, not a replay of
+  app settings. Rust owns the fields that must round-trip and can validate
+  schema, config/state compatibility, dimensions, topology, seeds, SoA column
+  lengths, grass/biome byte lengths, species registry state, and population
+  caps before a worker starts using the artifact.
+- **Applies to**: `architecture/simulation-core.md`,
+  `architecture/worker-runtime.md`,
+  `architecture/shared-memory-and-protocol.md`.
+- **Code anchors**: `app/crates/evosim/src/world/mod.rs →
+  WorldRuntimeStateV1`; `app/crates/evosim/src/wasm_api/mod.rs →
+  WorldArtifactV1`, `WorldHandle::world_artifact_json`,
+  `WorldHandle::new_from_artifact_json`.
+- **Tradeoffs**: Brain weights, grass density, and biome bytes are compact
+  base64 blobs inside JSON rather than separate binary sections. This keeps
+  import/export simple and inspectable enough for fixtures, with a fixed worker
+  transport cap instead of unbounded messages.
+- **Revisit when**: deterministic science mode needs bit-for-bit future replay,
+  or telemetry history should be deliberately bundled with saved worlds.
 
 ### Biome map: a few large blobs from `world_seed` via a dedicated PRNG
 
@@ -712,8 +724,9 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   for a brain's whole run (the dropped "action-set / mode indicator" slot, the
   always-zero wall inputs in wrap mode) collapse to a per-output bias and are
   removed. One slot stays pinned to `1.0` as the classical bias-learning
-  constant (distinct from the dropped mode flag). Old brains are discarded on
-  any settings change (no save/load to migrate).
+  constant (distinct from the dropped mode flag). Artifact load validates the
+  saved topology against the embedded construction config instead of migrating
+  arbitrary settings changes onto old brains.
 - **Why**: A constant input wastes weights and trains against a dishonest
   surface. Mode information that matters (8 vs 16 creature sectors, present vs
   absent wall inputs) is carried *implicitly* by the layout, so a separate
@@ -1094,9 +1107,9 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   → same centres every boot; this is separate from the sim-string RNG so creature
   draws are unaffected.
 - **Boot-seam constraint**: `grass_clump_count` and `grass_clump_size` are
-  construction-only and ride the explicit `newWithFounderCount` boot params
-  (same rule as `grass_cell_size`) — `initial_sliders` is applied AFTER
-  world construction and cannot re-seed.
+  construction-only and ride the boot `WorldConfig` (same rule as
+  `grass_cell_size`) — `initial_sliders` is applied AFTER world construction
+  and cannot re-seed.
 - **Fallback**: `grass_clump_count = 0` falls back to the old uniform-scatter path
   (`grass_initial_seed_count` cells uniformly at random). No other code path changed.
 - **Applies to**: `architecture/simulation-core.md`.

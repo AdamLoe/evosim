@@ -136,6 +136,16 @@ pub const CTRL_TELEMETRY_REPORT_LEN: usize = 146;
 /// Echo of the request epoch the telemetry response is answering.
 pub const CTRL_TELEMETRY_REPORT_REQ_EPOCH: usize = 147;
 
+/// Saved-world artifact request epoch. Main bumps this for autosave, named save,
+/// or export; the worker responds with a versioned world artifact JSON payload.
+pub const CTRL_WORLD_ARTIFACT_REQ_EPOCH: usize = 148;
+/// Saved-world artifact response epoch, bumped after payload bytes are written.
+pub const CTRL_WORLD_ARTIFACT_RESP_EPOCH: usize = 149;
+/// Length of the saved-world artifact JSON in bytes.
+pub const CTRL_WORLD_ARTIFACT_RESP_LEN: usize = 150;
+/// Echo of the request epoch the saved-world response is answering.
+pub const CTRL_WORLD_ARTIFACT_RESP_REQ_EPOCH: usize = 151;
+
 /// Length of the leading i32 region in i32 slots. Byte buffers start
 /// at `CTRL_I32_REGION_LEN * 4`.
 pub const CTRL_I32_REGION_LEN: usize = 256;
@@ -171,9 +181,16 @@ pub const TELEMETRY_REPORT_OFFSET: usize = SPECIES_TABLE_OFFSET + SPECIES_TABLE_
 /// non-silent truncation/error JSON instead of clipping bytes.
 pub const TELEMETRY_REPORT_CAP: usize = 768 * 1024;
 
+/// Byte offset of the saved-world artifact payload.
+pub const WORLD_ARTIFACT_OFFSET: usize = TELEMETRY_REPORT_OFFSET + TELEMETRY_REPORT_CAP;
+/// Maximum saved-world artifact payload size. Large enough for ordinary mature
+/// worlds with compact base64 grass/biome/brain bytes; oversized worlds receive
+/// an explicit JSON error payload instead of silent truncation.
+pub const WORLD_ARTIFACT_CAP: usize = 64 * 1024 * 1024;
+
 /// Total control SAB size in bytes. Includes some trailing padding so future
 /// fields can be added without breaking on-disk SAB shape assumptions.
-pub const CONTROL_SAB_BYTES: usize = TELEMETRY_REPORT_OFFSET + TELEMETRY_REPORT_CAP + 1024;
+pub const CONTROL_SAB_BYTES: usize = WORLD_ARTIFACT_OFFSET + WORLD_ARTIFACT_CAP + 1024;
 
 // ─── Compile-time sanity ────────────────────────────────────────────────────
 
@@ -194,10 +211,14 @@ const _: () = assert!(
     "telemetry-report buffer must fit within the control SAB",
 );
 const _: () = assert!(
+    WORLD_ARTIFACT_OFFSET + WORLD_ARTIFACT_CAP <= CONTROL_SAB_BYTES,
+    "world-artifact buffer must fit within the control SAB",
+);
+const _: () = assert!(
     CTRL_I32_REGION_LEN * 4 <= INSPECT_RESP_OFFSET,
     "i32 region must end before the inspect-response byte buffer starts",
 );
 const _: () = assert!(
-    CTRL_TELEMETRY_REPORT_REQ_EPOCH < CTRL_I32_REGION_LEN,
-    "telemetry lanes must fit within the i32 region",
+    CTRL_WORLD_ARTIFACT_RESP_REQ_EPOCH < CTRL_I32_REGION_LEN,
+    "artifact lanes must fit within the i32 region",
 );

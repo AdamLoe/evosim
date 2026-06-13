@@ -25,6 +25,13 @@ import { span } from "./perf";
 import { getSettings, setSetting, hasStoredSetting } from "./settings";
 import { applyTheme } from "./themes";
 import { showToast } from "./toast";
+import {
+  latestWorldSave,
+  metadataFromArtifact,
+  putAutosave,
+  putNamedSave,
+  withAppMetadata,
+} from "./storage/world-saves";
 import packageJson from "../package.json";
 import {
   SimBridge,
@@ -58,6 +65,7 @@ const WORKER_BOOT_TIMEOUT_MS = 15_000;
 const WORKER_STALL_TIMEOUT_MS = 3_500;
 const MAX_AUTO_RECOVERY_ATTEMPTS = 2;
 const RECOVERY_ATTEMPT_STABLE_MS = 2_000;
+const AUTOSAVE_INTERVAL_MS = 30_000;
 
 type WorkerHealthState =
   | "booting"
@@ -72,6 +80,8 @@ type WorkerFaultKind = "boot_timeout" | "error" | "messageerror" | "stall";
 
 interface SpawnWorkerOptions {
   debugFault?: WorkerDebugFault | null;
+  savedStateJson?: string | null;
+  savedStateLoadMode?: "resume" | "fork";
   bootTimeoutMs?: number;
   onWorkerFault?: (kind: Exclude<WorkerFaultKind, "boot_timeout">, detail: string) => void;
 }
@@ -301,13 +311,19 @@ async function main(): Promise<void> {
     };
   }
 
-  async function spawnTrackedWorker(seed: string): Promise<SimBridge> {
+  async function spawnTrackedWorker(
+    seed: string,
+    savedStateJson: string | null = null,
+    loadMode: "resume" | "fork" = "resume",
+  ): Promise<SimBridge> {
     const generation = ++workerGeneration;
     const fault = nextDebugFault;
     nextDebugFault = null;
     setWorkerState(generation === 1 ? "booting" : "restarting");
     const bridge = await spawnSimWorker(seed, {
       debugFault: fault,
+      savedStateJson,
+      savedStateLoadMode: loadMode,
       bootTimeoutMs: WORKER_BOOT_TIMEOUT_MS,
       onWorkerFault: bindWorkerFault(generation),
     });
@@ -344,6 +360,17 @@ async function main(): Promise<void> {
     oldBridge.terminate();
     cleanupAfterWorkerSwap(rail);
     if (!automatic) automaticRecoveryAttempts = 0;
+  }
+
+  async function loadWorldArtifact(artifactJson: string, mode: "resume" | "fork"): Promise<void> {
+    metadataFromArtifact(artifactJson);
+    const oldBridge = simBridge;
+    const replacement = await spawnTrackedWorker("", artifactJson, mode);
+    simBridge = replacement;
+    oldBridge.terminate();
+    cleanupAfterWorkerSwap(rail);
+    automaticRecoveryAttempts = 0;
+    showToast(mode === "fork" ? "Forked saved world." : "Resumed saved world.", 2600);
   }
 
   async function recoverWorker(kind: WorkerFaultKind, detail: string): Promise<void> {
@@ -397,6 +424,11 @@ async function main(): Promise<void> {
   // v1.13 Wave 1: media-player top-bar buttons (play/pause, restart,
   // auto-restart, settings, perf). All share the `.iconbtn` CSS class.
   // Order in DOM matches left-to-right visual order.
+  const persistenceUi = installPersistenceUi(
+    () => simBridge,
+    (artifact, mode) => loadWorldArtifact(artifact, mode),
+  );
+
   installTopBarButtons(() => simBridge, () => restart(), rail, () => {
     if (workerState === "running" || workerState === "paused") {
       resetWatchdogProgress(performance.now());
@@ -496,6 +528,30 @@ async function main(): Promise<void> {
   });
 
   let autoRestartPending = false;
+  let lastAutosaveAtMs = performance.now();
+  let lastAutosaveTick = -1;
+  let autosaveInFlight = false;
+
+  function maybeAutosave(now: number, tick: number): void {
+    if (autosaveInFlight || tick === lastAutosaveTick) return;
+    if (now - lastAutosaveAtMs < AUTOSAVE_INTERVAL_MS) return;
+    autosaveInFlight = true;
+    lastAutosaveAtMs = now;
+    lastAutosaveTick = tick;
+    void simBridge.requestWorldArtifact()
+      .then(async (artifact) => {
+        if (!artifact) throw new Error("save request timed out");
+        const record = await putAutosave(artifact, APP_VERSION);
+        persistenceUi.setStatus(`autosaved t${record.tick}`);
+      })
+      .catch((err) => {
+        const message = err instanceof Error ? err.message : String(err);
+        persistenceUi.setStatus(`autosave failed: ${message}`);
+      })
+      .finally(() => {
+        autosaveInFlight = false;
+      });
+  }
 
   // v1.13 Wave 2: render-loop seq-gate. The renderer must never paint the
   // same snapshot twice — if `seq === lastPaintedSeq`, the RAF callback
@@ -695,6 +751,7 @@ async function main(): Promise<void> {
         tps: header.tps,
         worldEnded: !!header.world_ended,
       });
+      maybeAutosave(now, header.tick);
     } finally {
       frameSpan.close();
     }
@@ -782,6 +839,8 @@ async function spawnSimWorker(
     initial_sliders: currentSliderState(),
     initial_target_tps: targetTPS,
     initial_paused: paused,
+    saved_state_json: options.savedStateJson ?? undefined,
+    saved_state_load_mode: options.savedStateLoadMode,
     debug_fault: options.debugFault ?? undefined,
   });
 
@@ -912,6 +971,129 @@ function makeTextBtn(id: string, label: string, title: string): HTMLButtonElemen
   btn.title = title;
   btn.textContent = label;
   return btn;
+}
+
+function downloadText(filename: string, mime: string, text: string): void {
+  const blob = new Blob([text], { type: `${mime};charset=utf-8` });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function installPersistenceUi(
+  getBridge: () => SimBridge,
+  loadArtifact: (artifactJson: string, mode: "resume" | "fork") => Promise<void>,
+): { setStatus: (message: string) => void } {
+  const bar = document.getElementById("top-bar");
+  const status = document.createElement("span");
+  status.id = "save-status";
+  status.className = "topbar-btn";
+  status.textContent = "save: idle";
+  status.title = "World save/autosave status";
+
+  const setStatus = (message: string): void => {
+    status.textContent = `save: ${message}`;
+    status.title = status.textContent;
+  };
+
+  const requestArtifact = async (): Promise<string> => {
+    setStatus("saving...");
+    const artifact = await getBridge().requestWorldArtifact();
+    if (!artifact) throw new Error("save request timed out");
+    metadataFromArtifact(artifact);
+    return withAppMetadata(artifact, APP_VERSION);
+  };
+
+  const saveBtn = makeTextBtn("world-save-btn", "Save", "Save named world state");
+  saveBtn.addEventListener("click", () => {
+    void requestArtifact()
+      .then((artifact) => putNamedSave(artifact, APP_VERSION))
+      .then((record) => {
+        setStatus(`saved t${record.tick}`);
+        showToast("World saved.", 2200);
+      })
+      .catch((err) => {
+        const message = err instanceof Error ? err.message : String(err);
+        setStatus(`save failed: ${message}`);
+      });
+  });
+
+  const resumeBtn = makeTextBtn("world-resume-btn", "Resume", "Resume latest saved world");
+  resumeBtn.addEventListener("click", () => {
+    void latestWorldSave()
+      .then((record) => {
+        if (!record) throw new Error("no saved world");
+        setStatus(`loading t${record.tick}...`);
+        return loadArtifact(record.artifactJson, "resume");
+      })
+      .then(() => setStatus("resumed"))
+      .catch((err) => {
+        const message = err instanceof Error ? err.message : String(err);
+        setStatus(`resume failed: ${message}`);
+      });
+  });
+
+  const forkBtn = makeTextBtn("world-fork-btn", "Fork", "Fork latest saved world");
+  forkBtn.addEventListener("click", () => {
+    void latestWorldSave()
+      .then((record) => {
+        if (!record) throw new Error("no saved world");
+        setStatus(`forking t${record.tick}...`);
+        return loadArtifact(record.artifactJson, "fork");
+      })
+      .then(() => setStatus("forked"))
+      .catch((err) => {
+        const message = err instanceof Error ? err.message : String(err);
+        setStatus(`fork failed: ${message}`);
+      });
+  });
+
+  const exportBtn = makeTextBtn("world-export-btn", "Export", "Export current world artifact");
+  exportBtn.addEventListener("click", () => {
+    void requestArtifact()
+      .then((artifact) => {
+        const meta = metadataFromArtifact(artifact);
+        downloadText(`evosim-world-t${meta.tick}.json`, "application/json", artifact);
+        setStatus(`exported t${meta.tick}`);
+      })
+      .catch((err) => {
+        const message = err instanceof Error ? err.message : String(err);
+        setStatus(`export failed: ${message}`);
+      });
+  });
+
+  const importInput = document.createElement("input");
+  importInput.id = "world-import-input";
+  importInput.type = "file";
+  importInput.accept = "application/json,.json";
+  importInput.hidden = true;
+  const importBtn = makeTextBtn("world-import-btn", "Import", "Import world artifact");
+  importBtn.addEventListener("click", () => importInput.click());
+  importInput.addEventListener("change", () => {
+    const file = importInput.files?.[0];
+    importInput.value = "";
+    if (!file) return;
+    void file.text()
+      .then(async (text) => {
+        const artifact = withAppMetadata(text, APP_VERSION);
+        const meta = metadataFromArtifact(artifact);
+        await putNamedSave(artifact, APP_VERSION, `Imported t${meta.tick}`, "imported");
+        setStatus(`imported t${meta.tick}`);
+        await loadArtifact(artifact, "resume");
+      })
+      .catch((err) => {
+        const message = err instanceof Error ? err.message : String(err);
+        setStatus(`import failed: ${message}`);
+      });
+  });
+
+  if (bar) bar.append(saveBtn, resumeBtn, forkBtn, exportBtn, importBtn, status, importInput);
+  return { setStatus };
 }
 
 function installWorkerStatusUi(onRetry: () => void): {

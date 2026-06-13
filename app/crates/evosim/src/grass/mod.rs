@@ -19,6 +19,7 @@ use crate::rng::{grass_hash_fused_4, grass_hash_u64, SimRng};
 use core::sync::atomic::AtomicU8;
 #[cfg(feature = "threads")]
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 // ─── v2.0.2 Stream 1a: u8 density quantization ──────────────────────────────
@@ -89,7 +90,8 @@ fn scatter_sub(cell: &AtomicU8, sub_byte: u8) -> bool {
 /// `GrassGrid` test constructors default to `Blur` so the existing blur
 /// propagation tests keep passing without rewriting their assertions; the World
 /// boot path flips the live grid to `Scatter`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum GrassPropagation {
     /// Stochastic u8 scatter (v2.0.2) — the live propagation path.
     Scatter,
@@ -1159,6 +1161,25 @@ impl GrassGrid {
             .iter()
             .map(|b| b.load(Ordering::Relaxed))
             .collect()
+    }
+
+    /// Replace the full density field from artifact bytes, then rebuild every
+    /// derived grass cache that is not itself persisted.
+    pub fn replace_density_u8(&mut self, bytes: &[u8]) -> Result<(), String> {
+        if bytes.len() != self.density.len() {
+            return Err(format!(
+                "grass density length {} does not match grid length {}",
+                bytes.len(),
+                self.density.len()
+            ));
+        }
+        for (cell, &byte) in self.density.iter().zip(bytes) {
+            cell.store(byte, Ordering::Relaxed);
+        }
+        self.rebuild_row_bitset();
+        self.resync_active_from_density();
+        self.refresh_pyramid();
+        Ok(())
     }
 
     /// Set every cell to the encoded `v`. The `Vec<AtomicU8>` analogue of the old

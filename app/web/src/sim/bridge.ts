@@ -53,6 +53,10 @@ import {
   CTRL_TELEMETRY_REPORT_LEN,
   CTRL_TELEMETRY_REPORT_REQ_EPOCH,
   CTRL_TELEMETRY_REQ_EPOCH,
+  CTRL_WORLD_ARTIFACT_REQ_EPOCH,
+  CTRL_WORLD_ARTIFACT_RESP_EPOCH,
+  CTRL_WORLD_ARTIFACT_RESP_LEN,
+  CTRL_WORLD_ARTIFACT_RESP_REQ_EPOCH,
   INSPECT_RESP_CAP,
   INSPECT_RESP_OFFSET,
   NN_STATS_CAP,
@@ -63,6 +67,8 @@ import {
   SPECIES_TABLE_OFFSET,
   TELEMETRY_REPORT_CAP,
   TELEMETRY_REPORT_OFFSET,
+  WORLD_ARTIFACT_CAP,
+  WORLD_ARTIFACT_OFFSET,
 } from "../generated/control-sab";
 // v2.0.3 Stream 2b: re-export camera lane constants so worker + main can import
 // them from sim-bridge without going through the generated file directly.
@@ -347,6 +353,8 @@ export interface SimMessageBoot {
   initial_sliders: Record<string, number>;
   initial_target_tps: number;
   initial_paused: boolean;
+  saved_state_json?: string;
+  saved_state_load_mode?: "resume" | "fork";
   /** Test-only fault injection. Main only sets this from window.__evosimE2E. */
   debug_fault?: WorkerDebugFault;
 }
@@ -413,6 +421,7 @@ interface DebouncedSliderEntry {
 /** Resolves to a JSON string (the inspector response) or null on timeout. */
 type PendingInspect = (json: string | null) => void;
 type PendingTelemetry = (json: string | null) => void;
+type PendingWorldArtifact = (json: string | null) => void;
 
 /** Max time main will wait for a worker response before resolving to null. */
 const REQUEST_TIMEOUT_MS = 5_000;
@@ -456,6 +465,12 @@ export class SimBridge {
     resolve: PendingTelemetry;
     deadlineMs: number;
   } | null = null;
+  private lastWorldArtifactRespEpoch = 0;
+  private worldArtifactPending: {
+    reqEpoch: number;
+    resolve: PendingWorldArtifact;
+    deadlineMs: number;
+  } | null = null;
 
   // Drives the per-frame poll of all SAB response slots. Started on attach,
   // stopped on terminate. Uses `setInterval` at 60 Hz so inspector responses
@@ -497,6 +512,7 @@ export class SimBridge {
     this.lastNnStatsEpoch = Atomics.load(this.ctrlI32, CTRL_NN_STATS_EPOCH);
     this.lastSpeciesTableEpoch = Atomics.load(this.ctrlI32, CTRL_SPECIES_TABLE_EPOCH);
     this.lastTelemetryReportEpoch = Atomics.load(this.ctrlI32, CTRL_TELEMETRY_REPORT_EPOCH);
+    this.lastWorldArtifactRespEpoch = Atomics.load(this.ctrlI32, CTRL_WORLD_ARTIFACT_RESP_EPOCH);
     this.responsePoller = setInterval(() => this.pollResponses(), 1000 / 60);
   }
 
@@ -698,6 +714,25 @@ export class SimBridge {
     });
   }
 
+  requestWorldArtifact(): Promise<string | null> {
+    if (!this.ctrlI32) return Promise.resolve(null);
+    if (this.worldArtifactPending !== null) {
+      this.worldArtifactPending.resolve(null);
+      this.worldArtifactPending = null;
+    }
+    const reqEpoch = Atomics.load(this.ctrlI32, CTRL_WORLD_ARTIFACT_REQ_EPOCH) + 1;
+    Atomics.store(this.ctrlI32, CTRL_WORLD_ARTIFACT_REQ_EPOCH, reqEpoch);
+    Atomics.add(this.ctrlI32, CTRL_FUTEX, 1);
+    Atomics.notify(this.ctrlI32, CTRL_FUTEX, 1);
+    return new Promise<string | null>((resolve) => {
+      this.worldArtifactPending = {
+        reqEpoch,
+        resolve,
+        deadlineMs: performance.now() + REQUEST_TIMEOUT_MS,
+      };
+    });
+  }
+
   // ─── Tear-down ──────────────────────────────────────────────────────────
 
   terminate(): void {
@@ -716,6 +751,10 @@ export class SimBridge {
     if (this.telemetryPending !== null) {
       this.telemetryPending.resolve(null);
       this.telemetryPending = null;
+    }
+    if (this.worldArtifactPending !== null) {
+      this.worldArtifactPending.resolve(null);
+      this.worldArtifactPending = null;
     }
     this.ctrlI32 = null;
     this.ctrlF32 = null;
@@ -784,6 +823,23 @@ export class SimBridge {
       }
     }
 
+    const artifactEpoch = Atomics.load(this.ctrlI32, CTRL_WORLD_ARTIFACT_RESP_EPOCH);
+    if (artifactEpoch !== this.lastWorldArtifactRespEpoch) {
+      const respReqEpoch = Atomics.load(this.ctrlI32, CTRL_WORLD_ARTIFACT_RESP_REQ_EPOCH);
+      const len = Atomics.load(this.ctrlI32, CTRL_WORLD_ARTIFACT_RESP_LEN) >>> 0;
+      const json = this.decodeBytes(
+        WORLD_ARTIFACT_OFFSET,
+        WORLD_ARTIFACT_CAP,
+        len,
+      );
+      this.lastWorldArtifactRespEpoch = artifactEpoch;
+      const pending = this.worldArtifactPending;
+      if (pending !== null && pending.reqEpoch === respReqEpoch) {
+        this.worldArtifactPending = null;
+        pending.resolve(len === 0 ? null : json);
+      }
+    }
+
     // GC stale inspect request.
     if (this.inspectPending !== null && this.inspectPending.deadlineMs < performance.now()) {
       this.inspectPending.resolve(null);
@@ -792,6 +848,13 @@ export class SimBridge {
     if (this.telemetryPending !== null && this.telemetryPending.deadlineMs < performance.now()) {
       this.telemetryPending.resolve(null);
       this.telemetryPending = null;
+    }
+    if (
+      this.worldArtifactPending !== null &&
+      this.worldArtifactPending.deadlineMs < performance.now()
+    ) {
+      this.worldArtifactPending.resolve(null);
+      this.worldArtifactPending = null;
     }
   }
 

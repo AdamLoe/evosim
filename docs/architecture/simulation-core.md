@@ -123,6 +123,11 @@ world shape, founder boosts, and NN topology ride `WorldConfig` because
 `initial_sliders` is applied after construction and cannot resize the
 already-built `WorldDims` or rebuild founder brains.
 
+Saved-world artifacts embed a resolved `WorldConfig` and validate it against
+the serialized runtime state before constructing a resumed or forked world.
+Artifact validation is independent of app settings migration and does not use
+`initial_sliders` as a source for construction fields.
+
 ## What it owns
 
 - The `World` struct, `CreatureSoA`, `GrassGrid`, `SpatialGrid`, `SimRng`,
@@ -154,6 +159,14 @@ already-built `WorldDims` or rebuild founder brains.
   (render format unchanged).
 - The action ring-flash (`FlashTag` + `flash_ticks` countdown;
   priority: Killed > CreatedChild > Attacked > Grazed > Born).
+- Versioned world runtime state (`WorldRuntimeStateV1`) for saved artifacts:
+  tick, dimensions, `world_seed`, RNG state, live sliders, NN topology,
+  creature SoA + compact base64 brain weights, grass density + propagation
+  metadata, biome grid bytes, species registry, `next_id`, and
+  `world_ended`. `World::to_runtime_state_v1` serializes it and
+  `World::from_runtime_state_v1` validates lengths/topology/seeds before
+  rebuilding derived caches such as spatial grids, grass pyramids, profiler
+  scratch, and NN stats.
 
 ## What it does NOT own
 
@@ -176,6 +189,7 @@ The `WorldHandle` wasm-bindgen surface (`app/crates/evosim/src/wasm_api/mod.rs`)
 WorldHandle::step_n(n: u32) -> bool
 WorldHandle::write_snapshot(slot: u32)
 WorldHandle::newWithConfigJson(config_json: &str) -> Result<WorldHandle>
+WorldHandle::newFromArtifactJson(artifact_json: &str, load_mode: &str) -> Result<WorldHandle>
 WorldHandle::set_slider(name: &str, value: f32)
 WorldHandle::sliders_defaults_json() -> String
 WorldHandle::creature_at(wx, wy, tol) -> Option<f64>
@@ -186,6 +200,7 @@ WorldHandle::profile_enable(on: bool)
 WorldHandle::profile_clear()
 WorldHandle::profile_report_json() -> String
 WorldHandle::telemetry_report_json() -> String
+WorldHandle::world_artifact_json() -> String
 WorldHandle::nn_worker_stats_json() -> String
 WorldHandle::tps / jank_count / tick / population / world_ended / world_size
 // Free functions:
@@ -201,9 +216,10 @@ per-creature inspector UI.
 
 `WorldHandle` also owns bounded, in-memory run telemetry: aggregate samples
 every fixed sampling period, a capped low-cardinality event log, and the
-worst whole-tick jank observation since the last jank reset. It remains
-runtime-only: no IndexedDB, save/load, or per-creature trace is part of the
-sim core.
+worst whole-tick jank observation since the last jank reset. Saved-world
+artifacts include telemetry policy/metadata (`includes_samples: false`) but
+do not serialize the telemetry sample/event buffers by default; telemetry
+export remains the path for run-history downloads.
 
 ## Tick step order
 

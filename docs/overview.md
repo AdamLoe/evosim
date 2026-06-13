@@ -9,8 +9,9 @@ generated from a `world_seed`; creatures graze on a runtime-sized grass density
 field (1920² cells at 5u each by default), attack each other, reproduce, and die
 when energy hits zero. An **opt-in species + sexual-mating mode** swaps the
 single-pool asexual `Split` for N seeded species that reproduce by `Mate` and
-refuse to eat their own kind. There is no save/load, no scripted scenario —
-every page load starts a fresh world.
+refuse to eat their own kind. Worlds can be autosaved, named-saved,
+resumed, forked, exported, and imported as versioned `evosim.world`
+artifacts; scripted scenarios are still out of scope.
 
 ## Shape of the system
 

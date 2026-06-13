@@ -1,8 +1,8 @@
 ---
-status:        active
+status:        shipped
 owner:         orchestrator
-last_updated:  2026-06-12
-okay_to_delete: false
+last_updated:  2026-06-13
+okay_to_delete: true
 long_lived:    false
 owning_docs:
   - architecture/simulation-core.md
@@ -140,6 +140,20 @@ Code routes:
 
 ## Migration Notes
 
-At ship time, remove the "no save/load" statement from `overview.md`, add
-architecture for persistence/storage, document protocol additions, and record
-format/versioning rationale in `decisions/sim.md` or a new decision entry.
+Shipped facts were migrated into the owning docs:
+
+- `overview.md` now describes autosave, named save, resume, fork, export, and
+  import as versioned `evosim.world` artifacts.
+- `architecture/simulation-core.md` documents `WorldRuntimeStateV1`, artifact
+  validation, embedded `WorldConfig`, and telemetry-policy-only persistence.
+- `architecture/worker-runtime.md` documents fresh-worker resume/fork boot,
+  saved slider seeding, and artifact requests in running/paused loop paths.
+- `architecture/shared-memory-and-protocol.md` documents the saved-world SAB
+  lanes and 64 MiB artifact buffer.
+- `architecture/app-shell.md` documents IndexedDB autosave/named/imported
+  records, visible save status, import/export, and resume/fork UX.
+- `architecture/testing.md` documents the Rust round-trip tests and
+  Playwright save/resume/fork/export/import path.
+- `decisions/sim.md`, `decisions/app-shell.md`, and
+  `decisions/cross-cutting.md` record artifact format, storage, and SAB
+  transport decisions.

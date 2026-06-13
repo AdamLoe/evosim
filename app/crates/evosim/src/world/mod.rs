@@ -88,6 +88,212 @@ use crate::grid::SpatialGrid;
 use crate::rng::SimRng;
 use serde::{Deserialize, Serialize};
 
+const WORLD_RUNTIME_STATE_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WorldDimsStateV1 {
+    pub world_size: f32,
+    pub wrap_world: bool,
+    pub grass_dim: usize,
+    pub grass_cell_count: usize,
+    pub hash_dim: usize,
+    pub grass_cell_size: f32,
+}
+
+impl From<WorldDims> for WorldDimsStateV1 {
+    fn from(value: WorldDims) -> Self {
+        Self {
+            world_size: value.world_size,
+            wrap_world: value.wrap_world,
+            grass_dim: value.grass_dim,
+            grass_cell_count: value.grass_cell_count,
+            hash_dim: value.hash_dim,
+            grass_cell_size: value.grass_cell_size,
+        }
+    }
+}
+
+impl WorldDimsStateV1 {
+    fn validate_against(&self, expected: WorldDims) -> Result<(), String> {
+        let actual = WorldDimsStateV1::from(expected);
+        if self.world_size != actual.world_size
+            || self.wrap_world != actual.wrap_world
+            || self.grass_dim != actual.grass_dim
+            || self.grass_cell_count != actual.grass_cell_count
+            || self.hash_dim != actual.hash_dim
+            || self.grass_cell_size != actual.grass_cell_size
+        {
+            return Err(format!(
+                "artifact dimensions do not match embedded construction config: artifact={self:?} expected={actual:?}"
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CreatureStateV1 {
+    pub id: Vec<u64>,
+    pub x: Vec<f32>,
+    pub y: Vec<f32>,
+    pub vx: Vec<f32>,
+    pub vy: Vec<f32>,
+    pub energy: Vec<f32>,
+    pub age: Vec<u32>,
+    pub digestion_cooldown: Vec<u32>,
+    pub cumulative_upkeep: Vec<f32>,
+    pub last_action: Vec<Action>,
+    pub action_this_tick: Vec<Action>,
+    pub distance_travelled: Vec<f32>,
+    pub birth_tick: Vec<u32>,
+    pub ticks_since_split: Vec<u32>,
+    pub brain_weights_b64: String,
+    pub hue: Vec<f32>,
+    pub flash_tag: Vec<FlashTag>,
+    pub flash_ticks: Vec<u8>,
+    pub species_id: Vec<u16>,
+    pub mating_cooldown: Vec<u32>,
+}
+
+impl CreatureStateV1 {
+    fn len(&self) -> usize {
+        self.id.len()
+    }
+
+    fn validate_lengths(&self) -> Result<(), String> {
+        let n = self.len();
+        let lengths = [
+            ("x", self.x.len()),
+            ("y", self.y.len()),
+            ("vx", self.vx.len()),
+            ("vy", self.vy.len()),
+            ("energy", self.energy.len()),
+            ("age", self.age.len()),
+            ("digestion_cooldown", self.digestion_cooldown.len()),
+            ("cumulative_upkeep", self.cumulative_upkeep.len()),
+            ("last_action", self.last_action.len()),
+            ("action_this_tick", self.action_this_tick.len()),
+            ("distance_travelled", self.distance_travelled.len()),
+            ("birth_tick", self.birth_tick.len()),
+            ("ticks_since_split", self.ticks_since_split.len()),
+            ("hue", self.hue.len()),
+            ("flash_tag", self.flash_tag.len()),
+            ("flash_ticks", self.flash_ticks.len()),
+            ("species_id", self.species_id.len()),
+            ("mating_cooldown", self.mating_cooldown.len()),
+        ];
+        for (name, len) in lengths {
+            if len != n {
+                return Err(format!(
+                    "creature column {name} length {len} does not match id length {n}"
+                ));
+            }
+        }
+        if n > MAX_POP_FOR_SIM {
+            return Err(format!(
+                "artifact population {n} exceeds MAX_POP_FOR_SIM {MAX_POP_FOR_SIM}"
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GrassStateV1 {
+    pub propagation: GrassPropagation,
+    pub world_seed: u32,
+    pub density_b64: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WorldRuntimeStateV1 {
+    pub schema_version: u32,
+    pub tick: u32,
+    pub seed: String,
+    pub rng: SimRng,
+    pub dims: WorldDimsStateV1,
+    pub world_seed: u32,
+    pub biome_grid_b64: String,
+    pub species: species::SpeciesRegistry,
+    pub grass: GrassStateV1,
+    pub creatures: CreatureStateV1,
+    pub sliders: DevSliders,
+    pub next_creature_id: u64,
+    pub world_ended: bool,
+    pub nn_topology: NnTopology,
+}
+
+pub(crate) fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = *chunk.get(1).unwrap_or(&0);
+        let b2 = *chunk.get(2).unwrap_or(&0);
+        let n = ((b0 as u32) << 16) | ((b1 as u32) << 8) | b2 as u32;
+        out.push(TABLE[((n >> 18) & 0x3F) as usize] as char);
+        out.push(TABLE[((n >> 12) & 0x3F) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            TABLE[((n >> 6) & 0x3F) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[(n & 0x3F) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+pub(crate) fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
+    fn val(b: u8) -> Option<u8> {
+        match b {
+            b'A'..=b'Z' => Some(b - b'A'),
+            b'a'..=b'z' => Some(b - b'a' + 26),
+            b'0'..=b'9' => Some(b - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+
+    let compact: Vec<u8> = s.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    if !compact.len().is_multiple_of(4) {
+        return Err("base64 length must be a multiple of 4".to_string());
+    }
+    let mut out = Vec::with_capacity((compact.len() / 4) * 3);
+    for chunk in compact.chunks(4) {
+        let pad2 = chunk[2] == b'=';
+        let pad3 = chunk[3] == b'=';
+        let c0 = val(chunk[0]).ok_or_else(|| "invalid base64 character".to_string())? as u32;
+        let c1 = val(chunk[1]).ok_or_else(|| "invalid base64 character".to_string())? as u32;
+        let c2 = if pad2 {
+            0
+        } else {
+            val(chunk[2]).ok_or_else(|| "invalid base64 character".to_string())? as u32
+        };
+        let c3 = if pad3 {
+            0
+        } else {
+            val(chunk[3]).ok_or_else(|| "invalid base64 character".to_string())? as u32
+        };
+        if pad2 && !pad3 {
+            return Err("invalid base64 padding".to_string());
+        }
+        let n = (c0 << 18) | (c1 << 12) | (c2 << 6) | c3;
+        out.push(((n >> 16) & 0xFF) as u8);
+        if !pad2 {
+            out.push(((n >> 8) & 0xFF) as u8);
+        }
+        if !pad3 {
+            out.push((n & 0xFF) as u8);
+        }
+    }
+    Ok(out)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DevSliders {
     pub mutation_rate_multiplier: f32,
@@ -1613,6 +1819,230 @@ impl World {
 
     pub fn tick_once(&mut self) -> bool {
         self.step()
+    }
+
+    pub fn to_runtime_state_v1(&self) -> WorldRuntimeStateV1 {
+        let mut sliders = self.sliders.clone();
+        sliders.world_size = self.dims.world_size;
+        sliders.wrap_world = self.dims.wrap_world;
+        sliders.grass_cell_size = self.dims.grass_cell_size;
+        sliders.world_seed = self.world_seed;
+        let mut brain_weight_bytes = Vec::with_capacity(
+            self.creatures
+                .brains
+                .iter()
+                .map(|b| b.weights.len() * std::mem::size_of::<f32>())
+                .sum(),
+        );
+        for brain in &self.creatures.brains {
+            for weight in &brain.weights {
+                brain_weight_bytes.extend_from_slice(&weight.to_le_bytes());
+            }
+        }
+        WorldRuntimeStateV1 {
+            schema_version: WORLD_RUNTIME_STATE_SCHEMA_VERSION,
+            tick: self.tick,
+            seed: self.seed.clone(),
+            rng: self.rng.clone(),
+            dims: self.dims.into(),
+            world_seed: self.world_seed,
+            biome_grid_b64: base64_encode(&self.biome_grid),
+            species: self.species.clone(),
+            grass: GrassStateV1 {
+                propagation: self.grass.propagation,
+                world_seed: self.grass.world_seed,
+                density_b64: base64_encode(&self.grass.density_u8_snapshot()),
+            },
+            creatures: CreatureStateV1 {
+                id: self.creatures.id.clone(),
+                x: self.creatures.x.clone(),
+                y: self.creatures.y.clone(),
+                vx: self.creatures.vx.clone(),
+                vy: self.creatures.vy.clone(),
+                energy: self.creatures.energy.clone(),
+                age: self.creatures.age.clone(),
+                digestion_cooldown: self.creatures.digestion_cooldown.clone(),
+                cumulative_upkeep: self.creatures.cumulative_upkeep.clone(),
+                last_action: self.creatures.last_action.clone(),
+                action_this_tick: self.creatures.action_this_tick.clone(),
+                distance_travelled: self.creatures.distance_travelled.clone(),
+                birth_tick: self.creatures.birth_tick.clone(),
+                ticks_since_split: self.creatures.ticks_since_split.clone(),
+                brain_weights_b64: base64_encode(&brain_weight_bytes),
+                hue: self.creatures.hue.clone(),
+                flash_tag: self.creatures.flash_tag.clone(),
+                flash_ticks: self.creatures.flash_ticks.clone(),
+                species_id: self.creatures.species_id.clone(),
+                mating_cooldown: self.creatures.mating_cooldown.clone(),
+            },
+            sliders,
+            next_creature_id: self.next_creature_id,
+            world_ended: self.world_ended,
+            nn_topology: self.nn_topology.clone(),
+        }
+    }
+
+    pub fn from_runtime_state_v1(state: WorldRuntimeStateV1) -> Result<Self, String> {
+        if state.schema_version != WORLD_RUNTIME_STATE_SCHEMA_VERSION {
+            return Err(format!(
+                "unsupported world runtime state schema_version {} (expected {})",
+                state.schema_version, WORLD_RUNTIME_STATE_SCHEMA_VERSION
+            ));
+        }
+        state.creatures.validate_lengths()?;
+        let dims = WorldDims::from_world_size_with_cell_size(
+            state.sliders.world_size,
+            state.sliders.wrap_world,
+            state.sliders.grass_cell_size,
+        );
+        state.dims.validate_against(dims)?;
+        if state.world_seed != state.sliders.world_seed {
+            return Err(format!(
+                "artifact world_seed {} does not match sliders.world_seed {}",
+                state.world_seed, state.sliders.world_seed
+            ));
+        }
+        if state.grass.world_seed != state.world_seed {
+            return Err(format!(
+                "artifact grass.world_seed {} does not match world_seed {}",
+                state.grass.world_seed, state.world_seed
+            ));
+        }
+
+        let biome_grid = base64_decode(&state.biome_grid_b64)?;
+        if biome_grid.len() != dims.grass_cell_count {
+            return Err(format!(
+                "biome grid length {} does not match grass cell count {}",
+                biome_grid.len(),
+                dims.grass_cell_count
+            ));
+        }
+        let grass_density = base64_decode(&state.grass.density_b64)?;
+        if grass_density.len() != dims.grass_cell_count {
+            return Err(format!(
+                "grass density length {} does not match grass cell count {}",
+                grass_density.len(),
+                dims.grass_cell_count
+            ));
+        }
+
+        let nn_input_layout = self::nn::NnInputLayout::for_settings(
+            dims.wrap_world,
+            state.sliders.species_mode,
+            state.sliders.grass_multisight,
+        );
+        if state.nn_topology.input_width() != nn_input_layout.width() {
+            return Err(format!(
+                "nn_topology input_width {} does not match active layout width {}",
+                state.nn_topology.input_width(),
+                nn_input_layout.width()
+            ));
+        }
+
+        let mut grass_seed_rng = state.rng.clone();
+        let mut grass =
+            GrassGrid::new_with_capacity(&mut grass_seed_rng, 0, dims, Some(&biome_grid));
+        grass.set_propagation(state.grass.propagation);
+        grass.world_seed = state.grass.world_seed;
+        grass.replace_density_u8(&grass_density)?;
+
+        let n = state.creatures.len();
+        let brain_weight_bytes = base64_decode(&state.creatures.brain_weights_b64)?;
+        let weights_per_brain = state.nn_topology.weight_count();
+        let expected_brain_bytes = n
+            .checked_mul(weights_per_brain)
+            .and_then(|count| count.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| "brain weight byte length overflow".to_string())?;
+        if brain_weight_bytes.len() != expected_brain_bytes {
+            return Err(format!(
+                "brain weight byte length {} does not match expected {}",
+                brain_weight_bytes.len(),
+                expected_brain_bytes
+            ));
+        }
+        let mut creatures = CreatureSoA::with_capacity(n.max(1));
+        for i in 0..n {
+            let weight_start = i * weights_per_brain * std::mem::size_of::<f32>();
+            let mut weights = Vec::with_capacity(weights_per_brain);
+            for chunk in brain_weight_bytes
+                [weight_start..weight_start + weights_per_brain * std::mem::size_of::<f32>()]
+                .chunks_exact(std::mem::size_of::<f32>())
+            {
+                weights.push(f32::from_le_bytes(
+                    chunk.try_into().expect("chunk size is 4"),
+                ));
+            }
+            let brain = Brain {
+                weights,
+                topology: state.nn_topology.clone(),
+            };
+            creatures.push(
+                state.creatures.id[i],
+                state.creatures.x[i],
+                state.creatures.y[i],
+                state.creatures.energy[i],
+                state.creatures.birth_tick[i],
+                brain,
+                state.creatures.hue[i],
+                state.creatures.species_id[i],
+            );
+            creatures.vx[i] = state.creatures.vx[i];
+            creatures.vy[i] = state.creatures.vy[i];
+            creatures.age[i] = state.creatures.age[i];
+            creatures.digestion_cooldown[i] = state.creatures.digestion_cooldown[i];
+            creatures.cumulative_upkeep[i] = state.creatures.cumulative_upkeep[i];
+            creatures.last_action[i] = state.creatures.last_action[i];
+            creatures.action_this_tick[i] = state.creatures.action_this_tick[i];
+            creatures.distance_travelled[i] = state.creatures.distance_travelled[i];
+            creatures.ticks_since_split[i] = state.creatures.ticks_since_split[i];
+            creatures.flash_tag[i] = state.creatures.flash_tag[i];
+            creatures.flash_ticks[i] = state.creatures.flash_ticks[i];
+            creatures.mating_cooldown[i] = state.creatures.mating_cooldown[i];
+        }
+        let mut grid = SpatialGrid::new(dims);
+        grid.rebuild(&creatures.x, &creatures.y);
+
+        Ok(World {
+            tick: state.tick,
+            seed: state.seed,
+            dims,
+            world_seed: state.world_seed,
+            biome_grid,
+            species: state.species,
+            rng: state.rng,
+            grass,
+            grid,
+            creatures,
+            sliders: state.sliders,
+            next_creature_id: state.next_creature_id,
+            world_ended: state.world_ended,
+            profile: crate::profiler::Profiler::new(),
+            scratch_fx: Vec::new(),
+            scratch_fy: Vec::new(),
+            scratch_neighbors: Vec::new(),
+            scratch_damage: Vec::new(),
+            scratch_gain: Vec::new(),
+            scratch_cooldown_set: Vec::new(),
+            scratch_attempted_eat: Vec::new(),
+            scratch_got_a_bite: Vec::new(),
+            scratch_attack_picks: Vec::new(),
+            scratch_dead: Vec::new(),
+            scratch_cull_pool: Vec::new(),
+            scratch_splitters: Vec::new(),
+            scratch_mate_partners: Vec::new(),
+            scratch_newborn_dead: Vec::new(),
+            scratch_existing_dead: Vec::new(),
+            scratch_birth_seeds: Vec::new(),
+            scratch_child_brains: Vec::new(),
+            scratch_argmax_pre: Vec::new(),
+            sector_lut: proximity::build_sector_lut(),
+            scratch_sector_accum: Vec::new(),
+            nn_topology: state.nn_topology,
+            nn_input_layout,
+            nn_stats: std::sync::Arc::new(nn_stats::NnStats::new(
+                crate::profiler::clock_now_us_threadsafe(),
+            )),
+        })
     }
 
     /// Test-only deep clone of the World. Clones all SoA data and resets
