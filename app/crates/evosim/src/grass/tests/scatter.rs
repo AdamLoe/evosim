@@ -61,6 +61,59 @@ fn total_bytes(g: &GrassGrid) -> u64 {
     g.density_u8_snapshot().iter().map(|&b| b as u64).sum()
 }
 
+fn hash_density(g: &GrassGrid) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for b in g.density_u8_snapshot() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100_0000_01B3);
+    }
+    h
+}
+
+// ── Science-mode deterministic reduction ───────────────────────────────────
+
+#[test]
+fn science_scatter_repeats_exactly_across_tile_boundaries() {
+    let dim = DIMS.grass_dim;
+    let params = ScatterParams {
+        decay_pct: 0.45,
+        decay_amount: GRASS_MAX / 255.0 * 3.0,
+        spread_pct: 1.0,
+        spread_amount: GRASS_MAX,
+        ..ScatterParams::default()
+    };
+
+    let make = || {
+        let mut g = make_scatter_grid_biome(None, params);
+        g.set_deterministic_science_mode(true);
+        for dy in 30..35 {
+            for dx in 30..35 {
+                g.dset(dy * dim + dx, GRASS_MAX);
+            }
+        }
+        for dy in 0..4 {
+            for dx in 0..4 {
+                g.dset(dy * dim + dx, GRASS_MAX);
+                g.dset((dim - 1 - dy) * dim + (dim - 1 - dx), GRASS_MAX);
+            }
+        }
+        g.resync_active_from_density();
+        g
+    };
+
+    let mut a = make();
+    let mut b = make();
+    tick_n(&mut a, 12);
+    tick_n(&mut b, 12);
+
+    assert_eq!(
+        a.density_u8_snapshot(),
+        b.density_u8_snapshot(),
+        "science scatter must repeat exactly with tile-boundary and wrap-seam sources"
+    );
+    assert_eq!(hash_density(&a), hash_density(&b));
+}
+
 // ── Test (a): disc_footprint_is_round ───────────────────────────────────────
 
 /// Seed ONE cell in the centre of the grid, run many ticks with

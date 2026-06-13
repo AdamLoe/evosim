@@ -83,6 +83,28 @@ drove the choice — so future optimization passes start from facts, not guesses
   restructured so geometric-skip is applied to an already-sparse event list
   rather than a full tile scan.
 
+### Deterministic science scatter stays opt-in despite a faster covered fixture
+
+- **Decision**: `WorldConfig.science.deterministic` remains opt-in; the normal
+  relaxed scatter path stays the default. `cargo bench --no-run` is part of the
+  ship gate, and the focused threaded native bench command
+  `cargo bench --features threads --bench grass_scatter -- grass --warm-up-time 1 --measurement-time 2`
+  measured the covered 512², 6.25%-seeded fixture.
+- **Measurement**: Criterion reported `grass_propagation_scatter` at
+  2.2895 ms mean and `grass_propagation_science` at 1.6486 ms mean. The
+  `grass_full_tick/scatter` mean was 2.1559 ms; `grass_full_tick/science` was
+  1.5486 ms. On this fixture the deterministic reducer was faster, likely
+  because it avoids contended relaxed atomics.
+- **Why**: One fixture is not enough evidence to replace the default. Science
+  mode still clears full-grid delta scratch and performs an ordered reduction,
+  so large, dense, sparse-frontier, and browser-wasm regimes may have different
+  costs. Keeping the warning honest is safer than generalizing from the native
+  bench.
+- **Applies to**: `architecture/simulation-core.md`,
+  `architecture/profiler.md`.
+- **Code anchors**: `app/crates/evosim/src/grass/mod.rs → compute_propagation_scatter_science`;
+  `app/crates/evosim/benches/grass_scatter.rs`.
+
 ### Snapshot worker (v2.0.7) parked: staging copy is the dominant cost
 
 - **Decision**: `WorldHandle::write_snapshot` runs on the sim worker thread.

@@ -59,6 +59,22 @@ fn bench_grass_propagation(c: &mut Criterion) {
         );
     });
 
+    c.bench_function("grass_propagation_science", |b| {
+        let base = make_grid(WORLD_SIZE, SEED_COUNT, RNG_SEED);
+        b.iter_batched(
+            || {
+                let mut g = base.clone();
+                g.set_propagation(GrassPropagation::Scatter);
+                g.set_deterministic_science_mode(true);
+                g.world_seed = 42;
+                g.scatter_tick = 1;
+                g
+            },
+            |mut g| g.compute_propagation(black_box(0.05), black_box(0.02)),
+            criterion::BatchSize::SmallInput,
+        );
+    });
+
     // ── BLUR benchmark ───────────────────────────────────────────────────────
     // Use iter_batched for the same reason: clone is setup, not measured.
     // r_in_cell=0.05, k_propagate=0.02 match the production World defaults.
@@ -79,30 +95,40 @@ fn bench_grass_propagation(c: &mut Criterion) {
     // Mirrors what World::tick_once does (propagation + rebuild_row_bitset).
     // Both use the same 512² grid with default scatter params.
     let mut group = c.benchmark_group("grass_full_tick");
-    for mode in &[GrassPropagation::Scatter, GrassPropagation::Blur] {
-        let label = match mode {
-            GrassPropagation::Scatter => "scatter",
-            GrassPropagation::Blur => "blur",
+    for &(mode, science) in &[
+        (GrassPropagation::Scatter, false),
+        (GrassPropagation::Scatter, true),
+        (GrassPropagation::Blur, false),
+    ] {
+        let label = match (mode, science) {
+            (GrassPropagation::Scatter, false) => "scatter",
+            (GrassPropagation::Scatter, true) => "science",
+            (GrassPropagation::Blur, _) => "blur",
         };
         let base = make_grid(WORLD_SIZE, SEED_COUNT, RNG_SEED);
-        group.bench_with_input(BenchmarkId::from_parameter(label), mode, |b, &mode| {
-            b.iter_batched(
-                || {
-                    let mut g = base.clone();
-                    g.set_propagation(mode);
-                    if mode == GrassPropagation::Scatter {
-                        g.world_seed = 42;
-                        g.scatter_tick = 1;
-                    }
-                    g
-                },
-                |mut g| {
-                    g.compute_propagation(black_box(0.05), black_box(0.02));
-                    g.rebuild_row_bitset();
-                },
-                criterion::BatchSize::SmallInput,
-            );
-        });
+        group.bench_with_input(
+            BenchmarkId::from_parameter(label),
+            &(mode, science),
+            |b, &(mode, science)| {
+                b.iter_batched(
+                    || {
+                        let mut g = base.clone();
+                        g.set_propagation(mode);
+                        g.set_deterministic_science_mode(science);
+                        if mode == GrassPropagation::Scatter {
+                            g.world_seed = 42;
+                            g.scatter_tick = 1;
+                        }
+                        g
+                    },
+                    |mut g| {
+                        g.compute_propagation(black_box(0.05), black_box(0.02));
+                        g.rebuild_row_bitset();
+                    },
+                    criterion::BatchSize::SmallInput,
+                );
+            },
+        );
     }
     group.finish();
 }

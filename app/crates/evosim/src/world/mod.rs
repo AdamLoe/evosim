@@ -78,6 +78,10 @@ mod equilibrium_tests;
 #[path = "equilibrium_measure.rs"]
 mod equilibrium_measure;
 
+#[cfg(test)]
+#[path = "science_mode_tests.rs"]
+mod science_mode_tests;
+
 use self::nn::{chunk_ranges, dynamic_chunks};
 use self::tick::AttackPick;
 use crate::brain::{Brain, MutationPolicy, NnTopology};
@@ -469,6 +473,10 @@ pub struct DevSliders {
     /// Multiplier on grass-scatter spread probability and in-cell growth rate.
     /// Values < 1.0 slow regrowth; > 1.0 enrich the world.  Live-tunable.
     pub grass_regrowth_rate: f32,
+    /// Construction-only opt-in deterministic science/replay mode. Off by
+    /// default; when on, threaded scatter uses deterministic reduction instead
+    /// of relaxed cross-tile RMW races.
+    pub deterministic_science_mode: bool,
 }
 
 impl Default for DevSliders {
@@ -534,6 +542,7 @@ impl Default for DevSliders {
             starvation_drain_rate: STARVATION_DRAIN_RATE_DEFAULT,
             grass_capacity_scale: GRASS_CAPACITY_SCALE_DEFAULT,
             grass_regrowth_rate: GRASS_REGROWTH_RATE_DEFAULT,
+            deterministic_science_mode: false,
         }
     }
 }
@@ -779,6 +788,7 @@ impl World {
         // tests). Thread the world seed into the per-cell scatter hash RNG (the
         // tick is refreshed before each propagation call in `step`).
         grass.set_propagation(GrassPropagation::Scatter);
+        grass.set_deterministic_science_mode(sliders.deterministic_science_mode);
         grass.world_seed = world_seed;
         if sliders.full_grass_on_init {
             // Fill every cell to its biome carrying capacity (not a flat
@@ -1943,6 +1953,7 @@ impl World {
         let mut grass =
             GrassGrid::new_with_capacity(&mut grass_seed_rng, 0, dims, Some(&biome_grid));
         grass.set_propagation(state.grass.propagation);
+        grass.set_deterministic_science_mode(state.sliders.deterministic_science_mode);
         grass.world_seed = state.grass.world_seed;
         grass.replace_density_u8(&grass_density)?;
 

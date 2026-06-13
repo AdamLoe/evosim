@@ -33,9 +33,9 @@ that also bind the shell live in [`cross-cutting.md`](cross-cutting.md).
   construction-only knob commits.
 - **Why**: Mid-run construction changes can't safely re-shape the running
   world: dimensions, grass cell size, clump boot, species topology, founder
-  boosts, and NN topology are all consumed before the first tick. Staging them
-  into `WorldConfig` keeps the current world stable and keeps restart behavior
-  explicit.
+  boosts, NN topology, and science-mode scatter selection are all consumed
+  before the first tick. Staging them into `WorldConfig` keeps the current
+  world stable and keeps restart behavior explicit.
 - **Applies to**: `architecture/app-shell.md`.
 - **Code anchors**: `app/web/src/widgets/devpanel.ts →
   CONSTRUCTION_ONLY_SLIDERS`, `TOAST_CONSTRUCTION`,

@@ -215,6 +215,7 @@ fn render_world_config() -> String {
         WORLD_CONFIG_SCHEMA_VERSION
     ));
     out.push_str("export type WorldConfigCrossoverMode = \"average\" | \"fifty_fifty\";\n\n");
+    out.push_str("export interface ScienceConfig {\n  deterministic: boolean;\n}\n\n");
     out.push_str("export interface WorldShapeConfig {\n  size: number;\n  wrap: boolean;\n}\n\n");
     out.push_str("export interface GrassConstructionConfig {\n");
     out.push_str("  initial_seed_count: number;\n");
@@ -246,6 +247,7 @@ fn render_world_config() -> String {
     out.push_str("export interface WorldConfig {\n");
     out.push_str("  schema_version: typeof WORLD_CONFIG_SCHEMA_VERSION;\n");
     out.push_str("  master_seed: number;\n");
+    out.push_str("  science: ScienceConfig;\n");
     out.push_str("  world: WorldShapeConfig;\n");
     out.push_str("  grass: GrassConstructionConfig;\n");
     out.push_str("  population: PopulationConstructionConfig;\n");

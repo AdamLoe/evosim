@@ -40,10 +40,10 @@ seeding), `world_size` + `wrap_world`, and `master_seed`. See
 World construction is versioned by `WORLD_CONFIG_SCHEMA_VERSION` and enters
 wasm as one JSON `WorldConfig` object. The config owns dimensions/wrap,
 master seed, grass boot settings, initial population/energy cap,
-species/mating construction settings, founder action-output boosts, and NN
-topology. The worker still applies `initial_sliders` after construction so
-live slider lanes are seeded, but construction fields are not sourced from
-those lanes.
+species/mating construction settings, founder action-output boosts, NN
+topology, and the opt-in `science.deterministic` mode flag. The worker still
+applies `initial_sliders` after construction so live slider lanes are seeded,
+but construction fields are not sourced from those lanes.
 
 TypeScript consumes generated mirrors in
 `app/web/src/generated/world-config.ts`: `DEFAULT_WORLD_CONFIG`,
@@ -122,6 +122,9 @@ point; bools ride the same path as `0|1`.
 world shape, founder boosts, and NN topology ride `WorldConfig` because
 `initial_sliders` is applied after construction and cannot resize the
 already-built `WorldDims` or rebuild founder brains.
+`WorldConfig.science.deterministic` also rides `WorldConfig`: it selects the
+grass scatter implementation at world construction and is exposed in Settings
+as a next-world-only science/replay option, not as a live slider lane.
 
 Saved-world artifacts embed a resolved `WorldConfig` and validate it against
 the serialized runtime state before constructing a resumed or forked world.
@@ -252,7 +255,10 @@ fn step(&mut self) -> bool {
 ```
 
 `tick.nn` and `tick.grass_step` measure the main sim worker's wall-clock
-wait for the rayon dispatch only. See [`profiler.md`](profiler.md).
+wait for the compute dispatch only. In normal threaded builds that is the
+rayon wait; deterministic science scatter is an ordered reduction and reports
+its sequential dispatch under the same `tick.grass_step` leaf. See
+[`profiler.md`](profiler.md).
 
 The spatial grid is rebuilt once, from start-of-tick positions. Movement,
 repulsion, attack, and species mating reuse that grid; post-movement
@@ -346,6 +352,12 @@ noise). The per-cell hash RNG is `grass_hash_fused_4` — stateless
 SplitMix64-finalizer keyed on `(world_seed, cell, tick)`, never touches
 `SimRng`. No spontaneous spawn; dead cells are never spread sources.
 
+When `WorldConfig.science.deterministic = true`, scatter keeps the same
+tick-start `scatter_prev` source and per-cell hash RNG but replaces relaxed
+RMW writes with deterministic per-cell decay/add delta buffers and an
+ascending cell-order commit. This removes cross-tile write-race dependence
+without changing the default scatter mode.
+
 **`Blur`** (retained for tests): original deterministic separable-Gaussian
 path. Grid-direct test constructors default to `Blur`.
 
@@ -378,11 +390,16 @@ default remaining `GRASS_BITES_PER_BLOCK_DEFAULT = 2`. Six live
 scatter-params sliders (indices 54–59); three construction-scoped grass
 knobs (60–62); two construction-only clump knobs.
 
-**Determinism**: single-threaded runs are deterministic. Under
-`--features threads` the scatter kernel's lossy cross-tile relaxed RMW
-makes grass density **intentionally non-reproducible run-to-run** — an
-accepted perf-vs-reproducibility trade-off. Determinism tests assert exact
-equality only under `#[cfg(not(feature="threads"))]`.
+**Determinism**: normal/default mode remains optimized for the live app.
+Single-threaded normal runs are deterministic, but under `--features threads`
+the normal scatter kernel's lossy cross-tile relaxed RMW makes grass density
+intentionally non-reproducible run-to-run. Opt-in science mode is the
+reproducibility path. The covered promise is exact fixture-state/hash equality
+for the same seed/config/artifact plus the same app version across
+`cargo test --lib` and `cargo test --lib --features threads`; the pinned
+world fixture hash is `0xda586f7d1ea01dbc`. This is not a promise that normal
+mode, profiler/telemetry timing, browser event-loop timing, future app
+versions, or arbitrary hardware/browser floating-point paths are bit-identical.
 
 ## Action ring-flash (FlashTag)
 

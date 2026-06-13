@@ -100,6 +100,11 @@ export function getWorldSeed(): number {
   const v = widgetReaders.get("world_seed")?.();
   return Math.max(0, Math.round(v ?? getSettings().worldSeed)) >>> 0;
 }
+export function getScienceMode(): boolean {
+  const v = settingReaders.get("scienceMode")?.();
+  if (v !== undefined) return v !== 0;
+  return getSettings().scienceMode;
+}
 // Species + sexual-mating construction accessors for the WorldConfig boot
 // payload. Each falls back to the persisted setting if its widget is not
 // installed.
@@ -164,6 +169,9 @@ export function currentWorldConfig(masterSeed: number): WorldConfig {
   return {
     schema_version: WORLD_CONFIG_SCHEMA_VERSION,
     master_seed: Math.max(0, Math.round(masterSeed)) >>> 0,
+    science: {
+      deterministic: getScienceMode(),
+    },
     world: {
       size: getWorldSize(),
       wrap: getWrapWorld(),
@@ -202,9 +210,14 @@ export function currentWorldConfig(masterSeed: number): WorldConfig {
 
 type SliderReader = () => number;
 const widgetReaders = new Map<string, SliderReader>();
+const settingReaders = new Map<keyof Settings, SliderReader>();
 
 function registerWidget(name: string, reader: SliderReader): void {
   widgetReaders.set(name, reader);
+}
+
+function registerSettingReader(name: keyof Settings, reader: SliderReader): void {
+  settingReaders.set(name, reader);
 }
 
 export function currentSliderState(): Record<string, number> {
@@ -267,9 +280,11 @@ export function currentSliderState(): Record<string, number> {
 
 interface StagedHandle {
   /** Rust slider name. */
-  simName: string;
+  simName: string | null;
   /** Settings key the value mirrors. */
   settingKey: keyof Settings;
+  /** True for settings that only affect the next WorldConfig boot payload. */
+  nextWorld?: boolean;
   /** Read the current widget value (numeric; bools encode as 0|1). */
   readWidget: () => number;
   /** Write a value into the widget (updates UI + readout); does NOT push to sim. */
@@ -331,11 +346,13 @@ function applyAll(getBridge: () => SimBridge): void {
     // must NOT push a live slider update — the running sim ignores them and
     // the current world was already constructed with different values. Stage
     // them for the next boot payload (via widgetReaders / boot accessors) only.
-    if (!CONSTRUCTION_ONLY_SLIDERS.has(h.simName)) {
+    const constructionOnly =
+      h.nextWorld || (h.simName !== null && CONSTRUCTION_ONLY_SLIDERS.has(h.simName));
+    if (h.simName !== null && !constructionOnly) {
       getBridge().debouncedSetSlider(h.simName, v);
     }
     h.snapshot = v;
-    if (CONSTRUCTION_ONLY_SLIDERS.has(h.simName)) anyConstructionOnly = true;
+    if (constructionOnly) anyConstructionOnly = true;
   }
   if (anyConstructionOnly) showToast(TOAST_CONSTRUCTION);
   refreshDirtyState();
@@ -358,10 +375,12 @@ function resetAll(getBridge: () => SimBridge): void {
     h.writeWidget(v);
     // v2.0.5 S7: skip live slider push for construction-only settings (same
     // rationale as applyAll). They stage for the next boot payload only.
-    if (!CONSTRUCTION_ONLY_SLIDERS.has(h.simName)) {
+    const constructionOnly =
+      h.nextWorld || (h.simName !== null && CONSTRUCTION_ONLY_SLIDERS.has(h.simName));
+    if (h.simName !== null && !constructionOnly) {
       getBridge().debouncedSetSlider(h.simName, v);
     }
-    if (h.snapshot !== v && CONSTRUCTION_ONLY_SLIDERS.has(h.simName)) {
+    if (h.snapshot !== v && constructionOnly) {
       anyConstructionOnly = true;
     }
     h.snapshot = v;
@@ -541,9 +560,15 @@ function makeStagedSlider(
 
   if (spec.simName) {
     registerWidget(spec.simName, () => Number(numInput.value));
+  }
+  if (spec.nextWorld) {
+    registerSettingReader(spec.settingKey, () => Number(numInput.value));
+  }
+  if (spec.simName || spec.nextWorld) {
     stagedHandles.push({
       simName: spec.simName,
       settingKey: spec.settingKey,
+      nextWorld: spec.nextWorld,
       readWidget: () => Number(numInput.value),
       writeWidget,
       snapshot: initial,
@@ -559,6 +584,7 @@ interface ToggleSpec {
   simName: string | null;
   settingKey: keyof Settings;
   nextWorld?: boolean;
+  tooltip?: string;
 }
 
 function makeStagedToggle(spec: ToggleSpec): HTMLDivElement {
@@ -578,6 +604,7 @@ function makeStagedToggle(spec: ToggleSpec): HTMLDivElement {
     label: spec.label,
     effect: settingEffect(spec.nextWorld),
     effectLabel: spec.nextWorld ? EFFECT_LABELS.restart : "Applies on Apply",
+    tooltip: spec.tooltip,
     nextWorld: spec.nextWorld,
     controls: [input],
     reset: () => {
@@ -589,9 +616,15 @@ function makeStagedToggle(spec: ToggleSpec): HTMLDivElement {
 
   if (spec.simName) {
     registerWidget(spec.simName, () => (input.checked ? 1 : 0));
+  }
+  if (spec.nextWorld) {
+    registerSettingReader(spec.settingKey, () => (input.checked ? 1 : 0));
+  }
+  if (spec.simName || spec.nextWorld) {
     stagedHandles.push({
       simName: spec.simName,
       settingKey: spec.settingKey,
+      nextWorld: spec.nextWorld,
       readWidget: () => (input.checked ? 1 : 0),
       writeWidget,
       snapshot: initial ? 1 : 0,
@@ -648,9 +681,15 @@ function makeStagedDropdown(spec: DropdownSpec): HTMLDivElement {
 
   if (spec.simName) {
     registerWidget(spec.simName, () => Number(select.value));
+  }
+  if (spec.nextWorld) {
+    registerSettingReader(spec.settingKey, () => Number(select.value));
+  }
+  if (spec.simName || spec.nextWorld) {
     stagedHandles.push({
       simName: spec.simName,
       settingKey: spec.settingKey,
+      nextWorld: spec.nextWorld,
       readWidget: () => Number(select.value),
       writeWidget,
       snapshot: initial,
@@ -1188,6 +1227,13 @@ export function installDevPanel(getBridge: () => SimBridge): void {
     simName: "wrap_world",
     settingKey: "wrapWorld",
     nextWorld: true,
+  }));
+  worldSec.appendChild(makeStagedToggle({
+    label: "Deterministic science mode",
+    simName: null,
+    settingKey: "scienceMode",
+    nextWorld: true,
+    tooltip: "Uses deterministic grass reduction for replay fixtures. Can reduce throughput.",
   }));
   worldBox.appendChild(worldSec);
 

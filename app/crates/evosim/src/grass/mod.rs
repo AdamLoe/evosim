@@ -842,6 +842,15 @@ pub struct GrassGrid {
     /// coverage). Lazily sized to `density.len()`; empty until the first scatter
     /// tick. Unused on the blur path.
     pub scatter_prev: Vec<u8>,
+    /// Opt-in deterministic science mode for the scatter kernel. Default false
+    /// so the relaxed threaded hot path is unchanged.
+    pub deterministic_science_mode: bool,
+    /// Science-mode scratch: summed spread additions per target cell. Lazily
+    /// sized and left empty in normal mode.
+    scatter_add_delta: Vec<u16>,
+    /// Science-mode scratch: summed decay removals per source cell. Lazily
+    /// sized and left empty in normal mode.
+    scatter_decay_delta: Vec<u16>,
 }
 
 /// v2.0.2 Stream 1c: deep-copy a `Vec<AtomicU64>` bitset (Relaxed loads) — the
@@ -903,6 +912,9 @@ impl Clone for GrassGrid {
             // re-set it before the next compute_propagation call.
             profile_scatter: false,
             scatter_prev: self.scatter_prev.clone(),
+            deterministic_science_mode: self.deterministic_science_mode,
+            scatter_add_delta: self.scatter_add_delta.clone(),
+            scatter_decay_delta: self.scatter_decay_delta.clone(),
         }
     }
 }
@@ -997,6 +1009,9 @@ impl GrassGrid {
             profile_scatter: false,
             // Lazily sized on the first scatter tick (blur-path ctor leaves it empty).
             scatter_prev: Vec::new(),
+            deterministic_science_mode: false,
+            scatter_add_delta: Vec::new(),
+            scatter_decay_delta: Vec::new(),
         };
         g.rebuild_row_bitset();
         // Seed the active set from the initial density so the first tick
@@ -1406,6 +1421,35 @@ impl GrassGrid {
         false
     }
 
+    /// Set a tile and its 8-neighbour fringe in an atomic bitset, honoring wrap.
+    /// Used by deterministic scatter to build the next active frontier without
+    /// concurrent writers.
+    fn bitset_set_tile_and_fringe(set: &[AtomicU64], tpa: usize, wrap: bool, tile: usize) {
+        let tx = tile % tpa;
+        let ty = tile / tpa;
+        for dy in -1i64..=1 {
+            let ny = ty as i64 + dy;
+            let ny = if wrap {
+                ny.rem_euclid(tpa as i64)
+            } else if ny < 0 || ny >= tpa as i64 {
+                continue;
+            } else {
+                ny
+            };
+            for dx in -1i64..=1 {
+                let nx = tx as i64 + dx;
+                let nx = if wrap {
+                    nx.rem_euclid(tpa as i64)
+                } else if nx < 0 || nx >= tpa as i64 {
+                    continue;
+                } else {
+                    nx
+                };
+                Self::bitset_set(set, ny as usize * tpa + nx as usize);
+            }
+        }
+    }
+
     /// One propagation tick. Reads `self.density`, writes `self.scratch`, swaps.
     ///
     /// v2.0.1 §1: organic spread via a TRUE two-pass SEPARABLE `[1,2,1]/4`-per-axis
@@ -1750,6 +1794,23 @@ impl GrassGrid {
             self.scatter_prev.copy_from_slice(dens_u8);
         }
 
+        if self.deterministic_science_mode {
+            self.compute_propagation_scatter_science(
+                &active_list,
+                dim,
+                wrap,
+                tpa,
+                world_seed,
+                tick,
+                decay_pct,
+                spread_pct,
+                capacity_scale,
+                decay_byte,
+                spread_byte,
+            );
+            return;
+        }
+
         let d = &self.density;
         let prev = &self.scatter_prev;
         let cap = &self.capacity;
@@ -1997,6 +2058,160 @@ impl GrassGrid {
         std::mem::swap(&mut self.tile_active, &mut self.tile_active_next);
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn compute_propagation_scatter_science(
+        &mut self,
+        active_list: &[u32],
+        dim: usize,
+        wrap: bool,
+        tpa: usize,
+        world_seed: u32,
+        tick: u32,
+        decay_pct: f32,
+        spread_pct: f32,
+        capacity_scale: f32,
+        decay_byte: u8,
+        spread_byte: u8,
+    ) {
+        let n = self.density.len();
+        if self.scatter_add_delta.len() != n {
+            self.scatter_add_delta.resize(n, 0);
+        } else {
+            self.scatter_add_delta.fill(0);
+        }
+        if self.scatter_decay_delta.len() != n {
+            self.scatter_decay_delta.resize(n, 0);
+        } else {
+            self.scatter_decay_delta.fill(0);
+        }
+
+        let profile_on = self.profile_scatter;
+        let dispatch_start = if profile_on {
+            clock_now_us_threadsafe()
+        } else {
+            0
+        };
+        let body_start = if profile_on {
+            clock_now_us_threadsafe()
+        } else {
+            0
+        };
+
+        let prev = &self.scatter_prev;
+        let disc = &self.disc;
+        let add_delta = &mut self.scatter_add_delta;
+        let decay_delta = &mut self.scatter_decay_delta;
+
+        for &t in active_list {
+            let tile_start = if profile_on {
+                clock_now_us_threadsafe()
+            } else {
+                0
+            };
+            let t = t as usize;
+            let tx = t % tpa;
+            let ty = t / tpa;
+            let ix0 = tx * GRASS_TILE_SIZE;
+            let iy0 = ty * GRASS_TILE_SIZE;
+            let ix1 = (ix0 + GRASS_TILE_SIZE).min(dim);
+            let iy1 = (iy0 + GRASS_TILE_SIZE).min(dim);
+            let mut tile_has_grass = false;
+
+            for iy in iy0..iy1 {
+                for ix in ix0..ix1 {
+                    let c = iy * dim + ix;
+                    let s = prev[c];
+                    if s == 0 {
+                        continue;
+                    }
+                    tile_has_grass = true;
+                    let cid = c as u64;
+                    let (decay_u, spread_u, band_u, pick_u) =
+                        grass_hash_fused_4(world_seed, cid, tick);
+
+                    if decay_byte > 0 && decay_u < decay_pct {
+                        decay_delta[c] = decay_delta[c].saturating_add(decay_byte.max(1) as u16);
+                    }
+
+                    if spread_byte > 0 && spread_u < spread_pct {
+                        if let Some((dx, dy)) = disc.sample(band_u, pick_u) {
+                            let txi = ix as i64 + dx as i64;
+                            let tyi = iy as i64 + dy as i64;
+                            let dimi = dim as i64;
+                            let (gx, gy) = if wrap {
+                                (txi.rem_euclid(dimi), tyi.rem_euclid(dimi))
+                            } else if txi < 0 || txi >= dimi || tyi < 0 || tyi >= dimi {
+                                (-1, -1)
+                            } else {
+                                (txi, tyi)
+                            };
+                            if gx >= 0 {
+                                let tcell = gy as usize * dim + gx as usize;
+                                let cap_byte = encode_density(
+                                    (self.capacity[tcell] * capacity_scale).clamp(0.0, 1.0),
+                                );
+                                if cap_byte > 0 {
+                                    let density_add_byte =
+                                        ((spread_byte as u32 * s as u32 + 127) / 255).max(1) as u16;
+                                    add_delta[tcell] =
+                                        add_delta[tcell].saturating_add(density_add_byte);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if tile_has_grass {
+                Self::bitset_set_tile_and_fringe(&self.tile_active_next, tpa, wrap, t);
+            }
+            if profile_on {
+                self.row_body_self_us.fetch_add(
+                    clock_now_us_threadsafe().saturating_sub(tile_start),
+                    Ordering::Relaxed,
+                );
+                self.row_body_calls.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        if profile_on {
+            self.row_body_us.store(
+                clock_now_us_threadsafe().saturating_sub(body_start),
+                Ordering::Relaxed,
+            );
+        }
+
+        for c in 0..n {
+            let add = self.scatter_add_delta[c].min(u8::MAX as u16) as u8;
+            let decay = self.scatter_decay_delta[c].min(u8::MAX as u16) as u8;
+            if add == 0 && decay == 0 {
+                continue;
+            }
+            let base = prev[c];
+            let after_decay = base.saturating_sub(decay);
+            let next = if add > 0 {
+                let cap_byte = encode_density((self.capacity[c] * capacity_scale).clamp(0.0, 1.0));
+                after_decay.saturating_add(add).min(cap_byte)
+            } else {
+                after_decay
+            };
+            if next != base {
+                self.density[c].store(next, Ordering::Relaxed);
+                let tile = (c / dim / GRASS_TILE_SIZE) * tpa + (c % dim / GRASS_TILE_SIZE);
+                Self::bitset_set(&self.tile_active_next, tile);
+            }
+        }
+
+        if profile_on {
+            self.chunks_mut_us.store(
+                clock_now_us_threadsafe().saturating_sub(dispatch_start),
+                Ordering::Relaxed,
+            );
+        }
+
+        std::mem::swap(&mut self.tile_active, &mut self.tile_active_next);
+    }
+
     /// v2.0.2 Stream 1b: select the propagation kernel (live SCATTER vs retained
     /// BLUR). World/wasm calls this once after construction to put the live grid on
     /// the scatter path; grid-direct tests leave it at the `Blur` default.
@@ -2036,6 +2251,13 @@ impl GrassGrid {
     #[inline]
     pub fn set_profile_scatter(&mut self, on: bool) {
         self.profile_scatter = on;
+    }
+
+    /// Opt into deterministic scatter reduction for science/replay fixtures.
+    /// Normal mode leaves this off to preserve the relaxed threaded hot path.
+    #[inline]
+    pub fn set_deterministic_science_mode(&mut self, on: bool) {
+        self.deterministic_science_mode = on;
     }
 
     /// Bilinear sample at continuous world position `(x, y)`.
@@ -2263,6 +2485,9 @@ mod tests {
             // v2.0.4 C2: profiling gate — off by default.
             profile_scatter: false,
             scatter_prev: Vec::new(),
+            deterministic_science_mode: false,
+            scatter_add_delta: Vec::new(),
+            scatter_decay_delta: Vec::new(),
         };
         g.rebuild_row_bitset();
         g.resync_active_from_density();

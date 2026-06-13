@@ -424,13 +424,14 @@ fn species_mode_run_is_deterministic_for_same_seed() {
         assert_eq!(a.2, b.2, "same seed → identical hues");
     }
 
-    // Threaded (--features threads): the u8 scatter grass kernel is intentionally
-    // non-reproducible across threads. It uses lossy cross-tile read-modify-write
-    // (scatter_add/scatter_sub: relaxed load → clamp → store), so concurrent
-    // thread collisions clobber each other non-deterministically. Creatures sense
-    // the grass density field, so their decisions — and thus births/deaths — diverge
-    // between same-seed runs. This is an accepted design property (intentional fuzz;
-    // bit-reproducibility across threads is not required; see scatter kernel docs).
+    // Threaded normal mode (--features threads): the default u8 scatter grass
+    // kernel is intentionally non-reproducible across threads. It uses lossy
+    // cross-tile read-modify-write (scatter_add/scatter_sub: relaxed load →
+    // clamp → store), so concurrent thread collisions clobber each other
+    // non-deterministically. Creatures sense the grass density field, so their
+    // decisions — and thus births/deaths — diverge between same-seed runs. This
+    // is an accepted default-mode design property; science mode owns exact
+    // cross-feature replay fixtures.
     // We assert only liveness/sanity: both runs complete without panic, populations
     // are non-empty (at least one species survives), and sizes are within a plausible
     // band of each other. Observed run-to-run variation under rayon: population delta

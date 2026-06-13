@@ -16,6 +16,7 @@ function completeWorldConfigShape(config: WorldConfig): unknown {
   return {
     schema_version: config.schema_version,
     master_seed: typeof config.master_seed,
+    science: Object.keys(config.science).sort(),
     world: Object.keys(config.world).sort(),
     grass: Object.keys(config.grass).sort(),
     population: Object.keys(config.population).sort(),
@@ -69,6 +70,7 @@ test("settings defaults are derived from generated world config and live default
   expect(DEFAULTS.worldSize).toBe(DEFAULT_WORLD_CONFIG.world.size);
   expect(DEFAULTS.worldSeed).toBe(DEFAULT_WORLD_CONFIG.master_seed);
   expect(DEFAULTS.wrapWorld).toBe(DEFAULT_WORLD_CONFIG.world.wrap);
+  expect(DEFAULTS.scienceMode).toBe(DEFAULT_WORLD_CONFIG.science.deterministic);
   expect(DEFAULTS.initialGrassSeedCount).toBe(DEFAULT_WORLD_CONFIG.grass.initial_seed_count);
   expect(DEFAULTS.grassSize).toBe(DEFAULT_WORLD_CONFIG.grass.cell_size);
   expect(DEFAULTS.grassClumpCount).toBe(DEFAULT_WORLD_CONFIG.grass.clump_count);

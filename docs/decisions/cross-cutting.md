@@ -134,6 +134,9 @@ Decisions that bind more than one architecture doc.
   from those generated values instead of carrying an independent table.
   `WorldHandle::sliders_defaults_json()` remains the runtime Rust map; the
   Playwright defaults-drift spec asserts it matches the generated live defaults.
+  Additive config blocks, such as `WorldConfig.science.deterministic`, use
+  serde defaults so older saved artifacts and settings payloads resolve to the
+  shipped default when the field is absent.
 - **Why**: Rust tests construct `World` directly and need canonical defaults
   without the web shell. Generating TS mirrors removes the silent-drift path
   while preserving a localStorage default object before the worker exists.

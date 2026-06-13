@@ -39,6 +39,7 @@ the matching heading.
 | Biome map generation, blob seeding from world_seed | [`sim.md`](sim.md) → `Biome map: a few large blobs from world_seed via a dedicated PRNG` |
 | Species + sexual mating opt-in mode | [`sim.md`](sim.md) → `Species + sexual mating is an opt-in mode, not a replacement` |
 | Grass scatter kernel, stochastic u8 propagation, live path | [`sim.md`](sim.md) → `Stochastic u8 scatter kernel is the live propagation path; blur retained behind a selector` |
+| Deterministic science mode for grass scatter replay | [`sim.md`](sim.md) → `Threaded scatter stays nondeterministic by default; science mode is exact for covered fixtures` |
 | Grass LOD step: discrete mip-level stepper (`grass_lod_step`) | [`render.md`](render.md) → `grass_lod_step` |
 | Seeded grass clumps at boot, budget, reproducibility | [`sim.md`](sim.md) → `Seeded grass clumps: initial-budget choice` |
 | BiomePyramid precomputed at construction, write_snapshot window copy | [`sim.md`](sim.md) → `BiomePyramid precomputed at construction; write_snapshot copies a window` |
@@ -46,7 +47,7 @@ the matching heading.
 | SAB layout, byte alignment, cross-language constants, id encoding | [`cross-cutting.md`](cross-cutting.md) |
 | Settings tab stage-then-apply, construction-only sliders, settings schema | [`app-shell.md`](app-shell.md) |
 | Runtime world_size → SAB view binding (app-shell side) | [`app-shell.md`](app-shell.md) → `Runtime world_size ⇒ computed-dims-equality SAB view binding` |
-| Grass scatter bench: ns/cell attribution, fused RNG, geom-skip verdict | [`perf.md`](perf.md) |
+| Grass scatter bench: ns/cell attribution, fused RNG, science-mode cost, geom-skip verdict | [`perf.md`](perf.md) |
 | Snapshot worker (v2.0.7) NO-GO and unpark bar | [`perf.md`](perf.md) → `Snapshot worker (v2.0.7) parked` |
 | grass_step cadence/visibility gating deferred | [`perf.md`](perf.md) → `Grass grass_step cadence/visibility gating` |
 | `MAX_POP_FOR_SIM` Rust/TS duplication and boot assert | [`cross-cutting.md`](cross-cutting.md) → `MAX_POP_FOR_SIM is duplicated in Rust + TS and asserted at boot` |

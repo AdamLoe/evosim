@@ -60,6 +60,9 @@ fn make_grid(dims: WorldDims) -> GrassGrid {
         // v2.0.4 C2: profiling gate — off by default.
         profile_scatter: false,
         scatter_prev: Vec::new(),
+        deterministic_science_mode: false,
+        scatter_add_delta: Vec::new(),
+        scatter_decay_delta: Vec::new(),
     }
 }
 

@@ -22,9 +22,11 @@ Three gate surfaces:
   recovery. Playwright
    boots Vite via its `webServer` hook so the suite is one command.
 
-There is no Rust integration-test crate, no goldens, and no snapshot-hash
-acceptance. Saved-world artifacts have focused Rust round-trip tests and a
-Playwright save/resume/fork/export/import smoke path.
+There is no Rust integration-test crate. The one intentional native
+state-hash oracle is the deterministic science-mode fixture; it pins a small
+world hash across default and threaded feature runs. Saved-world artifacts
+have focused Rust round-trip tests and a Playwright save/resume/fork/export/
+import smoke path.
 
 ## What it owns
 
@@ -64,12 +66,12 @@ Notable coverage by file:
 | File | What it covers |
 |---|---|
 | `app/crates/evosim/src/wasm_api/mod.rs` | `write_snapshot_to_native` layout matches the documented byte stride; `max_pop_for_sim()` mirrors the constant; `creature_at` returns stable ids; `set_slider` dispatch round-trip; telemetry sample cadence/export shape/worst-jank/reset behavior; saved-world artifact round-trip and fork identity semantics. |
-| `crates/evosim/src/world/mod.rs` | Tick step body, slider effects on world construction, multi-founder spawn placement. |
+| `crates/evosim/src/world/mod.rs` | Tick step body, slider effects on world construction, multi-founder spawn placement, deterministic science-mode default-off and exact fixture hash. |
 | `crates/evosim/src/world/tick.rs` | Per-phase invariants — graze energy conservation, eat per-bite math, repulsion clamping, death/birth bookkeeping. |
 | `crates/evosim/src/world/nn.rs` | NN input layout, slot offsets, threaded NN matches sequential NN bit-for-bit (when seeded), chunk-range partition invariants. |
 | `crates/evosim/src/world/proximity.rs` | Sector LUT correctness, wall proximity edges, grass density bilinear seam wrap. |
 | `app/crates/evosim/src/brain/mod.rs` | Forward-pass shape, Leaky ReLU sign behaviour, mutation produces finite values. |
-| `app/crates/evosim/src/grass/mod.rs` | Density init, in-cell growth, scatter/blur propagation coverage, active-tile path equivalence to full-grid reference, wrapped `viewport_window` extraction, bilinear sample, row-has-density bitset rebuild. Tests live in the `grass/tests/` subdir. |
+| `app/crates/evosim/src/grass/mod.rs` | Density init, in-cell growth, scatter/blur propagation coverage, deterministic science scatter across tile boundaries/wrap seams, active-tile path equivalence to full-grid reference, wrapped `viewport_window` extraction, bilinear sample, row-has-density bitset rebuild. Tests live in the `grass/tests/` subdir. |
 | `crates/evosim/src/grid.rs` | `cell_of` boundary clamping, `for_each_in_radius` enumeration. |
 | `crates/evosim/src/profiler.rs` | Ring buffer pruning, five-tree minting via `ensure_root`, RAII span correctness. |
 
@@ -94,6 +96,10 @@ current producers. It intentionally skips non-current plan files.
 Determinism gates: `clippy.toml` forbids `HashMap` / `HashSet`
 `iter*` in sim-critical files (non-deterministic order would silently
 make tests flaky); use `BTreeMap` / sorted `Vec` if iteration is needed.
+`world/science_mode_tests.rs` pins the science-mode fixture hash
+`0xda586f7d1ea01dbc`, and the grass scatter tests assert exact density
+repeatability for a boundary/wrap-seam fixture. Those tests are required to
+pass under both `cargo test --lib` and `cargo test --lib --features threads`.
 
 ## Playwright e2e (`app/web/tests/e2e/`)
 

@@ -1,8 +1,8 @@
 ---
-status:        active
+status:        shipped
 owner:         orchestrator
 last_updated:  2026-06-13
-okay_to_delete: false
+okay_to_delete: true
 long_lived:    false
 owning_docs:
   - architecture/simulation-core.md
@@ -139,5 +139,28 @@ Code routes:
 
 ## Migration Notes
 
-At ship time, update the grass determinism section in `simulation-core.md`,
-testing docs, and decisions for the opt-in mode/performance tradeoff.
+Shipped 2026-06-13.
+
+- Added `WorldConfig.science.deterministic` as an additive, default-off config
+  block and generated the TypeScript mirror. The Settings panel exposes it as a
+  next-world-only science/replay toggle with a throughput warning.
+- Added deterministic science scatter: it reads the same tick-start
+  `scatter_prev` source as normal scatter, accumulates decay/add deltas into
+  owned per-cell buffers, and commits in ascending cell order. Normal threaded
+  scatter remains the default relaxed-RMW path.
+- Saved artifacts now record mode-appropriate compatibility flags and validate
+  the embedded `WorldConfig.science.deterministic` value against runtime state.
+- Added exact deterministic fixtures: a world hash pinned at
+  `0xda586f7d1ea01dbc` across `cargo test --lib` and
+  `cargo test --lib --features threads`, plus a grass boundary/wrap-seam
+  scatter repeatability fixture.
+- Migrated durable facts to `architecture/simulation-core.md`,
+  `architecture/profiler.md`, `architecture/testing.md`,
+  `decisions/sim.md`, `decisions/perf.md`, `decisions/cross-cutting.md`, and
+  `decisions/app-shell.md`. `architecture/biome.md` needed no content change
+  because the biome-capacity cap semantics did not change.
+- Bench evidence: `cargo bench --no-run` compiled, and the focused threaded
+  native `grass_scatter` run measured the covered 512², 6.25%-seeded fixture at
+  2.2895 ms mean for normal propagation scatter and 1.6486 ms mean for science
+  propagation. Science was faster on that fixture, but remains opt-in because
+  dense/large/browser regimes were not proven globally faster.

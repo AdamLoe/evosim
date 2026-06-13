@@ -108,6 +108,7 @@ function variant(seed: 1 | 2): Settings {
     worldSize: seed === 1 ? 4800 : 7200,
     worldSeed: seed === 1 ? 123456 : 654321,
     wrapWorld: seed !== 1,
+    scienceMode: seed === 1,
     speciesMode: seed === 1,
     crossoverMode: seed === 1 ? 0 : 1,
     startingSpeciesCount: seed === 1 ? 7 : 11,
@@ -278,6 +279,9 @@ test("boot world config includes every persisted construction setting", async ({
     world: {
       size: initial.worldSize,
       wrap: initial.wrapWorld,
+    },
+    science: {
+      deterministic: initial.scienceMode,
     },
     grass: {
       initial_seed_count: initial.initialGrassSeedCount,

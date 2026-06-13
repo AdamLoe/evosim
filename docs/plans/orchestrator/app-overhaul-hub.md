@@ -68,7 +68,7 @@ the pacing/snapshot plan, not as a hidden implementation detail.
 | Telemetry/history | Sim + protocol + UI/export | Shipped | Plan `03-telemetry-history-export.md` added bounded in-memory aggregate samples, low-cardinality events, request-only CSV/JSON export, and worst-jank summary; review commit `9e14062` fixed SAB-size docs. | None for this wave; persistence integration remains plan `04` scope. | Phase attribution remains explicit `unknown` until per-jank traces exist. |
 | Persistence | Rust wasm API + IndexedDB | Shipped | Plan `04-world-persistence-artifacts.md` added versioned `evosim.world` artifacts, Rust round-trip load, fresh-worker resume/fork, IndexedDB autosave/named/imported records, import/export controls, and focused regression coverage. | None for this wave; deterministic future replay remains plan `06` scope. | None. |
 | Config/schema/presets | Rust + generated TS + app shell | Shipped | Plan `05-world-config-schema-presets.md` added Rust-owned `WorldConfig`, generated TS defaults/types/presets, config-object worker boot, settings migration, and master-seed derivation; review commit `d62a5d9` fixed founder boosts as construction-only. | None for this wave; persistence should embed the shipped `WorldConfig`. | Legacy wrapper/live slider lanes intentionally remain. |
-| Deterministic science mode | Sim core + grass | Active | Threaded scatter uses relaxed cross-tile add/sub; docs already call out nondeterminism, and persistence artifacts can now record compatibility flags. | Implement `06-deterministic-science-mode.md` as opt-in science mode. | Must keep normal threaded mode default and avoid unmeasured perf regression. |
+| Deterministic science mode | Sim core + grass | Shipped | Plan `06-deterministic-science-mode.md` added opt-in `WorldConfig.science.deterministic`, deterministic grass scatter reduction, artifact compatibility metadata, settings exposure, exact native fixture hashes across default/threaded feature runs, and bench evidence. | None for this wave; normal threaded mode remains the default. | None. |
 | Docs drift automation | Docs + tests/CI | Shipped | Commit `d09cac2` added `scripts/docs-lint.mjs`, `pnpm docs:lint`, CI integration, and drift fixes. | Keep docs-lint green as later waves land. | None. |
 
 ## Phase Tracker
@@ -179,6 +179,11 @@ the pacing/snapshot plan, not as a hidden implementation detail.
 - `73d576f` reviewed persistence and fixed import validation before storing
   imported saves. Verification reported by reviewer: `cargo test --lib`, web
   typecheck, docs-lint, and focused persistence e2e passed.
+- `06-deterministic-science-mode.md` shipped opt-in deterministic science
+  scatter. Verification reported by implementer: generated bindings, Rust lib
+  tests with and without `threads`, both clippy feature sets, web typecheck,
+  docs-lint, focused defaults/settings e2e, web build, `cargo bench --no-run`,
+  focused threaded grass scatter benchmark, and `git diff --check` passed.
 
 ## Migration Notes
 

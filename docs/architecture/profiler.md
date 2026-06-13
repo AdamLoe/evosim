@@ -52,7 +52,7 @@ nn                   ← sum-busy across all rayon workers, per tick
     nn.forward.l3
 
 grass_step           ← sum-busy across all rayon workers, per tick
-  grass_step.dispatch           (par_chunks OR chunks_mut, mutually exclusive)
+  grass_step.dispatch           (normal par_chunks/chunks_mut, or science reduction)
   grass_step.row_compute
     grass_step.row_compute.body
   grass_step.bitset_rebuild
@@ -158,11 +158,13 @@ grass_step           ← sum-busy across all rayon workers, per tick
 - **`grass_step`** — same pattern with `GrassGrid`'s `_us` / `_calls`
   pairs (`par_chunks_us` + `dispatch_calls`, `chunks_mut_us` +
   `dispatch_calls`, `row_body_us` + `row_body_calls`,
-  `row_body_self_us` + `row_body_calls`). `par_chunks_us` and
-  `chunks_mut_us` are mutually exclusive at build time (only one is
-  non-zero depending on `--features threads`); `record_under_root`
-  collapses them under the unified `grass_step.dispatch` name and the
-  shared `dispatch_calls` counter records 1 per tick.
+  `row_body_self_us` + `row_body_calls`). Normal scatter uses
+  `par_chunks_us` in threaded builds and `chunks_mut_us` in non-threaded
+  builds. Deterministic science scatter records its ordered reduction
+  dispatch in `chunks_mut_us` even under `--features threads`, because it is
+  intentionally sequential at the commit boundary. `record_under_root`
+  collapses the dispatch counters under the unified `grass_step.dispatch`
+  name and the shared `dispatch_calls` counter records 1 per tick.
 - **`frame`** — TS-side `span("frame")` at the top of the RAF callback
   in `app/web/src/main.ts`, with inner spans in `app/web/src/render/gl.ts`.
   The `trail_state` child measures the id-keyed previous/current map rebuild

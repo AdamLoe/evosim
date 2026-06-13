@@ -5,6 +5,10 @@ export const WORLD_CONFIG_SCHEMA_VERSION = 1 as const;
 
 export type WorldConfigCrossoverMode = "average" | "fifty_fifty";
 
+export interface ScienceConfig {
+  deterministic: boolean;
+}
+
 export interface WorldShapeConfig {
   size: number;
   wrap: boolean;
@@ -45,6 +49,7 @@ export interface NnTopologyConstructionConfig {
 export interface WorldConfig {
   schema_version: typeof WORLD_CONFIG_SCHEMA_VERSION;
   master_seed: number;
+  science: ScienceConfig;
   world: WorldShapeConfig;
   grass: GrassConstructionConfig;
   population: PopulationConstructionConfig;
@@ -63,6 +68,9 @@ export interface WorldConfigPreset {
 export const DEFAULT_WORLD_CONFIG = {
   "schema_version": 1,
   "master_seed": 0,
+  "science": {
+    "deterministic": false
+  },
   "world": {
     "size": 9600.0,
     "wrap": true
@@ -110,6 +118,9 @@ export const WORLD_CONFIG_PRESETS = [
     "config": {
       "schema_version": 1,
       "master_seed": 0,
+      "science": {
+        "deterministic": false
+      },
       "world": {
         "size": 9600.0,
         "wrap": true
@@ -156,6 +167,9 @@ export const WORLD_CONFIG_PRESETS = [
     "config": {
       "schema_version": 1,
       "master_seed": 0,
+      "science": {
+        "deterministic": false
+      },
       "world": {
         "size": 4800.0,
         "wrap": true
@@ -202,6 +216,9 @@ export const WORLD_CONFIG_PRESETS = [
     "config": {
       "schema_version": 1,
       "master_seed": 0,
+      "science": {
+        "deterministic": false
+      },
       "world": {
         "size": 9600.0,
         "wrap": true

@@ -78,7 +78,9 @@ const SCHEMA_MAJOR = 3;
 // `grassRegrowthRate` (all six P3 equilibrium knobs) → minor bump within v3.
 // WorldConfig migration: construction defaults now come from generated Rust
 // output; existing user values are preserved by name where semantics still match.
-const SCHEMA_MINOR = 3;
+// Deterministic science mode: added `scienceMode` as an additive
+// construction-only setting.
+const SCHEMA_MINOR = 4;
 
 export const APP_FPS_CHOICES = [15, 30, 60, 120] as const;
 export type AppFPS = (typeof APP_FPS_CHOICES)[number];
@@ -216,6 +218,10 @@ export interface Settings {
   worldSize: number;
   worldSeed: number;
   wrapWorld: boolean;
+  // Construction-only science/replay mode. Off by default. When enabled the
+  // threaded grass scatter path uses deterministic reduction, which costs
+  // throughput but makes covered fixtures reproducible for the same app version.
+  scienceMode: boolean;
   // v2.0 Wave 3b: species + sexual-mating construction settings. All four are
   // CONSTRUCTION-ONLY (restart-required, toast on apply) and ride the boot call
   // (`newWithFounderCount`'s 5 trailing args), not the live slider SAB.
@@ -344,6 +350,7 @@ export const DEFAULTS: Settings = {
   worldSize: DEFAULT_WORLD_CONFIG.world.size,
   worldSeed: DEFAULT_WORLD_CONFIG.master_seed,
   wrapWorld: DEFAULT_WORLD_CONFIG.world.wrap,
+  scienceMode: DEFAULT_WORLD_CONFIG.science.deterministic,
   // v2.0 Wave 3b: species + sexual-mating construction settings. Must match the
   // Rust DevSliders defaults: SPECIES_MODE_DEFAULT (false), CROSSOVER_MODE_DEFAULT
   // (FiftyFifty ⇒ slider 1), STARTING_SPECIES_COUNT_DEFAULT (10),

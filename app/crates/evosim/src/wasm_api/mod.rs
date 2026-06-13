@@ -46,12 +46,20 @@ const WORLD_ARTIFACT_KIND: &str = "evosim.world";
 pub struct WorldConfig {
     pub schema_version: u32,
     pub master_seed: u32,
+    #[serde(default)]
+    pub science: ScienceConfig,
     pub world: WorldShapeConfig,
     pub grass: GrassConstructionConfig,
     pub population: PopulationConstructionConfig,
     pub species: SpeciesConstructionConfig,
     pub founders: FounderConstructionConfig,
     pub nn_topology: NnTopologyConstructionConfig,
+}
+
+#[derive(Clone, Serialize, Deserialize, Default)]
+pub struct ScienceConfig {
+    #[serde(default)]
+    pub deterministic: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -220,6 +228,7 @@ fn validate_artifact_config_matches_state(
             != s.starting_species_member_variance
         || config.founders.init_graze_boost.max(0.0) != s.init_graze_boost
         || config.founders.init_split_boost.max(0.0) != s.init_split_boost
+        || config.science.deterministic != s.deterministic_science_mode
     {
         return Err("embedded WorldConfig construction fields do not match runtime state".into());
     }
@@ -266,6 +275,9 @@ impl WorldConfig {
         Self {
             schema_version: WORLD_CONFIG_SCHEMA_VERSION,
             master_seed: 0,
+            science: ScienceConfig {
+                deterministic: false,
+            },
             world: WorldShapeConfig {
                 size: sliders.world_size,
                 wrap: sliders.wrap_world,
@@ -1015,6 +1027,7 @@ impl WorldHandle {
             grass_clump_size: config.grass.clump_size,
             init_graze_boost: config.founders.init_graze_boost.max(0.0),
             init_split_boost: config.founders.init_split_boost.max(0.0),
+            deterministic_science_mode: config.science.deterministic,
             ..Default::default()
         };
         let topology = parse_nn_topology_config(&config.nn_topology)
@@ -2680,6 +2693,17 @@ impl WorldHandle {
     pub fn world_artifact_json(&self) -> String {
         let mut identity = self.artifact_identity.clone();
         identity.artifact_id = make_artifact_id("artifact", self.inner.tick);
+        let compatibility_flags = if self.world_config.science.deterministic {
+            vec![
+                "deterministic_science_replay_same_app_version".to_string(),
+                "telemetry_samples_excluded".to_string(),
+            ]
+        } else {
+            vec![
+                "threaded_grass_future_replay_not_bit_exact".to_string(),
+                "telemetry_samples_excluded".to_string(),
+            ]
+        };
         let artifact = WorldArtifactV1 {
             kind: WORLD_ARTIFACT_KIND.to_string(),
             schema_version: WORLD_ARTIFACT_SCHEMA_VERSION,
@@ -2698,10 +2722,7 @@ impl WorldHandle {
                 policy: "telemetry samples are exported separately by telemetry_report_json"
                     .to_string(),
             },
-            compatibility_flags: vec![
-                "threaded_grass_future_replay_not_bit_exact".to_string(),
-                "telemetry_samples_excluded".to_string(),
-            ],
+            compatibility_flags,
         };
         serde_json::to_string(&artifact).unwrap_or_else(|e| {
             format!(
@@ -3350,6 +3371,7 @@ mod tests {
     fn world_artifact_round_trip_restores_runtime_state() {
         let mut config = WorldConfig::defaults();
         config.master_seed = 1234;
+        config.science.deterministic = true;
         config.world.size = 1200.0;
         config.grass.cell_size = 20.0;
         config.grass.clump_count = 2;
@@ -3361,6 +3383,19 @@ mod tests {
         handle.step_n(12);
 
         let artifact = handle.world_artifact_json();
+        let artifact_json: serde_json::Value = serde_json::from_str(&artifact).unwrap();
+        assert_eq!(
+            artifact_json["world_config"]["science"]["deterministic"],
+            true
+        );
+        assert!(
+            artifact_json["compatibility_flags"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|flag| flag == "deterministic_science_replay_same_app_version"),
+            "science-mode artifacts should advertise deterministic replay compatibility"
+        );
         let loaded =
             WorldHandle::new_from_artifact_json(&artifact, "resume").expect("artifact should load");
 
@@ -3373,6 +3408,8 @@ mod tests {
             loaded.inner.grass.density_u8_snapshot(),
             handle.inner.grass.density_u8_snapshot()
         );
+        assert!(loaded.inner.sliders.deterministic_science_mode);
+        assert!(loaded.inner.grass.deterministic_science_mode);
         assert_eq!(loaded.inner.creatures.id, handle.inner.creatures.id);
         assert_eq!(loaded.inner.next_creature_id, handle.inner.next_creature_id);
     }

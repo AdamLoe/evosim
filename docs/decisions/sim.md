@@ -438,8 +438,8 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   base64 blobs inside JSON rather than separate binary sections. This keeps
   import/export simple and inspectable enough for fixtures, with a fixed worker
   transport cap instead of unbounded messages.
-- **Revisit when**: deterministic science mode needs bit-for-bit future replay,
-  or telemetry history should be deliberately bundled with saved worlds.
+- **Revisit when**: deterministic science mode needs bit-for-bit cross-version
+  replay, or telemetry history should be deliberately bundled with saved worlds.
 
 ### Biome map: a few large blobs from `world_seed` via a dedicated PRNG
 
@@ -825,35 +825,43 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 - **Revisit when**: the blur deletion decision is made by the lead (the
   bench is the trigger).
 
-### Threaded scatter is intentionally non-reproducible; single-threaded runs are deterministic — PENDING LEAD RATIFICATION
+### Threaded scatter stays nondeterministic by default; science mode is exact for covered fixtures
 
-- **Decision**: Single-threaded runs are deterministic (same seed →
-  same output). Under `--features threads` and the live wasm sim (always
-  threaded), the scatter lossy cross-tile relaxed RMW makes grass density
-  — and hence creature behavior that senses it — **intentionally
-  non-reproducible** run-to-run. This is the accepted perf-vs-reproducibility
-  trade-off. The 2 determinism tests assert exact equality only under
-  `#[cfg(not(feature="threads"))]`; threaded tests assert liveness +
-  bounded population delta only.
-- **Why**: A fully-reproducible scatter under threads would require either
-  tile-local-only spread (no cross-tile writes), per-tile inbox merge
-  (queue incoming cross-tile adds, apply after all tiles finish), or
-  CAS-add (retry loop on every RMW). All three alternatives impose
-  significant complexity or cost: tile-local spread narrows the effective
-  disc; inbox merge adds per-tile allocation; CAS-add contends heavily at
-  dense frontiers. The lossy relaxed RMW is a wholesale collision on rare
-  concurrent cross-tile writes — the per-run grass trajectory differs but
-  the statistical properties (patch density, frontier speed) are stable.
-  This trade-off is accepted at the implementation level but **requires
-  lead ratification** for whether determinism is a durable contract.
-- **Alternatives considered**: tile-local spread only (rejected — shrinks
-  effective disc radius, breaks long-range seeding); per-tile inbox merge
-  (viable but complex; deferred as the preferred fix-path if ratification
-  requires reproducibility); CAS-add loop (rejected — contention too high
-  at dense frontiers).
-- **Applies to**: `architecture/simulation-core.md`.
-- **Revisit when**: the lead ratifies or rejects the reproducibility
-  trade-off; if rejected, implement per-tile inbox merge.
+- **Decision**: Normal scatter keeps the existing relaxed cross-tile RMW path
+  and remains the default. Under `--features threads` and the live wasm sim,
+  normal-mode grass density is intentionally non-reproducible run-to-run.
+  `WorldConfig.science.deterministic = true` selects an opt-in science/replay
+  path that reads the same tick-start `scatter_prev`, accumulates decay/add
+  deltas into owned per-cell scratch buffers, and commits cells in ascending
+  order. The covered contract is exact state/hash equality for the same
+  seed/config/artifact and same app version across `cargo test --lib` and
+  `cargo test --lib --features threads`; the pinned small-world fixture hash is
+  `0xda586f7d1ea01dbc`.
+- **Why**: The live app values throughput and statistical grass behavior more
+  than bit-exact replay, while science/regression workflows need a stable
+  comparison target. Keeping the mode opt-in preserves the normal hot path and
+  lets saved artifacts advertise whether future replay is expected to be exact.
+- **Tradeoffs**: Science mode adds full-grid delta scratch and an ordered
+  reduction/commit. The measured 512², 6.25%-seeded threaded native fixture was
+  faster than normal relaxed scatter, but that does not prove every large or
+  dense workload is faster. The UI labels it as science/replay mode and warns
+  that it can reduce throughput. The promise excludes normal mode,
+  profiler/telemetry timing, browser event-loop timing, future app versions,
+  and arbitrary hardware/browser floating-point identity beyond the covered
+  native fixtures.
+- **Alternatives considered**: tile-local spread only (rejected because it
+  shrinks the effective disc radius), per-tile inbox merge (viable but more
+  complex than needed for the local scratch reducer), and CAS-add loops
+  (rejected because dense-frontier contention would make the write path heavy).
+- **Applies to**: `architecture/simulation-core.md`,
+  `architecture/testing.md`.
+- **Code anchors**: `app/crates/evosim/src/grass/mod.rs → compute_propagation_scatter_science`,
+  `GrassGrid::set_deterministic_science_mode`;
+  `app/crates/evosim/src/world/mod.rs → DevSliders::deterministic_science_mode`;
+  `app/crates/evosim/src/world/science_mode_tests.rs`;
+  `app/crates/evosim/src/wasm_api/mod.rs → WorldConfig.science`,
+  `world_artifact_json`;
+  `app/web/src/widgets/devpanel.ts → currentWorldConfig`.
 
 ### GRASS_EQ_EPS = 1/255 (one u8 quantum)
 
