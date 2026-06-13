@@ -1,8 +1,8 @@
 ---
-status:        draft
+status:        shipped
 owner:         orchestrator
 last_updated:  2026-06-13
-okay_to_delete: false
+okay_to_delete: true
 long_lived:    false
 owning_docs:
   - architecture/worker-runtime.md
@@ -80,7 +80,7 @@ the pacing/snapshot plan, not as a hidden implementation detail.
 - [x] Apply plan-review corrections.
 - [x] Implement wave 1 with disjoint ownership.
 - [x] Review wave 1 work.
-- [ ] Continue later waves until shipped or blocked.
+- [x] Continue later waves until shipped or blocked.
 
 ## Candidate Wave Order
 
@@ -184,9 +184,13 @@ the pacing/snapshot plan, not as a hidden implementation detail.
   tests with and without `threads`, both clippy feature sets, web typecheck,
   docs-lint, focused defaults/settings e2e, web build, `cargo bench --no-run`,
   focused threaded grass scatter benchmark, and `git diff --check` passed.
+- Final review found no deterministic-mode fixes needed. Verification reported
+  by reviewer: `cargo test --lib science -- --nocapture` and
+  `cargo test --lib --features threads science -- --nocapture` passed with
+  exact fixture coverage.
 
 ## Migration Notes
 
-At ship time, migrate durable facts and decisions into the owning docs in
-frontmatter, then mark this hub `shipped` and `okay_to_delete: true` only if
-all temporary context has moved.
+Durable facts and tradeoffs have been migrated into the owning architecture and
+decision docs by the plan implementers/reviewers. This hub is a temporary
+coordination artifact and is okay to delete on the next plans cleanup pass.
