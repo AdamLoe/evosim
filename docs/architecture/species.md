@@ -20,7 +20,7 @@ The two modes never coexist in one run — switching requires a restart.
 
 ## SpeciesRegistry
 
-`crates/evosim/src/world/species.rs` → `Species` / `SpeciesRegistry`
+`crates/evosim/src/world/species.rs` → `Species`, `SpeciesRegistry`
 
 The registry is a `Vec<Species>` keyed by `id: u16`. Each entry holds the
 id, a `color_u32`, and a `name: String`. It is designed **dynamic**
@@ -38,7 +38,7 @@ single-pool mode) — see `crates/evosim/src/creature.rs` → `CreatureSoA`.
 
 ## N-anchor seeding
 
-`crates/evosim/src/world/mod.rs` → species seeding (`new_with_sliders` / `new_with_sliders_topology`)
+`crates/evosim/src/world/mod.rs` → `new_with_sliders`, `new_with_sliders_topology`
 
 Seeding is **deterministic from `world_seed`** via a dedicated setup PRNG
 (`SimRng::from_u64(world_seed ^ SEEDING_PRNG_SALT)`) — a distinct stream
@@ -95,7 +95,7 @@ widens the contact radius, letting creatures mate from further apart.
 
 ## Crossover
 
-`app/crates/evosim/src/brain/mod.rs` → `child_from_crossover_with_sigma`
+`crates/evosim/src/brain/mod.rs` → `child_from_crossover_with_sigma`
 
 Crossover (`crossover_mode`: `average` or `fifty_fifty`, default
 `fifty_fifty`) is applied to **brain weights** only, then the same per-birth
@@ -116,7 +116,7 @@ effectiveness is a constant — there is no genome to modulate it.
 
 ## Action gate (mode-dependent action[2])
 
-`crates/evosim/src/world/nn.rs` → `ActionGate` / `decode_action` / `is_valid_action`
+`crates/evosim/src/world/nn.rs` → `ActionGate`, `decode_action`, `is_valid_action`
 
 The NN output shape is unchanged: `action[2]` decodes to `Action::Split` in
 both modes, but its **meaning** and validity gate differ by mode. In
@@ -146,7 +146,7 @@ The logit order is stable across modes.
 - `crates/evosim/src/world/mod.rs` → `handle_mating`, species seeding in `new_with_sliders_topology`
 - `crates/evosim/src/world/tick.rs` → `attack` (same-species gate), `energy_bookkeeping` (cooldown decrement)
 - `crates/evosim/src/world/nn.rs` → `ActionGate`, `decode_action`, `is_valid_action`
-- `app/crates/evosim/src/brain/mod.rs` → `child_from_crossover_with_sigma`, `founder_spread_with_sigma`
+- `crates/evosim/src/brain/mod.rs` → `child_from_crossover_with_sigma`, `founder_spread_with_sigma`
 - `crates/evosim/src/creature.rs` → `CreatureSoA` (`species_id`, `mating_cooldown`, `hue` columns)
 - `crates/evosim/src/constants.rs` → `SPECIES_MODE_DEFAULT`, `CrossoverMode`, `STARTING_SPECIES_COUNT_DEFAULT`, `STARTING_SPECIES_MEMBER_COUNT_DEFAULT`, `STARTING_SPECIES_MEMBER_VARIANCE_DEFAULT`, `MATING_COOLDOWN_TICKS_DEFAULT`, `MATING_CONTACT_RADIUS_FACTOR`, `MATE_REACH_MULTIPLIER_DEFAULT`
 

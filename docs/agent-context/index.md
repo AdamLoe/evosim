@@ -12,7 +12,7 @@ Under **agent-docs v1**, the generic workflow discipline lives in the
 global kit (`~/agent-docs/v1/rules/`); the in-repo docs below
 hold what's specific to **evosim** and link up to the matching global
 rule. App-independent commands and templates are exposed as global
-**skills** (`/fresh-chat`, `/fresh-orchestrator`, `/fix-docs-drift-all`,
+**skills** (`/fresh-chat`, `/grand-orchestrator`, `/fix-docs-drift-all`,
 `/check-docs-consistency-some`, `/wrap-up-current-chat`), not as in-repo
 prompt files.
 
@@ -29,7 +29,7 @@ prompt files.
 | Creating, updating, or shipping a plan | [`../plans/index.md`](../plans/index.md) (landing); [`~/agent-docs/v1/plan-lifecycle.md`](~/agent-docs/v1/plan-lifecycle.md) (lifecycle) + [`~/agent-docs/v1/plan-template.md`](~/agent-docs/v1/plan-template.md) (skeleton); [`maintaining-docs.md`](maintaining-docs.md) | `rules/authoring-rules.md` §workflow |
 
 For a multi-stream effort driven via sub-agents (audit → plan →
-implement → verify → doc-migrate), bootstrap with the `/fresh-orchestrator`
+implement → verify → doc-migrate), bootstrap with the `/grand-orchestrator`
 skill and read `orchestrating.md`. A single focused change does not need it.
 
 ## See also

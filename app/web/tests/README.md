@@ -1,14 +1,14 @@
 # evosim Playwright e2e suite
 
 Smoke tests for the main-thread → sim-worker control path. Exists because
-v1.6's `Atomics.waitAsync` loop has now regressed *twice* into a state
-where `onmessage` stops firing on the sim worker (sliders / pause / TPS /
-inspect / profile all dark-hole) and no unit test would have caught it.
+the worker loop can regress into a state where `onmessage` stops firing on
+the sim worker (sliders / pause / TPS / inspect / profile all dark-hole)
+and no unit test would catch it.
 
 ## Run
 
 ```bash
-cd web
+cd app/web
 pnpm install            # one-time
 pnpm test:e2e
 ```
@@ -45,24 +45,22 @@ pnpm test:e2e --project chromium --grep "pause"   # one test at a time
 - **slider change** — opens the dev-panel, edits the `basic upkeep`
   numeric input, asserts the worker did not log a `set_slider … rejected`
   warning (which the bridge wraps wasm errors with).
-- **profile toggle** — toggles `show profiler` + the `#profiler-enable`
-  checkbox, asserts all four stacked tables (frame, tick, nn, grass_step)
-  populate within 4 s of the click.
+- **profile toggle** — opens the Settings rail's Profiler category and
+  asserts the profiler trees populate within 4 s.
 - **restart `r`** — presses the `r` hotkey, asserts the tick counter
   resets (drops below the pre-restart value).
 
 Every test forces target-TPS to 1000 *before* interacting, because that is
-the regime where `1000/targetTPS - elapsed` clamps to 0 and
-`Atomics.waitAsync(.., 0)` returns synchronously. A test at default
-TPS=60 passes on the buggy commit — that's how this regression slipped
-out of v1.7.
+the regime where futex wake handling, pacing overshoot, and snapshot
+back-pressure failures surface. A test at default TPS=60 can pass while
+high-throughput control is broken.
 
 ## Adding tests
 
 If you're adding a test for a new main → worker message, do it under
 target-TPS=1000 so any future "loop doesn't yield" regression also breaks
-your test. Reading state back is easiest via the status bar
-(`#status` textContent: `seed: X  ·  tick N  ·  pop P`) or a downstream
-observable (e.g. perf-panel render). If you need to read worker state
+your test. Reading state back is easiest via the status line
+(`#perf-status-line` textContent: `seed: X · tick N · pop P`) or a downstream
+observable (e.g. profiler-tree render). If you need to read worker state
 directly that no UI exposes, plumb it through `request_profile_report`
 which already round-trips JSON.

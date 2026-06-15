@@ -19,7 +19,7 @@ drove the choice — so future optimization passes start from facts, not guesses
 - **Applies to**: `architecture/simulation-core.md`.
 - **Code anchors**: `crates/evosim/src/constants.rs → HASH_CELL`;
   `crates/evosim/src/world/tick.rs → World::apply_movement_and_repulsion`;
-  `crates/evosim/benches/tick_profile.rs`.
+  `crates/evosim/benches/tick_profile.rs → make_handle`.
 - **Revisit when**: density, movement range, or interaction fidelity makes the
   stale-bucket tradeoff unacceptable.
 
@@ -36,7 +36,7 @@ drove the choice — so future optimization passes start from facts, not guesses
   `architecture/render-pipeline.md`.
 - **Code anchors**: `crates/evosim/src/constants.rs → GRASS_PYRAMID_REFRESH_PERIOD`;
   `crates/evosim/src/world/mod.rs → World::step`;
-  `crates/evosim/benches/tick_profile.rs`.
+  `crates/evosim/benches/tick_profile.rs → make_handle`.
 - **Revisit when**: stale far-grass sensing is observable or a dirty-subtree
   refresh makes per-tick freshness cheap.
 
@@ -58,8 +58,8 @@ drove the choice — so future optimization passes start from facts, not guesses
   progress without an architectural change (event-sampling, cadence gating).
 - **Applies to**: `architecture/simulation-core.md`.
 - **Code anchors**: `crates/evosim/src/rng.rs → grass_hash_fused_4`;
-  `app/crates/evosim/src/grass/mod.rs → compute_propagation_scatter` (the 2-hash dispatch);
-  `crates/evosim/benches/grass_attribution.rs` (the attribution bench).
+  `crates/evosim/src/grass/mod.rs → compute_propagation_scatter` (the 2-hash dispatch);
+  `crates/evosim/benches/grass_attribution.rs → bench_attribution`.
 - **Revisit when**: the event-sampling refactor (see deferred entry below) is in
   scope and the freeze loop is restructured around a compact live-cell list — only
   then does reducing the per-cell cost below the freeze floor become meaningful.
@@ -77,8 +77,8 @@ drove the choice — so future optimization passes start from facts, not guesses
   freeze read of every cell. At high fill the compact-list overhead dominates.
   The S0 attribution bench verdict is unambiguous.
 - **Applies to**: `architecture/simulation-core.md`.
-- **Code anchors**: `crates/evosim/benches/grass_attribution.rs` (the `geom_skip`
-  variant rows).
+- **Code anchors**: `crates/evosim/benches/grass_attribution.rs → variant_geom_skip`,
+  `bench_attribution`.
 - **Revisit when**: the event-sampling refactor is in scope and the freeze loop is
   restructured so geometric-skip is applied to an already-sparse event list
   rather than a full tile scan.
@@ -102,10 +102,10 @@ drove the choice — so future optimization passes start from facts, not guesses
   bench.
 - **Applies to**: `architecture/simulation-core.md`,
   `architecture/profiler.md`.
-- **Code anchors**: `app/crates/evosim/src/grass/mod.rs → compute_propagation_scatter_science`;
-  `app/crates/evosim/benches/grass_scatter.rs`.
+- **Code anchors**: `crates/evosim/src/grass/mod.rs → compute_propagation_scatter_science`;
+  `crates/evosim/benches/grass_scatter.rs → bench_grass_propagation`.
 
-### Snapshot worker (v2.0.7) parked: staging copy is the dominant cost
+### Snapshot worker parked: staging copy is the dominant cost
 
 - **Decision**: `WorldHandle::write_snapshot` runs on the sim worker thread.
   A separate dedicated snapshot worker is **parked** and may not be unparked
@@ -113,12 +113,12 @@ drove the choice — so future optimization passes start from facts, not guesses
   irreducible in place.
 - **Why**: `write_snapshot` reads live `World` state by borrow — creature SoA
   columns, the grass `density` field (mutated every tick via atomic RMW), and the
-  mip `pyramid` (fully rebuilt every tick). Any off-thread split requires one of:
+  cadence-refreshed mip `pyramid`. Any off-thread split requires one of:
   (a) double-buffering all hot `World` state — copies more bytes than it saves
   because the staging copy IS the dominant cost; (b) a per-tick barrier after
   every `step_n` — gives back the rayon parallelism gain plus a sync tax;
   (c) staging a source copy on the sim thread — same dominant cost as (a). The
-  `BiomePyramid` precompute (v2.0.6 S9) eliminated the prior dominant cost (biome
+  `BiomePyramid` precompute eliminated the prior dominant cost (biome
   recompute was 83% of the 13.74 ms total); snapshot write is now **2.35 ms**,
   dominated by the grass-pyramid memcpy (~2.2 ms). That remaining cost is a
   bounded memcpy reducible in the existing worker (tighter LOD budget, async copy)
@@ -130,9 +130,9 @@ drove the choice — so future optimization passes start from facts, not guesses
 - **Applies to**: `architecture/worker-runtime.md`,
   `architecture/shared-memory-and-protocol.md`,
   `architecture/simulation-core.md`.
-- **Code anchors**: `app/crates/evosim/src/wasm_api/mod.rs → WorldHandle::write_snapshot`
+- **Code anchors**: `crates/evosim/src/wasm_api/mod.rs → write_snapshot`
   (source reads: creature SoA borrow, `grass.density`, `grass.pyramid`);
-  `crates/evosim/benches/snapshot_write.rs` (the benchmark that measured the
+  `crates/evosim/benches/snapshot_write.rs → bench_snapshot_write_full` (the benchmark that measured the
   13.74 ms → 2.35 ms speedup).
 - **Revisit when**: a new measured dominant cost in `write_snapshot` emerges that
   cannot be eliminated in place AND a double-buffer design is available that
@@ -156,10 +156,9 @@ drove the choice — so future optimization passes start from facts, not guesses
 - **Applies to**: `architecture/worker-runtime.md`,
   `architecture/shared-memory-and-protocol.md`,
   `architecture/render-pipeline.md`.
-- **Code anchors**: `app/crates/evosim/src/control_sab.rs → CTRL_CONSUMED_SEQ`;
-  `app/web/src/sim/worker.ts → maybeWriteSnapshotToSAB`;
-  `app/web/src/main.ts → frame`;
-  `app/web/tests/e2e/app-fps.spec.ts`.
+- **Code anchors**: `crates/evosim/src/control_sab.rs → CTRL_CONSUMED_SEQ`;
+  `web/src/sim/worker.ts → maybeWriteSnapshotToSAB`;
+  `web/src/main.ts → frame`.
 
 ### Telemetry history is fixed-cadence and exported on request
 
@@ -169,7 +168,7 @@ drove the choice — so future optimization passes start from facts, not guesses
   main requests export through the telemetry SAB response buffer.
 - **Why**: The profiler already handles short-window diagnostics; per-frame or
   cadence-written full-history JSON would add avoidable worker cost and
-  pressure the old small report buffers. Fixed-cadence samples bound memory and
+  pressure the report buffers. Fixed-cadence samples bound memory and
   CPU, while request-only export keeps steady-state cost to cheap aggregate
   sampling.
 - **Tradeoffs**: CSV/JSON export can be a few seconds stale only until the
@@ -180,11 +179,11 @@ drove the choice — so future optimization passes start from facts, not guesses
   `architecture/shared-memory-and-protocol.md`,
   `architecture/worker-runtime.md`,
   `architecture/app-shell.md`.
-- **Code anchors**: `app/crates/evosim/src/wasm_api/mod.rs → telemetry_report_json`;
-  `app/crates/evosim/src/control_sab.rs → TELEMETRY_REPORT_CAP`;
-  `app/web/src/sim/worker.ts → serveTelemetryRequest`;
-  `app/web/src/sim/bridge.ts → SimBridge.requestTelemetryReport`;
-  `app/web/src/widgets/perf-panel.ts → exportTelemetry`.
+- **Code anchors**: `crates/evosim/src/wasm_api/mod.rs → telemetry_report_json`;
+  `crates/evosim/src/control_sab.rs → TELEMETRY_REPORT_CAP`;
+  `web/src/sim/worker.ts → serveTelemetryRequest`;
+  `web/src/sim/bridge.ts → requestTelemetryReport`;
+  `web/src/widgets/perf-panel.ts → exportTelemetry`.
 
 ### Static biome texture uploads are metadata-cached
 
@@ -195,7 +194,7 @@ drove the choice — so future optimization passes start from facts, not guesses
   sim runs. Caching by window metadata removes repeated static uploads without
   risking biome/grass UV misalignment after pan, zoom, LOD, wrap, or restart.
 - **Applies to**: `architecture/render-pipeline.md`.
-- **Code anchors**: `app/web/src/render/gl.ts → renderWorldImpl`.
+- **Code anchors**: `web/src/render/gl.ts → renderWorldImpl`.
 
 ### Velocity lanes remain deferred
 
@@ -209,7 +208,7 @@ drove the choice — so future optimization passes start from facts, not guesses
 - **Applies to**: `architecture/render-pipeline.md`,
   `architecture/profiler.md`,
   `architecture/shared-memory-and-protocol.md`.
-- **Code anchors**: `app/web/src/render/gl.ts → renderWorldImpl`.
+- **Code anchors**: `web/src/render/gl.ts → renderWorldImpl`.
 
 ### Grass `grass_step` cadence/visibility gating: deferred as the next 10× lever
 
@@ -222,11 +221,11 @@ drove the choice — so future optimization passes start from facts, not guesses
   once decay keeps every grass-bearing tile permanently active. Cadence gating
   (process a tile every Nth tick, batch N decay/spread rolls into one
   rate-preserving roll) is the only behavior-neutral lever that beats the O(N)
-  floor without a fidelity trade. The user steer on 2026-06-04 was: ship pyramid
-  cadence only; leave `grass_step`; revisit with event-sampling if a true 10×
-  is needed. The decision was not to block the wave on this work.
+  floor without a fidelity trade. The current decision is to keep pyramid
+  cadence separate from `grass_step` cadence and revisit event-sampling only
+  when a larger grass-step reduction is needed.
 - **Applies to**: `architecture/simulation-core.md`.
-- **Code anchors**: `app/crates/evosim/src/grass/mod.rs → compute_propagation_scatter`
+- **Code anchors**: `crates/evosim/src/grass/mod.rs → compute_propagation_scatter`
   (the current per-tick full-pass path).
 - **Revisit when**: grass-step wall time becomes the dominant TPS constraint at
   the user's target world size — the first lever to reach for is cadence/throttle

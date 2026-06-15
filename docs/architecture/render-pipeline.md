@@ -14,7 +14,7 @@ via typed arrays — no copy, no postMessage.
 
 Both the grass and biome textures are fixed **4096×4096 R8** allocations
 (`GRASS_LOD_BUDGET_AXIS = 4096`, single-sourced in Rust via `gen_bindings` →
-`app/web/src/generated/lod-constants.ts`). Each frame the renderer uploads only the
+`web/src/generated/lod-constants.ts`). Each frame the renderer uploads only the
 sim-chosen clipmap window (`win_w × win_h` bytes) into the `(0, 0)` corner
 via `texSubImage2D`, then applies a UV transform (`u_uv_scale`/`u_uv_offset`)
 to map the world-space quad into that window. The sim worker selects the
@@ -80,7 +80,7 @@ is correctly aspect-matched.
 - **The profile-tree shape** — owned by [`profiler.md`](profiler.md).
   The renderer only opens spans by name.
 - **The dev-panel UI, the rail tabs, the inspector** — those live in
-  `app/web/src/widgets/` and `app/web/src/rail/` and only border the renderer
+  `web/src/widgets/` and `web/src/rail/` and only border the renderer
   via the camera + the snapshot views passed into `renderWorld`.
 
 ## Per-frame shape (in `main.ts`)
@@ -115,8 +115,6 @@ RAF callback (wrapped in `span("frame")`):
      // (mode-downsampled, same win_w×win_h as the grass window).
      // windowMeta carries mip_level, win_origin_x/y, win_w/h, tex dims,
      // wrap mode; consumed each frame to drive the UV transform + texSubImage2D.
-     // Also writes camera SAB lanes (cx/cy/zoom as f32-bits at slots 136-138;
-     // viewport_w/h as u32 at slots 139-140) so the worker knows the view.
   8. Atomics.store(CTRL_CONSUMED_SEQ, seq), update perf-panel status line
 ```
 
@@ -169,7 +167,7 @@ lineage-hue-derived). No renderer change is needed or expected.
 Then one `gl.drawArraysInstanced(TRIANGLE_STRIP, 0, 4, bodyCount)` call
 covers every visible body (including wrapped ghost copies). Bodies are
 filled discs; the `disc` fragment shader switches to an annulus when
-`v_inner_px > 0` (highlight pass), and to a **flat ~1px point** when
+`v_inner_px > 0` (highlight pass), and to a **radial-shaded ~1px point** when
 `v_inner_px < 0`.
 
 ### Survey camera, sub-pixel points, wrap-aware draw
@@ -209,8 +207,8 @@ the `inner_px` sentinel (packed as `v_radii_px.y`):
   ring suppressed.
 - **Radial-shaded dot branch** (`inner_px = -1`, bottom band: raw radius < 1 px):
   a radial gradient (`shade = mix(1.3, 0.6, r)`, bright centre → dark edge),
-  alpha hardcoded to 1.0, no AA disc and no outline ring. Replaced the old
-  flat single-color fill so faction territories stay legible at survey zoom.
+  alpha hardcoded to 1.0, no AA disc and no outline ring, so faction
+  territories stay legible at survey zoom.
 
 **Halo (per-instance LOD multiplier).** A separate `HALO_VS`/`HALO_FS` program
 issues a second instanced draw against the SAME body instance buffer. Peak
@@ -445,9 +443,10 @@ grass density brightens green on top. It samples an **R8 biome-id texture**
 with **NEAREST** filtering so each cell is a flat color. The biome data is
 carried as a windowed clipmap in the per-slot biome window (mode-downsampled, same
 `win_w × win_h` as the grass window); the renderer uploads it via
-`texSubImage2D` every painted frame using the same UV transform as grass —
-biome tint therefore tracks the grass window at every LOD level. For biome
-id-to-color mapping and semantics, see [`architecture/biome.md`](biome.md).
+`texSubImage2D` when the biome metadata key or wasm-memory buffer changes,
+using the same UV transform as grass. Biome tint therefore tracks the grass
+window at every LOD level. For biome id-to-color mapping and semantics, see
+[`architecture/biome.md`](biome.md).
 
 The fragment alpha is the `u_opacity` uniform (the live **`biomeOpacity`**
 "World opacity" Display setting, default 1.0). The biome quad is the bottom
@@ -478,8 +477,7 @@ fully on top.
 - `render/gl.ts` → `renderWorld`, `renderWorldImpl`,
   `initRenderer`, `DISC_VS`/`DISC_FS`, `GRASS_VS`/`GRASS_FS`,
   `BIOME_VS`/`BIOME_FS`, `FRAME_VS`/`FRAME_FS`, `FLOATS_PER_INSTANCE`,
-  `GRASS_CELL_SIZE`, the wrap-offset ghost-copy loop, `PERMANENT_EXP`,
-  `HIGHLIGHT_FADE_MS`, the halo-skip and trail-skip pop thresholds.
+  `PERMANENT_EXP`, `HIGHLIGHT_FADE_MS`, `windowUvWrap`.
 - `sim/bridge.ts` → `GRASS_LOD_BUDGET_AXIS`, `WindowMetadata`,
   `readWindowMetadata`, `makeSlotLayout`, `grassOffset`, `biomeWinOffset`,
   `SNAPSHOT_HEADER_BYTES`, `CTRL_CAMERA_CX_BITS`/`CTRL_CAMERA_CY_BITS`/
@@ -487,7 +485,7 @@ fully on top.
 - `render/scene.ts` → `Camera`, `PX_PER_SIZE`, `MIN_ZOOM`/`MAX_ZOOM`,
   `makeCamera`, `clampCamera`, `worldToScreen`.
 - `render/camera.ts` → `attachCameraControls`.
-- `app/web/src/main.ts` → the RAF `frame` callback, camera SAB lane writes,
+- `web/src/main.ts` → the RAF `frame` callback, camera SAB lane writes,
   `getLatestWindowMetadata`, and `spawnSimWorker`'s SAB binding.
 - `rail/highlight.ts` → `highlights` map, TTL semantics.
 

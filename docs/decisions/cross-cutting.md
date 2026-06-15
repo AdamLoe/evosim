@@ -6,8 +6,8 @@ Decisions that bind more than one architecture doc.
 
 ### `MAX_POP_FOR_SIM` is duplicated in Rust + TS and asserted at boot
 
-- **Decision**: The constant lives in `app/crates/evosim/src/constants.rs` AND
-  `app/web/src/sim/bridge.ts`. The worker passes the Rust value through
+- **Decision**: The constant lives in `crates/evosim/src/constants.rs` AND
+  `web/src/sim/bridge.ts`. The worker passes the Rust value through
   `boot_ready.max_pop_for_sim`; main asserts the TS const matches and
   throws on mismatch.
 - **Why**: The SAB region sizes are derived from this constant — they
@@ -20,22 +20,24 @@ Decisions that bind more than one architecture doc.
 - **Applies to**: `architecture/simulation-core.md`,
   `architecture/shared-memory-and-protocol.md`,
   `architecture/worker-runtime.md`.
-- **Code anchors**: `app/crates/evosim/src/constants.rs → MAX_POP_FOR_SIM`,
-  `app/web/src/sim/bridge.ts → MAX_POP_FOR_SIM`,
-  `app/crates/evosim/src/wasm_api/mod.rs → max_pop_for_sim`,
-  `app/web/src/main.ts → spawnSimWorker` (the assert).
+- **Code anchors**: `crates/evosim/src/constants.rs → MAX_POP_FOR_SIM`,
+  `web/src/sim/bridge.ts → MAX_POP_FOR_SIM`,
+  `crates/evosim/src/wasm_api/mod.rs → max_pop_for_sim`,
+  `web/src/main.ts → spawnSimWorker` (the assert).
 
-### Snapshot SAB header padded to 32 bytes for stride alignment
+### Snapshot SAB header is 64 bytes to preserve typed-array alignment
 
-- **Decision**: The 20-byte stats header is followed by 12 bytes of
-  padding so the creature SoA starts at a 32-byte-aligned offset.
+- **Decision**: `SNAPSHOT_HEADER_BYTES` is a fixed 64-byte header. The stats
+  fields occupy the front of the header and the window-metadata fields occupy
+  the later half; the creature SoA begins immediately after the header.
 - **Why**: `new Float32Array(buf, offset, len)` and friends throw if
-  `offset` is not a multiple of the element stride. Creature stride is
-  32 bytes; Chrome and Firefox both enforce the alignment. Trimming
-  the pad to save 12 bytes per slot would break the typed-array
-  constructor.
+  `offset` is not aligned for the element type. A 64-byte header keeps the
+  creature SoA aligned to the Rust byte stride and leaves room for the
+  snapshot-window metadata without changing the creature region layout.
 - **Applies to**: `architecture/shared-memory-and-protocol.md`.
-- **Code anchors**: `app/web/src/sim/bridge.ts → SNAPSHOT_HEADER_BYTES`.
+- **Code anchors**: `crates/evosim/src/wasm_api/mod.rs → SNAPSHOT_HEADER_BYTES`,
+  `SNAPSHOT_CREATURE_STRIDE`; `web/src/sim/bridge.ts → SNAPSHOT_HEADER_BYTES`,
+  `CREATURE_STRIDE`.
 
 ### `tps` is round-tripped via `f32::to_bits`, not as JSON or a separate atomic
 
@@ -47,8 +49,8 @@ Decisions that bind more than one architecture doc.
   introduce precision questions.
 - **Applies to**: `architecture/shared-memory-and-protocol.md`,
   `architecture/simulation-core.md`.
-- **Code anchors**: `app/crates/evosim/src/wasm_api/mod.rs → write_snapshot_to`
-  (the `tps().to_bits()` write), `app/web/src/sim/bridge.ts →
+- **Code anchors**: `crates/evosim/src/wasm_api/mod.rs → WorldHandle::write_snapshot`
+  (the `tps().to_bits()` write), `web/src/sim/bridge.ts →
   readSnapshotHeader`.
 
 ### Worker→main poll cadences: 1 Hz for profile, 750 ms for NN stats
@@ -61,21 +63,21 @@ Decisions that bind more than one architecture doc.
   one could collapse them if a unifying poll system arrived.
 - **Applies to**: `architecture/shared-memory-and-protocol.md`,
   `architecture/worker-runtime.md`.
-- **Code anchors**: `app/web/src/widgets/perf-panel.ts → POLL_INTERVAL_MS`,
-  `app/web/src/widgets/worker-stats.ts → POLL_INTERVAL_MS`.
+- **Code anchors**: `web/src/widgets/perf-panel.ts → POLL_INTERVAL_MS`,
+  `web/src/widgets/worker-stats.ts → POLL_MS`.
 
 ### Worker-control e2e tests force `targetTPS = 1000` before interacting
 
-- **Decision**: Worker-control Playwright tests under `app/web/tests/e2e/`
+- **Decision**: Worker-control Playwright tests under `web/tests/e2e/`
   set target TPS to 1000 before exercising the control path they cover.
 - **Why**: High target TPS stresses pacing overshoot, futex wake handling,
   SAB request delivery, and snapshot back-pressure. Tests at default TPS=60
   can pass while high-throughput control is broken.
 - **Applies to**: `architecture/testing.md`,
   `architecture/worker-runtime.md`.
-- **Code anchors**: `app/web/tests/e2e/sim-bridge.spec.ts`,
-  `app/web/tests/e2e/app-fps.spec.ts`,
-  `app/web/tests/README.md`.
+- **Code anchors**: `web/tests/e2e/sim-bridge.spec.ts`,
+  `web/tests/e2e/app-fps.spec.ts`,
+  `web/tests/README.md`.
 - **Revisit when**: a fundamentally different pacing primitive lands
   that no longer has the 0-timeout pathology; until then, the rule
   stays mandatory.
@@ -108,9 +110,9 @@ Decisions that bind more than one architecture doc.
 - **Applies to**: `architecture/simulation-core.md`,
   `architecture/shared-memory-and-protocol.md`,
   `architecture/render-pipeline.md`.
-- **Code anchors**: `app/crates/evosim/src/wasm_api/mod.rs → creature_at`,
-  `creature_idx_by_id`, `write_creatures_each` (id_lo/id_hi split),
-  `app/web/src/render/gl.ts → renderWorldImpl` (the `idView` decode).
+- **Code anchors**: `crates/evosim/src/wasm_api/mod.rs → creature_at`,
+  `creature_idx_by_id`, `fill_creature_bytes` (id_lo/id_hi split),
+  `web/src/render/gl.ts → renderWorldImpl` (the `idView` decode).
 
 ### Sim worker first-paint handshake: tick once + snapshot once before `boot_ready`
 
@@ -122,13 +124,13 @@ Decisions that bind more than one architecture doc.
   flashes empty.
 - **Applies to**: `architecture/worker-runtime.md`,
   `architecture/shared-memory-and-protocol.md`.
-- **Code anchors**: `app/web/src/sim/worker.ts → handleBoot`.
+- **Code anchors**: `web/src/sim/worker.ts → handleBoot`.
 
 ### Rust owns WorldConfig and live defaults; TypeScript consumes generated mirrors
 
 - **Decision**: Rust owns the versioned `WorldConfig` construction schema,
   complete config presets, and `DevSliders::default()`. `cargo run --bin
-  gen-bindings` emits `app/web/src/generated/world-config.ts` with
+  gen-bindings` emits `web/src/generated/world-config.ts` with
   `DEFAULT_WORLD_CONFIG`, `WORLD_CONFIG_PRESETS`, and
   `DEFAULT_LIVE_SLIDER_VALUES`. `settings.ts → DEFAULTS` derives sim defaults
   from those generated values instead of carrying an independent table.
@@ -143,12 +145,12 @@ Decisions that bind more than one architecture doc.
 - **Applies to**: `architecture/simulation-core.md`,
   `architecture/app-shell.md`,
   `architecture/shared-memory-and-protocol.md`.
-- **Code anchors**: `app/crates/evosim/src/world/mod.rs → DevSliders::default`,
-  `app/crates/evosim/src/wasm_api/mod.rs → WorldConfig`,
-  `app/crates/evosim/src/bin/gen_bindings.rs → render_world_config`,
-  `app/web/src/generated/world-config.ts`,
-  `app/crates/evosim/src/wasm_api/mod.rs → sliders_defaults_json`,
-  `app/web/src/settings.ts → DEFAULTS`,
+- **Code anchors**: `crates/evosim/src/world/mod.rs → DevSliders::default`,
+  `crates/evosim/src/wasm_api/mod.rs → WorldConfig`,
+  `crates/evosim/src/bin/gen_bindings.rs → render_world_config`,
+  `web/src/generated/world-config.ts`,
+  `crates/evosim/src/wasm_api/mod.rs → sliders_defaults_json`,
+  `web/src/settings.ts → DEFAULTS`,
   `web/tests/e2e/defaults-drift.spec.ts`.
 
 ### Hammer-restart is allowed; old rayon workers GC with the terminated parent
@@ -161,21 +163,19 @@ Decisions that bind more than one architecture doc.
   while the previous bridge's closures keep the SAB rooted, so the
   renderer keeps painting until the new boot lands.
 - **Applies to**: `architecture/worker-runtime.md`.
-- **Code anchors**: `app/web/src/main.ts → restart`.
+- **Code anchors**: `web/src/main.ts → restart`.
 
 ### Runtime `world_size` ⇒ computed-dims-equality SAB safety model
 
 - **Decision**: `world_size` (default 9600u) is a **runtime** construction
-  setting, not a compile-time constant. Consequently grass-grid dims
-  (`grass_dim = round(world_size / GRASS_CELL_SIZE)`) and the snapshot
-  grass/biome window regions are all **derived from settings at boot**. The
-  cross-language SAB-safety model shifts from "assert equal *constant*"
-  (`GRASS_CELL_COUNT` Rust ↔ TS) to "size every view off the **boot-reported**
-  `grass_dim`": `boot_ready` carries the runtime `grass_dim`, the snapshot grass
-  and biome window allocations are both `min(grass_dim, 4096)²` bytes, and the
-  TS side sizes both views off the reported `grass_dim`, never a hardcoded
-  constant. `MAX_POP_FOR_SIM` / `CREATURE_STRIDE` stay constant-asserted (the
-  creature region is world-size-independent).
+  setting, not a compile-time constant. Consequently grass-grid dims and the
+  snapshot grass/biome window regions are all **derived from settings at boot**.
+  There is no Rust ↔ TS `GRASS_CELL_COUNT` constant contract; every web view is
+  sized from the **boot-reported** `grass_dim`. `boot_ready` carries the runtime
+  `grass_dim`, the snapshot grass and biome window allocations are computed from
+  that value, and the TS side never uses a hardcoded grass-cell count.
+  `MAX_POP_FOR_SIM` / `CREATURE_STRIDE` stay constant-asserted because the
+  creature region is world-size-independent.
   The app-shell SAB-view binding side (how `makeSlotLayout` is built from
   `boot_ready.grass_dim`) is recorded in `decisions/app-shell.md`.
 - **Why**: The user explicitly wants worlds **editable across a wide range**
@@ -187,9 +187,9 @@ Decisions that bind more than one architecture doc.
   layout object, rebuilt per boot).
 - **Applies to**: `architecture/shared-memory-and-protocol.md`
   (computed-dims-equality), `architecture/simulation-core.md` (`WorldDims`).
-- **Code anchors**: `app/crates/evosim/src/constants.rs → WorldDims::from_world_size`,
-  `app/crates/evosim/src/wasm_api/mod.rs → SnapshotLayout::from_grass_cell_count` (the
-  `grass_bytes == biome_bytes` assert), `boot_ready.grass_dim`.
+- **Code anchors**: `crates/evosim/src/constants.rs → WorldDims::from_world_size_with_cell_size`,
+  `crates/evosim/src/wasm_api/mod.rs → SnapshotLayout::from_grass_cell_count` (the
+  `grass_bytes == biome_bytes` assert), `web/src/sim/bridge.ts → SimReplyBootReady`.
 - **Revisit when**: a feature needs the world to resize *after* boot (today
   nothing resizes after boot — restart rebuilds the world).
 
@@ -213,36 +213,35 @@ Decisions that bind more than one architecture doc.
 - **Applies to**: `architecture/simulation-core.md` (biome gen + species
   seeding), `architecture/app-shell.md` (settings master seed),
   `decisions/sim.md` (biome / seeding entries).
-- **Code anchors**: `app/crates/evosim/src/wasm_api/mod.rs → WorldConfig`,
+- **Code anchors**: `crates/evosim/src/wasm_api/mod.rs → WorldConfig`,
   `WorldHandle::new_with_config_json`,
-  `app/crates/evosim/src/constants.rs → derive_world_seed`, `WorldSeedStream`,
-  `app/crates/evosim/src/world/mod.rs → World::new_with_sliders_topology`
+  `crates/evosim/src/constants.rs → derive_world_seed`, `WorldSeedStream`,
+  `crates/evosim/src/world/mod.rs → World::new_with_sliders_topology`
   (internal `world_seed` consumers).
 
 ### NN input layout is derived from construction settings → SAB/topology implications
 
 - **Decision**: The NN input width is **runtime/settings-derived**, not a
-  compile-time constant. `NnInputLayout::for_settings(wrap_world, species_mode)`
-  composes the active input groups and computes the total width (a multiple of
-  8 in `[8, MAX_NN_INPUTS = 48]`); it feeds the first matmul's `fan_in`. The
-  four (wrap × species) compositions pad to widths **32 / 40 / 40 / 48**. The
-  old compile-time `NN_INPUTS == 32` hard assert is replaced by runtime checks
-  in `NnTopology::with_input_width`. Saved-world artifact load validates the
-  embedded topology against the construction config instead of migrating
-  arbitrary settings changes onto old brains.
+  compile-time constant. `NnInputLayout::for_settings(wrap_world, species_mode,
+  grass_multisight)` composes the active input groups and computes the total
+  width (a multiple of 8 capped by `MAX_NN_INPUTS`); it feeds the first
+  matmul's `fan_in`. Wrap, species mode, and grass multisight together select
+  the layout; saved-world artifact load validates the embedded topology against
+  the construction config instead of migrating arbitrary settings changes onto
+  old brains.
 - **Why**: Inputs constant for a brain's whole run waste weights and train
   against a dishonest surface; a settings-derived layout always trains against
   the honest input surface for the current world (see the fuller rationale in
   `decisions/sim.md`). This is cross-cutting because the width flows into the
   brain topology (`fan_in`), the boot `nn_topology` payload, and the brain/nn
-  drift-guard tests, which exercise all four compositions.
+  drift-guard tests, which exercise the runtime-width constraints.
 - **Applies to**: `architecture/simulation-core.md` (the width table + topology),
   `architecture/shared-memory-and-protocol.md` (the `nn_topology` boot payload),
   `decisions/sim.md` (the settings-derived-layout decision).
-- **Code anchors**: `app/crates/evosim/src/world/nn.rs → NnInputLayout`,
-  `app/crates/evosim/src/brain/mod.rs → NnTopology::with_input_width`,
-  `app/crates/evosim/src/constants.rs → MAX_NN_INPUTS = 48`,
-  `app/crates/evosim/src/brain/tests/width.rs`.
+- **Code anchors**: `crates/evosim/src/world/nn.rs → NnInputLayout`,
+  `crates/evosim/src/brain/mod.rs → NnTopology::with_input_width`,
+  `crates/evosim/src/constants.rs → MAX_NN_INPUTS`,
+  `crates/evosim/src/brain/tests/width.rs → input_width_validation_rejects_bad_widths`.
 
 ### Saved-world artifacts use SAB request/response with a fixed cap
 
@@ -256,10 +255,11 @@ Decisions that bind more than one architecture doc.
   bounded and makes quota/size failure visible to the UI.
 - **Applies to**: `architecture/shared-memory-and-protocol.md`,
   `architecture/worker-runtime.md`, `architecture/app-shell.md`.
-- **Code anchors**: `app/crates/evosim/src/control_sab.rs →
-  WORLD_ARTIFACT_OFFSET`, `WORLD_ARTIFACT_CAP`;
-  `app/web/src/sim/worker.ts → serveWorldArtifactRequest`;
-  `app/web/src/sim/bridge.ts → requestWorldArtifact`.
+- **Code anchors**: `crates/evosim/src/control_sab.rs →
+  WORLD_ARTIFACT_OFFSET`, `WORLD_ARTIFACT_CAP`, `CTRL_I32_REGION_LEN`;
+  `web/src/generated/control-sab.ts → WORLD_ARTIFACT_OFFSET`, `WORLD_ARTIFACT_CAP`;
+  `web/src/sim/worker.ts → serveWorldArtifactRequest`;
+  `web/src/sim/bridge.ts → SimBridge`.
 
 ## See also
 

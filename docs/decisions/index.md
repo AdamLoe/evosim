@@ -54,7 +54,7 @@ the matching heading.
 | Playwright `targetTPS = 1000` rule | [`cross-cutting.md`](cross-cutting.md) → `Worker-control e2e tests force targetTPS = 1000 before interacting` |
 | Rendering, camera, GL, direct SAB reads | [`render.md`](render.md) |
 | R8 grass texture, JS-side cull, highlight id decode, status bar | [`render.md`](render.md) |
-| Profiler four-tree shape, no-rollup rule, honest call counts | [`profiler.md`](profiler.md) |
+| Profiler five-tree shape, no-rollup rule, honest call counts | [`profiler.md`](profiler.md) |
 | Worker-sum profiler trees and `_calls` atomics | [`profiler.md`](profiler.md) |
 | Telemetry sampling/export and worst-jank attribution | [`perf.md`](perf.md) + [`profiler.md`](profiler.md) |
 | Threaded wasm default, `panic = "abort"`, link args, COOP/COEP | [`build.md`](build.md) |

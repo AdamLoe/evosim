@@ -34,7 +34,7 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 - **Alternatives considered**: `step_n(floor(tickBudget))` with a
   fractional-budget accumulator (shipped briefly; reverted — main.ts
   batched because it shared the render thread, the worker doesn't).
-- **Code anchors**: `app/web/src/sim/worker.ts → simLoop`.
+- **Code anchors**: `web/src/sim/worker.ts → simLoop`.
 
 ### Pacing uses synchronous `Atomics.wait` because steady-state control is SAB-only
 
@@ -49,8 +49,8 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 - **Tradeoffs**: Any future feature that reintroduces steady-state
   postMessage control must revisit the pacing primitive first.
 - **Applies to**: `architecture/worker-runtime.md`.
-- **Code anchors**: `app/web/src/sim/worker.ts → simLoop`,
-  `app/web/src/sim/bridge.ts → SimBridge`.
+- **Code anchors**: `web/src/sim/worker.ts → simLoop`,
+  `web/src/sim/bridge.ts → SimBridge`.
 
 ### Slider drain ordering: drain at the top of every iteration
 
@@ -61,8 +61,8 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   deterministically. If the drain happened after `step_n`, the slider
   would skip a tick.
 - **Applies to**: `architecture/worker-runtime.md`.
-- **Code anchors**: `app/web/src/sim/worker.ts → simLoop`,
-  `app/web/src/sim/worker.ts → readControlSab`.
+- **Code anchors**: `web/src/sim/worker.ts → simLoop`,
+  `web/src/sim/worker.ts → readControlSab`.
 
 ### `set_slider(name, value)` is the sole external mutation entry point
 
@@ -79,8 +79,8 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 - **Tradeoffs**: Unknown slider names throw a `JsValue` error — typos
   surface as a `[sim] set_slider("X", v) rejected` warning rather than
   silently no-op'ing. (Considered a feature.)
-- **Code anchors**: `app/crates/evosim/src/wasm_api/mod.rs → WorldHandle::set_slider`,
-  `app/crates/evosim/src/wasm_api/mod.rs → try_set_slider`.
+- **Code anchors**: `crates/evosim/src/wasm_api/mod.rs → WorldHandle::set_slider`,
+  `crates/evosim/src/wasm_api/mod.rs → try_set_slider`.
 
 ### `MAX_POP_FOR_SIM` is a safety backstop, not the equilibrium mechanism
 
@@ -99,10 +99,10 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 - **Applies to**: `architecture/simulation-core.md`,
   `architecture/shared-memory-and-protocol.md`,
   `decisions/cross-cutting.md`.
-- **Code anchors**: `app/crates/evosim/src/world/mod.rs → World::handle_births`,
-  `app/crates/evosim/src/constants.rs → MAX_POP_FOR_SIM`,
-  `app/crates/evosim/src/wasm_api/mod.rs → write_creatures_each` (debug_assert),
-  `World::scratch_cull_pool`.
+- **Code anchors**: `crates/evosim/src/world/mod.rs → World::handle_births`,
+  `crates/evosim/src/constants.rs → MAX_POP_FOR_SIM`,
+  `crates/evosim/src/wasm_api/mod.rs → fill_creature_bytes` (debug_assert),
+  `crates/evosim/src/world/mod.rs → World`.
 - **Revisit when**: a feature wants persistent per-creature identity
   guarantees (e.g., a Hall of Fame), or the cap value moves past where
   allocator pressure becomes a problem.
@@ -117,13 +117,11 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
      the tick path applies wrap-aware radius filtering.
   2. **Starvation drain** — below `starvation_threshold` energy, an extra
      `starvation_drain_rate` drain fires each tick.
-  3. **Grass capacity scale + regrowth rate** — `grass_capacity_scale`
-     multiplies the per-cell biome carrying-cap; `grass_regrowth_rate`
-     multiplies spread probability + in-cell growth rate. Together they
-     bound total food supply. Six live sliders: idx 67–72
-     (`crowding_strength`=0.010, `crowding_radius`=20, `starvation_threshold`=15,
-     `starvation_drain_rate`=0.30, `grass_capacity_scale`=0.7,
-     `grass_regrowth_rate`=1.0).
+  3. **Grass supply** — total food is bounded by the per-cell biome
+     carrying-cap and the live Grass-tab scatter knobs (decay/spread/growth).
+     The equilibrium slider names and stable indices are owned by
+     `crates/evosim/src/wasm_api/mod.rs` → `SLIDER_NAMES`; their default values
+     are owned by the `CROWDING_*` and `STARVATION_*` constants named below.
 - **Why the random cull was the wrong mechanism**: random cull kills good and
   bad foragers with equal probability, so selection never compounds — a
   well-fed, long-lived forager has the same chance of dying as a starving one.
@@ -131,28 +129,29 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   cannot find food (high crowding, low energy) dies preferentially; a skilled
   forager at good energy level survives. This is the selection argument for
   replacing the cull.
-- **Verified dynamics** (headless harness, T=3000, K=4 seeds × both RNG paths;
-  exit test `world/equilibrium_tests.rs`): steady-state mean ~1600–1760,
-  CoV 0.007–0.025, never extinct, never cap-pinned, backstop cull never fires.
+- **Verified dynamics**: `cargo test --lib` runs
+  `crates/evosim/src/world/equilibrium_tests.rs`, which gates the steady-state
+  band, extinction/cap-pinning checks, backstop-cull absence, and death-cohort
+  age-at-death trend.
   The startup transient dips to ~38 founders before recovery on some seeds —
   a UX artifact, not extinction. **Foraging learning signal confirmed**:
-  death-cohort age-at-death up 3.1–4.6× from early to late cohorts (real
+  death-cohort age-at-death up 3.7–5.4× from early to late cohorts (real
   selection, not monotone artifact). Energy-gathered-per-tick is flat (food is
   the constraint) — skill manifests as *living longer on the same budget*.
   Age-at-death is therefore the correct foraging proxy.
   The browser-sized default world also has a Playwright startup smoke in
-  `app/web/tests/e2e/sim-bridge.spec.ts`: at high TPS after fresh boot, the
+  `web/tests/e2e/sim-bridge.spec.ts`: at high TPS after fresh boot, the
   page remains alive and below the default population cap.
 - **Applies to**: `architecture/simulation-core.md`.
-- **Code anchors**: `app/crates/evosim/src/world/tick.rs → energy_bookkeeping` (crowding + starvation drain);
-  `app/crates/evosim/src/world/mod.rs → DevSliders` (six new fields);
-  `app/crates/evosim/src/constants.rs → CROWDING_STRENGTH_DEFAULT`, `CROWDING_RADIUS_DEFAULT`,
-  `STARVATION_THRESHOLD_DEFAULT`, `STARVATION_DRAIN_RATE_DEFAULT`,
-  `GRASS_CAPACITY_SCALE_DEFAULT`, `GRASS_REGROWTH_RATE_DEFAULT`;
-  `app/crates/evosim/src/world/equilibrium_tests.rs` (death-cohort + steady-state band gate).
+- **Code anchors**: `crates/evosim/src/world/tick.rs → energy_bookkeeping` (crowding + starvation drain);
+  `crates/evosim/src/world/mod.rs → DevSliders` (four equilibrium fields);
+  `crates/evosim/src/constants.rs → CROWDING_STRENGTH_DEFAULT`, `CROWDING_RADIUS_DEFAULT`,
+  `STARVATION_THRESHOLD_DEFAULT`, `STARVATION_DRAIN_RATE_DEFAULT`;
+  `crates/evosim/src/world/equilibrium_tests.rs` (death-cohort + steady-state band gate).
 - **Revisit when**: observed steady-state band or age-at-death trend differs
   materially in-browser (threaded scatter changes grass texture, headless is
-  single-threaded); re-tune `grass_capacity_scale` first.
+  single-threaded); re-tune `crowding_strength` / `starvation_drain_rate` or the
+  Grass-tab scatter knobs first.
 
 ### Sim worker handles restart by terminate + respawn
 
@@ -166,8 +165,8 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   during the gap because the previous bridge's SABs stay GC-rooted
   until the new `boot_ready` lands.
 - **Applies to**: `architecture/worker-runtime.md`.
-- **Code anchors**: `app/web/src/main.ts → restart`,
-  `app/web/src/main.ts → spawnSimWorker`.
+- **Code anchors**: `web/src/main.ts → restart`,
+  `web/src/main.ts → spawnSimWorker`.
 
 ### Worker recovery is restart-first and progress-observed
 
@@ -183,8 +182,8 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   normal restart seed semantics. Exact state restoration waits for the
   persistence design.
 - **Applies to**: `architecture/worker-runtime.md`.
-- **Code anchors**: `app/web/src/main.ts → checkWorkerWatchdog`,
-  `restartWorker`, `recoverWorker`; `app/web/src/sim/bridge.ts →
+- **Code anchors**: `web/src/main.ts → checkWorkerWatchdog`,
+  `restartWorker`, `recoverWorker`; `web/src/sim/bridge.ts →
   WorkerDebugFault`.
 - **Revisit when**: world persistence ships, or a future protocol adds a
   live-worker health heartbeat that is cheaper or more precise than the
@@ -200,8 +199,8 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   release.
 - **Applies to**: `architecture/worker-runtime.md`,
   `architecture/shared-memory-and-protocol.md`.
-- **Code anchors**: `app/web/src/widgets/devpanel.ts → currentSliderState`,
-  `app/web/src/main.ts → spawnSimWorker`.
+- **Code anchors**: `web/src/widgets/devpanel.ts → currentSliderState`,
+  `web/src/main.ts → spawnSimWorker`.
 
 ### `WorldHandle` exposes no wasm-side `cross_origin_isolated` getter
 
@@ -211,8 +210,8 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   except a wasm-bindgen call.
 - **Applies to**: `architecture/worker-runtime.md`,
   `architecture/build-and-deploy.md`.
-- **Code anchors**: `app/web/src/main.ts → main` (`globalThis...`),
-  `app/web/src/sim/worker.ts → handleBoot` (`(self as ...).crossOriginIsolated`).
+- **Code anchors**: `web/src/main.ts → main` (`globalThis...`),
+  `web/src/sim/worker.ts → handleBoot` (`(self as ...).crossOriginIsolated`).
 
 ### Deterministic chunking for the parallel NN pass
 
@@ -222,9 +221,9 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   any given `(pop, workers)` combination — chunk boundaries are a
   function of inputs, not of rayon's runtime scheduling.
 - **Applies to**: `architecture/simulation-core.md`.
-- **Code anchors**: `app/crates/evosim/src/world/nn.rs → chunk_ranges`,
-  `app/crates/evosim/src/world/nn.rs → dynamic_chunks`,
-  `app/crates/evosim/src/constants.rs → MIN_CHUNKS`, `MAX_CHUNKS`.
+- **Code anchors**: `crates/evosim/src/world/nn.rs → chunk_ranges`,
+  `crates/evosim/src/world/nn.rs → dynamic_chunks`,
+  `crates/evosim/src/constants.rs → MIN_CHUNKS`, `MAX_CHUNKS`.
 
 ### Brain is `32 → 48 → 24 → 5` Leaky ReLU pyramid, no biases
 
@@ -237,12 +236,12 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   be multiples of 8 (the topology choice is partly a consequence). No
   biases keeps the weight count parametric and the founder init
   uniform-random. The **input width** is a *runtime* field of
-  `NnTopology`, a multiple of 8 in `[8, MAX_NN_INPUTS = 48]`, fed to
+  `NnTopology`, a multiple of 8 capped by `MAX_NN_INPUTS`, fed to
   the first matmul as `fan_in`. `build_nn_input` is a composable,
   offset-computing `NnInputLayout` descriptor.
 - **Applies to**: `architecture/simulation-core.md`.
-- **Code anchors**: `app/crates/evosim/src/brain/mod.rs → Brain`, `Brain::founder`,
-  `Brain::forward`; `app/crates/evosim/src/constants.rs → NN_OUTPUTS`,
+- **Code anchors**: `crates/evosim/src/brain/mod.rs → Brain`, `Brain::founder`,
+  `Brain::forward`; `crates/evosim/src/constants.rs → NN_OUTPUTS`,
   `NN_WEIGHT_COUNT`, `NN_INIT_RANGE_L1`, `NN_INIT_RANGE_L2`, `NN_INIT_RANGE_L3`.
 
 ### Founder NN is pure uniform-random — no hardwired priors
@@ -250,14 +249,14 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 - **Decision**: `Brain::founder` initializes weights from `rng.uniform`
   per layer with the He ranges above. No "energy → split" wiring, no
   grass-detector hot slot, no Move baseline.
-- **Why**: Previous founder-bias hardwiring (in superseded versions)
-  was brittle to topology / slot-layout changes. Uniform-random with a
-  reasonable multi-founder count (default 8 via Halton placement)
+- **Why**: Hardwired founder priors are brittle to topology / slot-layout
+  changes. Uniform-random with a reasonable multi-founder count
+  (`STARTING_POP_DEFAULT` via Halton placement)
   gives the sim enough lineages that at least one survives
   generation 0.
 - **Applies to**: `architecture/simulation-core.md`.
-- **Code anchors**: `app/crates/evosim/src/brain/mod.rs → Brain::founder`,
-  `app/crates/evosim/src/constants.rs → FOUNDER_COUNT_DEFAULT`.
+- **Code anchors**: `crates/evosim/src/brain/mod.rs → Brain::founder`,
+  `crates/evosim/src/constants.rs → STARTING_POP_DEFAULT`.
 - **Revisit when**: a session with default sliders routinely
   extinct-ends before generation 1; that signals the founder pool
   needs the prior back, or wider He ranges.
@@ -292,8 +291,8 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   at the population sizes the sim reaches. Reusing `action[2]`'s logit for
   Mate keeps the SAB + brain output shape unchanged between modes.
 - **Applies to**: `architecture/simulation-core.md`.
-- **Code anchors**: `app/crates/evosim/src/creature.rs → Action`, `Action::ALL`;
-  `app/crates/evosim/src/world/nn.rs → ActionGate / decode_action / is_valid_action`.
+- **Code anchors**: `crates/evosim/src/creature.rs → Action`, `Action::ALL`;
+  `crates/evosim/src/world/nn.rs → ActionGate`, `decode_action`, `is_valid_action`.
 
 ### Creature color is lineage-hue-derived; per-action highlight is a ring-flash
 
@@ -313,9 +312,9 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 - **Applies to**: `architecture/simulation-core.md`,
   `architecture/shared-memory-and-protocol.md`,
   `architecture/render-pipeline.md`.
-- **Code anchors**: `app/crates/evosim/src/creature.rs → CreatureSoA` (`hue` column),
-  `app/crates/evosim/src/world/tick.rs → flash_decay`,
-  `app/crates/evosim/src/wasm_api/mod.rs → lineage_color_u32, pack_render_u32`.
+- **Code anchors**: `crates/evosim/src/creature.rs → CreatureSoA` (`hue` column),
+  `crates/evosim/src/world/tick.rs → flash_decay`,
+  `crates/evosim/src/wasm_api/mod.rs → lineage_color_u32, pack_render_u32`.
 
 ### Pure neuroevolution: genome removed; brain is the only heritable thing
 
@@ -332,9 +331,9 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   management is traceable to the brain alone. The constants are set at the
   median-genome values so behaviour is unchanged from a neutral genome run.
 - **Applies to**: `architecture/simulation-core.md`.
-- **Code anchors**: `app/crates/evosim/src/creature.rs → CreatureSoA` (`hue` column replaces `genome`),
-  `app/crates/evosim/src/constants.rs` (the former genome use-site constants),
-  `app/crates/evosim/src/world/tick.rs → graze / attack / energy_bookkeeping`.
+- **Code anchors**: `crates/evosim/src/creature.rs → CreatureSoA` (`hue` column replaces `genome`),
+  `crates/evosim/src/constants.rs → BODY_RADIUS_PER_SIZE`,
+  `crates/evosim/src/world/tick.rs → graze`, `attack`, `energy_bookkeeping`.
 
 ### Attack picks first-valid in a per-attacker-rotated cell walk
 
@@ -361,7 +360,7 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   cheapest mitigation is a starburst cell walk so "first" approximates
   "closest" without sorting.
 - **Code anchors**: `crates/evosim/src/grid.rs → SpatialGrid::find_first_in_radius`,
-  `app/crates/evosim/src/world/tick.rs → attack`, `AttackPick`.
+  `crates/evosim/src/world/tick.rs → attack`, `AttackPick`.
 
 ### Creature proximity scan walks cells in starburst order with sector-saturation early-bail
 
@@ -384,7 +383,7 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   acceptable at the sparse coarse-cell density, with the fallback being
   to bail the two blocks independently.
 - **Applies to**: `architecture/simulation-core.md`.
-- **Code anchors**: `app/crates/evosim/src/world/proximity.rs → proximity_starburst`,
+- **Code anchors**: `crates/evosim/src/world/proximity.rs → proximity_starburst`,
   `compute_creature_proximity_sectors`,
   `compute_creature_proximity_sectors_species` (the 16-sector species variant).
 - **Tradeoffs**: Output is bit-identical to the prior bbox walk (same
@@ -430,8 +429,8 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 - **Applies to**: `architecture/simulation-core.md`,
   `architecture/worker-runtime.md`,
   `architecture/shared-memory-and-protocol.md`.
-- **Code anchors**: `app/crates/evosim/src/world/mod.rs →
-  WorldRuntimeStateV1`; `app/crates/evosim/src/wasm_api/mod.rs →
+- **Code anchors**: `crates/evosim/src/world/mod.rs →
+  WorldRuntimeStateV1`; `crates/evosim/src/wasm_api/mod.rs →
   WorldArtifactV1`, `WorldHandle::world_artifact_json`,
   `WorldHandle::new_from_artifact_json`.
 - **Tradeoffs**: Brain weights, grass density, and biome bytes are compact
@@ -455,8 +454,8 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   legible landscape with distinct food-rich and food-poor regions. SplitMix64
   is trivial, fast, and never touches the sim RNG draw order.
 - **Applies to**: `architecture/simulation-core.md`.
-- **Code anchors**: `app/crates/evosim/src/world/biome.rs → generate_biome_grid`;
-  `app/crates/evosim/src/world/mod.rs`.
+- **Code anchors**: `crates/evosim/src/world/biome.rs → generate_biome_grid`;
+  `crates/evosim/src/world/mod.rs`.
 - **Tradeoffs**: Blob count/radius are balance knobs (constants in
   `biome.rs`); proportions are statistical, not exact per seed. The grid
   is `grass_cell_count` u8 — same size as the snapshot grass region.
@@ -479,9 +478,10 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   possible selection pressure. Avoidance remains learnable through grass-sector
   and current-grass inputs.
 - **Applies to**: `architecture/biome.md`, `architecture/simulation-core.md`.
-- **Code anchors**: `app/crates/evosim/src/world/biome.rs → capacity_factor_from_u8`;
-  `app/crates/evosim/src/grass/mod.rs → compute_propagation_scatter` (the cap write);
-  `app/crates/evosim/src/constants.rs → GRASS_CAPACITY_PLAINS/WATER/DESERT`.
+- **Code anchors**: `crates/evosim/src/world/biome.rs → capacity_factor_from_u8`;
+  `crates/evosim/src/grass/mod.rs → compute_propagation_scatter` (the cap write);
+  `crates/evosim/src/constants.rs → GRASS_CAPACITY_PLAINS`,
+  `GRASS_CAPACITY_WATER`, `GRASS_CAPACITY_DESERT`.
 
 ### Biomes have no direct NN type input
 
@@ -492,8 +492,8 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   redundant proxy for the food signal and makes the learning surface wider
   without adding an effect the creature can act on directly.
 - **Applies to**: `architecture/simulation-core.md`.
-- **Code anchors**: `app/crates/evosim/src/world/nn.rs → NnInputLayout::for_settings`,
-  `build_nn_input`; `app/crates/evosim/src/world/proximity.rs →
+- **Code anchors**: `crates/evosim/src/world/nn.rs → NnInputLayout::for_settings`,
+  `build_nn_input`; `crates/evosim/src/world/proximity.rs →
   compute_grass_density_sectors`, `compute_grass_far_band_sectors`.
 - **Revisit when**: a new biome effect other than grass capacity is added.
 
@@ -508,11 +508,12 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   faction storytelling is the v2 thing worth adding. A single hard switch
   keeps both readable and lets the user A/B them.
 - **Applies to**: `architecture/simulation-core.md`.
-- **Code anchors**: `app/crates/evosim/src/world/mod.rs`, `app/crates/evosim/src/world/nn.rs`,
-  `app/crates/evosim/src/world/tick.rs`, `app/crates/evosim/src/world/species.rs`,
-  `app/crates/evosim/src/wasm_api/mod.rs`.
-- **Code anchors**: `DevSliders.species_mode`, `World.species`
-  (`SpeciesRegistry`), the `species_id` SoA column.
+- **Code anchors**: `crates/evosim/src/world/mod.rs`, `crates/evosim/src/world/nn.rs`,
+  `crates/evosim/src/world/tick.rs`, `crates/evosim/src/world/species.rs`,
+  `crates/evosim/src/wasm_api/mod.rs`.
+- **Code anchors**: `crates/evosim/src/world/mod.rs → DevSliders`, `World`;
+  `crates/evosim/src/world/species.rs → SpeciesRegistry`;
+  `crates/evosim/src/creature.rs → CreatureSoA`.
 
 ### Mate: contact-radius, NN-initiated, first-found, initiator-only cost + cooldown
 
@@ -536,9 +537,9 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   roughly squares the gating probability, which a clustered founder group with
   random brains rarely clears.
 - **Applies to**: `architecture/simulation-core.md`.
-- **Code anchors**: `app/crates/evosim/src/world/mod.rs → World::handle_mating`,
-  `app/crates/evosim/src/world/nn.rs → ActionGate`, `decode_action`, `is_valid_action`,
-  `app/crates/evosim/src/world/tick.rs → energy_bookkeeping` (cooldown decrement).
+- **Code anchors**: `crates/evosim/src/world/mod.rs → World::handle_mating`,
+  `crates/evosim/src/world/nn.rs → ActionGate`, `decode_action`, `is_valid_action`,
+  `crates/evosim/src/world/tick.rs → energy_bookkeeping` (cooldown decrement).
 - **Revisit when**: births spike in a way that traces to many initiators mating one
   popular partner in a single tick — add a partner-cooldown guard at that point.
 
@@ -558,8 +559,8 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   available for homogenization research. Per-weight crossover is kept safe by
   the aligned regime (same-species-only mating + small per-birth mutation).
 - **Applies to**: `architecture/simulation-core.md`.
-- **Code anchors**: `app/crates/evosim/src/brain/mod.rs → Brain::child_from_crossover_with_sigma`,
-  `app/crates/evosim/src/world/mod.rs → World::handle_mating`.
+- **Code anchors**: `crates/evosim/src/brain/mod.rs → Brain::child_from_crossover_with_sigma`,
+  `crates/evosim/src/world/mod.rs → World::handle_mating`.
 - **Revisit when**: playtest shows one mode strictly dominant, or brains
   demonstrably fail to evolve under mating.
 
@@ -573,7 +574,7 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   generations; without a hard gate every species converges to cannibalism. Our
   brains aren't deep enough to encode evolved anti-cannibalism, so we guardrail it.
 - **Applies to**: `architecture/simulation-core.md`.
-- **Code anchors**: `app/crates/evosim/src/world/tick.rs → World::attack`.
+- **Code anchors**: `crates/evosim/src/world/tick.rs → attack`.
 - **Revisit when**: brains grow deep enough that anti-cannibalism could plausibly
   evolve and be retained against drift.
 
@@ -606,10 +607,10 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   with the genome; species survival now depends entirely on the brain and the
   food-limited equilibrium, which is the intended selection environment.
 - **Applies to**: `architecture/simulation-core.md`, `architecture/species.md`.
-- **Code anchors**: `app/crates/evosim/src/world/species.rs → SpeciesRegistry`, `SPECIES_PALETTE`;
-  `app/crates/evosim/src/brain/mod.rs → Brain::founder_spread_with_sigma`;
-  `app/crates/evosim/src/world/mod.rs → pick_anchors`, `World::new_with_sliders_topology`
-  (seeding branch); `app/crates/evosim/src/wasm_api/mod.rs → fill_creature_bytes` (species color lane).
+- **Code anchors**: `crates/evosim/src/world/species.rs → SpeciesRegistry`, `SPECIES_PALETTE`;
+  `crates/evosim/src/brain/mod.rs → Brain::founder_spread_with_sigma`;
+  `crates/evosim/src/world/mod.rs → pick_anchors`, `World::new_with_sliders_topology`
+  (seeding branch); `crates/evosim/src/wasm_api/mod.rs → fill_creature_bytes` (species color lane).
 - **Revisit when**: future splits/merges land (split-aware color generator needed);
   founders cold-start-extinct before brain evolution kicks in.
 
@@ -630,10 +631,10 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   protocol break when future species splits arrive.
 - **Applies to**: `architecture/simulation-core.md`,
   `architecture/shared-memory-and-protocol.md`.
-- **Code anchors**: `app/crates/evosim/src/wasm_api/mod.rs → species_table_json`;
+- **Code anchors**: `crates/evosim/src/wasm_api/mod.rs → species_table_json`;
   `crates/evosim/src/control_sab.rs` (slots + byte window);
-  `app/web/src/sim/worker.ts → maybeWriteSpeciesTable`;
-  `app/web/src/generated/control-sab.ts` (regenerated).
+  `web/src/sim/worker.ts → maybeWriteSpeciesTable`;
+  `web/src/generated/control-sab.ts` (regenerated).
 
 ### Species-mode population balance: sane defaults for the mating economy
 
@@ -648,8 +649,9 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   Single-pool equilibrium is now held by the food-limited mortality sliders
   (see the food-limited equilibrium entry above), not by this entry.
 - **Applies to**: `architecture/simulation-core.md`.
-- **Code anchors**: `app/crates/evosim/src/constants.rs → MATING_COOLDOWN_TICKS_DEFAULT`,
-  `SPLIT_GIFT_MAX_DEFAULT`, `starting_species_member_count` (default), `starting_species_count` (default).
+- **Code anchors**: `crates/evosim/src/constants.rs → MATING_COOLDOWN_TICKS_DEFAULT`,
+  `SPLIT_GIFT_MAX_DEFAULT`, `STARTING_SPECIES_MEMBER_COUNT_DEFAULT`,
+  `STARTING_SPECIES_COUNT_DEFAULT`.
 - **Revisit when**: playtest wants growth at the default world — first lever is
   cranking `starting_species_member_count` (denser clumps).
 
@@ -681,7 +683,7 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   habitable-cell search would add a scan and quietly mask cross-biome mating
   as a failure mode.
 - **Applies to**: `architecture/simulation-core.md`.
-- **Code anchors**: `app/crates/evosim/src/world/mod.rs → World::handle_mating`.
+- **Code anchors**: `crates/evosim/src/world/mod.rs → World::handle_mating`.
 
 ### Species extinct = extinct; `Species-A..J` names; species-only history
 
@@ -695,8 +697,9 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   species history is the storytelling primitive that matters once splits ship
   (plumbed-but-empty until then).
 - **Applies to**: `architecture/simulation-core.md`, `architecture/species.md`.
-- **Code anchors**: `app/crates/evosim/src/world/species.rs → World.species`;
-  `app/crates/evosim/src/wasm_api/mod.rs → creature_inspect_json`; inspector species block `#ins-species-*`.
+- **Code anchors**: `crates/evosim/src/world/mod.rs → World`;
+  `crates/evosim/src/world/species.rs → SpeciesRegistry`;
+  `crates/evosim/src/wasm_api/mod.rs → creature_inspect_json`.
 - **Revisit when**: splits/merges land (then extinction, naming, and the
   history breadcrumb all gain real behavior).
 
@@ -713,8 +716,8 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   didn't justify a new setting + decode path + balance surface for the thin
   "they all migrate east" readability win.
 - **Applies to**: `architecture/simulation-core.md`.
-- **Code anchors**: `app/crates/evosim/src/creature.rs → Action`;
-  `app/crates/evosim/src/world/nn.rs → decode_action`.
+- **Code anchors**: `crates/evosim/src/creature.rs → Action`;
+  `crates/evosim/src/world/nn.rs → decode_action`.
 
 ### NN input layout is settings-derived; no vestigial slots; one bias slot
 
@@ -735,8 +738,9 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   practice. (The full 8-way width table across wrap×species×multisight —
   32/32/40/40/40/40/48/48 — lives in `architecture/simulation-core.md`; the
   cross-language safety implication is in `decisions/cross-cutting.md`.)
-- **Applies to**: `architecture/simulation-core.md`,
-  `app/crates/evosim/src/world/nn.rs → NnInputLayout / NnInputGroup`, `app/crates/evosim/src/brain/mod.rs → NnTopology`.
+- **Applies to**: `architecture/simulation-core.md`.
+- **Code anchors**: `crates/evosim/src/world/nn.rs → NnInputLayout`,
+  `NnInputGroup`; `crates/evosim/src/brain/mod.rs → NnTopology`.
 - **Alternatives**: keep a constant action-set-indicator input for
   "portability" (rejected — a brain selected against one `action[2]` semantic
   doesn't transfer just because one constant signal says which mode it's in);
@@ -753,8 +757,8 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   non-brain variation from the learning signal. Repulsion still approximates
   "creatures own space" without requiring per-creature spatial tracking.
 - **Applies to**: `architecture/simulation-core.md`.
-- **Code anchors**: `app/crates/evosim/src/constants.rs` (body radius constant);
-  `app/crates/evosim/src/world/tick.rs` (repulsion use site).
+- **Code anchors**: `crates/evosim/src/constants.rs` (body radius constant);
+  `crates/evosim/src/world/tick.rs` (repulsion use site).
 
 ### Grass density field is `Vec<AtomicU8>` on the snapshot quantization scale
 
@@ -773,7 +777,7 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   (3.7 MB vs 14.7 MB).
 - **Applies to**: `architecture/simulation-core.md`,
   `architecture/render-pipeline.md`.
-- **Code anchors**: `app/crates/evosim/src/grass/mod.rs → GrassGrid::density` (field),
+- **Code anchors**: `crates/evosim/src/grass/mod.rs → GrassGrid`,
   `encode_density`, `decode_density`, `GrassGrid::dget`, `GrassGrid::dset`,
   `GrassGrid::dget_u8`, `GrassGrid::density_u8_snapshot`.
 
@@ -815,10 +819,10 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 - **Tradeoffs**: The blur is NOT deleted (perf hit ~34× but not the
   50–100× stretch target; deletion deferred). The blur's tile_class
   equilibrium logic is inert on the scatter path.
-- **Code anchors**: `app/crates/evosim/src/grass/mod.rs → compute_propagation_scatter`,
+- **Code anchors**: `crates/evosim/src/grass/mod.rs → compute_propagation_scatter`,
   `compute_propagation_blur`, `GrassPropagation`, `DiscTable`,
   `ScatterParams`, `GrassGrid::scatter_params`;
-  `app/crates/evosim/src/constants.rs → GRASS_DECAY_PCT_DEFAULT`, `GRASS_DECAY_AMOUNT_DEFAULT`,
+  `crates/evosim/src/constants.rs → GRASS_DECAY_PCT_DEFAULT`, `GRASS_DECAY_AMOUNT_DEFAULT`,
   `GRASS_SPREAD_PCT_DEFAULT`, `GRASS_SPREAD_AMOUNT_DEFAULT`,
   `GRASS_SPREAD_RING1_PCT_DEFAULT`, `GRASS_SPREAD_RING2_PCT_DEFAULT`,
   `GRASS_SPREAD_RING3_PCT_DEFAULT`, `GRASS_SPREAD_RADIUS`.
@@ -835,8 +839,8 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   deltas into owned per-cell scratch buffers, and commits cells in ascending
   order. The covered contract is exact state/hash equality for the same
   seed/config/artifact and same app version across `cargo test --lib` and
-  `cargo test --lib --features threads`; the pinned small-world fixture hash is
-  `0xda586f7d1ea01dbc`.
+  `cargo test --lib --features threads`; the fixture hash is owned by
+  `crates/evosim/src/world/science_mode_tests.rs`.
 - **Why**: The live app values throughput and statistical grass behavior more
   than bit-exact replay, while science/regression workflows need a stable
   comparison target. Keeping the mode opt-in preserves the normal hot path and
@@ -855,13 +859,13 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   (rejected because dense-frontier contention would make the write path heavy).
 - **Applies to**: `architecture/simulation-core.md`,
   `architecture/testing.md`.
-- **Code anchors**: `app/crates/evosim/src/grass/mod.rs → compute_propagation_scatter_science`,
+- **Code anchors**: `crates/evosim/src/grass/mod.rs → compute_propagation_scatter_science`,
   `GrassGrid::set_deterministic_science_mode`;
-  `app/crates/evosim/src/world/mod.rs → DevSliders::deterministic_science_mode`;
-  `app/crates/evosim/src/world/science_mode_tests.rs`;
-  `app/crates/evosim/src/wasm_api/mod.rs → WorldConfig.science`,
+  `crates/evosim/src/world/mod.rs → DevSliders`;
+  `crates/evosim/src/world/science_mode_tests.rs → deterministic_science_mode_is_default_off`;
+  `crates/evosim/src/wasm_api/mod.rs → WorldConfig`,
   `world_artifact_json`;
-  `app/web/src/widgets/devpanel.ts → currentWorldConfig`.
+  `web/src/widgets/devpanel.ts → currentWorldConfig`.
 
 ### GRASS_EQ_EPS = 1/255 (one u8 quantum)
 
@@ -876,7 +880,7 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   value round-trips to within one quantum of `cap − EPS` is correctly
   classified saturated, restoring the frontier skip for biome-capped cells.
 - **Applies to**: `architecture/simulation-core.md`,
-  `app/crates/evosim/src/grass/mod.rs → GRASS_EQ_EPS`.
+  `crates/evosim/src/grass/mod.rs → GRASS_EQ_EPS`.
 
 ### Grass scatter sliders plus live bites-per-block
 
@@ -893,10 +897,10 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   update on the running world. The default bite count remains 2, preserving the
   shipped default transfer.
 - **Applies to**: `architecture/simulation-core.md`.
-- **Code anchors**: `app/crates/evosim/src/constants.rs → GRASS_BITES_PER_BLOCK_DEFAULT`;
-  `app/crates/evosim/src/wasm_api/mod.rs → SLIDER_NAMES` (indices 54–59), `try_set_slider`;
-  `app/crates/evosim/src/world/tick.rs → graze`;
-  `app/crates/evosim/src/grass/mod.rs → GrassGrid::consume`.
+- **Code anchors**: `crates/evosim/src/constants.rs → GRASS_BITES_PER_BLOCK_DEFAULT`;
+  `crates/evosim/src/wasm_api/mod.rs → SLIDER_NAMES` (indices 54–59), `try_set_slider`;
+  `crates/evosim/src/world/tick.rs → graze`;
+  `crates/evosim/src/grass/mod.rs → GrassGrid::consume`.
 
 ### Grass pyramid: u8 box-filter mip clipmap over the density field
 
@@ -925,12 +929,12 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   owned levels), amortized across the refresh period. Zoomed-out render and
   far-grass sensing may lag by at most that period; default zoom render reads
   live L0. Active-set-keyed partial refresh is deferred; see the
-  `TODO(stage3-pyramid-perf)` anchor in `app/crates/evosim/src/grass/mod.rs`.
-- **Code anchors**: `app/crates/evosim/src/grass/mod.rs → GrassPyramid`, `GrassGrid::pyramid`,
+  `TODO(stage3-pyramid-perf)` anchor in `crates/evosim/src/grass/mod.rs`.
+- **Code anchors**: `crates/evosim/src/grass/mod.rs → GrassPyramid`,
   `GrassGrid::refresh_pyramid`;
-  `app/crates/evosim/src/constants.rs → GRASS_PYRAMID_MAX_LEVELS`,
+  `crates/evosim/src/constants.rs → GRASS_PYRAMID_MAX_LEVELS`,
   `GRASS_PYRAMID_REFRESH_PERIOD`;
-  `app/crates/evosim/src/world/mod.rs → World::step`.
+  `crates/evosim/src/world/mod.rs → World::step`.
 
 ### Far multi-band grass NN sight: GrassBandsFar default ON; single-band toggle kept
 
@@ -948,13 +952,13 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   before local exhaustion. Shipping default ON keeps all born creatures on the
   same layout as the rest of the world; the toggle is for the A/B and debugging.
 - **Constraint**: without direct biome-type inputs, all
-  wrap×species×multisight combinations fit within `MAX_NN_INPUTS = 48`; no
+  wrap×species×multisight combinations fit within `MAX_NN_INPUTS`; no
   fallback is needed. The widest current layout is walled+species+multisight
   at 46 real slots → 48 padded.
 - **Applies to**: `architecture/simulation-core.md`.
-- **Code anchors**: `app/crates/evosim/src/world/nn.rs → NnInputGroup::GrassBandsFar`,
-  `NnInputLayout::for_settings`; `app/crates/evosim/src/world/proximity.rs →
-  compute_grass_far_band_sectors`; `app/crates/evosim/src/constants.rs → GRASS_FAR_SIGHT_RADIUS`,
+- **Code anchors**: `crates/evosim/src/world/nn.rs → NnInputGroup::GrassBandsFar`,
+  `NnInputLayout::for_settings`; `crates/evosim/src/world/proximity.rs →
+  compute_grass_far_band_sectors`; `crates/evosim/src/constants.rs → GRASS_FAR_SIGHT_RADIUS`,
   `GRASS_FAR_MIP_LEVEL`.
 - **Revisit when**: band count, radii, or mip level need retuning; or the
   MAX_NN_INPUTS ceiling becomes a bottleneck for future input groups.
@@ -962,16 +966,16 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 ### Fused RNG for scatter kernel (grass_hash_fused_4)
 
 - **Decision**: The scatter kernel replaces 4 separate `grass_hash_u64` calls
-  (salts 1–4) with `grass_hash_fused_4` (`app/crates/evosim/src/rng.rs`): 2 `grass_hash_u64`
+  (salts 1–4) with `grass_hash_fused_4` (`crates/evosim/src/rng.rs`): 2 `grass_hash_u64`
   words, bit-sliced into non-overlapping windows for decay/spread/band/pick.
   The property "grass never perturbs `SimRng`" is preserved; distribution
-  statistics match within tolerance (tested in `app/crates/evosim/src/grass/tests/fused_rng.rs`).
+  statistics match within tolerance (tested in `crates/evosim/src/grass/tests/fused_rng.rs`).
 - **Why**: Attribution bench (S0) measured RNG as the dominant per-cell cost at
   dense fill (3.05 ns/cell, 47% of 6.42 ns/cell total). Fusing to 2 calls saves
   ~0.86 ns/cell at dense fill. Non-overlapping bit windows avoid cross-salt
   correlation while sharing the two-hash work.
 - **Applies to**: `architecture/simulation-core.md`.
-- **Code anchors**: `app/crates/evosim/src/rng.rs → grass_hash_fused_4`; `app/crates/evosim/src/grass/mod.rs →
+- **Code anchors**: `crates/evosim/src/rng.rs → grass_hash_fused_4`; `crates/evosim/src/grass/mod.rs →
   compute_propagation_scatter` (the 2-hash dispatch replacing the 4-call path).
 
 ### Density-weighted ("fertility") spread: variant A, amount ∝ source
@@ -988,12 +992,12 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 - **Why**: Denser source cells push harder → self-reinforcing patch centers →
   tighter, more organic-looking clumps. The persistence invariant (plains
   super-critical, water sub-critical at shoreline) is preserved (tested in
-  `app/crates/evosim/src/grass/tests/fertility.rs`). The 0.04 decay default is **feel-tunable** —
+  `crates/evosim/src/grass/tests/fertility.rs`). The 0.04 decay default is **feel-tunable** —
   the lead should confirm it reads well in the browser.
 - **Applies to**: `architecture/simulation-core.md`.
-- **Code anchors**: `app/crates/evosim/src/grass/mod.rs → compute_propagation_scatter`
+- **Code anchors**: `crates/evosim/src/grass/mod.rs → compute_propagation_scatter`
   (the `(spread_byte * s + 127) / 255` add_byte line);
-  `app/crates/evosim/src/constants.rs → GRASS_DECAY_PCT_DEFAULT`.
+  `crates/evosim/src/constants.rs → GRASS_DECAY_PCT_DEFAULT`.
 
 ### grass_size slider: configurable cell size as perf lever
 
@@ -1005,14 +1009,14 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 - **Why**: Cell count scales ~1/size², so a larger cell is the bluntest available
   perf lever — reducing grass_step work without architectural change. It is the
   principled form of "use less grass" and pairs with the LOD/scale resolution theme.
-- **Tradeoffs**: `LUT_RADIUS = 4` (in `app/crates/evosim/src/world/proximity.rs`) is pinned to the
+- **Tradeoffs**: `LUT_RADIUS = 4` (in `crates/evosim/src/world/proximity.rs`) is pinned to the
   5u default — a safe over-approximation across the full 5–20u range. The grass
   `bilinear_sample` + circle-overlap uses the runtime `grass_cell_size`; so do
   `biome.rs` and the `render/gl.ts` UV transform (all
   previously hard-coded 5.0).
 - **Applies to**: `architecture/simulation-core.md`, `architecture/render-pipeline.md`.
-- **Code anchors**: `app/crates/evosim/src/constants.rs → WorldDims::from_world_size_with_cell_size`,
-  `GRASS_CELL_SIZE_DEFAULT`; `app/web/src/render/gl.ts → renderWorldImpl`
+- **Code anchors**: `crates/evosim/src/constants.rs → WorldDims::from_world_size_with_cell_size`,
+  `GRASS_CELL_SIZE_DEFAULT`; `web/src/render/gl.ts → renderWorldImpl`
   (`grass_cell_size` param from `boot_ready`).
 - **Revisit when**: `LUT_RADIUS` needs retuning for cell sizes > 20u, or the
   sim's proximity semantics change to depend on absolute cell size.
@@ -1056,8 +1060,8 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   benchmarking reference and break test constructors that rely on the Blur
   default.
 - **Applies to**: `architecture/simulation-core.md`.
-- **Code anchors**: `app/crates/evosim/src/grass/mod.rs → compute_propagation_blur`,
-  `blur_at`, `GrassPropagation`; `app/crates/evosim/src/grass/tests/v201.rs`.
+- **Code anchors**: `crates/evosim/src/grass/mod.rs → compute_propagation_blur`,
+  `blur_at`, `GrassPropagation`; `crates/evosim/src/grass/tests/v201.rs`.
 - **Revisit when**: the lead decides to delete the blur path.
 
 ### Snapshot stays on the sim thread; off-thread snapshot worker rejected
@@ -1085,7 +1089,7 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 - **Applies to**: `architecture/worker-runtime.md`,
   `architecture/shared-memory-and-protocol.md`,
   `architecture/simulation-core.md`.
-- **Code anchors**: `app/crates/evosim/src/wasm_api/mod.rs → WorldHandle::write_snapshot` (the source
+- **Code anchors**: `crates/evosim/src/wasm_api/mod.rs → WorldHandle::write_snapshot` (the source
   reads: creature SoA borrow, `grass.density`, `grass.pyramid`).
 - **Revisit when**: a new dominant `write_snapshot` cost emerges that cannot
   be eliminated in-place, AND a double-buffer design is available that provably
@@ -1121,9 +1125,9 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 - **Fallback**: `grass_clump_count = 0` falls back to the old uniform-scatter path
   (`grass_initial_seed_count` cells uniformly at random). No other code path changed.
 - **Applies to**: `architecture/simulation-core.md`.
-- **Code anchors**: `app/crates/evosim/src/grass/mod.rs → GrassGrid::seed_clumps`;
-  `app/crates/evosim/src/world/mod.rs → new_with_sliders_topology`;
-  `app/crates/evosim/src/constants.rs → GRASS_CLUMP_COUNT_DEFAULT`, `GRASS_CLUMP_SIZE_DEFAULT`.
+- **Code anchors**: `crates/evosim/src/grass/mod.rs → GrassGrid::seed_clumps`;
+  `crates/evosim/src/world/mod.rs → new_with_sliders_topology`;
+  `crates/evosim/src/constants.rs → GRASS_CLUMP_COUNT_DEFAULT`, `GRASS_CLUMP_SIZE_DEFAULT`.
 - **Alternatives considered**: sampling from Halton sequence instead of the
   stateless hash — rejected because the hash is already present and avoids adding
   a sequential dependency; Halton would need a per-clump sequential index that
@@ -1136,10 +1140,9 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 ### BiomePyramid precomputed at construction; write_snapshot copies a window
 
 - **Decision**: A `BiomePyramid` struct is built **once at world construction**
-  (`BiomePyramid::build`) from the static `biome_grid` and stored on `WorldHandle`
-  as `biome_pyramid`. Each call to `write_snapshot` copies a pre-downsampled biome
-  window from the pyramid via `biome_pyramid.copy_window(...)`, replacing the
-  old per-tick mode-downsample loop. The pyramid is invalidated only on world
+  (`BiomePyramid::build`) from the static `biome_grid`. Each call to
+  `write_snapshot` copies a pre-downsampled biome window from the pyramid via
+  `BiomePyramid::copy_window`. The pyramid is invalidated only on world
   reconstruction (restart).
 - **Why**: Before this change, `write_snapshot` recomputed the mode-downsampled
   biome window every tick from the static `biome_grid` via an unmemoized nested loop.
@@ -1152,10 +1155,9 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   expensive phase). Window copy replaces a loop over `win_w × win_h` biome cells
   per tick — the copy is a bounded slice copy vs. the old per-cell mode calculation.
 - **Applies to**: `architecture/simulation-core.md`, `architecture/profiler.md`.
-- **Code anchors**: `app/crates/evosim/src/wasm_api/mod.rs → BiomePyramid`, `BiomePyramid::build`,
-  `BiomePyramid::copy_window`; `app/crates/evosim/src/wasm_api/mod.rs → WorldHandle::biome_pyramid`;
-  `app/crates/evosim/src/wasm_api/mod.rs → write_snapshot` (the `biome_pyramid.copy_window` call replacing
-  the old loop); profiler span `write_output_sab.snapshot.biome`.
+- **Code anchors**: `crates/evosim/src/wasm_api/mod.rs → BiomePyramid`,
+  `BiomePyramid::build`, `BiomePyramid::copy_window`, `WorldHandle::write_snapshot`;
+  profiler span `write_output_sab.snapshot.biome`.
 - **Revisit when**: biome grid becomes dynamic (live biome editing); at that point
   the pyramid must be rebuilt on mutation, or the per-tick recompute reinstated.
 

@@ -5,9 +5,9 @@
 ### Threaded wasm build is the default; plain build is for testing the cfg path only
 
 - **Decision**: Every dev and release wasm build uses
-  `--features threads`. The plain build (`wasm-pack build --target web
-  --out-dir web/wasm --dev`) exists only to exercise the
-  `cfg(not(feature = "threads"))` Rust paths.
+  `--features threads`. The plain build (`wasm-pack build crates/evosim
+  --target web --out-dir ../../web/wasm --dev`) exists only to exercise
+  the `cfg(not(feature = "threads"))` Rust paths.
 - **Why**: The plain build runs ~1/N× speed with no error or warning —
   rayon silently collapses to 1 thread. The footgun has bitten the
   project enough times that the default rule needs to be loud.
@@ -72,10 +72,23 @@
 - **Code anchors**: `web/vite.config.ts → crossOriginIsolationHeaders`,
   `web/public/_headers`.
 
-### `web/wasm/` is gitignored and never auto-rebuilt
+### GitHub Pages deploy sets `VITE_BASE` and uses the COI shim
 
-- **Decision**: `web/wasm/` is in `.gitignore`. `pnpm dev` does NOT
-  invoke `wasm-pack`. Every Rust change requires a manual
+- **Decision**: `.github/workflows/deploy-pages.yml` sets
+  `VITE_BASE=/evosim/` for the Pages build. GitHub Pages cannot serve the
+  `_headers` COOP/COEP file, so `web/index.html` loads the COI
+  service-worker shim before the app module.
+- **Why**: Built asset URLs must resolve under the repository path on
+  Pages, and threaded wasm still needs cross-origin isolation on hosts that
+  cannot set response headers.
+- **Applies to**: `architecture/build-and-deploy.md`.
+- **Code anchors**: `.github/workflows/deploy-pages.yml`,
+  `web/vite.config.ts → base`, `web/index.html`.
+
+### `web/wasm/` artifacts are gitignored and never auto-rebuilt
+
+- **Decision**: `web/wasm/.gitignore` ignores wasm-pack outputs.
+  `pnpm dev` does NOT invoke `wasm-pack`. Every Rust change requires a manual
   `wasm-pack build ...` and a hard browser reload.
 - **Why**: The wasm-pack outputs are large binary artifacts whose
   diffs are unreviewable; checking them in would balloon the repo and
@@ -89,6 +102,7 @@
   rebuild-wasm message).
 - **Applies to**: `architecture/build-and-deploy.md`,
   `agent-context/dev-loop.md`.
+- **Code anchors**: `web/wasm/.gitignore`.
 
 ### Vite `worker: { format: "es" }`
 

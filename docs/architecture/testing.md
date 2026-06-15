@@ -4,22 +4,30 @@ What test suites exist, what each covers, where they live.
 
 ## What it is
 
-Three gate surfaces:
+Gate surfaces:
 
-1. **Rust unit tests** — `cargo test --lib`, run both with the default
+1. **Rust static gates** — `cargo fmt --all --check`,
+   `cargo clippy --all-targets -- -D warnings`, and
+   `cargo clippy --all-targets --features threads -- -D warnings`.
+2. **Rust unit tests** — `cargo test --lib`, run both with the default
    feature set and with `--features threads`. Live next to the code as
    `#[cfg(test)] mod tests` blocks. Cover sim invariants, wasm-bindgen
    surface behaviour, NN forward + decode, grass propagation, slider
    dispatch, snapshot byte layout.
-2. **Docs lint** — `cd app/web && pnpm docs:lint`. Dependency-free Node
+3. **Rust bench compile gate** — `cargo bench --no-run`. This catches
+   Criterion bench drift while avoiding the `panic=abort`/unwind mismatch
+   that makes `cargo build --benches` the wrong command here.
+4. **Docs lint** — `cd app/web && pnpm docs:lint`. Dependency-free Node
    gate for mechanical docs drift: local links/paths, architecture/decision
    routing, ownership paths, Rust↔TS generated constants, worker pacing
    invariants, and profiler tree/span drift.
-3. **Playwright e2e** — `cd app/web && pnpm test:e2e`. Specs under
-  `app/web/tests/e2e/` cover the main↔worker control path, generated
-  Rust↔TS config/defaults drift, settings persistence, world persistence,
-  grass LOD/window metadata, restart-time grass sizing, and worker watchdog
-  recovery. Playwright
+5. **TypeScript build gates** — `cd app/web && pnpm typecheck` and
+   `pnpm build`. `build` runs `tsc --noEmit && vite build`.
+6. **Playwright e2e** — `cd app/web && pnpm test:e2e`. Specs under
+   `app/web/tests/e2e/` cover the main↔worker control path, generated
+   Rust↔TS config/defaults drift, settings persistence, world persistence,
+   grass LOD/window metadata, restart-time grass sizing, and worker watchdog
+   recovery. Playwright
    boots Vite via its `webServer` hook so the suite is one command.
 
 There is no Rust integration-test crate. The one intentional native
@@ -65,15 +73,15 @@ Notable coverage by file:
 
 | File | What it covers |
 |---|---|
-| `app/crates/evosim/src/wasm_api/mod.rs` | `write_snapshot_to_native` layout matches the documented byte stride; `max_pop_for_sim()` mirrors the constant; `creature_at` returns stable ids; `set_slider` dispatch round-trip; telemetry sample cadence/export shape/worst-jank/reset behavior; saved-world artifact round-trip and fork identity semantics. |
+| `crates/evosim/src/wasm_api/mod.rs` | `write_snapshot_to_native` layout matches the documented byte stride; `max_pop_for_sim()` mirrors the constant; `creature_at` returns stable ids; `set_slider` dispatch round-trip; telemetry sample cadence/export shape/worst-jank/reset behavior; saved-world artifact round-trip and fork identity semantics. |
 | `crates/evosim/src/world/mod.rs` | Tick step body, slider effects on world construction, multi-founder spawn placement, deterministic science-mode default-off and exact fixture hash. |
 | `crates/evosim/src/world/tick.rs` | Per-phase invariants — graze energy conservation, eat per-bite math, repulsion clamping, death/birth bookkeeping. |
 | `crates/evosim/src/world/nn.rs` | NN input layout, slot offsets, threaded NN matches sequential NN bit-for-bit (when seeded), chunk-range partition invariants. |
 | `crates/evosim/src/world/proximity.rs` | Sector LUT correctness, wall proximity edges, grass density bilinear seam wrap. |
-| `app/crates/evosim/src/brain/mod.rs` | Forward-pass shape, Leaky ReLU sign behaviour, mutation produces finite values. |
-| `app/crates/evosim/src/grass/mod.rs` | Density init, in-cell growth, scatter/blur propagation coverage, deterministic science scatter across tile boundaries/wrap seams, active-tile path equivalence to full-grid reference, wrapped `viewport_window` extraction, bilinear sample, row-has-density bitset rebuild. Tests live in the `grass/tests/` subdir. |
+| `crates/evosim/src/brain/mod.rs` | Forward-pass shape, Leaky ReLU sign behaviour, mutation produces finite values. |
+| `crates/evosim/src/grass/mod.rs` | Density init, in-cell growth, scatter/blur propagation coverage, deterministic science scatter across tile boundaries/wrap seams, active-tile path equivalence to full-grid reference, wrapped `viewport_window` extraction, bilinear sample, row-has-density bitset rebuild. Tests live in the `grass/tests/` subdir. |
 | `crates/evosim/src/grid.rs` | `cell_of` boundary clamping, `for_each_in_radius` enumeration. |
-| `crates/evosim/src/profiler.rs` | Ring buffer pruning, five-tree minting via `ensure_root`, RAII span correctness. |
+| `crates/evosim/src/profiler.rs` | Ring buffer pruning, profiler-root minting via `ensure_root`, RAII span correctness. |
 
 ## Docs lint
 
@@ -97,7 +105,7 @@ Determinism gates: `clippy.toml` forbids `HashMap` / `HashSet`
 `iter*` in sim-critical files (non-deterministic order would silently
 make tests flaky); use `BTreeMap` / sorted `Vec` if iteration is needed.
 `world/science_mode_tests.rs` pins the science-mode fixture hash
-`0xda586f7d1ea01dbc`, and the grass scatter tests assert exact density
+`0xa73ea794b541d797`, and the grass scatter tests assert exact density
 repeatability for a boundary/wrap-seam fixture. Those tests are required to
 pass under both `cargo test --lib` and `cargo test --lib --features threads`.
 
@@ -132,7 +140,7 @@ Key coverage:
 - `sim-bridge.spec.ts` **slider change** — opens the dev panel, edits `basic upkeep`, asserts
   no `set_slider … rejected` warning lands on the console.
 - `sim-bridge.spec.ts` **profile toggle** — toggles `show profiler` + `#profiler-enable`,
-  asserts all five stacked profiler tables populate within 4 s.
+  asserts profiler tables populate within 4 s.
 - `sim-bridge.spec.ts` **restart `r`** — presses the `r` hotkey, asserts the tick counter
   resets (drops below the pre-restart value).
 - `sab-control.spec.ts` verifies the all-SAB transport still populates
@@ -170,21 +178,27 @@ If you touch `simLoop()` in `app/web/src/sim/worker.ts`, run it.
 ## Code anchors
 
 - `crates/evosim/Cargo.toml` → `[features] threads`.
-- `app/web/package.json` → `"test:e2e": "playwright test"`.
-- `app/web/package.json` → `"docs:lint": "node ../../scripts/docs-lint.mjs"`.
+- `web/package.json` → `"test:e2e": "playwright test"`.
+- `web/package.json` → `"docs:lint": "node ../../scripts/docs-lint.mjs"`.
 - `scripts/docs-lint.mjs` → mechanical docs drift gate.
-- `app/web/playwright.config.ts` → `webServer`, `reuseExistingServer`.
-- `app/web/tests/e2e/app-fps.spec.ts` → App FPS choices, persistence, and
+- `web/playwright.config.ts` → `webServer`, `reuseExistingServer`.
+- `web/tests/e2e/app-fps.spec.ts` → App FPS choices, persistence, and
   snapshot back-pressure under high target TPS.
-- `app/web/tests/e2e/sim-bridge.spec.ts` → worker control-path smoke tests.
-- `app/web/tests/e2e/worker-watchdog.spec.ts` → worker crash/freeze recovery
+- `web/tests/e2e/sim-bridge.spec.ts` → worker control-path smoke tests.
+- `web/tests/e2e/sab-control.spec.ts` → SAB transport/profile/inspector
+  smoke tests.
+- `web/tests/e2e/inspector-nn.spec.ts` → paused NN inspector smoke tests.
+- `web/tests/e2e/grass-lod-smoke.spec.ts` → grass LOD/window smoke tests.
+- `web/tests/e2e/grass-size-restart.spec.ts` → restart-time grass sizing
+  smoke tests.
+- `web/tests/e2e/worker-watchdog.spec.ts` → worker crash/freeze recovery
   and paused no-false-positive coverage.
-- `app/web/tests/e2e/world-persistence.spec.ts` → saved-world Save/Resume/Fork/
+- `web/tests/e2e/world-persistence.spec.ts` → saved-world Save/Resume/Fork/
   Export/Import coverage.
-- `app/web/tests/e2e/defaults-drift.spec.ts` → generated Rust↔TS config/default drift guard.
-- `app/web/tests/e2e/settings-persistence.spec.ts` → Settings localStorage and
+- `web/tests/e2e/defaults-drift.spec.ts` → generated Rust↔TS config/default drift guard.
+- `web/tests/e2e/settings-persistence.spec.ts` → Settings localStorage and
   boot slider-state / WorldConfig persistence guard.
-- `app/web/tests/README.md` → onboarding pointer; the authoritative
+- `web/tests/README.md` → onboarding pointer; the authoritative
   command/coverage list lives here and in
   [`../agent-context/testing-how-to.md`](../agent-context/testing-how-to.md).
 - `clippy.toml` → `disallowed-methods` for the HashMap/HashSet ban.

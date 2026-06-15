@@ -30,7 +30,12 @@ Standard clippy / fmt gates (also from `app/`):
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 cargo clippy --all-targets --features threads -- -D warnings
+cargo bench --no-run
 ```
+
+`cargo bench --no-run` is a compile gate for Criterion benches; use it
+instead of `cargo build --benches`, because the workspace's
+`panic = "abort"` profiles conflict with Criterion's unwind requirement.
 
 ### TypeScript
 

@@ -76,7 +76,7 @@ grass_step           ← sum-busy across all rayon workers, per tick
   invocation count so `ms/call` reflects per-creature / per-row cost,
   not per-tick cost. RAII spans contribute 1; sum-of-workers drains
   contribute N (the real per-creature or per-row work count).
-- The TS-side `frame` mirror in `app/web/src/perf.ts` (independent state,
+- The TS-side `frame` mirror in `web/src/perf.ts` (independent state,
   same shape, stitched in by the perf panel).
 - The 1 Hz worker→main poll cadence for the profile report.
 - The display rules: insertion-order stable, indent by dotted-prefix
@@ -84,18 +84,19 @@ grass_step           ← sum-busy across all rayon workers, per tick
   `window: X.X s` header above the five trees.
 - The backend is **always-on**. The worker calls
   `world.profile_enable(true)` once at boot and never disables. The
-  `showProfiler` setting is the source of truth for panel visibility
-  and poll activity — but the Rust ring buffers keep accumulating
-  regardless, so the panel has data the moment it reappears.
+  `showProfiler` setting is the source of truth for panel visibility and
+  poll/render activity, not for backend recording. Rust ring buffers and
+  TS-side frame samples keep accumulating, so the panel has data the moment it
+  reappears.
   **Panel location**: the profiler content is in `#settings-profiler-pane`
   (the Settings panel's "Profiler" sub-nav category), not the old
   `#perf-box` in the left column. `#perf-box` remains in the DOM as an
   empty hidden placeholder.
   **Activation**: selecting the Profiler sub-nav category calls
   `setSetting("showProfiler", true)` + `setProfilerVisible(true)`, which
-  starts recording and poll. Navigating to any other category calls both
-  with `false`. Default `Settings.showProfiler = false`; the profiler is
-  idle until the user opens its category.
+  starts polling/rendering the panel. Navigating to any other category calls
+  both with `false`. Default `Settings.showProfiler = false`; the profiler is
+  hidden by default, while recording stays warm.
 
 ## What it does NOT own
 
@@ -105,7 +106,7 @@ grass_step           ← sum-busy across all rayon workers, per tick
 - **The wasm boot or the rayon pool init** — owned by
   [`worker-runtime.md`](worker-runtime.md).
 - **The profile-toggle checkbox UI** — owned by
-  `app/web/src/widgets/perf-panel.ts`; this doc owns the data the panel
+  `web/src/widgets/perf-panel.ts`; this doc owns the data the panel
   renders.
 
 ## Key invariants
@@ -166,7 +167,7 @@ grass_step           ← sum-busy across all rayon workers, per tick
   collapses the dispatch counters under the unified `grass_step.dispatch`
   name and the shared `dispatch_calls` counter records 1 per tick.
 - **`frame`** — TS-side `span("frame")` at the top of the RAF callback
-  in `app/web/src/main.ts`, with inner spans in `app/web/src/render/gl.ts`.
+  in `web/src/main.ts`, with inner spans in `web/src/render/gl.ts`.
   The `trail_state` child measures the id-keyed previous/current map rebuild
   used by velocity trails. Every TS span is one RAII invocation →
   `call_count = 1`.
@@ -208,8 +209,8 @@ counters into a single reply alongside the JSON tree:
 }
 ```
 
-The TS-side `frame` tree (from `app/web/src/perf.ts::reportJson()`) is
-spliced in by `app/web/src/widgets/perf-panel.ts` before rendering. The
+The TS-side `frame` tree (from `web/src/perf.ts::reportJson()`) is
+spliced in by `web/src/widgets/perf-panel.ts` before rendering. The
 panel renders five `.profiler-tree-section` blocks in the order
 `[frame, sim_worker, tick, nn, grass_step]`; any tree not in that whitelist
 renders at the bottom in JSON-insertion order so a future sixth tree
@@ -249,17 +250,10 @@ lets the worker publish JS-measured durations into the always-on
 Rust profile tree, which is what main reads through
 `profile_report_json`.
 
-Pattern:
-
-```ts
-const t0 = performance.now();
-doWork();
-world.record_profile_sample("sim_worker", "tick",
-  Math.round((performance.now() - t0) * 1000), 1);
-```
-
-The three `sim_worker.*` spans use this pattern. Any new worker-side
-span that wants to reach the perf panel should too.
+Worker-side spans that need to reach the perf panel should use
+`web/src/sim/worker.ts` → `simLoop` and
+`crates/evosim/src/wasm_api/mod.rs` → `WorldHandle::record_profile_sample`
+as the template.
 
 ## Code anchors
 
@@ -268,45 +262,36 @@ span that wants to reach the perf panel should too.
   `Profiler::record_under_root` (signature
   `(root_name, path, dur_us, call_count)`),
   `Profiler::record_external`, `Profiler::clear`,
-  `ProfilerInner::ensure_root`,
-  `report_json`, `serialize_node` (writes `total_call_count`),
-  `clock_now_us_threadsafe`, `SpanGuard`, `ROOT_TICK`,
-  `ROOT_FRAME`, `WINDOW_MS`, `SAMPLES_PER_NODE`, `MAX_NODES`.
-- `app/crates/evosim/src/wasm_api/mod.rs` → `WorldHandle::profile_enable`,
+  `ProfilerInner::ensure_root`, `Profiler::report_json`,
+  `serialize_node` (writes `total_call_count`),
+  `clock_now_us_threadsafe`, `SpanGuard`.
+- `crates/evosim/src/wasm_api/mod.rs` → `WorldHandle::profile_enable`,
   `WorldHandle::profile_clear`, `WorldHandle::profile_report_json`,
-  `WorldHandle::telemetry_report_json`.
-- `crates/evosim/src/world/mod.rs` → the `record_under_root("grass_step", ...)` calls
-  (passing paired `_us` + `_calls`) and the `tick.color_ema` sibling
-  lift.
+  `WorldHandle::telemetry_report_json`,
+  `WorldHandle::record_profile_sample`, `WorldHandle::write_snapshot`.
+- `crates/evosim/src/world/mod.rs` → `World::step`.
 - `crates/evosim/src/world/nn.rs` → `nn_forward_all_chunks`,
-  `nn_stats.reset_tick`, the per-worker atomic-accumulator bracket
-  ordering, the `creatures_in_chunk` argument threaded into
-  `record_chunk_subphases`.
-- `crates/evosim/src/world/nn_stats.rs` → `NnStats`, `tick_build_input_total_us` +
-  `tick_build_input_total_calls`, `tick_proximity_total_us` +
-  `tick_proximity_total_calls`, `tick_forward_calls`,
-  `tick_forward_l1_calls` / `_l2_calls` / `_l3_calls`,
-  `tick_chunk_wall_calls`, `record_chunk_subphases`, `record_chunk_lite`.
-- `app/crates/evosim/src/grass/mod.rs` → `par_chunks_us`, `chunks_mut_us`, `row_body_us`,
-  `row_body_self_us`, `dispatch_calls`, `row_body_calls` atomic
-  counters.
-- `app/web/src/perf.ts` → `span`, `setProfilerEnabled`,
+  `build_nn_input`.
+- `crates/evosim/src/world/nn_stats.rs` → `NnStats`,
+  `NnStats::record_chunk_subphases`, `NnStats::record_chunk_lite`.
+- `crates/evosim/src/grass/mod.rs` → `GrassGrid`,
+  `GrassGrid::compute_propagation`, `GrassGrid::rebuild_row_bitset`.
+- `web/src/perf.ts` → `span`, `setProfilerEnabled`,
   `isProfilerEnabled`, `reportJson`, `resetFrameTree`,
-  `recordSample` (3-tuple `[ts, dur, call_count]`),
+  `recordSample`,
   the empty-stack `frame` special-case.
-- `app/web/src/render/gl.ts` → the `frame.render_world*` span calls.
-- `app/web/src/main.ts` → the outer `span("frame")` and
+- `web/src/render/gl.ts` → the `frame.render_world*` span calls.
+- `web/src/main.ts` → the outer `span("frame")` and
   `span("frame.snapshot.read")` brackets.
-- `app/web/src/widgets/perf-panel.ts` → `installProfilerPanel` (mounts
+- `web/src/widgets/perf-panel.ts` → `installProfilerPanel` (mounts
   into `#settings-profiler-pane`), `setProfilerVisible` (called by
   devpanel sub-nav wiring on Profiler category select/deselect),
   `TREE_ORDER`, telemetry CSV/JSON export actions, the `total_call_count`
   divisor in the `ms/call` formula, the `window: X.X s` header render.
-- `app/web/src/sim/worker.ts` → the `sim_worker.*` span calls and the
+- `web/src/sim/worker.ts` → the `sim_worker.*` span calls and the
   `WorldHandle::record_profile_sample` invocations.
-- `app/crates/evosim/src/wasm_api/mod.rs` → `record_under_root("sim_worker", "write_output_sab.snapshot*", ...)`
-  calls (four sub-spans: `.snapshot`, `.snapshot.creatures`, `.snapshot.grass_copy`,
-  `.snapshot.biome`).
+- `crates/evosim/src/wasm_api/mod.rs` → `record_under_root("sim_worker", "write_output_sab.snapshot*", ...)`
+  calls.
 
 ## Update when
 

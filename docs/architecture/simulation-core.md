@@ -33,9 +33,9 @@ seeding), `world_size` + `wrap_world`, and `master_seed`. See
 
 ## WorldConfig, defaults, and seeds
 
-`app/crates/evosim/src/wasm_api/mod.rs` → `WorldConfig`,
+`crates/evosim/src/wasm_api/mod.rs` → `WorldConfig`,
 `WorldHandle::new_with_config_json`
-`app/crates/evosim/src/bin/gen_bindings.rs` → `render_world_config`
+`crates/evosim/src/bin/gen_bindings.rs` → `render_world_config`
 
 World construction is versioned by `WORLD_CONFIG_SCHEMA_VERSION` and enters
 wasm as one JSON `WorldConfig` object. The config owns dimensions/wrap,
@@ -46,7 +46,7 @@ applies `initial_sliders` after construction so live slider lanes are seeded,
 but construction fields are not sourced from those lanes.
 
 TypeScript consumes generated mirrors in
-`app/web/src/generated/world-config.ts`: `DEFAULT_WORLD_CONFIG`,
+`web/src/generated/world-config.ts`: `DEFAULT_WORLD_CONFIG`,
 `WORLD_CONFIG_PRESETS`, and `DEFAULT_LIVE_SLIDER_VALUES`. Settings defaults
 derive construction values from `DEFAULT_WORLD_CONFIG` and live slider values
 from `DEFAULT_LIVE_SLIDER_VALUES`; the Playwright defaults-drift spec compares
@@ -77,51 +77,20 @@ These are now separate subsystems with their own docs:
 - **Species and sexual mating** — `SpeciesRegistry`, N-anchor seeding, sexual
   `Mate` + crossover, same-species attack gate → [`species.md`](species.md)
 
-## Slider table (current state)
+## Slider and config ownership
 
-Current construction and live sliders, their index, and scope. Rationale
-for the shape and additions is in `decisions/sim.md`.
+Current slider names, stable indices, and generated TypeScript mirrors are
+owned by `crates/evosim/src/wasm_api/mod.rs` → `SLIDER_NAMES`,
+`SLIDER_COUNT`, `SLIDER_BUCKET_BASE`, `WorldHandle::set_slider`, and
+`WorldHandle::set_slider_by_index`. The generated web mirror is
+`web/src/generated/slider-ids.ts` → `SLIDER_NAMES`, `SLIDER_COUNT`,
+`SLIDER_INDEX`; `cargo test --lib` and `cd app/web && pnpm docs:lint` are the
+drift gates for that Rust ↔ TS contract.
 
-| Idx | Name | Scope |
-|---|---|---|
-| 0–16 | core creature/energy knobs | mostly live |
-| 17 | `max_population` | live |
-| 18 | `world_size` | construction |
-| 19 | `world_seed` | construction compatibility lane; external config uses `master_seed` |
-| 20 | `wrap_world` | construction |
-| 21 | `_reserved_legacy_water_movement_penalty` | no-op |
-| 22 | `_reserved_legacy_desert_movement_penalty` | no-op |
-| 23 | `_reserved_legacy_trait_mutation_sigma_multiplier` | no-op |
-| 24 | `species_mode` | construction |
-| 25 | `crossover_mode` | construction |
-| 26 | `starting_species_count` | construction |
-| 27 | `starting_species_member_count` | construction |
-| 28 | `starting_species_member_variance` | construction |
-| 29 | `mating_cooldown_ticks` | live |
-| 30–53 | mutation buckets (`SLIDER_BUCKET_BASE` = 30) | live |
-| 54–59 | grass scatter params (decay/spread/ring weights) | live |
-| 60 | `lod_bias` | live |
-| 61 | `grass_multisight` | construction |
-| 62 | `grass_size` / `grass_cell_size` | construction |
-| 63 | `grass_lod_step` | live |
-| 64 | `mate_reach_multiplier` | live |
-| 65 | `init_graze_boost` | construction (founder only) |
-| 66 | `init_split_boost` | construction (founder only) |
-| 67 | `crowding_strength` | live |
-| 68 | `crowding_radius` | live |
-| 69 | `starvation_threshold` | live |
-| 70 | `starvation_drain_rate` | live |
-| 71 | `grass_capacity_scale` | live |
-| 72 | `grass_regrowth_rate` | live |
-
-`SLIDER_COUNT = 73`. Authoritative list: `app/crates/evosim/src/wasm_api/mod.rs` →
-`SLIDER_NAMES`. `set_slider(name, value)` is the sole mutation entry
-point; bools ride the same path as `0|1`.
-
-`grass_cell_size` (idx 62), the clump knobs, species construction knobs,
-world shape, founder boosts, and NN topology ride `WorldConfig` because
-`initial_sliders` is applied after construction and cannot resize the
-already-built `WorldDims` or rebuild founder brains.
+`grass_cell_size`, the clump knobs, species construction knobs, world shape,
+founder boosts, and NN topology ride `WorldConfig` because `initial_sliders`
+is applied after construction and cannot resize the already-built `WorldDims`
+or rebuild founder brains.
 `WorldConfig.science.deterministic` also rides `WorldConfig`: it selects the
 grass scatter implementation at world construction and is exposed in Settings
 as a next-world-only science/replay option, not as a live slider lane.
@@ -186,30 +155,12 @@ Artifact validation is independent of app settings migration and does not use
 
 ## How it interacts with neighbours
 
-The `WorldHandle` wasm-bindgen surface (`app/crates/evosim/src/wasm_api/mod.rs`):
-
-```text
-WorldHandle::step_n(n: u32) -> bool
-WorldHandle::write_snapshot(slot: u32)
-WorldHandle::newWithConfigJson(config_json: &str) -> Result<WorldHandle>
-WorldHandle::newFromArtifactJson(artifact_json: &str, load_mode: &str) -> Result<WorldHandle>
-WorldHandle::set_slider(name: &str, value: f32)
-WorldHandle::sliders_defaults_json() -> String
-WorldHandle::creature_at(wx, wy, tol) -> Option<f64>
-WorldHandle::creature_idx_by_id(id: f64) -> Option<u32>
-WorldHandle::creature_inspect_json(idx: u32) -> Option<String>
-WorldHandle::creature_nn_inspect_json(idx: u32) -> Option<String>
-WorldHandle::profile_enable(on: bool)
-WorldHandle::profile_clear()
-WorldHandle::profile_report_json() -> String
-WorldHandle::telemetry_report_json() -> String
-WorldHandle::world_artifact_json() -> String
-WorldHandle::nn_worker_stats_json() -> String
-WorldHandle::tps / jank_count / tick / population / world_ended / world_size
-// Free functions:
-max_pop_for_sim() -> u32
-rayon_current_num_threads() -> u32
-```
+The wasm-bindgen surface is owned by `crates/evosim/src/wasm_api/mod.rs` →
+`WorldHandle` and its `impl WorldHandle` methods. The main interaction groups
+are construction/resume, tick stepping, snapshot publication, slider mutation,
+creature lookup/inspection, profiling/telemetry, saved-world artifacts,
+species/NN reports, and small metadata getters. Free wasm exports used by the
+shell are `max_pop_for_sim` and `rayon_current_num_threads`.
 
 `creature_nn_inspect_json` returns a JSON object with the full labeled NN
 input vector (group, label, value per slot) and the current output (vx, vy,
@@ -226,33 +177,19 @@ export remains the path for run-history downloads.
 
 ## Tick step order
 
-```text
-fn step(&mut self) -> bool {
-    let _tick = profile_span!(&self.profile, "tick");
+`crates/evosim/src/world/mod.rs` → `World::step`
+`crates/evosim/src/world/tick.rs` → `apply_movement_and_repulsion`, `graze`,
+`attack`, `energy_bookkeeping`, `collect_deaths`, `flash_decay`
 
-    // Thin path: once world_ended (or pop==0) only grass_step +
-    // bitset rebuild + tick++ run, then return false.
+`World::step` owns the phase order. It rebuilds the spatial grid, runs the NN
+pass, movement/repulsion, graze, attack, grass propagation plus row-bitset
+rebuild, cadence-gated pyramid refresh, energy bookkeeping, species mating or
+single-pool births, death collection, ring-flash decay, and tail bookkeeping.
+When `world_ended` or `pop == 0`, it uses the thin path that keeps grass/bitset
+maintenance and tick advancement alive but returns `false`.
 
-    // 1. tick.grid.rebuild      — SpatialGrid::rebuild
-    // 2. tick.nn                — chunked Brain::forward (LEAF)
-    // 4. tick.movement          — integrate + repulsion + apply
-    // 5. tick.graze             — multi-cell density consume
-    // 6. tick.attack            — per-bite energy transfer
-    // 7. tick.grass_step        — compute_propagation (Scatter or Blur)
-    //                             + rebuild_row_bitset (LEAF)
-    // 7b.tick.pyramid_refresh   — cadence-gated full mip recompute
-    // 8. tick.energy_bookkeeping — age upkeep + digestion; PLUS:
-    //                             crowding mortality (∝ exact neighbours in radius)
-    //                             starvation drain (below energy floor)
-    // 9a.(tick.handle_births)   — species_mode only: handle_mating (sexual Mate)
-    // 9b.tick.collect_deaths
-    //10. tick.handle_births     — single-pool asexual Split
-    //                             RANDOM CULL (backstop only, effectively
-    //                             never fires under food-limited equilibrium)
-    //12. tick.color_ema         — ring-flash decay (span name kept)
-    //    tick.bookkeeping_tail  — last_action promote, tick++, world-end check
-}
-```
+The named phases emit `tick.*` profiler spans; `cargo test --lib` covers the
+equilibrium and deterministic-science invariants that depend on this order.
 
 `tick.nn` and `tick.grass_step` measure the main sim worker's wall-clock
 wait for the compute dispatch only. In normal threaded builds that is the
@@ -270,7 +207,7 @@ two full `hash_dim²` rebuilds. `tick.movement` is decomposed into
 
 ## NN topology (runtime input width → hidden layers → 5)
 
-`app/crates/evosim/src/brain/mod.rs` → `NnTopology`, `Brain`
+`crates/evosim/src/brain/mod.rs` → `NnTopology`, `Brain`
 `crates/evosim/src/world/nn.rs` → `NnInputLayout`, `NnInputGroup`, `build_nn_input`
 
 Input width is a **runtime field** of `NnTopology`. The active width is
@@ -278,17 +215,18 @@ computed by the composable `NnInputLayout` descriptor
 (`NnInputLayout::for_settings(wrap_world, species_mode, grass_multisight)`)
 then fed to the first matmul as `fan_in`. Width must be a multiple of 8
 and `≤ MAX_NN_INPUTS`; see `crates/evosim/src/constants.rs` for the ceiling value
-(`MAX_NN_INPUTS = 48`).
+(`MAX_NN_INPUTS`; gated by `cargo test --lib`).
 
 **Active input groups** (always-on): `SelfMemory` (8), `CreatureSectors` (8
 single-pool / 16 species mode), `GrassSectors` (8), `CurrGrass` (1),
 `Bias` (1).
 **Conditional groups**: `WallProximity` (4) when `wrap_world = false`;
 `GrassBandsFar` (8 far sectors at `GRASS_FAR_SIGHT_RADIUS`, mip level
-`GRASS_FAR_MIP_LEVEL`) when `grass_multisight = true`. All 8 combinations fit
-within `MAX_NN_INPUTS = 48` — no fallback is needed.
+`GRASS_FAR_MIP_LEVEL`) when `grass_multisight = true`. All layout combinations
+fit within `MAX_NN_INPUTS` — no fallback is needed.
 
-**8-way width table:**
+**Width compositions** (`cargo test --lib` via
+`crates/evosim/src/brain/tests/width.rs` gates these literal widths):
 
 Single-band (`grass_multisight=false`):
 
@@ -327,7 +265,7 @@ cells under the creature.
 
 ## Grass mechanic
 
-`app/crates/evosim/src/grass/mod.rs` → `GrassGrid`
+`crates/evosim/src/grass/mod.rs` → `GrassGrid`
 
 The density field is `Vec<AtomicU8>` (`GrassGrid::density`), stored on the
 snapshot quantization scale — a raw u8 IS the renderable density byte.
@@ -396,10 +334,11 @@ the normal scatter kernel's lossy cross-tile relaxed RMW makes grass density
 intentionally non-reproducible run-to-run. Opt-in science mode is the
 reproducibility path. The covered promise is exact fixture-state/hash equality
 for the same seed/config/artifact plus the same app version across
-`cargo test --lib` and `cargo test --lib --features threads`; the pinned
-world fixture hash is `0xda586f7d1ea01dbc`. This is not a promise that normal
-mode, profiler/telemetry timing, browser event-loop timing, future app
-versions, or arbitrary hardware/browser floating-point paths are bit-identical.
+`cargo test --lib` and `cargo test --lib --features threads`; the fixture hash
+is owned by `crates/evosim/src/world/science_mode_tests.rs`. This is not a
+promise that normal mode, profiler/telemetry timing, browser event-loop timing,
+future app versions, or arbitrary hardware/browser floating-point paths are
+bit-identical.
 
 ## Action ring-flash (FlashTag)
 
@@ -418,14 +357,14 @@ renderer — see [`shared-memory-and-protocol.md`](shared-memory-and-protocol.md
 - `crates/evosim/src/world/tick.rs` → `apply_movement_and_repulsion`, `graze`, `attack`, `energy_bookkeeping`, `collect_deaths`, `flash_decay`
 - `crates/evosim/src/world/nn.rs` → `nn_forward_all_chunks`, `build_nn_input`, `build_labeled_nn_inspect`, `NnInputLayout`, `NnInputGroup`, `ActionGate`, `decode_action`, `is_valid_action`, `chunk_ranges`, `dynamic_chunks`
 - `crates/evosim/src/world/nn_stats.rs` → `NnStats`
-- `crates/evosim/src/world/proximity.rs` → `LUT_RADIUS`, sector LUT build, creature + grass proximity helpers, `compute_creature_proximity_sectors_species`, `compute_grass_far_band_sectors`
-- `app/crates/evosim/src/brain/mod.rs` → `Brain`, `Brain::forward`, `Brain::child_from`, `NnTopology`, `lrelu`
+- `crates/evosim/src/world/proximity.rs` → `LUT_RADIUS`, `compute_creature_proximity_sectors_species`, `compute_grass_far_band_sectors`
+- `crates/evosim/src/brain/mod.rs` → `Brain`, `Brain::forward`, `Brain::child_from`, `NnTopology`, `lrelu`
 - `crates/evosim/src/creature.rs` → `CreatureSoA` (`hue` column), `FlashTag`, `Action`
-- `app/crates/evosim/src/grass/mod.rs` → `GrassGrid`, `GrassPropagation`, `ScatterParams`, `DiscTable`, `GrassPyramid`, `compute_propagation`, `consume`
+- `crates/evosim/src/grass/mod.rs` → `GrassGrid`, `GrassPropagation`, `ScatterParams`, `DiscTable`, `GrassPyramid`, `compute_propagation`, `consume`
 - `crates/evosim/src/rng.rs` → `SimRng`, `grass_hash_u64`, `grass_hash_fused_4`
 - `crates/evosim/src/grid.rs` → `SpatialGrid`, `cell_of`, `rebuild`, `for_each_in_radius`
-- `crates/evosim/src/constants.rs` → `WorldDims`, `MAX_POP_FOR_SIM`, `GRASS_CELL_SIZE`, `MAX_NN_INPUTS`, `MIN_CHUNKS`, `MAX_CHUNKS`, `GRASS_SPREAD_RADIUS`, `GRASS_BITES_PER_BLOCK_DEFAULT`, `GRASS_PYRAMID_MAX_LEVELS`, `CROWDING_STRENGTH_DEFAULT`, `CROWDING_RADIUS_DEFAULT`, `STARVATION_THRESHOLD_DEFAULT`, `STARVATION_DRAIN_RATE_DEFAULT`, `GRASS_CAPACITY_SCALE_DEFAULT`, `GRASS_REGROWTH_RATE_DEFAULT`, [etc — authoritative list in file]
-- `app/crates/evosim/src/wasm_api/mod.rs` → `WorldHandle`, `WorldHandle::set_slider`, `WorldHandle::write_snapshot`, `WorldHandle::creature_nn_inspect_json`, `BiomePyramid`, `lineage_color_u32`, `max_pop_for_sim`
+- `crates/evosim/src/constants.rs` → `WorldDims`, `MAX_POP_FOR_SIM`, `GRASS_CELL_SIZE`, `MAX_NN_INPUTS`, `MIN_CHUNKS`, `MAX_CHUNKS`, `GRASS_SPREAD_RADIUS`, `GRASS_BITES_PER_BLOCK_DEFAULT`, `GRASS_PYRAMID_MAX_LEVELS`, `CROWDING_STRENGTH_DEFAULT`, `CROWDING_RADIUS_DEFAULT`, `STARVATION_THRESHOLD_DEFAULT`, `STARVATION_DRAIN_RATE_DEFAULT`, [etc — authoritative list in file]
+- `crates/evosim/src/wasm_api/mod.rs` → `WorldHandle`, `WorldHandle::set_slider`, `WorldHandle::write_snapshot`, `WorldHandle::creature_nn_inspect_json`, `BiomePyramid`, `lineage_color_u32`, `max_pop_for_sim`
 - `crates/evosim/src/world/equilibrium_tests.rs` — exit-gate test: death-cohort age-at-death trend + steady-state population band
 
 ## Update when

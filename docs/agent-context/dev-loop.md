@@ -8,9 +8,9 @@ Any time you're iterating on a Rust or TS change and want to see it run
 in the browser. The canonical build commands, flags, and threaded-bundle
 invariants live in
 [`../architecture/build-and-deploy.md`](../architecture/build-and-deploy.md);
-this doc is the procedural version for an agent at the keyboard. It is also the canonical landing for the dev-server workflow (the
-The old in-repo dev-server prompt file has been deleted; this doc
-replaces it).
+this doc is the procedural version for an agent at the keyboard. It is
+also the canonical landing for the dev-server workflow; the old in-repo
+dev-server prompt file has been deleted, and this doc replaces it.
 
 ## The inner loop
 

@@ -33,7 +33,7 @@ subtree index.
 - **Plans** are working coordination docs for multi-step work. Route
   through [`plans/index.md`](plans/index.md).
 
-> The maintenance/chat commands (`/fresh-chat`, `/fresh-orchestrator`,
+> The maintenance/chat commands (`/fresh-chat`, `/grand-orchestrator`,
 > `/wrap-up-current-chat`, `/clear-plans`, `/fix-docs-drift-all`,
 > `/check-docs-consistency-some`, `/review-docs`) are global skills, not
 > in-repo files. There is no `prompts/` tree anymore.

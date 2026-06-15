@@ -5,7 +5,7 @@ block, sequencing, workflow skeleton, what NOT to do) lives in the global
 kit at `~/agent-docs/v1/rules/orchestrating.md`. Read that first.
 
 To bootstrap an orchestration chat for this repo, use the
-`/fresh-orchestrator` skill.
+`/grand-orchestrator` skill.
 
 ## When does this apply
 
@@ -64,7 +64,7 @@ learn.
 ## See also
 
 - [`index.md`](index.md) — agent-context router.
-- `/fresh-orchestrator` skill — bootstrap prompt for an orchestration chat.
+- `/grand-orchestrator` skill — bootstrap prompt for an orchestration chat.
 - [`maintaining-docs.md`](maintaining-docs.md) — the doc-migration rules
   step 7 of the workflow invokes.
 - [`testing-how-to.md`](testing-how-to.md) — the gates and the

@@ -10,8 +10,10 @@ A Cargo workspace (`Cargo.toml` at `app/`) with a single member crate
 feature flag that pulls in `rayon` + `wasm-bindgen-rayon`. The web shell
 (Vite + TS) imports the wasm output from `app/web/wasm/`. The dev server pins
 port 47821 and sets COOP/COEP so `SharedArrayBuffer` is available.
-Production deploys static `app/web/dist/` to any host that respects
-`app/web/public/_headers`.
+Production deploys static `app/web/dist/`. Hosts that support `_headers`
+read `app/web/public/_headers`; the GitHub Pages workflow builds with
+`VITE_BASE=/evosim/` and relies on the checked-in COI service-worker shim
+for cross-origin isolation.
 
 ## What it owns
 
@@ -122,7 +124,7 @@ always a COOP/COEP miss or a stale wasm bundle.
 
 `[target.wasm32-unknown-unknown]` rustflags include:
 
-- `-C target-feature=+atomics,+bulk-memory,+mutable-globals`
+- `-C target-feature=+atomics,+bulk-memory,+mutable-globals,+simd128`
 - `-C link-arg=--shared-memory`
 - `-C link-arg=--max-memory=4294967296`
 - `-C link-arg=--import-memory`
@@ -170,8 +172,9 @@ for wasm instantiation and the standard caching rules for
 ## Production deploy
 
 `pnpm build` in `app/web/` runs `tsc --noEmit && vite build` and emits
-`app/web/dist/`. Cloudflare Pages reads `app/web/public/_headers` directly;
-any static host that respects an `_headers` file works.
+`app/web/dist/`. The GitHub Pages workflow sets `VITE_BASE=/evosim/` before
+that build and uploads `app/web/dist/`; Cloudflare Pages and other hosts that
+respect `_headers` read `app/web/public/_headers` directly.
 
 The release wasm goes through `wasm-opt -O4 --enable-bulk-memory
 --enable-mutable-globals` via
@@ -187,7 +190,7 @@ The release wasm goes through `wasm-opt -O4 --enable-bulk-memory
 - `cargo test --lib`
 - `cargo test --lib --features threads`
 - `rustup run nightly wasm-pack build crates/evosim --target web --out-dir ../../web/wasm --release --features threads`
-- (Web job, depends on Rust job) `pnpm typecheck` + `pnpm build`
+- (Web job, depends on Rust job) `pnpm docs:lint` + `pnpm build`
 
 ## Code anchors
 
@@ -198,10 +201,11 @@ The release wasm goes through `wasm-opt -O4 --enable-bulk-memory
 - `.cargo/config.toml` → `[target.wasm32-unknown-unknown]` rustflags,
   `[unstable] build-std`.
 - `rust-toolchain.toml` → pinned `1.95.0` stable.
-- `app/web/vite.config.ts` → `crossOriginIsolationHeaders`, port `47821`,
+- `web/vite.config.ts` → `crossOriginIsolationHeaders`, port `47821`,
   `worker: { format: "es" }`.
-- `app/web/public/_headers` → COOP/COEP, CSP, caching rules.
+- `web/public/_headers` → COOP/COEP, CSP, caching rules.
 - `.github/workflows/ci.yml` → gate matrix.
+- `.github/workflows/deploy-pages.yml` → GitHub Pages `VITE_BASE` deploy.
 
 ## Update when
 

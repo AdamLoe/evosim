@@ -10,7 +10,7 @@ u8 per grass cell — and stored on `World.biome_grid` for O(1) per-tick
 lookups. The grid never changes during a run; it is rebuilt only on world
 reconstruction (restart).
 
-`crates/evosim/src/constants.rs` → `Biome` enum (`Plains = 0`, `Water = 1`, `Desert = 2`)
+`crates/evosim/src/constants.rs` → `Biome`
 
 ## Blob generation
 
@@ -45,7 +45,7 @@ biome buffer exposed to the web shell.
 
 ## Grass biome-capacity scaling (the ONLY surviving per-tick biome effect)
 
-`app/crates/evosim/src/grass/mod.rs` → `compute_propagation_scatter`
+`crates/evosim/src/grass/mod.rs` → `compute_propagation_scatter`
 
 Each grass cell's scatter spread is capped at a **biome-capacity byte**
 derived from the cell's biome via `capacity_factor_from_u8`. Plains cells
@@ -83,11 +83,11 @@ grass-sector, far-grass, and current-grass NN inputs.
 ## Code anchors
 
 - `crates/evosim/src/world/biome.rs` → `generate_biome_grid`, `biome_from_u8`, `capacity_factor_from_u8`
-- `crates/evosim/src/world/mod.rs` → `World.biome_grid` (the stored u8 grid)
+- `crates/evosim/src/world/mod.rs` → `World`
 - `crates/evosim/src/world/nn.rs` → `NnInputLayout::for_settings`, `build_nn_input`
-- `crates/evosim/src/constants.rs` → `Biome` enum, `GRASS_CAPACITY_PLAINS`, `GRASS_CAPACITY_WATER`, `GRASS_CAPACITY_DESERT`
-- `app/crates/evosim/src/grass/mod.rs` → `compute_propagation_scatter` (biome-capacity cap on spread writes)
-- `app/crates/evosim/src/wasm_api/mod.rs` → `BiomePyramid` (`build`, `copy_window`)
+- `crates/evosim/src/constants.rs` → `Biome`, `GRASS_CAPACITY_PLAINS`, `GRASS_CAPACITY_WATER`, `GRASS_CAPACITY_DESERT`
+- `crates/evosim/src/grass/mod.rs` → `compute_propagation_scatter` (biome-capacity cap on spread writes)
+- `crates/evosim/src/wasm_api/mod.rs` → `BiomePyramid`, `BiomePyramid::build`, `BiomePyramid::copy_window`
 
 ## See also
 
