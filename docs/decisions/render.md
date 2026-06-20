@@ -255,21 +255,18 @@
   path is unchanged (backward compat).
 - **Setting name**: `grass_lod_step` (Rust slider index 63, TS `grassLodStep`).
 - **Displayed values and Auto mapping** (cell counts scale with `grass_dim`;
-  default `grass_dim=480` at `grass_cell_size=20`, max `grass_dim=1920` at
-  `grass_cell_size=5` — user-lowerable slider):
+  construction default `grass_dim=480` at `GRASS_CELL_SIZE_DEFAULT=20`; the bare
+  `WorldDims::from_world_size` fallback retains `GRASS_CELL_SIZE=5` → `grass_dim=1920` —
+  two distinct paths, not to be conflated):
   - `Auto` (0): auto-selects from visible-span formula; at default zoom=1 and
     default `grass_dim=480` this is L0 (full resolution). `lodBias` active in Auto.
-  - `Full` (1, UI label `"Full (~1920px)"` reflects the fine-grained max, not the
-    default): force L0 — one step finer than auto at any zoom-out level where auto
-    would pick L1+. At default scale (`grass_dim=480`) L0 = 480 cells.
-  - `Half` (2): force L1 — 4× fewer cells than L0.
-  - `Quarter` (3): force L2 — 16× fewer cells than L0.
-  - `Eighth` (4): force L3 — 64× fewer cells than L0.
-  - `Sixteenth` (5): force L4 — 256× fewer cells than L0.
-- **Note**: The UI label `"Full (~1920px)"` in `devpanel.ts` is a literal
-  string that reflects the fine-grained max (`grass_cell_size=5`), not the
-  shipping default (`grass_dim=480`). It is not updated to reflect
-  `grass_cell_size` changes.
+  - `Full` (1, UI label `"Full (~480px)"` anchored to the construction default):
+    force L0 — one step finer than auto at any zoom-out level where auto would
+    pick L1+. At the fine-grained case (`grass_cell_size=5`) L0 = 1920 cells.
+  - `Half` (2, `"Half (~240px)"` at default): force L1 — 4× fewer cells than L0.
+  - `Quarter` (3, `"Quarter (~120px)"` at default): force L2 — 16× fewer cells than L0.
+  - `Eighth` (4, `"Eighth (~60px)"` at default): force L3 — 64× fewer cells than L0.
+  - `Sixteenth` (5, `"Sixteenth (~30px)"` at default): force L4 — 256× fewer cells than L0.
 - **LIVE setting** — LOD selection happens in `write_snapshot` per-snapshot. No
   restart required. Exposed as a staged (non-construction-only) DevPanel dropdown.
 - **Why**: `lod_bias` only nudges finer as an offset against the auto formula; it
