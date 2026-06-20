@@ -96,7 +96,8 @@ RAF callback (wrapped in `span("frame")`):
      the camera center folded into `[0, world_size)` so the worker's clipmap
      window tracks the base map while the renderer keeps the absolute camera
      center for tile drawing.
-     If no new seq, repaint only for paused camera movement.
+     If no new seq and paused with a slot layout, repaint every frame
+     (keeps canvas filled across pause, rail toggles, and pan/zoom).
      If there is a new seq but the configured App FPS interval has not elapsed,
      skip snapshot read/render and do not ack the seq yet.
   3. open `frame.snapshot.read` span
@@ -149,7 +150,7 @@ seed: <cachedSeed>  ·  tick <N>  ·  pop <N>  ·  <TPS> TPS  ·  <FPS> FPS[  (w
 The App FPS setting is a Display setting with exactly `15`, `30`, `60`,
 and `120` choices (default `60`). It caps expensive snapshot read,
 render, and upload work; the RAF callback still runs at browser cadence
-to write camera lanes and handle paused camera repaint.
+to write camera lanes and repaint every frame while paused.
 
 ## Per-creature instance pack
 
@@ -269,7 +270,7 @@ always covers the trail's lead-in pixel.
 
 The renderer does **not** interpolate duplicate snapshot frames. Main
 paints a snapshot once, stores `CTRL_CONSUMED_SEQ`, and waits for either
-a new seq or a paused camera repaint. Inside `renderWorldImpl`, each
+a new seq or the every-frame paused repaint. Inside `renderWorldImpl`, each
 paint pointer-swaps `prevById` and `currById`, clears the new current map,
 and walks the current SoA once to populate id → position entries. Bodies
 render at their raw current positions.

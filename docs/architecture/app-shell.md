@@ -102,10 +102,10 @@ The Settings panel separates staged sim controls from live-apply UI controls.
   that sit outside the staged Settings widgets, such as the perf-panel
   `max_population` selector, the legacy grass wave sliders, and the mutation
   buckets until the NN tab registers its own readers.
-- Paused worlds repaint from the latest snapshot when a rail resize changes
-  the canvas dimensions, using the same frozen-sequence path as paused
-  pan/zoom repaint. This prevents WebGL resize clears from remaining visible
-  while the worker is paused.
+- Paused worlds repaint every RAF frame from the latest snapshot while
+  `seq === lastPaintedSeq` and a slot layout is ready. This keeps the canvas
+  filled across pause, rail toggles, and camera pan/zoom — avoiding blank-canvas
+  artifacts that a movement-gated repaint could not cover.
 
 The Settings sub-nav is wired from the category buttons in
 `app/web/index.html`; the corresponding pane visibility is managed by

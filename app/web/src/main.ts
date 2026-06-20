@@ -636,9 +636,10 @@ async function main(): Promise<void> {
     const appFrameIntervalMs = 1000 / appFPS;
     const dueForAppFrame = now - lastPaintedAtMs >= appFrameIntervalMs - 0.5;
     if (seq === lastPaintedSeq) {
-      // No new snapshot since the last paint. Re-render only when the camera
-      // moved (pan/zoom while paused) so the canvas reflects the new view.
-      // v2.1 P1: always call refreshInspector even when seq is frozen so the
+      // No new snapshot since the last paint. Repaint every frame while
+      // paused (and a slot layout is ready) so the canvas stays filled
+      // across pause, rail toggles, and camera pan/zoom.
+      // Always call refreshInspector even when seq is frozen so the
       // NN I/O fetch can fire while paused (it's serialised inside
       // refreshInspector and would otherwise never run on a paused world).
       refreshInspector(simBridge, rail, paused);
@@ -648,7 +649,7 @@ async function main(): Promise<void> {
         const slot: 0 | 1 = rawSlot === 1 ? 1 : 0;
         const slotBaseOff = slotOffset(layout, slot);
         const header = readSnapshotHeader(snapshotView, slotBaseOff);
-        // Also refresh window metadata on camera-pan repaint.
+        // Refresh window metadata each paused frame so UV transform stays current.
         latestWindowMetadata = readWindowMetadata(snapshotView, slotBaseOff);
         const pop = Math.min(header.pop, MAX_POP_FOR_SIM);
         const creatures = pop > 0

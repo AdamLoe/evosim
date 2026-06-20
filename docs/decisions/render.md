@@ -35,10 +35,12 @@
 - **Decision**: Grass density quantizes to `u8` Rust-side
   (`(d * 255).clamp(0,255) as u8`) and uploads as `gl.R8` /
   `gl.UNSIGNED_BYTE`.
-- **Why**: One byte per cell instead of four. At the default
-  (1920² runtime grid) that's a ~3.7 MB `texImage2D`/`texSubImage2D`
-  instead of ~14.7 MB. Quantization loses ~8 bits of density precision;
-  visually indistinguishable, well under any visual-fidelity threshold.
+- **Why**: One byte per cell instead of four. At the fine-grained case
+  (1920² grid, `grass_cell_size=5`, user-lowerable) that would be ~3.7 MB
+  `texImage2D`/`texSubImage2D` vs ~14.7 MB. At the shipping default (480²
+  grid, `grass_cell_size=20`) the window is ~230 KB. Quantization loses ~8
+  bits of density precision; visually indistinguishable, well under any
+  visual-fidelity threshold.
 - **Tradeoffs**: A future per-cell-derivative use would want more bits;
   if that lands, the grass texture format becomes a per-consumer
   decision rather than a global one.
@@ -101,14 +103,15 @@
 - **Decision**: The Display setting `appFPS` is restricted to
   `15 | 30 | 60 | 120` (default 60) and caps snapshot read, render, and
   upload work in `main.ts`. The RAF callback still runs at browser cadence
-  for camera SAB writes and paused camera repaint. The perf status line's
-  FPS is counted from painted frames in the trailing 1 s window.
+  for camera SAB writes and the every-frame paused repaint. The perf status
+  line's FPS is counted from painted frames in the trailing 1 s window.
 - **Why**: The sim's target TPS and the app's paint budget are separate
   controls. Users need high TPS for simulation throughput without forcing
   main to read/upload/render snapshots the browser cannot display.
 - **Tradeoffs**: While running, camera-only visual response can wait for
-  the next configured app frame; while paused, camera movement bypasses the
-  cap so panning/zooming a frozen world still repaints.
+  the next configured app frame; while paused, every RAF frame repaints from
+  the frozen snapshot so the canvas stays filled across rail toggles and
+  camera pan/zoom.
 - **Applies to**: `architecture/render-pipeline.md`,
   `architecture/worker-runtime.md`, `architecture/app-shell.md`.
 - **Code anchors**: `web/src/main.ts → frame`,
@@ -209,8 +212,9 @@
   mip level; (2) snapshot windowing — only the visible region at that level is
   published per slot.
 - **Why**: At `grass_dim` > 4096 a full-resolution copy would exceed the
-  budget; even at the default 1920² the copy is ~3.7 MB per tick. A pyramid
-  lets the snapshot be both bandwidth-bounded (`GRASS_LOD_BUDGET_AXIS = 4096`
+  budget; at the fine-grained case (1920², `grass_cell_size=5`) a full copy
+  would be ~3.7 MB per tick. A pyramid lets the snapshot be both
+  bandwidth-bounded (`GRASS_LOD_BUDGET_AXIS = 4096`
   cells per axis) and LOD-correct at any zoom. Mean downsampling (box filter)
   is the correct aggregate for a density field — no aliasing from nearest.
 - **Applies to**: `architecture/render-pipeline.md`,
@@ -250,15 +254,22 @@
   entirely. When `grass_lod_step == 0` (Auto), the original formula + `lod_bias`
   path is unchanged (backward compat).
 - **Setting name**: `grass_lod_step` (Rust slider index 63, TS `grassLodStep`).
-- **Displayed values and Auto mapping** (at default grass_dim=1920, 5u cells):
-  - `Auto` (0): auto-selects from visible-span formula; at default zoom=1 this
-    is L0 (1920 cells, full resolution). `lodBias` still active in Auto mode.
-  - `Full ~1920` (1): force L0 — one step finer than auto at any zoom-out
-    level where auto would pick L1+. Same as auto at default zoom.
-  - `Half ~960` (2): force L1 — 4× fewer cells, intentionally coarse.
-  - `Quarter ~480` (3): force L2 — 16× fewer cells.
-  - `Eighth ~240` (4): force L3 — 64× fewer cells.
-  - `Sixteenth ~120` (5): force L4 — 256× fewer cells.
+- **Displayed values and Auto mapping** (cell counts scale with `grass_dim`;
+  default `grass_dim=480` at `grass_cell_size=20`, max `grass_dim=1920` at
+  `grass_cell_size=5` — user-lowerable slider):
+  - `Auto` (0): auto-selects from visible-span formula; at default zoom=1 and
+    default `grass_dim=480` this is L0 (full resolution). `lodBias` active in Auto.
+  - `Full` (1, UI label `"Full (~1920px)"` reflects the fine-grained max, not the
+    default): force L0 — one step finer than auto at any zoom-out level where auto
+    would pick L1+. At default scale (`grass_dim=480`) L0 = 480 cells.
+  - `Half` (2): force L1 — 4× fewer cells than L0.
+  - `Quarter` (3): force L2 — 16× fewer cells than L0.
+  - `Eighth` (4): force L3 — 64× fewer cells than L0.
+  - `Sixteenth` (5): force L4 — 256× fewer cells than L0.
+- **Note**: The UI label `"Full (~1920px)"` in `devpanel.ts` is a literal
+  string that reflects the fine-grained max (`grass_cell_size=5`), not the
+  shipping default (`grass_dim=480`). It is not updated to reflect
+  `grass_cell_size` changes.
 - **LIVE setting** — LOD selection happens in `write_snapshot` per-snapshot. No
   restart required. Exposed as a staged (non-construction-only) DevPanel dropdown.
 - **Why**: `lod_bias` only nudges finer as an offset against the auto formula; it
