@@ -1080,7 +1080,7 @@ export function installDevPanel(getBridge: () => SimBridge): void {
     settingKey: "grassLodStep",
     options: [
       { value: 0, label: "Auto" },
-      { value: 1, label: "Full (~1920px)" },
+      { value: 1, label: "Full (~480px)" },
       { value: 2, label: "Half (~960px)" },
       { value: 3, label: "Quarter (~480px)" },
       { value: 4, label: "Eighth (~240px)" },
@@ -1305,7 +1305,7 @@ export function installDevPanel(getBridge: () => SimBridge): void {
   }));
   // v2.0.4 S2: grass cell size (construction-only — resizes grass_dim + snapshot).
   // Larger cells ⇒ fewer cells ⇒ less grass_step work (cell count ∝ 1/size²).
-  // Default 5.0 (1920² at world 9600u). At 10u → 960², at 20u → 480².
+  // Default 20.0 (480² at world 9600u). At 10u → 960², at 5u → 1920².
   // Restart-required: changes dims, capacity[], biome grid, snapshot slot.
   grassSec.appendChild(makeStagedSlider({
     label: "Grass cell size",
