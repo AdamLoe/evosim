@@ -1081,10 +1081,10 @@ export function installDevPanel(getBridge: () => SimBridge): void {
     options: [
       { value: 0, label: "Auto" },
       { value: 1, label: "Full (~480px)" },
-      { value: 2, label: "Half (~960px)" },
-      { value: 3, label: "Quarter (~480px)" },
-      { value: 4, label: "Eighth (~240px)" },
-      { value: 5, label: "Sixteenth (~120px)" },
+      { value: 2, label: "Half (~240px)" },
+      { value: 3, label: "Quarter (~120px)" },
+      { value: 4, label: "Eighth (~60px)" },
+      { value: 5, label: "Sixteenth (~30px)" },
     ],
   }));
   // v2.0.4 S1: lodBias nudge — active in Auto mode only (overridden by stepper).
