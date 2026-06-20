@@ -8,13 +8,14 @@ splits staged sim controls from live-apply UI controls.
 
 - The top-level DOM structure in `app/web/index.html`: `#app-shell`,
   `#left-col`, `#top-bar`, `#canvas-wrap`, `#right-rail`, `#rail-tabs`,
-  the Settings sub-nav, the inspector body, and the Menu tab body.
+  the Settings sub-nav, the inspector body, the General tab body, and the
+  Profiler tab body.
 - Rail tab routing in `app/web/src/rail/index.ts → RailTab` and
   `installRail`.
 - Which TS module mounts into which part of the shell. `main.ts` installs
   the dev panel before worker spawn so `currentSliderState()` is ready for
   boot, then wires worker status, the rail, canvas click handling, the
-  profiler panel, the NN tab, the Menu tab, and the top-bar controls.
+  profiler panel, the NN tab, the General tab, and the top-bar controls.
 - The stage-then-apply pattern in the Settings panel: per-row dirty tracking,
   Apply / Cancel / Reset semantics, the live-vs-staged split, and the
   restart-needed toast for construction-only settings.
@@ -22,11 +23,13 @@ splits staged sim controls from live-apply UI controls.
   `widgets/devpanel.ts → installDevPanel`, including the left sub-nav and
   the matching `#settings-<cat>-pane` containers.
 - Cross-widget profiler gating: `showProfiler` is the source of truth for
-  profiler recording state. Selecting the Profiler category enables
-  recording and polling; leaving the category disables both.
-- The Menu tab: `main.ts → installMenuTab` mounts the run toggle and the
-  saved-world actions, and `storage/world-saves.ts` owns the IndexedDB
-  records behind them.
+  profiler recording state. Selecting the top-level Profiler tab enables
+  recording and polling; leaving the tab disables both.
+- The General tab: `main.ts → installMenuTab` mounts auto-restart, world
+  Export / Import, and the autosave status line. Named Save / Resume / Fork
+  controls are not exposed in the General tab.
+- The app badge: `main.ts → installAppBadge` mounts `evosim v<APP_VERSION>` as
+  a small sharp rectangle in the bottom-left corner of `#canvas-wrap`.
 - Theme application: `app/web/src/themes.ts → applyTheme` writes the active
   palette tokens onto `<html>`.
 
@@ -51,25 +54,30 @@ splits staged sim controls from live-apply UI controls.
 | `#canvas-wrap > #aquarium` | The WebGL2 sim view. | `render/gl.ts`. |
 | `#perf-box` | Hidden placeholder kept for resize-handle compatibility. | `widgets/perf-panel.ts`. |
 | `#right-rail` | Persistent right column. | `rail/index.ts → installRail`. |
-| `#rail-tabs` | Settings, Inspector, and Menu rail tabs. | `rail/index.ts`. |
+| `#rail-tabs` | General, Inspector, Settings, and Profiler rail tabs. | `rail/index.ts`. |
 | `#rail-settings` | Settings panel with the left sub-nav and category panes. | `widgets/devpanel.ts → installDevPanel`. |
 | `#settings-<cat>-pane` | Category pane mounted by `categoryBox(id)`. | `widgets/devpanel.ts → categoryBox`. |
-| `#settings-profiler-pane` | Profiler panel: status line, charts, telemetry export, CPU monitor, profile trees. | `widgets/perf-panel.ts → installProfilerPanel`. |
+| `#rail-profiler` → `#settings-profiler-pane` | Profiler panel: status line, charts, telemetry export, CPU monitor, profile trees. | `widgets/perf-panel.ts → installProfilerPanel`. |
 | `#settings-nn-pane` | NN topology and mutation-bucket editors. | `rail/nn-tab.ts → installNnTab`. |
 | `#rail-inspector` | Creature inspector body and empty state. | `rail/inspector.ts`. |
-| `#rail-menu` → `#menu-inner` | Menu tab body for auto-restart and saved-world controls. | `main.ts → installMenuTab`. |
+| `#rail-general` → `#menu-inner` | General tab body for auto-restart, Export / Import, and autosave status. | `main.ts → installMenuTab`. |
 | `#toast-host` | Transient notice slot. | `toast.ts → showToast`. |
 
 ## Tab routing rules
 
-- Settings is the default visible rail tab.
+- General is the default visible rail tab and the top-bar hamburger opens it.
 - Clicking the active tab while the rail is open closes the rail.
 - Clicking another tab, or clicking while the rail is closed, opens the rail
   and switches to that tab.
+- Selecting the Profiler tab enables profiler recording and polling; leaving
+  the tab idles both.
 - Clicking a creature opens the rail to Inspector and populates the inspector
   body.
 - Clicking empty space leaves Inspector open with its empty-state hint.
 - The `~` hotkey is ignored while focus is inside an input or textarea.
+- Escape opens Settings when the rail is closed or another tab is active, and
+  closes the rail when Settings is already open. Escape is ignored while focus
+  is inside an input or textarea.
 
 ## Settings panel
 
@@ -81,15 +89,23 @@ The Settings panel separates staged sim controls from live-apply UI controls.
   behavior.
 - Live-apply controls update immediately and do not participate in dirty
   tracking. That includes run controls and render-side UI settings such as
-  `autoRun`, `showProfiler`, and the display/theme controls.
+  `autoRun`, `showProfiler`, `visualRepeats`, `maxZoomOutMaps`, the creature
+  survey-dot controls, repeat-border controls, and the display/theme controls.
+  These settings are render-side only and are read by the camera/renderer each
+  frame; they do not mutate simulation state.
 - Construction-only settings stage into the next `WorldConfig` boot payload.
   Apply and Reset persist them locally and show the restart-needed toast.
   `CONSTRUCTION_ONLY_SLIDERS` and `currentWorldConfig()` are the owning
-  symbols.
+  symbols. The no-grass-zone toggle is in this group: it changes world
+  construction capacity/zone bytes and therefore requires a restarted world.
 - `currentSliderState()` includes staged widget values plus the live controls
   that sit outside the staged Settings widgets, such as the perf-panel
   `max_population` selector, the legacy grass wave sliders, and the mutation
   buckets until the NN tab registers its own readers.
+- Paused worlds repaint from the latest snapshot when a rail resize changes
+  the canvas dimensions, using the same frozen-sequence path as paused
+  pan/zoom repaint. This prevents WebGL resize clears from remaining visible
+  while the worker is paused.
 
 The Settings sub-nav is wired from the category buttons in
 `app/web/index.html`; the corresponding pane visibility is managed by
@@ -110,7 +126,9 @@ world is already constructed; those settings cannot resize the world, rebuild
 the NN input layout, or re-seed boot grass after the fact.
 
 `app/web/src/generated/world-config.ts` is generated and supplies the
-defaults used by the settings layer.
+defaults used by the settings layer. Display defaults that do not ride
+`WorldConfig` live in `settings.ts`; generated construction defaults include
+the grass/no-grass-zone enable flag.
 
 ## See also
 

@@ -7,14 +7,15 @@
 //
 // A second throttled fetch — `requestNnInspectId` (kind=2) — fetches
 // the NN I/O JSON and renders the "NN Inputs / NN Outputs" block inside the
-// inspector. Only fires while paused (the NN I/O re-runs forward() on demand).
+// inspector. It is serialized after the regular inspect request because the
+// worker has one inspect-request lane.
 
 import {
   CREATURE_STRIDE,
   type SimBridge,
 } from "../sim/bridge";
 import type { Camera } from "../render/scene";
-import { screenToWorld } from "../render/scene";
+import { screenToWorld, wrapWorldCoord } from "../render/scene";
 import { setRailOpen } from "../main";
 import { getSettings } from "../settings";
 import { highlights, HIGHLIGHT_PERMANENT } from "./highlight";
@@ -366,12 +367,12 @@ function clearSelection(_rail: RailState): void {
 }
 
 // exported so main.ts can call it in the paused seq-unchanged RAF branch
-// (the normal pollRail path only runs on new-snapshot frames, so the NN I/O
-// fetch — serialised inside refreshInspector — would never fire while paused).
+// (the normal pollRail path only runs on new-snapshot frames, so the serialized
+// inspect refresh would otherwise stop while paused).
 export function refreshInspector(
   simBridge: SimBridge,
   rail: RailState,
-  isPaused: boolean,
+  _isPaused: boolean,
 ): void {
   if (state.kind !== "selected") return;
   const { creatureId } = state;
@@ -415,8 +416,7 @@ export function refreshInspector(
     // NN I/O fetch — serialized inside the regular inspect's then()
     // so the two requests never race (issueInspect cancels any pending request,
     // so we must only fire the NN request after the regular one has resolved).
-    // Only fires while paused; skips if the NN throttle hasn't elapsed.
-    if (!isPaused) return;
+    // Poll while running too; skips if the NN throttle hasn't elapsed.
     const nowNn = performance.now();
     if (nowNn - lastNnInspectReplyMs < NN_INSPECT_REFRESH_INTERVAL_MS) return;
     const myNnSeq = ++lastNnInspectRequestSeq;
@@ -439,6 +439,7 @@ export function installCanvasClickHandler(
   canvas: HTMLCanvasElement,
   cam: Camera,
   getView: () => { w: number; h: number },
+  getWorldSize: () => number,
   simBridge: SimBridge,
   rail: RailState,
 ): void {
@@ -472,7 +473,10 @@ export function installCanvasClickHandler(
     const rect = canvas.getBoundingClientRect();
     const sx = e.clientX - rect.left;
     const sy = e.clientY - rect.top;
-    const [wx, wy] = screenToWorld(cam, w, h, sx, sy);
+    const [rawWx, rawWy] = screenToWorld(cam, w, h, sx, sy);
+    const worldSize = getWorldSize();
+    const wx = getSettings().visualRepeats ? wrapWorldCoord(rawWx, worldSize) : rawWx;
+    const wy = getSettings().visualRepeats ? wrapWorldCoord(rawWy, worldSize) : rawWy;
     const toleranceWorld = 6.0 / cam.zoom;
 
     if (latestSoA) {

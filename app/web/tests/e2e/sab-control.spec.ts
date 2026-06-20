@@ -52,11 +52,8 @@ async function setTargetTps(page: Page, tps: number): Promise<void> {
   }, tps);
 }
 
-// v2.1 P4: the profiler moved from the bottom #perf-box panel into the Settings
-// rail's "Profiler" category pane (#settings-profiler-pane). Open the settings
-// rail and navigate to the Profiler category so profiler-tree assertions work.
+// v2.1 P4 follow-up: the profiler lives in a top-level Profiler rail tab.
 async function ensureProfilerVisible(page: Page): Promise<void> {
-  // Open the settings rail if collapsed.
   const collapsed = await page.evaluate(
     () => document.getElementById("app-shell")?.classList.contains("rail-collapsed") ?? true,
   );
@@ -64,12 +61,11 @@ async function ensureProfilerVisible(page: Page): Promise<void> {
     await page.locator("body").focus();
     await page.keyboard.press("~");
   }
-  await expect(page.locator("#rail-settings")).toBeVisible();
-  // Click the "Profiler" category button to make the profiler pane active.
   await page.evaluate(() => {
-    const btn = document.querySelector<HTMLButtonElement>('.settings-cat-btn[data-cat="profiler"]');
-    btn?.click();
+    const btn = document.querySelector<HTMLButtonElement>('.rail-tab[data-tab="profiler"]');
+    if (btn && !btn.classList.contains("is-active")) btn.click();
   });
+  await expect(page.locator("#rail-profiler")).toBeVisible();
   await expect(page.locator("#settings-profiler-pane")).toBeVisible();
 }
 

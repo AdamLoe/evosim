@@ -57,7 +57,7 @@ before grepping.
 | `app/web/src/sim/worker.ts` | The sim worker entry. Inits wasm + rayon, allocates the control SAB (snapshot + biome regions live in wasm memory), runs the synchronous `Atomics.wait` tick loop, reads the control SAB, writes snapshots + the polled species table. |
 | `app/web/src/sim/bridge.ts` | Single source of truth for the main↔worker boundary. Discriminated unions for every `SimMessage` / `SimReply`, SAB layout constants, snapshot-stride/lane decode, slot-offset helpers, and the `SimBridge` runtime class (incl. `latestSpeciesTable()`). |
 | `app/web/src/render/gl.ts` | WebGL2 renderer. Instanced creature bodies, trails, glow/ring/highlight passes, R8 grass and biome window textures, world frame, wrap-aware ghost-copy cull, survey-zoom points, and lineage/species color decode. |
-| `app/web/src/render/scene.ts` | Camera math (no draw calls). `Camera`, `PX_PER_SIZE`, `MIN_ZOOM = 0.04` / `MAX_ZOOM`, `makeCamera`, `clampCamera`, `worldToScreen`. |
+| `app/web/src/render/scene.ts` | Camera math (no draw calls). `Camera`, `PX_PER_SIZE`, `DEFAULT_MAX_ZOOM_OUT_MAPS`, `MAX_ZOOM`, `makeCamera`, `clampCamera`, `minCameraZoom`, `worldToScreen`. |
 | `app/web/src/render/camera.ts` | Pointer-driven pan / zoom controls bound to the canvas. |
 | `app/web/src/perf.ts` | TS-side mirror of the profiler. Holds the `frame` tree; `span(name)` opens / closes a sample. The panel concatenates this with the Rust trees. |
 | `app/web/src/themes.ts` | The `THEMES` palette map + `applyTheme(id)`; writes CSS custom properties onto `<html>`. |

@@ -160,6 +160,31 @@ drove the choice — so future optimization passes start from facts, not guesses
   `web/src/sim/worker.ts → maybeWriteSnapshotToSAB`;
   `web/src/main.ts → frame`.
 
+### Target TPS live-applies; high-target stutter is tick-cost limited
+
+- **Decision**: Treat target TPS as a live SAB control, not a restart-scoped
+  setting. A target-TPS change writes `CTRL_TARGET_TPS_BITS`, wakes the futex,
+  and is read at the top of the next worker loop. If achieved TPS remains below
+  the requested value, diagnose tick cost before UI/control delivery.
+- **Measurement**: The existing Playwright `target TPS dropdown` smoke passed
+  against the running app. A pinned manual browser run changed a live world from
+  target 60 to target 500 without restart: 60 requested produced ~59.6 ticks/s
+  over 2.5 s, then 500 requested produced ~173.6 ticks/s over 2.5 s on the same
+  run. The profiler snapshot at target 500 showed `sim_worker.tick` at ~98.9%
+  of worker-loop time, with `tick.nn` and `tick.grass_step` the largest leaves.
+- **Why**: The control path is responsive; the worker simply has no pacing sleep
+  left once tick work exceeds the target slice. Main-thread FPS can also look
+  low under headless/browser throttling, but that does not imply target TPS
+  requires restart.
+- **Applies to**: `architecture/worker-runtime.md`,
+  `architecture/profiler.md`, `architecture/render-pipeline.md`.
+- **Code anchors**: `web/src/sim/bridge.ts → SimBridge.setTargetTps`;
+  `web/src/sim/worker.ts → readControlSab`, `simLoop`;
+  `crates/evosim/src/world/mod.rs → World::step`.
+- **Revisit when**: a UI change stops writing the TPS input through
+  `setExternalTargetTPS`, or a worker pacing refactor changes the SAB read/wake
+  ordering.
+
 ### Telemetry history is fixed-cadence and exported on request
 
 - **Decision**: Keep longitudinal telemetry in bounded in-memory rings:

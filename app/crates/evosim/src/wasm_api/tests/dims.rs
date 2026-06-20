@@ -8,7 +8,7 @@
 use super::super::WorldHandle;
 use crate::constants::{WorldDims, WORLD_SIZE_DEFAULT};
 
-/// world_size=9600 → grass_dim=1920 → grass_cell_count=3_686_400.
+/// world_size=9600 → fallback grass_dim=1920 → grass_cell_count=3_686_400.
 #[test]
 fn default_dims_9600() {
     let d = WorldDims::from_world_size(WORLD_SIZE_DEFAULT, true);
@@ -16,7 +16,7 @@ fn default_dims_9600() {
     assert_eq!(d.grass_cell_count, 3_686_400);
 }
 
-/// world_size=1200 → grass_dim=240.
+/// world_size=1200 → fallback grass_dim=240.
 #[test]
 fn dims_1200() {
     let d = WorldDims::from_world_size(1200.0, false);
@@ -77,12 +77,12 @@ fn snapshot_and_biome_window_sizes_follow_live_slot_layout() {
     assert_eq!(h.snapshot_buf_byte_len() as usize, 2 * slot);
 }
 
-/// The default (9600u) boot derives the documented 1920² grass dim end-to-end,
+/// The default (9600u) boot derives the documented 480² grass dim end-to-end,
 /// and the grass/biome-window slot regions are exactly `grass_cell_count` bytes.
 #[test]
-fn default_boot_reports_1920_grass_dim() {
+fn default_boot_reports_480_grass_dim() {
     let h = WorldHandle::new("dims-default");
-    assert_eq!(h.grass_dim(), 1920);
-    assert_eq!(h.snapshot_grass_bytes() as usize, 1920 * 1920);
-    assert_eq!(h.snapshot_biome_win_bytes() as usize, 1920 * 1920);
+    assert_eq!(h.grass_dim(), 480);
+    assert_eq!(h.snapshot_grass_bytes() as usize, 480 * 480);
+    assert_eq!(h.snapshot_biome_win_bytes() as usize, 480 * 480);
 }

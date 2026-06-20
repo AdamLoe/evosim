@@ -77,11 +77,9 @@ export const SLIDER_NAMES = [
   "crowding_radius",
   "starvation_threshold",
   "starvation_drain_rate",
-  "grass_capacity_scale",
-  "grass_regrowth_rate",
 ] as const;
 
-export const SLIDER_COUNT = 73 as const;
+export const SLIDER_COUNT = 71 as const;
 
 export type SliderName = (typeof SLIDER_NAMES)[number];
 

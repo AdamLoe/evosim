@@ -80,7 +80,7 @@ fn deterministic_science_mode_is_default_off() {
 
 #[test]
 fn science_mode_fixture_hash_is_exact_and_stable() {
-    const EXPECTED: u64 = 0xda58_6f7d_1ea0_1dbc;
+    const EXPECTED: u64 = 0xc194_714a_a8e3_5690;
     let a = science_fixture_hash();
     let b = science_fixture_hash();
     assert_eq!(a, b, "same seed/config must produce exact repeated hash");

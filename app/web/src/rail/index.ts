@@ -1,4 +1,4 @@
-// Rail orchestrator: two persistent tabs (Settings / Inspector).
+// Rail orchestrator: persistent right-rail tabs.
 // v2.1 P4: NN is no longer a top-level tab; it lives in the Settings rail's
 // "NN" category pane. Inspector stays click-to-open.
 // Called from main.ts each RAF via `pollRail`.
@@ -8,17 +8,20 @@ import { refreshInspector, updateLatestSoA } from "./inspector";
 import { pruneHighlights, highlights } from "./highlight";
 import { getSettings } from "../settings";
 
-export type RailTab = "inspector" | "settings" | "menu";
+export type RailTab = "general" | "inspector" | "settings" | "profiler";
 
 export interface RailState {
   switchTab(name: RailTab): void;
   readonly activeTab: RailTab;
 }
 
-function installTabs(setRailOpen: (open: boolean) => void): RailState {
-  // Default to Settings. Rail starts collapsed (Wave 0) so this is just the
-  // tab that's visible when the user first opens the rail via the ⚙ icon.
-  let activeTab: RailTab = "settings";
+function installTabs(
+  setRailOpen: (open: boolean) => void,
+  onTabChange?: (name: RailTab) => void,
+): RailState {
+  // Default to General. The rail starts collapsed, and the top-bar hamburger
+  // opens this tab first.
+  let activeTab: RailTab = "general";
 
   function switchTab(name: RailTab): void {
     activeTab = name;
@@ -31,6 +34,7 @@ function installTabs(setRailOpen: (open: boolean) => void): RailState {
       const panelName = p.id.replace("rail-", "");
       p.classList.toggle("is-active", panelName === name);
     });
+    onTabChange?.(name);
   }
 
   document.querySelectorAll(".rail-tab").forEach((btn) => {
@@ -57,8 +61,11 @@ function installTabs(setRailOpen: (open: boolean) => void): RailState {
   };
 }
 
-export function installRail(setRailOpen: (open: boolean) => void): RailState {
-  return installTabs(setRailOpen);
+export function installRail(
+  setRailOpen: (open: boolean) => void,
+  onTabChange?: (name: RailTab) => void,
+): RailState {
+  return installTabs(setRailOpen, onTabChange);
 }
 
 export function pollRail(
@@ -67,8 +74,8 @@ export function pollRail(
   simBridge: SimBridge,
   creatures: Float32Array,
   pop: number,
-  /** v2.1 P1: true when the sim is paused. Forwarded to refreshInspector so
-   *  the NN I/O fetch is only issued while paused. */
+  /** v2.1 P1: true when the sim is paused. Forwarded so refreshInspector keeps
+   *  updating during paused frames where the snapshot sequence does not move. */
   isPaused: boolean,
 ): void {
   // v1.13 Wave 2: population sampling moved to widgets/perf-panel.ts

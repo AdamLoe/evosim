@@ -7,6 +7,8 @@ export function attachCameraControls(
   cam: Camera,
   getView: () => { w: number; h: number },
   getWorldSize: () => number,
+  getVisualRepeats: () => boolean,
+  getMaxZoomOutMaps: () => number,
 ): void {
   let dragging = false;
   let lastX = 0;
@@ -32,7 +34,7 @@ export function attachCameraControls(
     cam.cx -= dx / cam.zoom;
     cam.cy -= dy / cam.zoom;
     const { w, h } = getView();
-    clampCamera(cam, getWorldSize(), w, h);
+    clampCamera(cam, getWorldSize(), w, h, getVisualRepeats(), getMaxZoomOutMaps());
   });
   canvas.addEventListener(
     "wheel",
@@ -43,12 +45,12 @@ export function attachCameraControls(
       // 1.2^(1/3) ≈ 1.063 — three scroll ticks equal one old tick.
       const factor = e.deltaY < 0 ? 1.063 : 1 / 1.063;
       cam.zoom *= factor;
-      clampCamera(cam, getWorldSize(), w, h);
+      clampCamera(cam, getWorldSize(), w, h, getVisualRepeats(), getMaxZoomOutMaps());
       // Keep the world point under the cursor stable across the zoom.
       const [wx2, wy2] = screenToWorld(cam, w, h, e.clientX, e.clientY);
       cam.cx += wx - wx2;
       cam.cy += wy - wy2;
-      clampCamera(cam, getWorldSize(), w, h);
+      clampCamera(cam, getWorldSize(), w, h, getVisualRepeats(), getMaxZoomOutMaps());
     },
     { passive: false },
   );
@@ -77,7 +79,7 @@ export function attachCameraControls(
       const d = Math.hypot(a.x - b.x, a.y - b.y);
       cam.zoom = pinchInitZoom * (d / pinchInitDist);
       const { w, h } = getView();
-      clampCamera(cam, getWorldSize(), w, h);
+      clampCamera(cam, getWorldSize(), w, h, getVisualRepeats(), getMaxZoomOutMaps());
     }
   });
   canvas.addEventListener("touchend", (e) => {

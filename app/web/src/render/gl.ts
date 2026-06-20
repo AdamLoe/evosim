@@ -9,7 +9,7 @@
 // before they touch the GPU; an LOD threshold omits rings when the
 // on-screen body radius is < 6 px (they'd be invisible anyway).
 
-import { type Camera, PX_PER_SIZE } from "./scene";
+import { type Camera, PX_PER_SIZE, visibleRepeatTiles } from "./scene";
 import { getSettings } from "../settings";
 import { span } from "../perf";
 import { CREATURE_STRIDE, MAX_POP_FOR_SIM, GRASS_LOD_BUDGET_AXIS, type WindowMetadata } from "../sim/bridge";
@@ -194,10 +194,10 @@ void main() {
   out_color = vec4(glow, a);
 }`;
 
-// Biome layer (v2.0 Wave 1b): a fullscreen world-quad drawn UNDER the grass.
-// Samples an R8 biome-id texture (one u8 `Biome` tag per grass cell: 0=Plains,
-// 1=Water, 2=Desert) with NEAREST filtering so cells stay flat-colored, and
-// maps each id to a flat biome color. The grass density layer brightens on top.
+// No-grass-zone layer (v2.0 Wave 1b): a fullscreen world-quad drawn UNDER the
+// grass. Samples an R8 zone-id texture (one u8 tag per grass cell: 0=normal
+// capacity, 1/2=low capacity) with NEAREST filtering so cells stay flat-colored,
+// and maps each id to a flat zone color. The grass density layer brightens on top.
 //
 // v2.0.3 Stream 2d: the biome texture is now a windowed clipmap (same window as
 // the grass channel). u_uv_offset + u_uv_scale map the world-space quad UV into
@@ -248,8 +248,8 @@ void main() {
   // R8 unorm: id stored as (biome/255). Recover the integer tag.
   float id = floor(texture(u_biome, suv).r * 255.0 + 0.5);
   vec3 col = u_plains;
-  if (id > 1.5) col = u_desert;       // 2 = Desert
-  else if (id > 0.5) col = u_water;   // 1 = Water
+  if (id > 1.5) col = u_desert;       // 2 = low-capacity zone variant
+  else if (id > 0.5) col = u_water;   // 1 = low-capacity zone variant
   out_color = vec4(col, u_opacity);
 }`;
 
@@ -298,6 +298,7 @@ in vec2 v_world;
 uniform sampler2D u_grass;
 uniform float u_opacity;
 uniform float u_time;
+uniform float u_world_size;
 uniform vec3 u_grass_tint;
 // ── Smoothing (intensity filtering) ──
 // Bicubic (Catmull-Rom) blend, 0..1. 0 = crisp snapped cells (original look);
@@ -333,6 +334,7 @@ uniform float u_lod_blend;
 // a full toroidal period, so we wrap v_uv with mod() instead of letting the
 // CLAMP_TO_EDGE sampler smear the last data texel across the off-window region.
 uniform vec2 u_uv_wrap;
+uniform vec2 u_uv_offset;
 out vec4 out_color;
 
 // Wrap a UV into the window period on each axis where wrapping is enabled.
@@ -363,6 +365,27 @@ float vnoise(vec2 p) {
 float fbm(vec2 p) {
   float v = 0.0, a = 0.5;
   for (int k = 0; k < 4; k++) { v += a * vnoise(p); p *= 2.0; a *= 0.5; }
+  return v;
+}
+float tileVnoise(vec2 uv, float cells) {
+  vec2 period = vec2(max(cells, 1.0));
+  vec2 p = uv * period;
+  vec2 i = floor(p);
+  vec2 f = p - i;
+  f = f * f * (3.0 - 2.0 * f);
+  float a = vhash(mod(i, period));
+  float b = vhash(mod(i + vec2(1.0, 0.0), period));
+  float c = vhash(mod(i + vec2(0.0, 1.0), period));
+  float d = vhash(mod(i + vec2(1.0, 1.0), period));
+  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+float tileFbm(vec2 uv, float cells) {
+  float v = 0.0, a = 0.5, c = max(floor(cells), 1.0);
+  for (int k = 0; k < 4; k++) {
+    v += a * tileVnoise(uv, c);
+    c *= 2.0;
+    a *= 0.5;
+  }
   return v;
 }
 
@@ -431,22 +454,35 @@ void main() {
   dd = pow(dd, u_contrast);
   if (dd <= 0.0) discard;
 
-  // Optional procedural texture overlay (default off), keyed on ABSOLUTE WORLD
-  // POSITION (v_world) so it doesn't swim as the clipmap window/mip shifts.
+  bool repeatPeriod = u_uv_wrap.x > 0.0 || u_uv_wrap.y > 0.0;
+  vec2 worldPeriod = fract(v_world / max(u_world_size, 1.0));
+  vec2 clipmapOriginFreeUv = v_uv - u_uv_offset;
+
+  // Optional procedural texture overlay (default off). Slice windows use
+  // absolute world position so texture doesn't swim as the clipmap shifts;
+  // full-repeat windows use tile-periodic UVs so repeated terrain has no
+  // shader-generated seam, even when only one axis is repeating.
   float erodeAmt = u_erode * u_texture;
   float shadeAmt = u_shade * u_texture;
   float shade = 1.0;
   if (u_texture > 0.0) {
     float blade = max(u_blade, 0.5);
-    float nCoarse = fbm(v_world / (blade * 6.0));
-    float nFine = fbm(v_world / blade + 11.3);
+    float nCoarse = repeatPeriod
+      ? tileFbm(worldPeriod, max(floor(u_world_size / (blade * 6.0)), 1.0))
+      : fbm(v_world / (blade * 6.0));
+    float nFine = repeatPeriod
+      ? tileFbm(fract(worldPeriod + vec2(0.37, 0.61)), max(floor(u_world_size / blade), 1.0))
+      : fbm(v_world / blade + 11.3);
     dd *= 1.0 - erodeAmt * (1.0 - nCoarse);   // erode patch edges
     shade = 1.0 + shadeAmt * (nFine - 0.5) * 1.4; // blade-shade variation
     if (dd <= 0.0) discard;
   }
 
-  float wave = 0.08 * sin(v_uv.x * 18.0 + u_time * 0.6)
-             + 0.06 * sin(v_uv.y * 22.0 - u_time * 0.4);
+  float wave = repeatPeriod
+    ? 0.08 * sin(worldPeriod.x * 18.849555 + u_time * 0.6)
+      + 0.06 * sin(worldPeriod.y * 25.132741 - u_time * 0.4)
+    : 0.08 * sin(clipmapOriginFreeUv.x * 18.0 + u_time * 0.6)
+      + 0.06 * sin(clipmapOriginFreeUv.y * 22.0 - u_time * 0.4);
   float a = clamp(dd + wave * dd, 0.0, 1.0);
 
   vec3 col = u_grass_tint * u_brightness * shade;
@@ -510,6 +546,7 @@ layout(location = 0) in vec2 a_world;
 uniform vec2 u_viewport;
 uniform vec2 u_cam_pos;
 uniform float u_zoom;
+uniform float u_opacity;
 void main() {
   vec2 px_pos = (a_world - u_cam_pos) * u_zoom + u_viewport * 0.5;
   vec2 ndc = (px_pos / u_viewport) * 2.0 - 1.0;
@@ -519,9 +556,10 @@ void main() {
 
 const FRAME_FS = `#version 300 es
 precision highp float;
+uniform float u_opacity;
 out vec4 out_color;
 void main() {
-  out_color = vec4(180.0/255.0, 200.0/255.0, 230.0/255.0, 0.25);
+  out_color = vec4(180.0/255.0, 200.0/255.0, 230.0/255.0, u_opacity);
 }`;
 
 // ─── Renderer state ──────────────────────────────────────────────────────
@@ -641,6 +679,7 @@ interface GLState {
     viewport: WebGLUniformLocation;
     camPos: WebGLUniformLocation;
     zoom: WebGLUniformLocation;
+    opacity: WebGLUniformLocation;
   };
   frameVao: WebGLVertexArrayObject;
   frameBuf: WebGLBuffer;
@@ -963,13 +1002,14 @@ function initRenderer(gl: WebGL2RenderingContext): GLState {
     viewport: mustGet(gl.getUniformLocation(frameProgram, "u_viewport"), "u_viewport"),
     camPos: mustGet(gl.getUniformLocation(frameProgram, "u_cam_pos"), "u_cam_pos"),
     zoom: mustGet(gl.getUniformLocation(frameProgram, "u_zoom"), "u_zoom"),
+    opacity: mustGet(gl.getUniformLocation(frameProgram, "u_opacity"), "u_opacity"),
   };
 
   const frameVao = mustGet(gl.createVertexArray(), "createVertexArray");
   gl.bindVertexArray(frameVao);
   const frameBuf = mustGet(gl.createBuffer(), "createBuffer");
   gl.bindBuffer(gl.ARRAY_BUFFER, frameBuf);
-  gl.bufferData(gl.ARRAY_BUFFER, 8 * 4, gl.DYNAMIC_DRAW); // 8 floats placeholder
+  gl.bufferData(gl.ARRAY_BUFFER, FRAME_VERTS.byteLength, gl.DYNAMIC_DRAW);
   gl.enableVertexAttribArray(0);
   gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
   gl.bindVertexArray(null);
@@ -1004,8 +1044,25 @@ interface XY { x: number; y: number; }
 let prevById: Map<number, XY> = new Map();
 let currById: Map<number, XY> = new Map();
 
-// Reusable 8-float buffer for the world-bounds frame line endpoints.
-const FRAME_VERTS = new Float32Array(8);
+// Reusable buffer for four thick border rectangles (4 rects × 6 verts × xy).
+const FRAME_VERTS = new Float32Array(48);
+
+function writeRectVerts(
+  out: Float32Array,
+  off: number,
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+): number {
+  out[off++] = x0; out[off++] = y0;
+  out[off++] = x1; out[off++] = y0;
+  out[off++] = x1; out[off++] = y1;
+  out[off++] = x0; out[off++] = y0;
+  out[off++] = x1; out[off++] = y1;
+  out[off++] = x0; out[off++] = y1;
+  return off;
+}
 
 // ─── Theme-token readers (v1.9.2) ────────────────────────────────────────
 // CSS-var values come back as strings; parse to vec3/vec4 once per frame.
@@ -1164,13 +1221,13 @@ export function renderWorld(
 // windows (zoomed in, never tiled) we return 0 so the shader keeps the plain
 // CLAMP_TO_EDGE sampling that is correct inside a single world view.
 function windowUvWrap(
-  wrapWorld: boolean,
+  visualRepeats: boolean,
   winW: number,
   winH: number,
   cellSizeL: number,
   worldSize: number,
 ): [number, number] {
-  if (!wrapWorld) return [0, 0];
+  if (!visualRepeats) return [0, 0];
   const eps = cellSizeL * 0.5;
   const wrapX = winW * cellSizeL >= worldSize - eps ? winW / GRASS_LOD_BUDGET_AXIS : 0;
   const wrapY = winH * cellSizeL >= worldSize - eps ? winH / GRASS_LOD_BUDGET_AXIS : 0;
@@ -1203,24 +1260,9 @@ function renderWorldImpl(
   gl.clearColor(br, bg, bb, 1.0);
   gl.clear(gl.COLOR_BUFFER_BIT);
 
-  // v2.0.1: Compute toroidal tile offsets EARLY so both the grass/biome
-  // and creature passes can share the same frustum-derived offset sets.
-  // Matches the creature pass logic exactly (see xOffsets/yOffsets below).
-  const W_early = world_size;
-  const tileHalfW = cam.zoom > 0 ? (viewW / cam.zoom) * 0.5 : 0;
-  const tileHalfH = cam.zoom > 0 ? (viewH / cam.zoom) * 0.5 : 0;
-  const tileMinX = cam.cx - tileHalfW;
-  const tileMaxX = cam.cx + tileHalfW;
-  const tileMinY = cam.cy - tileHalfH;
-  const tileMaxY = cam.cy + tileHalfH;
-  const tileXOffsets: number[] = [0];
-  const tileYOffsets: number[] = [0];
-  if (wrap_world && W_early > 0) {
-    if (tileMinX < 0) tileXOffsets.push(-W_early);
-    if (tileMaxX > W_early) tileXOffsets.push(W_early);
-    if (tileMinY < 0) tileYOffsets.push(-W_early);
-    if (tileMaxY > W_early) tileYOffsets.push(W_early);
-  }
+  const settings = getSettings();
+  const visualRepeats = settings.visualRepeats;
+  const repeatTiles = visibleRepeatTiles(cam, world_size, viewW, viewH, visualRepeats);
 
   // ─── Biome layer (v2.0 Wave 1b, v2.0.3 Stream 2d) ───
   // Drawn first, UNDER the grass. An R8 biome-id texture mapped to flat
@@ -1232,7 +1274,7 @@ function renderWorldImpl(
   // biomeTex (allocated once in initRenderer). The UV transform reuses the
   // same u_uv_scale/u_uv_offset derived from the grass window metadata.
   //
-  // At default scale: mip=0, origin=(0,0), win=1920×1920 — byte-identical
+  // At default scale: mip=0, origin=(0,0), win=480×480 — byte-identical
   // to the old full-field path. Biome tint is visually unchanged at default scale.
   //
   // v2.0.1: Toroidal tiling — extra draws for each non-zero offset pair.
@@ -1286,31 +1328,26 @@ function renderWorldImpl(
     // full-world width exactly when the window covers the world. Slice windows
     // (zoomed in, never tiled) keep wrap = 0 and the plain clamp behavior.
     const [uvWrapX, uvWrapY] = windowUvWrap(
-      wrap_world, winW, winH, cellSizeL, world_size,
+      visualRepeats, winW, winH, cellSizeL, world_size,
     );
 
     gl.useProgram(s.biomeProgram);
     gl.uniform2f(s.biomeU.viewport, viewW, viewH);
     gl.uniform1f(s.biomeU.zoom, cam.zoom);
     gl.uniform1f(s.biomeU.worldSize, world_size);
-    // Visual-identity defaults (Wave 1c): Plains / Water / Desert flat colors.
+    // Visual-identity defaults: normal-capacity / low-capacity zone colors.
     gl.uniform3f(s.biomeU.plains, 74 / 255, 106 / 255, 58 / 255);
     gl.uniform3f(s.biomeU.water, 40 / 255, 92 / 255, 168 / 255);
     gl.uniform3f(s.biomeU.desert, 196 / 255, 178 / 255, 128 / 255);
-    gl.uniform1f(s.biomeU.opacity, getSettings().biomeOpacity);
+    gl.uniform1f(s.biomeU.opacity, settings.biomeOpacity);
     // v2.0.3 Stream 2d: clipmap UV transform (same as grass).
     gl.uniform2f(s.biomeU.uvScale, uvScaleVal, uvScaleVal);
     gl.uniform2f(s.biomeU.uvOffset, uvOffsetX, uvOffsetY);
     gl.uniform2f(s.biomeU.uvWrap, uvWrapX, uvWrapY);
     gl.bindVertexArray(s.biomeVao);
-    for (let xi = 0; xi < tileXOffsets.length; xi++) {
-      for (let yi = 0; yi < tileYOffsets.length; yi++) {
-        gl.uniform2f(s.biomeU.camPos,
-          cam.cx - tileXOffsets[xi],
-          cam.cy - tileYOffsets[yi],
-        );
-        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-      }
+    for (const tile of repeatTiles) {
+      gl.uniform2f(s.biomeU.camPos, cam.cx - tile.x, cam.cy - tile.y);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
   }
 
@@ -1324,7 +1361,7 @@ function renderWorldImpl(
   // v2.0.3 Stream 2c: texSubImage2D only the win_w × win_h window bytes into
   // the fixed GRASS_LOD_BUDGET_AXIS² budget texture at (0,0). The UV transform
   // (u_uv_scale, u_uv_offset) maps the world-space quad into the window region.
-  if (getSettings().showGrass) {
+  if (settings.showGrass) {
     const grassSpan = span("frame.render_world.grass");
     try {
       gl.activeTexture(gl.TEXTURE0);
@@ -1355,10 +1392,10 @@ function renderWorldImpl(
       //   u_uv_scale  = world_size / (grass_cell_size * 2^mipLevel * BUDGET_AXIS)
       //   u_uv_offset = -vec2(winOriginX, winOriginY) / BUDGET_AXIS
       // This maps a_corner ∈ [0,1] (world fraction) to the window sub-region
-      // of the budget texture. At default scale (mip=0, origin=(0,0), win=1920):
-      //   scale = 9600 / (5 * 1 * 4096) ≈ 0.469  (= 1920/4096 = winW/BUDGET)
+      // of the budget texture. At default scale (mip=0, origin=(0,0), win=480):
+      //   scale = 9600 / (20 * 1 * 4096) ≈ 0.117  (= 480/4096 = winW/BUDGET)
       //   offset = (0,0)
-      // giving v_uv ∈ [0, ≈0.469] — exactly the 1920 data pixels in 4096 texture.
+      // giving v_uv ∈ [0, ≈0.117] — exactly the 480 data pixels in 4096 texture.
       // v2.0.4 S2: uses the runtime cell size (not the legacy constant 5.0).
       const cellSizeL = grass_cell_size * Math.pow(2, mipLevel);
       const uvScaleVal = world_size / (cellSizeL * GRASS_LOD_BUDGET_AXIS);
@@ -1366,23 +1403,23 @@ function renderWorldImpl(
       const uvOffsetY = -winOriginY / GRASS_LOD_BUDGET_AXIS;
       // Toroidal wrap period (see biome pass + windowUvWrap for rationale).
       const [uvWrapX, uvWrapY] = windowUvWrap(
-        wrap_world, winW, winH, cellSizeL, world_size,
+        visualRepeats, winW, winH, cellSizeL, world_size,
       );
 
       gl.useProgram(s.grassProgram);
       gl.uniform2f(s.grassU.viewport, viewW, viewH);
       gl.uniform1f(s.grassU.zoom, cam.zoom);
       gl.uniform1f(s.grassU.worldSize, world_size);
-      gl.uniform1f(s.grassU.opacity, getSettings().grassOpacity);
-      gl.uniform1f(s.grassU.smooth, getSettings().grassSmoothing);
-      gl.uniform1f(s.grassU.soft, getSettings().grassSoftness);
-      gl.uniform1f(s.grassU.texture, getSettings().grassTexture);
-      gl.uniform1f(s.grassU.erode, getSettings().grassEdgeErosion);
-      gl.uniform1f(s.grassU.shade, getSettings().grassShadeVariation);
-      gl.uniform1f(s.grassU.blade, getSettings().grassBladeSize);
-      gl.uniform1f(s.grassU.floor, getSettings().grassDensityFloor);
-      gl.uniform1f(s.grassU.contrast, getSettings().grassContrast);
-      gl.uniform1f(s.grassU.brightness, getSettings().grassBrightness);
+      gl.uniform1f(s.grassU.opacity, settings.grassOpacity);
+      gl.uniform1f(s.grassU.smooth, settings.grassSmoothing);
+      gl.uniform1f(s.grassU.soft, settings.grassSoftness);
+      gl.uniform1f(s.grassU.texture, settings.grassTexture);
+      gl.uniform1f(s.grassU.erode, settings.grassEdgeErosion);
+      gl.uniform1f(s.grassU.shade, settings.grassShadeVariation);
+      gl.uniform1f(s.grassU.blade, settings.grassBladeSize);
+      gl.uniform1f(s.grassU.floor, settings.grassDensityFloor);
+      gl.uniform1f(s.grassU.contrast, settings.grassContrast);
+      gl.uniform1f(s.grassU.brightness, settings.grassBrightness);
       gl.uniform1f(s.grassU.time, performance.now() / 1000);
       const tint = readGrassTint();
       gl.uniform3f(s.grassU.tint, tint[0], tint[1], tint[2]);
@@ -1391,14 +1428,9 @@ function renderWorldImpl(
       gl.uniform2f(s.grassU.uvWrap, uvWrapX, uvWrapY);
       gl.uniform1f(s.grassU.lodBlend, 0.0);
       gl.bindVertexArray(s.grassVao);
-      for (let xi = 0; xi < tileXOffsets.length; xi++) {
-        for (let yi = 0; yi < tileYOffsets.length; yi++) {
-          gl.uniform2f(s.grassU.camPos,
-            cam.cx - tileXOffsets[xi],
-            cam.cy - tileYOffsets[yi],
-          );
-          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-        }
+      for (const tile of repeatTiles) {
+        gl.uniform2f(s.grassU.camPos, cam.cx - tile.x, cam.cy - tile.y);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
       }
     } finally {
       grassSpan.close();
@@ -1408,18 +1440,28 @@ function renderWorldImpl(
   // ─── World-bounds frame ───
   {
     const W = world_size;
-    FRAME_VERTS[0] = 0; FRAME_VERTS[1] = 0;
-    FRAME_VERTS[2] = W; FRAME_VERTS[3] = 0;
-    FRAME_VERTS[4] = W; FRAME_VERTS[5] = W;
-    FRAME_VERTS[6] = 0; FRAME_VERTS[7] = W;
+    const borderMinPx = Math.max(0.1, Math.min(8, settings.repeatBorderMinPx));
+    const borderScale = Math.max(0, Math.min(32, settings.repeatBorderScale));
+    const borderOpacity = Math.max(0, Math.min(1, settings.repeatBorderOpacity));
+    const borderPx = Math.max(borderMinPx, cam.zoom * borderScale);
+    const halfBorderWorld = Math.max(0.5 / cam.zoom, borderPx / cam.zoom) * 0.5;
+    let frameOff = 0;
+    frameOff = writeRectVerts(FRAME_VERTS, frameOff, 0, -halfBorderWorld, W, halfBorderWorld);
+    frameOff = writeRectVerts(FRAME_VERTS, frameOff, 0, W - halfBorderWorld, W, W + halfBorderWorld);
+    frameOff = writeRectVerts(FRAME_VERTS, frameOff, -halfBorderWorld, 0, halfBorderWorld, W);
+    frameOff = writeRectVerts(FRAME_VERTS, frameOff, W - halfBorderWorld, 0, W + halfBorderWorld, W);
     gl.useProgram(s.frameProgram);
     gl.uniform2f(s.frameU.viewport, viewW, viewH);
     gl.uniform2f(s.frameU.camPos, cam.cx, cam.cy);
     gl.uniform1f(s.frameU.zoom, cam.zoom);
+    gl.uniform1f(s.frameU.opacity, borderOpacity);
     gl.bindVertexArray(s.frameVao);
     gl.bindBuffer(gl.ARRAY_BUFFER, s.frameBuf);
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, FRAME_VERTS);
-    gl.drawArrays(gl.LINE_LOOP, 0, 4);
+    for (const tile of repeatTiles) {
+      gl.uniform2f(s.frameU.camPos, cam.cx - tile.x, cam.cy - tile.y);
+      gl.drawArrays(gl.TRIANGLES, 0, frameOff / 2);
+    }
   }
 
   // ─── Creatures (bodies + highlight rings) ───
@@ -1479,7 +1521,7 @@ function renderWorldImpl(
 
     // Trail scratch: parallel to bodies, one entry per creature that has
     // both prev and curr and is actually moving.
-    const trailScratch = s.trailScratch;
+    let trailScratch = s.trailScratch;
     let trailOff = 0;
     const enableTrails = pop <= 12000;
 
@@ -1489,25 +1531,9 @@ function renderWorldImpl(
     let flashScratch = s.flashScratch;
     let flashOff = 0;
 
-    // v2.0 Wave 1c: wrap-aware draw. On a toroidal world a creature near x=0
-    // must also render at x=world_size+δ when the camera straddles the x=0 (or
-    // x=W) seam, and likewise for y. Build the small set of per-axis world
-    // offsets {-W, 0, +W} the visible frustum actually needs; the common case
-    // (not wrapping, or frustum well inside the world) is a single {0} offset
-    // so the inner loop stays a no-op pass. Grow the body scratch to cover the
-    // worst case (pop × ghost-copy count).
     const W = world_size;
-    const xOffsets: number[] = [0];
-    const yOffsets: number[] = [0];
-    if (wrap_world && W > 0) {
-      if (minX < 0) xOffsets.push(-W);
-      if (maxX > W) xOffsets.push(W);
-      if (minY < 0) yOffsets.push(-W);
-      if (maxY > W) yOffsets.push(W);
-    }
-    const ghostCopies = xOffsets.length * yOffsets.length;
-    if (ghostCopies > 1) {
-      const worstFloats = pop * ghostCopies * FLOATS_PER_INSTANCE;
+    if (repeatTiles.length > 1) {
+      const worstFloats = pop * repeatTiles.length * FLOATS_PER_INSTANCE;
       if (s.instanceScratch.length < worstFloats) {
         s.instanceScratch = new Float32Array(worstFloats * 2);
       }
@@ -1517,16 +1543,19 @@ function renderWorldImpl(
     // v2.0 Wave 1c: at survey zoom a body's on-screen radius drops below 1px.
     // Rather than an AA-shaded disc (which fades to near-invisible), draw a
     // radially-shaded 1px dot so faction territories stay legible (task 4 v2.0.6 S11).
-    const POINT_THRESHOLD_PX = 1.0;
+    const SURVEY_FORMULA_END_PX = 1.0;
     // v2.0.1 LOD thresholds (zoom-adaptive ring + flash):
-    //   < POINT_THRESHOLD_PX → bottom band: radial-shaded dot (innerPx=-1),
-    //                          no ring, no halo (halo alpha=0.0), flash-tint if active
-    //   POINT..MID           → small shaded disc, no flash, no visible ring,
-    //                          weaker halo (halo alpha=0.4)
+    //   < SURVEY_FORMULA_END_PX → formula-sized radial dot (innerPx=-1),
+    //                             no ring, no halo, flash-tint if active
+    //   FORMULA_END..MID        → formula radius blends back to body radius
+    //                             before the full body-disc style takes over
     //   MID..NEAR            → slim ring (0.992..1.0), reduced halo (halo alpha=0.4)
     //   ≥ NEAR_THRESHOLD_PX  → full ring (0.96..1.0), full halo (halo alpha=1.0)
     const MID_THRESHOLD_PX = 4.0;
     const NEAR_THRESHOLD_PX = 12.0;
+    const SURVEY_DISC_START_PX = MID_THRESHOLD_PX;
+    const surveyDotMinPx = Math.max(0.1, Math.min(8, settings.creatureSurveyDotMinPx));
+    const surveyDotScale = Math.max(1.0, Math.min(32, settings.creatureSurveyDotScale));
     // v2.0.6 S11: per-LOD-band halo alpha multiplier encoded in instance alpha.
     // HALO_FS multiplies u_strength by v_color.a, so these gate the halo per band.
     const HALO_ALPHA_NEAR = 1.0;   // near band: full halo
@@ -1547,8 +1576,15 @@ function renderWorldImpl(
       const cid = idHi * 4294967296 + idLo;
       const prev = prevById.get(cid);
       const rawRadiusPx = radiusWorld * PX_PER_SIZE * cam.zoom;
-      const isPoint = rawRadiusPx < POINT_THRESHOLD_PX;
-      const radiusPx = isPoint ? 1 : rawRadiusPx;
+      const isPoint = rawRadiusPx < SURVEY_DISC_START_PX;
+      const surveyRadiusPx = Math.max(surveyDotMinPx, rawRadiusPx * surveyDotScale);
+      const radiusPx = rawRadiusPx < SURVEY_FORMULA_END_PX
+        ? surveyRadiusPx
+        : rawRadiusPx < SURVEY_DISC_START_PX
+          ? surveyRadiusPx + (rawRadiusPx - surveyRadiusPx)
+            * ((rawRadiusPx - SURVEY_FORMULA_END_PX)
+              / (SURVEY_DISC_START_PX - SURVEY_FORMULA_END_PX))
+          : rawRadiusPx;
       // inner_px sentinel: -1 ⇒ flat point (no shading), 0 ⇒ shaded disc.
       const innerPx = isPoint ? -1 : 0;
       // v2.0 Wave 2b: display color is a single packed RGBA8 u32 (lane 3),
@@ -1577,90 +1613,70 @@ function renderWorldImpl(
       }
 
       // Emit one (and, near a wrapped seam, up to a few ghost) copies.
-      for (let xi = 0; xi < xOffsets.length; xi++) {
-        const ox = xOffsets[xi];
+      for (const tile of repeatTiles) {
+        const ox = tile.x;
         const x = cx_raw + ox;
         if (x < minX - margin || x > maxX + margin) continue;
-        for (let yi = 0; yi < yOffsets.length; yi++) {
-          const oy = yOffsets[yi];
-          const y = cy_raw + oy;
-          if (y < minY - margin || y > maxY + margin) continue;
-          // v2.0.6 S11: per-LOD-band halo strength encoded in alpha.
-          // Both DISC_FS branches (body disc and flat-point dot) hardcode opacity to
-          // 1.0 and ignore v_color.a, so alpha here is safe to repurpose as the
-          // per-instance halo strength signal read by HALO_FS. Bottom-band alpha=0.0
-          // makes the halo contribution zero even though the instance is still drawn.
-          const haloAlpha = isPoint ? HALO_ALPHA_BOTTOM
-            : (rawRadiusPx >= NEAR_THRESHOLD_PX ? HALO_ALPHA_NEAR : HALO_ALPHA_MID);
-          // v2.0.6 S11 task 5: action-tint for bottom-band dots. When a creature
-          // has an active flash (flashTicks > 0, flashTag > 0), blend the dot color
-          // toward the action color. Uses only flashTag/flashTicks from existing
-          // packed_u32 (lane 6) — no new Rust snapshot fields required.
-          // The tint affects both the radial-gradient dot (body) and any halo
-          // (alpha=0.0 so the halo is invisible; the tint is purely on the dot).
-          let rcr = cr, rcg = cg, rcb = cb;
-          if (isPoint && flashTicks > 0 && flashTag > 0 && flashTag < FLASH_COLORS.length) {
-            const fc = FLASH_COLORS[flashTag];
-            const tintStrength = (flashTicks / FLASH_TICKS_MAX) * 0.6;
-            rcr = cr + (fc[0] - cr) * tintStrength;
-            rcg = cg + (fc[1] - cg) * tintStrength;
-            rcb = cb + (fc[2] - cb) * tintStrength;
-          }
-          bodyScratch[off    ] = x;
-          bodyScratch[off + 1] = y;
-          bodyScratch[off + 2] = radiusPx;
-          bodyScratch[off + 3] = innerPx;
-          bodyScratch[off + 4] = rcr;
-          bodyScratch[off + 5] = rcg;
-          bodyScratch[off + 6] = rcb;
-          bodyScratch[off + 7] = haloAlpha; // v2.0.6 S11: LOD halo strength (1.0/0.4/0.0)
-          off += FLOATS_PER_INSTANCE;
+        const oy = tile.y;
+        const y = cy_raw + oy;
+        if (y < minY - margin || y > maxY + margin) continue;
+        const haloAlpha = isPoint ? HALO_ALPHA_BOTTOM
+          : (rawRadiusPx >= NEAR_THRESHOLD_PX ? HALO_ALPHA_NEAR : HALO_ALPHA_MID);
+        let rcr = cr, rcg = cg, rcb = cb;
+        if (isPoint && flashTicks > 0 && flashTag > 0 && flashTag < FLASH_COLORS.length) {
+          const fc = FLASH_COLORS[flashTag];
+          const tintStrength = (flashTicks / FLASH_TICKS_MAX) * 0.6;
+          rcr = cr + (fc[0] - cr) * tintStrength;
+          rcg = cg + (fc[1] - cg) * tintStrength;
+          rcb = cb + (fc[2] - cb) * tintStrength;
+        }
+        bodyScratch[off    ] = x;
+        bodyScratch[off + 1] = y;
+        bodyScratch[off + 2] = radiusPx;
+        bodyScratch[off + 3] = innerPx;
+        bodyScratch[off + 4] = rcr;
+        bodyScratch[off + 5] = rcg;
+        bodyScratch[off + 6] = rcb;
+        bodyScratch[off + 7] = haloAlpha;
+        off += FLOATS_PER_INSTANCE;
 
-          // v2.0 Wave 2b: action ring-flash. Draw a transient outer annulus in
-          // the tag's color when flash_ticks > 0. Fades with the countdown.
-          // Coexists with the inspector selection ring (separate pass below).
-          // v2.0.1: skip flash at far/mid zoom — below MID_THRESHOLD_PX the
-          // body is too small for the annulus to be legible.
-          if (rawRadiusPx >= MID_THRESHOLD_PX && flashTicks > 0 && flashTag > 0 && flashTag < FLASH_COLORS.length) {
-            if (flashOff + FLOATS_PER_INSTANCE > flashScratch.length) {
-              const grown = new Float32Array(flashScratch.length * 2);
-              grown.set(flashScratch);
-              flashScratch = grown;
-              s.flashScratch = grown;
-            }
-            const fc = FLASH_COLORS[flashTag];
-            const fade = flashTicks / FLASH_TICKS_MAX;
-            // Annulus just outside the body; inner_px > 0 selects the flat
-            // annulus branch in DISC_FS.
-            const outer = radiusPx + 5;
-            const inner = radiusPx + 2;
-            flashScratch[flashOff] = x;
-            flashScratch[flashOff + 1] = y;
-            flashScratch[flashOff + 2] = outer;
-            flashScratch[flashOff + 3] = inner;
-            flashScratch[flashOff + 4] = fc[0];
-            flashScratch[flashOff + 5] = fc[1];
-            flashScratch[flashOff + 6] = fc[2];
-            flashScratch[flashOff + 7] = fade;
-            flashOff += FLOATS_PER_INSTANCE;
+        if (rawRadiusPx >= MID_THRESHOLD_PX && flashTicks > 0 && flashTag > 0 && flashTag < FLASH_COLORS.length) {
+          if (flashOff + FLOATS_PER_INSTANCE > flashScratch.length) {
+            const grown = new Float32Array(flashScratch.length * 2);
+            grown.set(flashScratch);
+            flashScratch = grown;
+            s.flashScratch = grown;
           }
+          const fc = FLASH_COLORS[flashTag];
+          const fade = flashTicks / FLASH_TICKS_MAX;
+          flashScratch[flashOff] = x;
+          flashScratch[flashOff + 1] = y;
+          flashScratch[flashOff + 2] = radiusPx + 5;
+          flashScratch[flashOff + 3] = radiusPx + 2;
+          flashScratch[flashOff + 4] = fc[0];
+          flashScratch[flashOff + 5] = fc[1];
+          flashScratch[flashOff + 6] = fc[2];
+          flashScratch[flashOff + 7] = fade;
+          flashOff += FLOATS_PER_INSTANCE;
+        }
 
-          // Trail: start = prev (one paint behind), end = current body, both
-          // shifted by the same wrap offset so the segment stays attached to
-          // this ghost copy. FS fades alpha from 0 at the back to a at the
-          // front (comet tail). Thickness scales with body radius (min 2 px).
-          if (drawTrail && prev !== undefined && trailOff + TRAIL_FLOATS_PER_INSTANCE <= trailScratch.length) {
-            trailScratch[trailOff    ] = prev.x + ox;
-            trailScratch[trailOff + 1] = prev.y + oy;
-            trailScratch[trailOff + 2] = x;
-            trailScratch[trailOff + 3] = y;
-            trailScratch[trailOff + 4] = cr;
-            trailScratch[trailOff + 5] = cg;
-            trailScratch[trailOff + 6] = cb;
-            trailScratch[trailOff + 7] = 0.6;
-            trailScratch[trailOff + 8] = Math.max(2, radiusPx * 0.6);
-            trailOff += TRAIL_FLOATS_PER_INSTANCE;
+        if (drawTrail && prev !== undefined) {
+          if (trailOff + TRAIL_FLOATS_PER_INSTANCE > trailScratch.length) {
+            const grown = new Float32Array(trailScratch.length * 2);
+            grown.set(trailScratch);
+            trailScratch = grown;
+            s.trailScratch = grown;
           }
+          trailScratch[trailOff    ] = prev.x + ox;
+          trailScratch[trailOff + 1] = prev.y + oy;
+          trailScratch[trailOff + 2] = x;
+          trailScratch[trailOff + 3] = y;
+          trailScratch[trailOff + 4] = cr;
+          trailScratch[trailOff + 5] = cg;
+          trailScratch[trailOff + 6] = cb;
+          trailScratch[trailOff + 7] = 0.6;
+          trailScratch[trailOff + 8] = Math.max(2, radiusPx * 0.6);
+          trailOff += TRAIL_FLOATS_PER_INSTANCE;
         }
       }
     }
@@ -1776,21 +1792,10 @@ function renderWorldImpl(
       creatures.byteOffset,
       pop * stride * (creatures.BYTES_PER_ELEMENT / 4),
     );
-    // v2.0 Wave 1c: same wrap offsets as the body pass so a highlighted
-    // creature near the seam also rings at its wrapped position.
-    const W = world_size;
     const halfW = (viewW / cam.zoom) * 0.5;
     const halfH = (viewH / cam.zoom) * 0.5;
     const hMinX = cam.cx - halfW, hMaxX = cam.cx + halfW;
     const hMinY = cam.cy - halfH, hMaxY = cam.cy + halfH;
-    const hxOff: number[] = [0];
-    const hyOff: number[] = [0];
-    if (wrap_world && W > 0) {
-      if (hMinX < 0) hxOff.push(-W);
-      if (hMaxX > W) hxOff.push(W);
-      if (hMinY < 0) hyOff.push(-W);
-      if (hMaxY > W) hyOff.push(W);
-    }
     const scratch = s.instanceScratch;
     let off = 0;
     for (let k = 0; k < pop; k++) {
@@ -1811,23 +1816,21 @@ function renderWorldImpl(
       const alpha = exp >= PERMANENT_EXP - 1
         ? 1.0
         : Math.min(1.0, (exp - nowMs) / HIGHLIGHT_FADE_MS);
-      for (let xi = 0; xi < hxOff.length; xi++) {
-        const x = x0 + hxOff[xi];
+      for (const tile of repeatTiles) {
+        const x = x0 + tile.x;
         if (x < hMinX - radiusWorld - 4 || x > hMaxX + radiusWorld + 4) continue;
-        for (let yi = 0; yi < hyOff.length; yi++) {
-          const y = y0 + hyOff[yi];
-          if (y < hMinY - radiusWorld - 4 || y > hMaxY + radiusWorld + 4) continue;
-          if (off + FLOATS_PER_INSTANCE > scratch.length) break;
-          scratch[off    ] = x;
-          scratch[off + 1] = y;
-          scratch[off + 2] = radiusPx + 4;
-          scratch[off + 3] = radiusPx + 2;
-          scratch[off + 4] = 255 / 255;
-          scratch[off + 5] = 200 / 255;
-          scratch[off + 6] = 50 / 255;
-          scratch[off + 7] = alpha;
-          off += FLOATS_PER_INSTANCE;
-        }
+        const y = y0 + tile.y;
+        if (y < hMinY - radiusWorld - 4 || y > hMaxY + radiusWorld + 4) continue;
+        if (off + FLOATS_PER_INSTANCE > scratch.length) break;
+        scratch[off    ] = x;
+        scratch[off + 1] = y;
+        scratch[off + 2] = radiusPx + 4;
+        scratch[off + 3] = radiusPx + 2;
+        scratch[off + 4] = 255 / 255;
+        scratch[off + 5] = 200 / 255;
+        scratch[off + 6] = 50 / 255;
+        scratch[off + 7] = alpha;
+        off += FLOATS_PER_INSTANCE;
       }
     }
     const hCount = (off / FLOATS_PER_INSTANCE) | 0;

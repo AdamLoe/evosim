@@ -8,11 +8,10 @@
 //   (b) tick counter advances >= 5 ticks in ~1 s
 //   (c) grass density changes between T0 and T1 (scatter kernel live)
 //   (d) window metadata (header bytes [32..64)): mip_level=0, winOriginX=0,
-//       win_w=grassDim (full horizontal coverage); win_h and winOriginY are
-//       aspect-ratio-corrected (v2.0.4 S1 fix — non-square viewport no longer
-//       produces a square window). At default zoom=1 with a 1280×720 viewport
-//       (Desktop Chrome): aspect=720/1280=0.5625, span_y=1920*0.5625=1080,
-//       raw_win_h=ceil(1080*1.5)=1620, winOriginY=(1920-1620)/2=150.
+//       win_w=grassDim (full horizontal coverage); win_h=grassDim (full vertical
+//       coverage). At default zoom with cell_size=20/grassDim=480 the visible
+//       span (~8000 cells) exceeds the full grid, so the window is always the
+//       full field: win_w=win_h=grassDim=480, winOriginX=winOriginY=0.
 //   (e) population > 0 (world not immediately extinct)
 
 import { test, expect, type Page } from "@playwright/test";
@@ -228,35 +227,28 @@ test("grass-lod-smoke: boots, grass evolves, window metadata sane at default sca
   ).toBe(true);
 
   // (d) Window metadata at default scale.
-  // v2.0.4 S1 aspect-ratio fix: the window is now aspect-correct.
-  // Viewport = 1280×720 (Desktop Chrome), grassDim = 1920.
-  // - mip_level=0: visible_cell_span_x=1920, ratio=1920/4096<1 → level=0.
-  // - winOriginX=0, winW=grassDim: full horizontal field always at default zoom.
-  // - aspect = 720/1280 = 0.5625; span_y = 1920*0.5625 = 1080.
-  //   raw_win_h = ceil(1080*1.5) = 1620; clamped to min(1920,4096) = 1620.
-  //   winOriginY = max(0, 960 - 810) = 150; clamped ≤ (1920-1620)=300 → 150.
-  // These values are CORRECT behaviour (aspect fix working), not a bug.
+  // Viewport = 1280×720 (Desktop Chrome), grassDim = 480 (cell_size=20, world=9600).
+  // Default zoom = ~0.06 (fit-world-in-viewport). At this zoom the visible span
+  // is ~8000 cells horizontally, which exceeds grassDim=480, so the full field
+  // is always visible:
+  // - mip_level=0: visible_cell_span_x≫grassDim, ratio<1 → level=0.
+  // - win_w = win_h = grassDim (full field, clamped at level bounds).
+  // - winOriginX = winOriginY = 0 (camera centered, window covers the whole grid).
   const { mipLevel, winOriginX, winOriginY, winW, winH, grassDim } = t0!;
   console.log(
     `[lod-smoke] window: mip=${mipLevel} origin=(${winOriginX},${winOriginY}) win=(${winW}x${winH}) grassDim=${grassDim}`,
   );
-  const viewportW = 1280;
-  const viewportH = 720;
-  const aspect = viewportH / viewportW; // 0.5625
-  const spanY = grassDim * aspect; // 1080 at grassDim=1920
-  const expectedWinH = Math.ceil(spanY * 1.5); // ceil(1620.0) = 1620
-  const expectedOriginY = Math.floor((grassDim - expectedWinH) / 2); // (1920-1620)/2 = 150
   expect(mipLevel, "default scale: mip_level must be 0").toBe(0);
   expect(winOriginX, "default scale: win_origin_x must be 0").toBe(0);
   expect(winW, "default scale: win_w must equal grassDim (full horizontal field)").toBe(grassDim);
   expect(
     winH,
-    `default scale: win_h must equal aspect-corrected height (${expectedWinH}) — v2.0.4 S1 aspect fix`,
-  ).toBe(expectedWinH);
+    "default scale: win_h must equal grassDim (full vertical field — zoom-out shows > whole grass grid)",
+  ).toBe(grassDim);
   expect(
     winOriginY,
-    `default scale: win_origin_y must be ${expectedOriginY} (centered aspect window) — v2.0.4 S1 aspect fix`,
-  ).toBe(expectedOriginY);
+    "default scale: win_origin_y must be 0 (centered window covering full grid)",
+  ).toBe(0);
 
   // (e) World alive.
   const status1 = await readStatus(page);

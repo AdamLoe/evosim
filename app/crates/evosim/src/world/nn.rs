@@ -49,6 +49,9 @@ impl World {
                 let mating_cost = self.sliders.split_gift;
                 let max_age = self.sliders.max_age;
                 let world_size = self.dims.world_size;
+                let creature_sector_range = self.sliders.creature_sector_range;
+                let grass_sector_range = self.sliders.grass_sector_range;
+                let grass_far_sector_range = self.sliders.grass_far_sector_range;
                 let stats_ref = std::sync::Arc::clone(&self.nn_stats);
 
                 let chunk_size = chunk_base_size_from_ranges(ranges, n);
@@ -109,6 +112,9 @@ impl World {
                                     mating_cost,
                                     max_age,
                                     world_size,
+                                    creature_sector_range,
+                                    grass_sector_range,
+                                    grass_far_sector_range,
                                     pick_t,
                                 );
                                 vx_sub[k] = vx;
@@ -159,6 +165,9 @@ impl World {
             let mating_cost = self.sliders.split_gift;
             let max_age = self.sliders.max_age;
             let world_size = self.dims.world_size;
+            let creature_sector_range = self.sliders.creature_sector_range;
+            let grass_sector_range = self.sliders.grass_sector_range;
+            let grass_far_sector_range = self.sliders.grass_far_sector_range;
             let layout = self.nn_input_layout.clone();
             for &(lo, hi) in ranges {
                 let mut input_buf = [0.0f32; MAX_NN_INPUTS];
@@ -192,6 +201,9 @@ impl World {
                         mating_cost,
                         max_age,
                         world_size,
+                        creature_sector_range,
+                        grass_sector_range,
+                        grass_far_sector_range,
                         pick_t,
                     );
                     self.creatures.vx[i] = vx;
@@ -296,8 +308,6 @@ impl World {
                 self.nn_stats.tick_forward_calls.load(Ordering::Relaxed) as u32,
             );
             // v1.12: emit `forward.l{k}` 1-based rows for every active matmul.
-            // The legacy 32→48→24→5 topology has 3 matmuls → l1/l2/l3, same
-            // names as pre-v1.12 so the perf panel renders identically.
             let matmul_count = self.nn_topology.matmul_count();
             for k in 0..matmul_count {
                 let path = format!("forward.l{}", k + 1);
@@ -643,6 +653,9 @@ pub(crate) fn build_nn_input(
     energy_max: f32,
     max_age: u32,
     world_size: f32,
+    creature_sector_range: f32,
+    grass_sector_range: f32,
+    grass_far_sector_range: f32,
     timings: Option<&mut BuildTimings>,
 ) -> [f32; MAX_NN_INPUTS] {
     use crate::profiler::clock_now_us_threadsafe;
@@ -714,13 +727,22 @@ pub(crate) fn build_nn_input(
                 self_species,
                 grid,
                 creatures,
+                creature_sector_range,
                 sector_scratch,
             );
             buf[o..o + NN_CREATURE_SECTORS_SPECIES]
                 .copy_from_slice(&sector_scratch[..NN_CREATURE_SECTORS_SPECIES]);
         } else {
             let mut sec8 = [0.0f32; 8];
-            proximity::compute_creature_proximity_sectors(x, y, i, grid, creatures, &mut sec8);
+            proximity::compute_creature_proximity_sectors(
+                x,
+                y,
+                i,
+                grid,
+                creatures,
+                creature_sector_range,
+                &mut sec8,
+            );
             buf[o..o + NN_SECTORS].copy_from_slice(&sec8[..NN_SECTORS]);
         }
     }
@@ -734,7 +756,14 @@ pub(crate) fn build_nn_input(
     // --- grass_density sectors ---
     if let Some(o) = layout.offset_of(NnInputGroup::GrassSectors) {
         let mut grass_sec = [0.0f32; 8];
-        proximity::compute_grass_density_sectors(x, y, grass, sector_lut, &mut grass_sec);
+        proximity::compute_grass_density_sectors(
+            x,
+            y,
+            grass,
+            sector_lut,
+            grass_sector_range,
+            &mut grass_sec,
+        );
         buf[o..o + NN_SECTORS].copy_from_slice(&grass_sec[..NN_SECTORS]);
     }
 
@@ -747,7 +776,13 @@ pub(crate) fn build_nn_input(
     // --- far-band grass density sectors (v2.0.4 S6) ---
     if let Some(o) = layout.offset_of(NnInputGroup::GrassBandsFar) {
         let mut far_sec = [0.0f32; 8];
-        proximity::compute_grass_far_band_sectors(x, y, grass, &mut far_sec);
+        proximity::compute_grass_far_band_sectors(
+            x,
+            y,
+            grass,
+            grass_far_sector_range,
+            &mut far_sec,
+        );
         buf[o..o + NN_SECTORS].copy_from_slice(&far_sec[..NN_SECTORS]);
     }
 
@@ -918,6 +953,9 @@ pub(crate) fn pick_action_d(
     mating_cost: f32,
     max_age: u32,
     world_size: f32,
+    creature_sector_range: f32,
+    grass_sector_range: f32,
+    grass_far_sector_range: f32,
     mut timings: Option<&mut PickTimings>,
 ) -> (f32, f32, Action, u8) {
     use crate::profiler::clock_now_us_threadsafe;
@@ -938,6 +976,9 @@ pub(crate) fn pick_action_d(
         energy_max,
         max_age,
         world_size,
+        creature_sector_range,
+        grass_sector_range,
+        grass_far_sector_range,
         build_arg,
     );
     let t_build_end = if timed { clock_now_us_threadsafe() } else { 0 };
@@ -1042,6 +1083,9 @@ pub(crate) fn build_labeled_nn_inspect(
     energy_max: f32,
     max_age: u32,
     world_size: f32,
+    creature_sector_range: f32,
+    grass_sector_range: f32,
+    grass_far_sector_range: f32,
 ) -> (Vec<LabeledInput>, [f32; crate::constants::NN_OUTPUTS]) {
     // Build the raw input buffer (same path as the tick).
     let prev_vx = creatures.vx[i];
@@ -1061,6 +1105,9 @@ pub(crate) fn build_labeled_nn_inspect(
         energy_max,
         max_age,
         world_size,
+        creature_sector_range,
+        grass_sector_range,
+        grass_far_sector_range,
         None,
     );
 
@@ -1215,6 +1262,9 @@ mod tests {
             energy_max,
             max_age,
             world_size,
+            w.sliders.creature_sector_range,
+            w.sliders.grass_sector_range,
+            w.sliders.grass_far_sector_range,
             None,
         )
     }
@@ -1346,6 +1396,187 @@ mod tests {
             inp[curr_off] > 0.0,
             "current grass cell must still be visible through CurrGrass"
         );
+    }
+
+    fn direction_cases() -> [(usize, f32, f32); 8] {
+        let d = std::f32::consts::FRAC_1_SQRT_2;
+        [
+            (0, 0.0, -1.0),
+            (1, d, -d),
+            (2, 1.0, 0.0),
+            (3, d, d),
+            (4, 0.0, 1.0),
+            (5, -d, d),
+            (6, -1.0, 0.0),
+            (7, -d, -d),
+        ]
+    }
+
+    fn centered_single_founder_world(seed: &str, sliders: crate::world::DevSliders) -> World {
+        let mut w = World::new_with_sliders(seed, sliders);
+        let c = w.dims.world_size * 0.5;
+        w.creatures.x[0] = c;
+        w.creatures.y[0] = c;
+        w.grid.rebuild(&w.creatures.x, &w.creatures.y);
+        w.grass.fill_density(0.0);
+        w.grass.rebuild_row_bitset();
+        w.grass.refresh_pyramid();
+        w
+    }
+
+    fn add_neighbor(w: &mut World, dx: f32, dy: f32, distance: f32, species_id: u16) {
+        let brain = w.creatures.brains[0].clone();
+        let i = w.creatures.push(
+            99,
+            w.creatures.x[0] + dx * distance,
+            w.creatures.y[0] + dy * distance,
+            w.sliders.energy_max,
+            0,
+            brain,
+            0.25,
+            species_id,
+        );
+        w.creatures.age[i] = 0;
+        w.grid.rebuild(&w.creatures.x, &w.creatures.y);
+    }
+
+    #[test]
+    fn nn_input_creature_sector_range_controls_all_directions() {
+        for (sector, dx, dy) in direction_cases() {
+            let mut w = centered_single_founder_world(
+                "creature-sector-range",
+                crate::world::DevSliders {
+                    founder_count: 1,
+                    creature_sector_range: 24.0,
+                    ..Default::default()
+                },
+            );
+            add_neighbor(&mut w, dx, dy, 12.0, 0);
+            let inp = build_for_founder(&mut w);
+            let off = w
+                .nn_input_layout
+                .offset_of(NnInputGroup::CreatureSectors)
+                .expect("CreatureSectors must be active");
+            assert!(
+                inp[off + sector] > 0.45,
+                "sector {sector} should see its placed neighbor, got {}",
+                inp[off + sector]
+            );
+
+            w.sliders.creature_sector_range = 8.0;
+            let inp = build_for_founder(&mut w);
+            assert_eq!(
+                inp[off + sector],
+                0.0,
+                "sector {sector} should go dark outside configured range"
+            );
+        }
+    }
+
+    fn grass_cell_index_at(w: &World, x: f32, y: f32) -> usize {
+        let dim = w.dims.grass_dim as i32;
+        let cell = w.dims.grass_cell_size;
+        let ix = (x / cell).floor() as i32;
+        let iy = (y / cell).floor() as i32;
+        let ix = ix.rem_euclid(dim) as usize;
+        let iy = iy.rem_euclid(dim) as usize;
+        iy * w.dims.grass_dim + ix
+    }
+
+    #[test]
+    fn nn_input_near_grass_sector_range_controls_all_directions() {
+        for (sector, dx, dy) in direction_cases() {
+            let mut w = centered_single_founder_world(
+                "near-grass-sector-range",
+                crate::world::DevSliders {
+                    founder_count: 1,
+                    grass_multisight: false,
+                    grass_sector_range: 80.0,
+                    ..Default::default()
+                },
+            );
+            let x = w.creatures.x[0] + dx * 30.0;
+            let y = w.creatures.y[0] + dy * 30.0;
+            let idx = grass_cell_index_at(&w, x, y);
+            w.grass.dset(idx, GRASS_MAX);
+            w.grass.rebuild_row_bitset();
+
+            let inp = build_for_founder(&mut w);
+            let off = w
+                .nn_input_layout
+                .offset_of(NnInputGroup::GrassSectors)
+                .expect("GrassSectors must be active");
+            assert!(
+                inp[off + sector] > 0.0,
+                "sector {sector} should see placed near grass, got {}",
+                inp[off + sector]
+            );
+
+            w.sliders.grass_sector_range = 15.0;
+            let inp = build_for_founder(&mut w);
+            assert_eq!(
+                inp[off + sector],
+                0.0,
+                "sector {sector} should go dark outside configured near-grass range"
+            );
+        }
+    }
+
+    fn fill_far_mip_cell(w: &mut World, world_x: f32, world_y: f32) {
+        let mip_scale = 1usize << GRASS_FAR_MIP_LEVEL;
+        let mip_cell = w.dims.grass_cell_size * mip_scale as f32;
+        let dim = w.dims.grass_dim;
+        let mip_dim = dim / mip_scale;
+        let cx = ((world_x.rem_euclid(w.dims.world_size) / mip_cell).floor() as usize)
+            .min(mip_dim.saturating_sub(1));
+        let cy = ((world_y.rem_euclid(w.dims.world_size) / mip_cell).floor() as usize)
+            .min(mip_dim.saturating_sub(1));
+        for by in 0..mip_scale {
+            for bx in 0..mip_scale {
+                let ix = (cx * mip_scale + bx).min(dim - 1);
+                let iy = (cy * mip_scale + by).min(dim - 1);
+                w.grass.dset(iy * dim + ix, GRASS_MAX);
+            }
+        }
+        w.grass.rebuild_row_bitset();
+        w.grass.refresh_pyramid();
+    }
+
+    #[test]
+    fn nn_input_far_grass_uses_runtime_cell_size_and_range() {
+        for cell_size in [20.0, 10.0] {
+            let mut w = centered_single_founder_world(
+                "far-grass-runtime-cell-size",
+                crate::world::DevSliders {
+                    founder_count: 1,
+                    grass_cell_size: cell_size,
+                    grass_multisight: true,
+                    grass_far_sector_range: 160.0,
+                    ..Default::default()
+                },
+            );
+            let off = w
+                .nn_input_layout
+                .offset_of(NnInputGroup::GrassBandsFar)
+                .expect("GrassBandsFar must be active");
+            let x = w.creatures.x[0] + 160.0;
+            let y = w.creatures.y[0];
+            fill_far_mip_cell(&mut w, x, y);
+            let inp = build_for_founder(&mut w);
+            assert!(
+                inp[off + 2] > 0.5,
+                "east far grass should be visible at runtime cell size {cell_size}, got {}",
+                inp[off + 2]
+            );
+
+            w.sliders.grass_far_sector_range = 80.0;
+            let inp = build_for_founder(&mut w);
+            assert_eq!(
+                inp[off + 2],
+                0.0,
+                "configured far range should move the sample away from the 160u patch"
+            );
+        }
     }
 
     // ---- decode_action tests (kept; layout-independent) ----

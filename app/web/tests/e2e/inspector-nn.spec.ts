@@ -210,3 +210,32 @@ test("NN I/O block logit bars have non-empty width after population", async ({
   );
   expect(vxvy, "vx/vy readout should be set").not.toBe("—");
 });
+
+test("NN I/O block also populates while the simulation is running", async ({
+  page,
+}) => {
+  await setPaused(page, false);
+
+  await expect
+    .poll(
+      async () => {
+        await page.evaluate(() => {
+          const block = document.getElementById("ins-nn-block");
+          if (block && getComputedStyle(block).display !== "none") return;
+          const ns = (window as unknown as { __evosimE2E?: { selectFirstCreature?: () => boolean } }).__evosimE2E;
+          ns?.selectFirstCreature?.();
+        });
+        return await page.evaluate(() => {
+          const block = document.getElementById("ins-nn-block");
+          return block ? getComputedStyle(block).display !== "none" : false;
+        });
+      },
+      { timeout: 8_000 },
+    )
+    .toBe(true);
+
+  const vxvy = await page.evaluate(
+    () => document.getElementById("ins-nn-vxvy")?.textContent ?? "",
+  );
+  expect(vxvy, "running NN vx/vy readout should be set").not.toBe("—");
+});

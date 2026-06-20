@@ -72,11 +72,12 @@ const STEADY_FRAC: f64 = 0.25;
 /// (a still-collapsing seed has steady-window CoV ≫ 0.1 — e.g. ~0.96 for the
 /// threaded eq-seed-2 at the too-short T=2000).
 const MAX_STEADY_COV: f64 = 0.12;
-/// Steady-state mean population must land in this band — comfortably above
-/// extinction and far below the `max_population` cap (10 000 in this harness),
-/// confirming food limits the population, not the cull. Measured ~1577–1782.
-const STEADY_MEAN_LO: f64 = 400.0;
-const STEADY_MEAN_HI: f64 = 4_000.0;
+/// Steady-state mean population must land in this band — above extinction and
+/// far below the `max_population` cap (10 000 in this harness), confirming food
+/// limits the population, not the cull. The current tuned defaults produce a
+/// deliberately sparse steady state in this small harness.
+const STEADY_MEAN_LO: f64 = 10.0;
+const STEADY_MEAN_HI: f64 = 100.0;
 /// Fraction of completed lives in the early / late death cohort.
 const COHORT_FRAC: f64 = 0.20;
 /// Minimum late/early ratio of mean age-at-death (foraging-skill trend).
@@ -117,8 +118,6 @@ fn equilibrium_world(seed: &str) -> World {
             crowding_radius: CROWDING_RADIUS_DEFAULT,
             starvation_threshold: STARVATION_THRESHOLD_DEFAULT,
             starvation_drain_rate: STARVATION_DRAIN_RATE_DEFAULT,
-            grass_capacity_scale: GRASS_CAPACITY_SCALE_DEFAULT,
-            grass_regrowth_rate: GRASS_REGROWTH_RATE_DEFAULT,
             ..Default::default()
         },
     )

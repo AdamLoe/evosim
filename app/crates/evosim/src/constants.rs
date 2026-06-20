@@ -74,7 +74,7 @@ pub const UPKEEP_NN_FIXED: f32 = 0.05;
 // ---- One-time costs ----
 pub const COST_MOVE_PER_DIST: f32 = 0.02;
 pub const SPLIT_GIFT_MAX_DEFAULT: f32 = 30.0;
-pub const SPLIT_THRESHOLD_DEFAULT: f32 = 99.0;
+pub const SPLIT_THRESHOLD_DEFAULT: f32 = 399.0;
 
 // ---- Attack ----
 /// Default per-bite energy transfer fraction. An attacker removes
@@ -133,7 +133,7 @@ const _: () = assert!(MAX_NN_INPUTS >= NN_INPUTS);
 const _: () = assert!(MAX_NN_INPUTS.is_multiple_of(8));
 pub const NN_OUTPUTS: usize = 5; // out[0]=vx, out[1]=vy, out[2..5]=action logits (Graze/Eat/Split)
                                  // v1.12: NN_HIDDEN_1/2 + NN_WEIGHT_COUNT were compile-time constants in
-                                 // the legacy 32→48→24→5 topology. They're now derived from the
+                                 // the legacy 32→48→5 topology. They're now derived from the
                                  // runtime `Brain.layer_sizes` (`src/brain.rs`). Legacy default lives in
                                  // `LEGACY_NN_TOPOLOGY` below.
 /// Hard upper bound on a single hidden-layer width. Drives the size of the
@@ -145,16 +145,16 @@ pub const NN_MAX_HIDDEN_WIDTH: usize = 256;
 pub const NN_MAX_HIDDEN_LAYERS: usize = 8;
 /// `NN_MAX_HIDDEN_LAYERS + 1` matmuls (one per hidden + one for output).
 pub const NN_MAX_MATMULS: usize = NN_MAX_HIDDEN_LAYERS + 1;
-/// Legacy 32→48→24→5 topology. Used as the default when no
+/// Legacy 32→48→5 topology. Used as the default when no
 /// `nn_topology` rides the boot payload and as a calibration anchor for the
 /// SIMD-vs-scalar drift-guard test.
-pub const LEGACY_HIDDEN_SIZES: &[usize] = &[48, 24];
+pub const LEGACY_HIDDEN_SIZES: &[usize] = &[48];
 /// Number of angular sectors for creature_proximity and grass_density inputs.
 /// World-aligned: 0 = N (0°), 1 = NE (45°), …, 7 = NW (315°).
 pub const NN_SECTORS: usize = 8;
-/// Range used by creature_proximity and grass_density sector inputs (world-units).
+/// Default range used by creature sector NN inputs (world-units).
 pub const PROXIMITY_RANGE: f32 = 20.0;
-/// Range used by the 8 grass-density sector NN inputs (world-units).
+/// Default range used by the 8 near grass-density sector NN inputs (world-units).
 ///
 /// v2.0 Wave 1a: raised 8.0 → 20.0. At the new 5u grass cell (was 1.25u) the old
 /// 8u range spanned only ~1.6 cells per sector — too coarse to give each of the
@@ -162,6 +162,8 @@ pub const PROXIMITY_RANGE: f32 = 20.0;
 /// axis (so each sector sees ≥3 cells), matching `PROXIMITY_RANGE`. The sector
 /// LUT radius (`LUT_RADIUS`) is computed from this range and the 5u cell.
 pub const GRASS_PROXIMITY_RANGE: f32 = 20.0;
+pub const CREATURE_SECTOR_RANGE_DEFAULT: f32 = PROXIMITY_RANGE;
+pub const GRASS_SECTOR_RANGE_DEFAULT: f32 = GRASS_PROXIMITY_RANGE;
 /// Range used by wall_proximity inputs (world-units).
 pub const WALL_PROXIMITY_RANGE: f32 = 50.0;
 // v1.12: legacy per-layer NN_INIT_RANGE_L1/L2/L3 constants removed. Founder
@@ -182,12 +184,12 @@ pub const REPULSION_MAX: f32 = 0.1;
 // ---- Per-creature defaults (D3: genome removed; all creatures share these) ----
 pub const START_ENERGY_DEFAULT: f32 = 200.0;
 pub const CREATURE_SIZE: f32 = 1.0;
-pub const MAX_AGE_DEFAULT: u32 = 5000;
+pub const MAX_AGE_DEFAULT: u32 = 2900;
 /// Default split-position jitter — children spawn at parent ± random[-v, v]
 /// per axis. Live-tunable via DevSliders.split_jitter.
 pub const SPLIT_JITTER_DEFAULT: f32 = 1.0;
 /// Default number of creatures seeded at world init (multi-founder).
-pub const STARTING_POP_DEFAULT: u32 = 32;
+pub const STARTING_POP_DEFAULT: u32 = 758;
 
 /// Sim-side population cap. The cap is a *simulation* invariant — when
 /// births would push pop above this number, `World::handle_births` randomly
@@ -214,35 +216,34 @@ pub const MIN_CHUNKS: usize = 4;
 pub const MAX_CHUNKS: usize = 16;
 
 // ---- Grass grid ----
-// v2.0 Wave 1a: the grass grid is runtime-sized. `GRASS_CELL_SIZE` (the per-axis
-// cell width) is the only compile-time knob; the per-axis cell count
-// `grass_dim = round(world_size / GRASS_CELL_SIZE)` and `grass_cell_count =
-// grass_dim²` are computed at construction (`WorldDims::from_world_size`). At the
-// default 9600u world this gives 1920 cells/axis → 3_686_400 cells.
+// v2.0 Wave 1a: the grass grid is runtime-sized. `GRASS_CELL_SIZE` is the
+// fallback cell width for tests/legacy constructors; production construction
+// reads `GRASS_CELL_SIZE_DEFAULT` through DevSliders. The per-axis cell count is
+// `grass_dim = round(world_size / grass_cell_size)` and `grass_cell_count =
+// grass_dim²`.
 //
 // Cell size raised 1.25 → 5.0: the world grew 8× per axis, so a 5u cell keeps the
 // grid at 1920² (vs a ruinous 7680² at the old 1.25u). Sim-internal grass density
 // stays f32 (dynamics unchanged); only the *snapshot* grass region quantizes to
 // u8 (one byte per cell) — see `wasm_api.rs`.
 //
-// v2.0.4 S2: `grass_cell_size` is now a CONSTRUCTION-ONLY slider (default 5.0).
+// v2.0.4 S2: `grass_cell_size` is now a CONSTRUCTION-ONLY slider.
 // Larger cells → fewer cells → less grass_step work (cell count ∝ 1/size²).
 // The active value lives on `DevSliders.grass_cell_size` and is read at world
 // construction via `WorldDims::from_world_size_with_cell_size`. This constant
 // is kept as the default/fallback value so existing call sites (tests, default
 // constructors) remain unchanged. Do NOT use it at live grass-dim read sites;
 // read `world.dims.grass_cell_size` instead.
-/// Default grass cell size in world-units. v2.0.4 S2: still the default; the
-/// runtime value is `DevSliders.grass_cell_size` → `WorldDims.grass_cell_size`.
+/// Fallback grass cell size in world-units. Production runtime value is
+/// `DevSliders.grass_cell_size` → `WorldDims.grass_cell_size`.
 pub const GRASS_CELL_SIZE: f32 = 5.0;
-/// Default for the `grass_cell_size` construction slider. Matches `GRASS_CELL_SIZE`.
-pub const GRASS_CELL_SIZE_DEFAULT: f32 = GRASS_CELL_SIZE;
+/// Default for the `grass_cell_size` construction slider.
+pub const GRASS_CELL_SIZE_DEFAULT: f32 = 20.0;
 /// Maximum density per cell (clamped post-step).
 pub const GRASS_MAX: f32 = 1.0;
 /// v2.0.3 Stream 2a: maximum number of pyramid levels (L0 alias + owned L1+
 /// buffers). The pyramid builder stops at 1×1 or when it would exceed this cap,
-/// whichever comes first. At grass_dim = 1920 (default) repeated halving
-/// (ceil-divide) yields 11 levels before reaching 1×1 — well under the cap.
+/// whichever comes first. The cap leaves room for larger runtime grids.
 /// Raise this only if you need more levels at larger grid sizes; 16 is enough
 /// for a 65536² world. Append-only constant — do not remove.
 pub const GRASS_PYRAMID_MAX_LEVELS: usize = 16;
@@ -285,20 +286,17 @@ pub const GRASS_PROPAGATION_RATE_K_DEFAULT: f32 = 0.003;
 pub const GRASS_INITIAL_SEED_COUNT_DEFAULT: u32 = 8000;
 /// Default number of clump centres for seeded-clump grass boot (v2.0.6 S3).
 ///
-/// Budget math (default 9600u world, 5u cells → 1920² = 3,686,400 cells):
-///   clump_count=40, clump_size=8 cells → disc area ≈ π×8² ≈ 201 cells/clump
-///   Total ≈ 40 × 201 = ~8,040 occupied cells — matches old uniform-scatter
-///   budget of 8000 and is well under 1% of the grid so the map looks clumped
-///   rather than diffuse. Clumps may overlap; actual count is ≤ 8040.
+/// Defaults are intentionally dense: `GRASS_CLUMP_COUNT_DEFAULT` centres each
+/// fill a `GRASS_CLUMP_SIZE_DEFAULT` disc. Clumps may overlap and are capped by
+/// the runtime grid.
 /// When set to 0 the world boots with the old uniform-scatter behaviour.
-pub const GRASS_CLUMP_COUNT_DEFAULT: u32 = 40;
+pub const GRASS_CLUMP_COUNT_DEFAULT: u32 = 2000;
 /// Default clump radius (in grass cells) for seeded-clump grass boot (v2.0.6 S3).
-/// A disc of radius 8 holds ≈ π×8² ≈ 201 cells, giving ~8,040 total occupied
-/// cells across 40 clumps — matching the old 8000-cell uniform-scatter budget.
-pub const GRASS_CLUMP_SIZE_DEFAULT: u32 = 8;
+/// Default clump radius (in grass cells) for seeded-clump grass boot.
+pub const GRASS_CLUMP_SIZE_DEFAULT: u32 = 40;
 /// Default energy gained per successful graze bite. Live-tunable via
 /// DevSliders.grass_energy_per_bite.
-pub const GRASS_ENERGY_PER_BITE_DEFAULT: f32 = 10.0;
+pub const GRASS_ENERGY_PER_BITE_DEFAULT: f32 = 15.0;
 /// Default number of bites required to fully drain a ripe (density == 1.0)
 /// grass cell. Density removed per bite = GRASS_MAX / bites_per_block.
 /// Live-tunable via DevSliders.grass_bites_per_block.
@@ -332,17 +330,17 @@ pub const FULL_GRASS_ON_INIT_DEFAULT: bool = false;
 /// the field can sustain more living-noise without global monotonic collapse.
 /// This value is FEEL-TUNABLE — the persistence invariant (plains super-critical,
 /// water sub-critical) is the guard, not the exact number. Adjust freely.
-pub const GRASS_DECAY_PCT_DEFAULT: f32 = 0.04;
+pub const GRASS_DECAY_PCT_DEFAULT: f32 = 0.01;
 /// Density subtracted (f32 grass-amount domain) on a decay event; floored at 0.
 /// 1/255 ≈ 0.0039 is the u8 quantization floor; this is ~2 bytes so decay is
 /// always visible (never stalls sub-quantum).
-pub const GRASS_DECAY_AMOUNT_DEFAULT: f32 = 0.008;
+pub const GRASS_DECAY_AMOUNT_DEFAULT: f32 = 0.146;
 /// Per-tick probability a grass cell rolls a spread event onto one disc target.
-pub const GRASS_SPREAD_PCT_DEFAULT: f32 = 0.55;
+pub const GRASS_SPREAD_PCT_DEFAULT: f32 = 0.02;
 /// Density added to the chosen spread target (f32 grass-amount domain), clamped
 /// to the target's biome cap. Larger than the decay amount so plains stays
 /// super-critical (a patch refills its own grazed/decayed gaps).
-pub const GRASS_SPREAD_AMOUNT_DEFAULT: f32 = 0.05;
+pub const GRASS_SPREAD_AMOUNT_DEFAULT: f32 = 0.5;
 /// Spread distance radial-band weights: probability mass for ring 1 / 2 / 3 of the
 /// disc table (need not sum to 1 — normalized at table build). Ring 1 dominant so
 /// spread is mostly local (tight patches), with a light long tail.
@@ -378,6 +376,7 @@ pub const GRASS_SPREAD_RADIUS: i32 = 3;
 /// (40u/cell), 4 cells out = 160u. This gives creatures far-field awareness of
 /// grass density that the near band (20u) completely misses.
 pub const GRASS_FAR_SIGHT_RADIUS: f32 = 160.0;
+pub const GRASS_FAR_SECTOR_RANGE_DEFAULT: f32 = GRASS_FAR_SIGHT_RADIUS;
 
 /// Pyramid mip level for the far grass band. Level 3 has effective cell size
 /// 5u × 2³ = 40u; sampling 4 cells from the creature gives 160u coverage.
@@ -516,13 +515,13 @@ pub const MATE_REACH_MULTIPLIER_DEFAULT: f32 = 1.0;
 /// would compound). >1.0 inflates the graze output's variance so it wins the
 /// action argmax more often, biasing brand-new creatures toward foraging; 1.0
 /// is a no-op. Construction-scoped.
-pub const INIT_GRAZE_BOOST_DEFAULT: f32 = 1.0;
+pub const INIT_GRAZE_BOOST_DEFAULT: f32 = 5.0;
 
 /// Default founder-only multiplier on the Split/Mate (`out[2]`) output-layer
 /// weight row (same logit slot decodes to Split in single-pool and Mate in
 /// species mode). Applied once to founder brains at construction. >1.0 biases
 /// new creatures toward splitting/mating; 1.0 is a no-op. Construction-scoped.
-pub const INIT_SPLIT_BOOST_DEFAULT: f32 = 1.0;
+pub const INIT_SPLIT_BOOST_DEFAULT: f32 = 5.0;
 
 /// Crossover policy for sexual reproduction (`species_mode` ON). Applied
 /// to brain weights before mutation. Default `FiftyFifty` preserves variance.
@@ -561,8 +560,9 @@ pub const CROSSOVER_MODE_DEFAULT: CrossoverMode = CrossoverMode::FiftyFifty;
 
 // ---- v2.1 P3: food-limited equilibrium knobs ----
 //
-// Five complementary mechanisms that together replace the random cull as the
-// primary population regulator:
+// Two complementary mortality mechanisms that together replace the random cull
+// as the primary population regulator (the birth-energy cost `split_gift` is the
+// third lever; its constant lives above at SPLIT_GIFT_MAX_DEFAULT):
 //
 //   1. CROWDING MORTALITY — per-tick extra energy upkeep proportional to the
 //      number of neighbours within `CROWDING_RADIUS`.  Uses the existing
@@ -570,14 +570,10 @@ pub const CROSSOVER_MODE_DEFAULT: CrossoverMode = CrossoverMode::FiftyFifty;
 //   2. STARVATION DRAIN — below `STARVATION_THRESHOLD` energy, creatures pay an
 //      extra `STARVATION_DRAIN_RATE` per tick on top of idle upkeep.  Death still
 //      occurs at energy ≤ 0.  Selects against bad foragers.
-//   3. GRASS CARRYING-CAPACITY SCALE — a live multiplier on every cell's capacity
-//      cap (all biomes).  Scaling down permanently caps total food and therefore
-//      population at equilibrium.
-//   4. GRASS REGROWTH RATE — multiplier on both scatter-spread probability and
-//      in-cell growth rate.  Dialled down to limit total food throughput.
-//   5. SPLIT GIFT — the existing birth-energy cost (`split_gift`) is surfaced
-//      prominently in the Equilibrium category; its constant lives above at
-//      SPLIT_GIFT_MAX_DEFAULT.
+//
+// (The earlier grass carrying-capacity-scale and grass-regrowth-rate multipliers
+// were removed — grass now regrows to full biome capacity and the Grass-tab
+// scatter knobs are the only food-throughput controls.)
 //
 // These default values were checked by the headless equilibrium harness
 // (`world/equilibrium_tests.rs`) across four seeds for 3,000 ticks on both
@@ -592,7 +588,7 @@ pub const CROSSOVER_MODE_DEFAULT: CrossoverMode = CrossoverMode::FiftyFifty;
 /// extra upkeep per tick — roughly equal to 60 % of the base idle upkeep
 /// (0.17/tick) — meaningfully penalising crowded patches without instantly
 /// killing lightly-clustered creatures.
-pub const CROWDING_STRENGTH_DEFAULT: f32 = 0.010;
+pub const CROWDING_STRENGTH_DEFAULT: f32 = 0.10;
 /// Spatial radius (world-units) within which neighbours are counted for the
 /// crowding upkeep.  Reuses the existing spatial-hash; must be ≤ PROXIMITY_RANGE
 /// so the hash-cell size (HASH_CELL = 20u) is the only cap on candidate count.
@@ -608,17 +604,6 @@ pub const STARVATION_THRESHOLD_DEFAULT: f32 = 15.0;
 /// (on top of idle upkeep), giving a clear selection window where good
 /// foragers recover and poor ones starve.
 pub const STARVATION_DRAIN_RATE_DEFAULT: f32 = 0.30;
-/// Live multiplier on every grass cell's carrying-capacity cap.  At 1.0 the
-/// caps are unchanged (Plains=1.0, Desert=0.30, Water=0.04).  Scaling down
-/// permanently limits total food and therefore equilibrium population.
-///
-/// 0.7 reduces all caps by 30 %, tightening the food ceiling so equilibrium
-/// pop settles comfortably below the `max_population` slider.
-pub const GRASS_CAPACITY_SCALE_DEFAULT: f32 = 0.7;
-/// Live multiplier on both the scatter-spread probability (`grass_spread_pct`)
-/// and the in-cell growth rate (`grass_in_cell_growth_r`).  Values < 1.0 slow
-/// regrowth and tighten the food ceiling; values > 1.0 enrich the world.
-pub const GRASS_REGROWTH_RATE_DEFAULT: f32 = 1.0;
 
 /// Runtime world dimensions, computed once at construction from `world_size`.
 ///
@@ -654,7 +639,7 @@ pub struct WorldDims {
 
 impl WorldDims {
     /// Compute runtime dims from a world size + wrap flag, using the default
-    /// `GRASS_CELL_SIZE` (5.0). All existing test/default-construction call
+    /// `GRASS_CELL_SIZE`. All existing test/default-construction call
     /// sites use this overload. Clamps `world_size` to a sane floor so a
     /// degenerate construction setting can't produce a zero-dim grid.
     pub fn from_world_size(world_size: f32, wrap_world: bool) -> Self {
@@ -693,18 +678,13 @@ mod constant_tests {
     use super::*;
 
     /// The retuned proximity/cell constants the LUT + starburst are built from.
-    /// v2.0 Wave 1a: GRASS_PROXIMITY_RANGE=20, GRASS_CELL_SIZE=5 → 4 cells/axis.
     #[test]
-    fn grass_proximity_spans_at_least_three_cells() {
+    fn grass_proximity_span_matches_default_cell_size() {
         let cells_per_axis = (GRASS_PROXIMITY_RANGE / GRASS_CELL_SIZE).ceil() as usize;
-        assert!(
-            cells_per_axis >= 3,
-            "each grass sector must span ≥3 cells at the 5u cell; got {cells_per_axis}"
-        );
         assert_eq!(cells_per_axis, 4, "expected ceil(20/5) = 4 cells per axis");
     }
 
-    /// Default world size derives the documented dims: 9600 → 1920 → 3_686_400.
+    /// Default world size derives the documented fallback dims: 9600 → 1920 → 3_686_400.
     #[test]
     fn default_world_dims_match_spec() {
         let d = WorldDims::from_world_size(WORLD_SIZE_DEFAULT, true);

@@ -14,8 +14,8 @@
 
 use crate::constants::WorldDims;
 use crate::constants::{
-    GRASS_CELL_SIZE, GRASS_FAR_MIP_LEVEL, GRASS_FAR_SIGHT_RADIUS, GRASS_MAX,
-    GRASS_MULTISIGHT_DEFAULT, MAX_NN_INPUTS, SPECIES_MODE_DEFAULT, WRAP_WORLD_DEFAULT,
+    GRASS_CELL_SIZE, GRASS_FAR_MIP_LEVEL, GRASS_FAR_SECTOR_RANGE_DEFAULT, GRASS_FAR_SIGHT_RADIUS,
+    GRASS_MAX, GRASS_MULTISIGHT_DEFAULT, MAX_NN_INPUTS, SPECIES_MODE_DEFAULT, WRAP_WORLD_DEFAULT,
 };
 use crate::grass::GrassGrid;
 use crate::rng::SimRng;
@@ -57,7 +57,7 @@ fn far_band_wrap_near_seam_no_panic() {
     let dims = WorldDims::from_world_size(ws, true);
     let grass = make_grid(dims, 0.0);
     let mut out = [0.0f32; 8];
-    compute_grass_far_band_sectors(5.0, 5.0, &grass, &mut out);
+    compute_grass_far_band_sectors(5.0, 5.0, &grass, GRASS_FAR_SECTOR_RANGE_DEFAULT, &mut out);
     for (s, &v) in out.iter().enumerate() {
         assert!(
             (0.0..=1.0).contains(&v),
@@ -75,7 +75,7 @@ fn far_band_walled_clamp_negative_y() {
     let dims = WorldDims::from_world_size(ws, false);
     let grass = make_grid(dims, 0.0);
     let mut out = [0.0f32; 8];
-    compute_grass_far_band_sectors(10.0, 10.0, &grass, &mut out);
+    compute_grass_far_band_sectors(10.0, 10.0, &grass, GRASS_FAR_SECTOR_RANGE_DEFAULT, &mut out);
     for (s, &v) in out.iter().enumerate() {
         assert!(
             (0.0..=1.0).contains(&v),
@@ -96,7 +96,7 @@ fn far_band_wrap_rem_euclid_not_saturating_cast() {
     refresh_pyramid(&mut grass);
     let mut out = [0.0f32; 8];
     // Sample near the corner so multiple sectors wrap.
-    compute_grass_far_band_sectors(5.0, 5.0, &grass, &mut out);
+    compute_grass_far_band_sectors(5.0, 5.0, &grass, GRASS_FAR_SECTOR_RANGE_DEFAULT, &mut out);
     for (s, &v) in out.iter().enumerate() {
         assert!(
             v > 0.9,
@@ -108,11 +108,11 @@ fn far_band_wrap_rem_euclid_not_saturating_cast() {
 
 // ── (b) band-radius → mip-level mapping ──────────────────────────────────────
 
-/// GRASS_FAR_MIP_LEVEL must exist in the default pyramid (grass_dim = 1920).
+/// GRASS_FAR_MIP_LEVEL must exist in the default runtime pyramid.
 #[test]
 fn far_mip_level_exists_in_default_pyramid() {
     use crate::grass::GrassPyramid;
-    let pyramid = GrassPyramid::new(1920);
+    let pyramid = GrassPyramid::new(480);
     assert!(
         GRASS_FAR_MIP_LEVEL < pyramid.num_levels(),
         "GRASS_FAR_MIP_LEVEL ({GRASS_FAR_MIP_LEVEL}) must be a valid level in the default \
@@ -195,7 +195,13 @@ fn far_band_empty_grid_all_zero() {
     let dims = WorldDims::from_world_size(ws, true);
     let grass = make_grid(dims, 0.0);
     let mut out = [0.0f32; 8];
-    compute_grass_far_band_sectors(ws / 2.0, ws / 2.0, &grass, &mut out);
+    compute_grass_far_band_sectors(
+        ws / 2.0,
+        ws / 2.0,
+        &grass,
+        GRASS_FAR_SECTOR_RANGE_DEFAULT,
+        &mut out,
+    );
     for (s, &v) in out.iter().enumerate() {
         assert_eq!(v, 0.0, "sector {s} = {v}, expected 0.0 on empty grid");
     }
@@ -209,7 +215,13 @@ fn far_band_full_grid_all_one() {
     let mut grass = make_grid(dims, GRASS_MAX);
     refresh_pyramid(&mut grass);
     let mut out = [0.0f32; 8];
-    compute_grass_far_band_sectors(ws / 2.0, ws / 2.0, &grass, &mut out);
+    compute_grass_far_band_sectors(
+        ws / 2.0,
+        ws / 2.0,
+        &grass,
+        GRASS_FAR_SECTOR_RANGE_DEFAULT,
+        &mut out,
+    );
     for (s, &v) in out.iter().enumerate() {
         assert!(
             (v - 1.0).abs() < 0.01,
@@ -227,7 +239,13 @@ fn far_band_outputs_always_bounded() {
         let mut grass = make_grid(dims, fill);
         refresh_pyramid(&mut grass);
         let mut out = [0.0f32; 8];
-        compute_grass_far_band_sectors(ws / 2.0, ws / 2.0, &grass, &mut out);
+        compute_grass_far_band_sectors(
+            ws / 2.0,
+            ws / 2.0,
+            &grass,
+            GRASS_FAR_SECTOR_RANGE_DEFAULT,
+            &mut out,
+        );
         for (s, &v) in out.iter().enumerate() {
             assert!(
                 (0.0..=1.0).contains(&v),

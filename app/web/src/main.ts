@@ -3,7 +3,7 @@
 // instance. Slider mutations / pause / TPS / inspect-requests go through
 // the SimBridge.
 
-import { makeCamera } from "./render/scene";
+import { clampCamera, initialCameraZoom, makeCamera, wrapWorldCoord } from "./render/scene";
 import { renderWorld } from "./render/gl";
 import { attachCameraControls } from "./render/camera";
 import { installRail, pollRail, highlights, type RailState } from "./rail/index";
@@ -12,6 +12,7 @@ import {
   setPanelStatus,
   resetPanelSamples,
   setPanelBridge,
+  setProfilerVisible,
 } from "./widgets/perf-panel";
 import {
   installDevPanel,
@@ -26,7 +27,6 @@ import { getSettings, setSetting, hasStoredSetting } from "./settings";
 import { applyTheme } from "./themes";
 import { showToast } from "./toast";
 import {
-  latestWorldSave,
   metadataFromArtifact,
   putAutosave,
   putNamedSave,
@@ -90,7 +90,10 @@ interface SpawnWorkerOptions {
 // lives inside the bottom perf panel and is updated via setPanelStatus()
 // (web/src/widgets/perf-panel.ts) each painted frame.
 const canvas = document.getElementById("aquarium") as HTMLCanvasElement;
-const gl = canvas.getContext("webgl2", { antialias: true, alpha: false });
+// preserveDrawingBuffer:true keeps rendered content visible across compositor
+// flushes, which is required for reliable e2e canvas screenshots and ensures
+// the canvas stays painted while paused.
+const gl = canvas.getContext("webgl2", { antialias: true, alpha: false, preserveDrawingBuffer: true });
 if (!gl) throw new Error("WebGL2 context unavailable");
 
 let viewW = 0;
@@ -238,7 +241,11 @@ async function main(): Promise<void> {
     automaticRecoveryAttempts = 0;
     void recoverWorker("boot_timeout", "manual retry");
   });
-  const rail = installRail(setRailOpen);
+  const rail = installRail(setRailOpen, (tab) => {
+    const profilerActive = tab === "profiler";
+    setSetting("showProfiler", profilerActive);
+    setProfilerVisible(profilerActive);
+  });
 
   function setWorkerState(state: WorkerHealthState, reason = ""): void {
     workerState = state;
@@ -343,9 +350,6 @@ async function main(): Promise<void> {
     highlights.clear();
     lastPaintedSeq = -1;
     lastPaintedAtMs = -Infinity;
-    lastPaintedCamX = NaN;
-    lastPaintedCamY = NaN;
-    lastPaintedCamZoom = NaN;
     latestWindowMetadata = null;
     hideWorldEndOverlay();
   }
@@ -401,27 +405,43 @@ async function main(): Promise<void> {
   setWorkerState("booting");
   simBridge = await spawnTrackedWorker(urlSeed);
 
-  const cam = makeCamera(latestSnapshotWorldSize());
+  const cam = makeCamera(
+    latestSnapshotWorldSize(),
+    viewW,
+    viewH,
+    getSettings().maxZoomOutMaps,
+  );
   attachCameraControls(
     canvas,
     cam,
     () => ({ w: viewW, h: viewH }),
     () => latestSnapshotWorldSize(),
+    () => getSettings().visualRepeats,
+    () => getSettings().maxZoomOutMaps,
   );
 
-  installCanvasClickHandler(canvas, cam, () => ({ w: viewW, h: viewH }), simBridge, rail);
+  installCanvasClickHandler(
+    canvas,
+    cam,
+    () => ({ w: viewW, h: viewH }),
+    () => latestSnapshotWorldSize(),
+    simBridge,
+    rail,
+  );
   // v2.1 P1 e2e: expose window.__evosimE2E.selectFirstCreature() for headless
   // specs that cannot reliably hit a creature with a blind canvas click.
   installInspectorE2EHook(rail, simBridge);
 
   installProfilerPanel(simBridge);
+  setSetting("showProfiler", rail.activeTab === "profiler");
+  setProfilerVisible(rail.activeTab === "profiler");
   // v1.13 Wave 2: the right-rail Monitor tab is gone. Its population graph
   // and per-worker stats now live in the bottom perf panel.
   // v1.12: NN tab. Topology Apply respawns the worker via restart(); bucket
   // edits are live-applied through getBridge() inside the installer.
   installNnTab(() => simBridge, () => restart());
 
-  // v2.1: the Menu rail tab (auto-restart + saved-world actions). Installed
+  // v2.1: the General rail tab (auto-restart + world artifact actions). Installed
   // before installTopBarButtons so #save-status exists for autosave reporting.
   const persistenceUi = installMenuTab(
     () => simBridge,
@@ -474,6 +494,20 @@ async function main(): Promise<void> {
       nextDebugFault = "boot_timeout";
       void restart();
     };
+    ns["requestWorldArtifact"] = (): Promise<string | null> =>
+      simBridge.requestWorldArtifact();
+    // Read one pixel from the centre of the WebGL canvas directly from the
+    // framebuffer (bypasses the compositor). Returns true if any channel > 0.
+    // More reliable than a DOM screenshot in headless Chromium (where the
+    // compositor may clear the backing store before the PNG is captured).
+    ns["canvasHasNonBlackPixels"] = (): boolean => {
+      if (!gl) return false;
+      const x = Math.floor(gl.drawingBufferWidth / 2);
+      const y = Math.floor(gl.drawingBufferHeight / 2);
+      const px = new Uint8Array(4);
+      gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      return px[0] > 0 || px[1] > 0 || px[2] > 0;
+    };
   }
 
   // World-end overlay wiring. Shown by the frame loop the first time a
@@ -516,14 +550,17 @@ async function main(): Promise<void> {
     toggleRailOpen();
   });
 
-  // v1.13 Wave 4: Escape clears the inspector selection. The clear emits
-  // the visibility event that hides the Inspector tab + falls back to NN
-  // when Inspector was active.
   window.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
     if (e.target instanceof HTMLInputElement) return;
     if (e.target instanceof HTMLTextAreaElement) return;
-    resetInspectorSelection(rail);
+    e.preventDefault();
+    if (getSettings().railOpen && rail.activeTab === "settings") {
+      setRailOpen(false);
+    } else {
+      setRailOpen(true);
+      rail.switchTab("settings");
+    }
   });
 
   let autoRestartPending = false;
@@ -560,13 +597,8 @@ async function main(): Promise<void> {
   // longer count one FPS per RAF.
   let lastPaintedSeq = -1;
   let lastPaintedAtMs = -Infinity;
-  // Camera snapshot used to detect pans/zooms that need a repaint while
-  // paused (seq frozen). Initialised to values that will never match the
-  // real camera so the very first frame always paints.
-  let lastPaintedCamX = NaN;
-  let lastPaintedCamY = NaN;
-  let lastPaintedCamZoom = NaN;
   function frame(now: number): void {
+    try {
     if (!controlI32 || !snapshotBuffer || !snapshotView || !slotLayout) {
       requestAnimationFrame(frame);
       return;
@@ -577,9 +609,23 @@ async function main(): Promise<void> {
     // up-to-date view of camera state when it calls write_snapshot.
     // f32-bits for cx/cy/zoom (same pattern as slider writes in SimBridge);
     // u32 for viewport width/height.
+    clampCamera(
+      cam,
+      latestWorldSize,
+      viewW,
+      viewH,
+      getSettings().visualRepeats,
+      getSettings().maxZoomOutMaps,
+    );
     if (controlF32) {
-      controlF32[CTRL_CAMERA_CX_BITS]   = cam.cx;
-      controlF32[CTRL_CAMERA_CY_BITS]   = cam.cy;
+      const workerCamX = getSettings().visualRepeats
+        ? wrapWorldCoord(cam.cx, latestWorldSize)
+        : cam.cx;
+      const workerCamY = getSettings().visualRepeats
+        ? wrapWorldCoord(cam.cy, latestWorldSize)
+        : cam.cy;
+      controlF32[CTRL_CAMERA_CX_BITS]   = workerCamX;
+      controlF32[CTRL_CAMERA_CY_BITS]   = workerCamY;
       controlF32[CTRL_CAMERA_ZOOM_BITS] = cam.zoom;
       Atomics.store(controlI32, CTRL_CAMERA_VIEWPORT_W, viewW >>> 0);
       Atomics.store(controlI32, CTRL_CAMERA_VIEWPORT_H, viewH >>> 0);
@@ -596,11 +642,7 @@ async function main(): Promise<void> {
       // NN I/O fetch can fire while paused (it's serialised inside
       // refreshInspector and would otherwise never run on a paused world).
       refreshInspector(simBridge, rail, paused);
-      const camMoved =
-        cam.cx !== lastPaintedCamX ||
-        cam.cy !== lastPaintedCamY ||
-        cam.zoom !== lastPaintedCamZoom;
-      if (paused && camMoved && slotLayout) {
+      if (paused && slotLayout) {
         const layout = slotLayout;
         const rawSlot = Atomics.load(controlI32, CTRL_CURRENT_SLOT);
         const slot: 0 | 1 = rawSlot === 1 ? 1 : 0;
@@ -648,9 +690,6 @@ async function main(): Promise<void> {
         );
         Atomics.store(controlI32, CTRL_CONSUMED_SEQ, seq);
         lastPaintedAtMs = now;
-        lastPaintedCamX = cam.cx;
-        lastPaintedCamY = cam.cy;
-        lastPaintedCamZoom = cam.zoom;
         setPanelStatus({
           seed: cachedSeed,
           tick: header.tick,
@@ -739,9 +778,6 @@ async function main(): Promise<void> {
       lastPaintedSeq = seq;
       Atomics.store(controlI32, CTRL_CONSUMED_SEQ, seq);
       lastPaintedAtMs = now;
-      lastPaintedCamX = cam.cx;
-      lastPaintedCamY = cam.cy;
-      lastPaintedCamZoom = cam.zoom;
 
       setPanelStatus({
         seed: cachedSeed,
@@ -753,6 +789,12 @@ async function main(): Promise<void> {
       maybeAutosave(now, header.tick);
     } finally {
       frameSpan.close();
+    }
+    } catch (frameErr) {
+      // Defensive: if anything in the frame body throws, log it but always
+      // reschedule so the frame loop cannot silently die. Under normal
+      // operation this catch should never fire.
+      console.error("[frame] unexpected error:", frameErr);
     }
     requestAnimationFrame(frame);
   }
@@ -877,7 +919,12 @@ async function spawnSimWorker(
   if (controlF32) {
     controlF32[CTRL_CAMERA_CX_BITS]   = ready.world_size / 2;
     controlF32[CTRL_CAMERA_CY_BITS]   = ready.world_size / 2;
-    controlF32[CTRL_CAMERA_ZOOM_BITS] = 1.0;
+    controlF32[CTRL_CAMERA_ZOOM_BITS] = initialCameraZoom(
+      ready.world_size,
+      viewW,
+      viewH,
+      getSettings().maxZoomOutMaps,
+    );
   }
   // v1.11 (A): the snapshot region lives at a fixed offset inside the
   // worker's wasm linear memory. With shared memory enabled,
@@ -921,7 +968,7 @@ async function spawnSimWorker(
   return bridge;
 }
 
-// v1.9.1: rail open/closed helpers. Both the ⚙ button and the `~` hotkey
+// v1.9.1: rail open/closed helpers. Both the hamburger button and the `~` hotkey
 // route through `toggleRailOpen`; the canvas click handler calls
 // `applyRailOpen(true)` to force the rail open before switching to Inspector.
 function applyRailOpen(open: boolean): void {
@@ -947,9 +994,9 @@ const SVG_ATTRS =
   'viewBox="0 0 24 24" width="18" height="18" fill="none" ' +
   'stroke="currentColor" stroke-width="1.8" stroke-linecap="round" ' +
   'stroke-linejoin="round" aria-hidden="true"';
-// v2.1 P4: only the settings ⚙ icon is needed in the top bar (NN/Inspector/perf
-// openers removed). Keep ICON_SETTINGS for the ⚙ rail toggle button.
-const ICON_SETTINGS = `<svg ${SVG_ATTRS}><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>`;
+// v2.1 P4: only the hamburger rail opener is needed in the top bar
+// (NN/Inspector/perf openers removed).
+const ICON_MENU = `<svg ${SVG_ATTRS}><path d="M4 6h16"></path><path d="M4 12h16"></path><path d="M4 18h16"></path></svg>`;
 
 function makeIconBtn(id: string, title: string, html: string): HTMLButtonElement {
   const btn = document.createElement("button");
@@ -984,9 +1031,8 @@ function downloadText(filename: string, mime: string, text: string): void {
   URL.revokeObjectURL(url);
 }
 
-// v2.1: the Menu rail tab. Holds the game options moved off the top bar —
-// the auto-restart run toggle and the saved-world actions (Save / Resume /
-// Fork / Export / Import) plus the save-status line. Mounts into #menu-inner.
+// General rail tab. Holds auto-restart, world Export / Import, and the
+// save-status line. Mounts into #menu-inner.
 function installMenuTab(
   getBridge: () => SimBridge,
   loadArtifact: (artifactJson: string, mode: "resume" | "fork") => Promise<void>,
@@ -1010,50 +1056,6 @@ function installMenuTab(
     metadataFromArtifact(artifact);
     return withAppMetadata(artifact, APP_VERSION);
   };
-
-  const saveBtn = makeTextBtn("world-save-btn", "Save", "Save named world state");
-  saveBtn.addEventListener("click", () => {
-    void requestArtifact()
-      .then((artifact) => putNamedSave(artifact, APP_VERSION))
-      .then((record) => {
-        setStatus(`saved t${record.tick}`);
-        showToast("World saved.", 2200);
-      })
-      .catch((err) => {
-        const message = err instanceof Error ? err.message : String(err);
-        setStatus(`save failed: ${message}`);
-      });
-  });
-
-  const resumeBtn = makeTextBtn("world-resume-btn", "Resume", "Resume latest saved world");
-  resumeBtn.addEventListener("click", () => {
-    void latestWorldSave()
-      .then((record) => {
-        if (!record) throw new Error("no saved world");
-        setStatus(`loading t${record.tick}...`);
-        return loadArtifact(record.artifactJson, "resume");
-      })
-      .then(() => setStatus("resumed"))
-      .catch((err) => {
-        const message = err instanceof Error ? err.message : String(err);
-        setStatus(`resume failed: ${message}`);
-      });
-  });
-
-  const forkBtn = makeTextBtn("world-fork-btn", "Fork", "Fork latest saved world");
-  forkBtn.addEventListener("click", () => {
-    void latestWorldSave()
-      .then((record) => {
-        if (!record) throw new Error("no saved world");
-        setStatus(`forking t${record.tick}...`);
-        return loadArtifact(record.artifactJson, "fork");
-      })
-      .then(() => setStatus("forked"))
-      .catch((err) => {
-        const message = err instanceof Error ? err.message : String(err);
-        setStatus(`fork failed: ${message}`);
-      });
-  });
 
   const exportBtn = makeTextBtn("world-export-btn", "Export", "Export current world artifact");
   exportBtn.addEventListener("click", () => {
@@ -1104,24 +1106,40 @@ function installMenuTab(
   // and writes the `autoRun` setting, whose only other reader is the
   // world-end auto-restart path.
   const autoBtn = makeTextBtn("auto-restart-btn", "Auto-restart", "Auto-restart on world end");
-  autoBtn.classList.toggle("is-active", getSettings().autoRun);
+  const refreshAutoBtn = (): void => {
+    const enabled = getSettings().autoRun;
+    autoBtn.textContent = enabled ? "On" : "Off";
+    autoBtn.classList.toggle("is-active", enabled);
+  };
+  refreshAutoBtn();
   autoBtn.addEventListener("click", () => {
     const next = !getSettings().autoRun;
     setSetting("autoRun", next);
-    autoBtn.classList.toggle("is-active", next);
+    refreshAutoBtn();
   });
 
   if (mount) {
+    const runRow = document.createElement("div");
+    runRow.className = "general-toggle-row";
+    const runLabel = document.createElement("span");
+    runLabel.className = "general-toggle-label";
+    runLabel.textContent = "Auto-restart";
+    runRow.append(runLabel, autoBtn);
+
+    const saveGrid = document.createElement("div");
+    saveGrid.className = "general-action-grid";
+    saveGrid.append(exportBtn, importBtn);
+
     mount.append(
-      menuSection("Run", autoBtn),
-      menuSection("Saved worlds", saveBtn, resumeBtn, forkBtn, exportBtn, importBtn, status),
+      menuSection("Run", runRow),
+      menuSection("World saves", saveGrid, status),
       importInput,
     );
   }
   return { setStatus };
 }
 
-// One labelled group inside the Menu tab: a heading over a column of controls.
+// One labelled group inside the General tab.
 function menuSection(title: string, ...children: HTMLElement[]): HTMLElement {
   const section = document.createElement("div");
   section.className = "menu-section";
@@ -1186,12 +1204,12 @@ function installAppBadge(): void {
 // v2.1: Top bar trimmed to exactly three controls:
 //   1. Play/Pause (pacing)
 //   2. Restart (rerolls seed)
-//   3. ⚙ Settings rail toggle (opens/closes the right rail)
+//   3. Hamburger rail toggle (opens/closes the right rail to General)
 //
-// Auto-restart and the saved-world actions moved to the Menu rail tab
+// Auto-restart and the saved-world actions moved to the General rail tab
 // (installMenuTab). NN opener, Inspector opener, and the perf-toggle opener
 // were removed earlier: NN is a Settings category, Inspector stays
-// click-to-open, and the Profiler is a Settings category.
+// click-to-open, and the Profiler is a top-level rail tab.
 function installTopBarButtons(
   getBridge: () => SimBridge,
   onRestart: () => void,
@@ -1229,16 +1247,16 @@ function installTopBarButtons(
   const restartBtn = makeTextBtn("restart-btn", "Restart", "Restart simulation (r)");
   restartBtn.addEventListener("click", onRestart);
 
-  // 3. ⚙ Settings rail toggle. Toggles the rail open/closed (same as `~`
-  //    hotkey). When the rail is open on the Settings tab a second click
-  //    collapses it; otherwise it opens the rail and switches to Settings.
-  const settingsBtn = makeIconBtn("settings-rail-btn", "Settings (~)", ICON_SETTINGS);
+  // 3. Hamburger General rail toggle. Toggles the rail open/closed. When the
+  //    rail is open on General a second click collapses it; otherwise it opens
+  //    the rail and switches to General.
+  const settingsBtn = makeIconBtn("settings-rail-btn", "General (~)", ICON_MENU);
   settingsBtn.addEventListener("click", () => {
-    if (getSettings().railOpen && rail.activeTab === "settings") {
+    if (getSettings().railOpen && rail.activeTab === "general") {
       setRailOpen(false);
     } else {
       setRailOpen(true);
-      rail.switchTab("settings");
+      rail.switchTab("general");
     }
   });
 
@@ -1246,7 +1264,7 @@ function installTopBarButtons(
 
   const refreshHighlights = (): void => {
     const railOpen = getSettings().railOpen;
-    settingsBtn.classList.toggle("is-active", railOpen && rail.activeTab === "settings");
+    settingsBtn.classList.toggle("is-active", railOpen && rail.activeTab === "general");
   };
   refreshPlayLabel();
   refreshHighlights();

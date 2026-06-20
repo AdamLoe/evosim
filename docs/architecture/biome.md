@@ -1,14 +1,19 @@
-# Biome generation and effects
+# Grass/no-grass zones
 
-Static biome map generation and the one surviving per-tick biome effect:
+Static no-grass-zone generation and its one simulation effect:
 grass-capacity capping.
 
 ## What it is
 
-At world construction a **static biome grid** is generated — one `Biome`
-u8 per grass cell — and stored on `World.biome_grid` for O(1) per-tick
-lookups. The grid never changes during a run; it is rebuilt only on world
-reconstruction (restart).
+At world construction a **static zone grid** is generated — one `Biome` u8
+per grass cell — and stored on `World.biome_grid`. Product-facing behavior is
+binary: plains cells have normal grass capacity, and non-plains cells are
+no-grass/dead-grass zones with lower capacity. The grid never changes during a
+run; it is rebuilt only on world reconstruction (restart).
+
+The construction setting `WorldConfig.grass.no_grass_zones` can disable this
+effect for a new world. Disabled worlds publish an all-plains grid, so grass
+capacity is normal everywhere and the renderer cannot show a dead-zone pattern.
 
 `crates/evosim/src/constants.rs` → `Biome`
 
@@ -21,54 +26,52 @@ alone — independent of both the species-seeding stream and the sim RNG
 (xoshiro). This pins the biome map to `world_seed` while the live run still
 varies per launch.
 
-Algorithm: scatter a few large blobs — `2..4` water centers and `2..4`
-desert centers, each at radius `0.13..0.18 × world_size` — over a Plains
-background. A cell inside a water blob is Water; inside a desert blob (and
-no water) is Desert; otherwise Plains. Water wins overlaps. Blob-center
-distances are **toroidal** when `wrap_world` is on. Tuned proportions land
-near **plains ~60% / water ~20% / desert ~20%** (plains is always the
-plurality).
+Algorithm: scatter a few large low-capacity blob groups over a Plains
+background. The internal byte tags still distinguish two low-capacity classes
+for capacity factors and stable saved-world compatibility, but the user-facing
+model is simply normal grass capacity vs no-grass/dead-grass zones. Blob-center
+distances are **toroidal** when `wrap_world` is on.
 
-`biome_from_u8` decodes a raw u8 to the `Biome` enum (bounds-checked; any
-out-of-range byte maps to `Plains`). `capacity_factor_from_u8` maps a biome
-byte to its grass carrying-capacity factor (Plains ×1.0, Desert ×0.30,
-Water ×0.04).
+`biome_from_u8` decodes a raw u8 to the internal `Biome` enum
+(bounds-checked; any out-of-range byte maps to `Plains`).
+`capacity_factor_from_u8` maps a zone byte to its grass carrying-capacity
+factor. Plains maps to full capacity; low-capacity tags map below full.
 
-## Static Biome Pyramid
+## Static Zone Pyramid
 
-The full biome grid stays sim-side on `World`. At `WorldHandle`
+The full zone grid stays sim-side on `World`. At `WorldHandle`
 construction, `BiomePyramid::build` precomputes mode-downsampled static
-biome levels that mirror the grass pyramid dimensions. Each snapshot copies
+zone levels that mirror the grass pyramid dimensions. Each snapshot copies
 only the current window with `BiomePyramid::copy_window`, appending it after
-the grass window in the snapshot slot. There is no separate full-field
-biome buffer exposed to the web shell.
+the grass window in the snapshot slot. There is no separate full-field zone
+buffer exposed to the web shell.
 
-## Grass biome-capacity scaling (the ONLY surviving per-tick biome effect)
+## Grass capacity scaling (the only zone effect)
 
 `crates/evosim/src/grass/mod.rs` → `compute_propagation_scatter`
 
-Each grass cell's scatter spread is capped at a **biome-capacity byte**
-derived from the cell's biome via `capacity_factor_from_u8`. Plains cells
-cap at full capacity; Water and Desert cells cap lower. The cap is applied
+Each grass cell's scatter spread is capped at a **capacity byte** derived from
+the cell's zone via `capacity_factor_from_u8`. Plains cells cap at full
+capacity; no-grass-zone tags cap lower. The cap is applied
 to incoming spread writes: `scatter_add` clamps to the target cell's biome
-cap. This limits food availability in non-Plains biomes, shaping grass
-density by biome without any per-creature movement or energy cost.
+cap. This limits food availability in no-grass zones without any per-creature
+movement or energy cost.
 
-Water and Desert cells are effectively **dead-grass avoidance zones** — the
-only reason to avoid them is lack of food, not a movement tax. There are no
-speed-cap, move-cost, or upkeep surcharges.
+No-grass-zone cells are **dead-grass avoidance zones** — the only reason to
+avoid them is lack of food, not a movement tax. There are no speed-cap,
+move-cost, or upkeep surcharges.
 
 ## NN signal
 
 `crates/evosim/src/world/nn.rs` → `NnInputLayout::for_settings`, `build_nn_input`
 
-There is no direct biome-type NN input. Biomes affect learning only by
-modulating grass carrying capacity, so creatures sense the result through the
-grass-sector, far-grass, and current-grass NN inputs.
+There is no direct zone-type NN input. Zones affect learning only by modulating
+grass carrying capacity, so creatures sense the result through the grass-sector,
+far-grass, and current-grass NN inputs.
 
 ## Invariants and gotchas
 
-- The biome grid is **static per run**. No in-run mutation. Any code that
+- The zone grid is **static per run**. No in-run mutation. Any code that
   accesses `World.biome_grid` after construction sees the same grid.
 - The SplitMix64 generator is a **third independent RNG stream** (separate
   from the xoshiro sim RNG and the seeding PRNG). Sharing with either would
@@ -77,8 +80,10 @@ grass-sector, far-grass, and current-grass NN inputs.
 - Toroidal distance in the blob generator matches `wrap_world` — if
   `wrap_world` is off, blobs use Euclidean distance and can crowd the map
   edges differently.
+- `no_grass_zones = false` is construction-only. Existing saved worlds resume
+  from their serialized zone grid and capacity state.
 - There is no genome-modulated penalty; every creature sees the same grass
-  capacity in each biome.
+  capacity in each zone class.
 
 ## Code anchors
 
@@ -92,8 +97,8 @@ grass-sector, far-grass, and current-grass NN inputs.
 ## See also
 
 - [`simulation-core.md`](simulation-core.md) — `World` overview, grass mechanic, `WorldDims` (world sizing)
-- [`render-pipeline.md`](render-pipeline.md) — biome-id quad drawn under the grass texture
+- [`render-pipeline.md`](render-pipeline.md) — zone-id quad drawn under the grass texture
 - [`shared-memory-and-protocol.md`](shared-memory-and-protocol.md) — per-slot biome window in wasm memory
-- [`../decisions/sim.md`](../decisions/sim.md) — rationale for static biome map and food-only biome effect
+- [`../decisions/sim.md`](../decisions/sim.md) — rationale for static no-grass zones and the food-only effect
 - [`../agent-context/maintaining-docs.md`](../agent-context/maintaining-docs.md)
 - Global authoring rules: `~/agent-docs/v1/rules/authoring-rules.md`

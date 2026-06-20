@@ -28,7 +28,8 @@ site reads `self.dims`.
 
 Construction-only sizing knobs: `grass_cell_size` (controls grass grid
 resolution), `grass_clump_count` + `grass_clump_size` (boot grass
-seeding), `world_size` + `wrap_world`, and `master_seed`. See
+seeding), `no_grass_zones` (normal-capacity everywhere when disabled),
+`world_size` + `wrap_world`, and `master_seed`. See
 `crates/evosim/src/constants.rs` for the default values and schema version.
 
 ## WorldConfig, defaults, and seeds
@@ -41,7 +42,8 @@ World construction is versioned by `WORLD_CONFIG_SCHEMA_VERSION` and enters
 wasm as one JSON `WorldConfig` object. The config owns dimensions/wrap,
 master seed, grass boot settings, initial population/energy cap,
 species/mating construction settings, founder action-output boosts, NN
-topology, and the opt-in `science.deterministic` mode flag. The worker still
+topology, NN sensing ranges, the no-grass-zone enable flag, and the opt-in
+`science.deterministic` mode flag. The worker still
 applies `initial_sliders` after construction so live slider lanes are seeded,
 but construction fields are not sourced from those lanes.
 
@@ -72,8 +74,8 @@ wall-proximity NN inputs are present.
 
 These are now separate subsystems with their own docs:
 
-- **Biome** — blob generation, static biome grid, grass-capacity cap
-  (the only surviving biome effect) → [`biome.md`](biome.md)
+- **Grass/no-grass zones** — static zone grid, construction disable switch,
+  and grass-capacity cap → [`biome.md`](biome.md)
 - **Species and sexual mating** — `SpeciesRegistry`, N-anchor seeding, sexual
   `Mate` + crossover, same-species attack gate → [`species.md`](species.md)
 
@@ -87,10 +89,12 @@ owned by `crates/evosim/src/wasm_api/mod.rs` → `SLIDER_NAMES`,
 `SLIDER_INDEX`; `cargo test --lib` and `cd app/web && pnpm docs:lint` are the
 drift gates for that Rust ↔ TS contract.
 
-`grass_cell_size`, the clump knobs, species construction knobs, world shape,
-founder boosts, and NN topology ride `WorldConfig` because `initial_sliders`
-is applied after construction and cannot resize the already-built `WorldDims`
-or rebuild founder brains.
+`grass_cell_size`, the clump knobs, `no_grass_zones`, species construction
+knobs, world shape, founder boosts, NN sensing ranges, and NN topology ride
+`WorldConfig` because
+`initial_sliders` is applied after construction and cannot resize the
+already-built `WorldDims`, rebuild zone capacity, change sensing caches, or
+rebuild founder brains.
 `WorldConfig.science.deterministic` also rides `WorldConfig`: it selects the
 grass scatter implementation at world construction and is exposed in Settings
 as a next-world-only science/replay option, not as a live slider lane.
@@ -254,14 +258,19 @@ Outputs: `out[0]=vx`, `out[1]=vy`, `out[2..5]` = action logits for
 `species.md`). Hidden layers use Leaky ReLU (slope 0.01). Per-layer
 founder init: He-uniform `r = sqrt(6 / fan_in)` at runtime.
 
-There is no direct biome-type NN input. Biomes carry no movement/energy
+There is no direct zone-type NN input. No-grass zones carry no movement/energy
 effects and shape learning only by changing grass carrying capacity; the brain
 reads that through `GrassSectors`, optional `GrassBandsFar`, and `CurrGrass`.
 See [`biome.md`](biome.md).
 
-`GrassBandsFar`: 8 directional sectors at far radius, sampled at mip
-level 3 from `GrassPyramid::sample_clamped` — O(1) per tap regardless of
-cells under the creature.
+`CreatureSectors`, `GrassSectors`, and `GrassBandsFar` each have a
+construction-time range in `WorldConfig.nn_sensing` and `DevSliders`. Defaults
+are 20u / 20u / 160u. The default creature-sector path keeps the legacy
+starburst scan; non-default creature ranges use the spatial grid's bounded
+radius iterator. Near grass keeps the default LUT path for the default 20u
+range and switches to direct sector math for other ranges. `GrassBandsFar`
+samples 8 directional sectors from mip level 3 using the runtime
+`grass_cell_size` from `WorldDims`, not the fallback constant.
 
 ## Grass mechanic
 
@@ -312,15 +321,17 @@ reported cost is amortized. Serves render LOD + snapshot windowing and
 far-grass NN sensing. Zoomed-out render and far sensing can lag by at most
 the refresh period; default zoom render reads live L0.
 
-**Boot seeding**: `grass_clump_count` (default 40) filled discs of radius
-`grass_clump_size` (default 8 cells), disc centres derived deterministically
-from `world_seed` via `grass_hash_u64`. Fallback to uniform-scatter when
+**Boot seeding**: `grass_clump_count` filled discs of radius
+`grass_clump_size`, with defaults owned by
+`crates/evosim/src/constants.rs → GRASS_CLUMP_COUNT_DEFAULT` and
+`GRASS_CLUMP_SIZE_DEFAULT`. Disc centres derive deterministically from
+`world_seed` via `grass_hash_u64`. Fallback to uniform-scatter when
 `grass_clump_count = 0`.
 
 Single-pool `founder_count` may seed up to `MAX_POP_FOR_SIM`; founders use a
-Halton sequence for positions and evenly spaced seed hues. The UI exposes up to
-8000 founders, and the live `max_population` cap applies at the first birth
-phase.
+Halton sequence for positions and evenly spaced seed hues. The default rides
+`STARTING_POP_DEFAULT`; the live `max_population` cap applies at the first
+birth phase.
 
 **Graze**: per-bite transfer using u8 quantization. The live
 `grass_bites_per_block` slider controls the density chunk size, with the
@@ -389,7 +400,7 @@ pure neuroevolution rationale, and the single-`set_slider`-entry-point rule.
 ## See also
 
 - [`species.md`](species.md) — species registry, N-anchor seeding, sexual mating
-- [`biome.md`](biome.md) — biome generation, movement + NN + grass effects
+- [`biome.md`](biome.md) — zone generation and grass-capacity effects
 - [`shared-memory-and-protocol.md`](shared-memory-and-protocol.md)
 - [`worker-runtime.md`](worker-runtime.md)
 - [`profiler.md`](profiler.md)

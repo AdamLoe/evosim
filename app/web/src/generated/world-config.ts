@@ -21,6 +21,7 @@ export interface GrassConstructionConfig {
   clump_count: number;
   clump_size: number;
   multisight: boolean;
+  no_grass_zones: boolean;
 }
 
 export interface PopulationConstructionConfig {
@@ -41,6 +42,12 @@ export interface FounderConstructionConfig {
   init_split_boost: number;
 }
 
+export interface NnSensingConfig {
+  creature_sector_range: number;
+  grass_sector_range: number;
+  grass_far_sector_range: number;
+}
+
 export interface NnTopologyConstructionConfig {
   hidden_sizes: number[];
   activations: string[];
@@ -55,6 +62,7 @@ export interface WorldConfig {
   population: PopulationConstructionConfig;
   species: SpeciesConstructionConfig;
   founders: FounderConstructionConfig;
+  nn_sensing: NnSensingConfig;
   nn_topology: NnTopologyConstructionConfig;
 }
 
@@ -78,14 +86,15 @@ export const DEFAULT_WORLD_CONFIG = {
   "grass": {
     "initial_seed_count": 8000,
     "full_on_init": false,
-    "cell_size": 5.0,
-    "clump_count": 40,
-    "clump_size": 8,
-    "multisight": true
+    "cell_size": 20.0,
+    "clump_count": 2000,
+    "clump_size": 40,
+    "multisight": true,
+    "no_grass_zones": true
   },
   "population": {
-    "founder_count": 32,
-    "energy_max": 100.0
+    "founder_count": 758,
+    "energy_max": 400.0
   },
   "species": {
     "enabled": false,
@@ -95,16 +104,19 @@ export const DEFAULT_WORLD_CONFIG = {
     "starting_species_member_variance": 3.0
   },
   "founders": {
-    "init_graze_boost": 1.0,
-    "init_split_boost": 1.0
+    "init_graze_boost": 5.0,
+    "init_split_boost": 5.0
+  },
+  "nn_sensing": {
+    "creature_sector_range": 20.0,
+    "grass_sector_range": 20.0,
+    "grass_far_sector_range": 160.0
   },
   "nn_topology": {
     "hidden_sizes": [
-      48,
-      24
+      48
     ],
     "activations": [
-      "lrelu",
       "lrelu"
     ]
   }
@@ -128,14 +140,15 @@ export const WORLD_CONFIG_PRESETS = [
       "grass": {
         "initial_seed_count": 8000,
         "full_on_init": false,
-        "cell_size": 5.0,
-        "clump_count": 40,
-        "clump_size": 8,
-        "multisight": true
+        "cell_size": 20.0,
+        "clump_count": 2000,
+        "clump_size": 40,
+        "multisight": true,
+        "no_grass_zones": true
       },
       "population": {
-        "founder_count": 32,
-        "energy_max": 100.0
+        "founder_count": 758,
+        "energy_max": 400.0
       },
       "species": {
         "enabled": false,
@@ -145,16 +158,19 @@ export const WORLD_CONFIG_PRESETS = [
         "starting_species_member_variance": 3.0
       },
       "founders": {
-        "init_graze_boost": 1.0,
-        "init_split_boost": 1.0
+        "init_graze_boost": 5.0,
+        "init_split_boost": 5.0
+      },
+      "nn_sensing": {
+        "creature_sector_range": 20.0,
+        "grass_sector_range": 20.0,
+        "grass_far_sector_range": 160.0
       },
       "nn_topology": {
         "hidden_sizes": [
-          48,
-          24
+          48
         ],
         "activations": [
-          "lrelu",
           "lrelu"
         ]
       }
@@ -177,14 +193,15 @@ export const WORLD_CONFIG_PRESETS = [
       "grass": {
         "initial_seed_count": 8000,
         "full_on_init": false,
-        "cell_size": 5.0,
+        "cell_size": 20.0,
         "clump_count": 24,
-        "clump_size": 8,
-        "multisight": true
+        "clump_size": 40,
+        "multisight": true,
+        "no_grass_zones": true
       },
       "population": {
         "founder_count": 24,
-        "energy_max": 100.0
+        "energy_max": 400.0
       },
       "species": {
         "enabled": false,
@@ -194,16 +211,19 @@ export const WORLD_CONFIG_PRESETS = [
         "starting_species_member_variance": 3.0
       },
       "founders": {
-        "init_graze_boost": 1.0,
-        "init_split_boost": 1.0
+        "init_graze_boost": 5.0,
+        "init_split_boost": 5.0
+      },
+      "nn_sensing": {
+        "creature_sector_range": 20.0,
+        "grass_sector_range": 20.0,
+        "grass_far_sector_range": 160.0
       },
       "nn_topology": {
         "hidden_sizes": [
-          48,
-          24
+          48
         ],
         "activations": [
-          "lrelu",
           "lrelu"
         ]
       }
@@ -226,14 +246,15 @@ export const WORLD_CONFIG_PRESETS = [
       "grass": {
         "initial_seed_count": 8000,
         "full_on_init": false,
-        "cell_size": 5.0,
-        "clump_count": 40,
-        "clump_size": 8,
-        "multisight": true
+        "cell_size": 20.0,
+        "clump_count": 2000,
+        "clump_size": 40,
+        "multisight": true,
+        "no_grass_zones": true
       },
       "population": {
         "founder_count": 100,
-        "energy_max": 100.0
+        "energy_max": 400.0
       },
       "species": {
         "enabled": true,
@@ -246,13 +267,16 @@ export const WORLD_CONFIG_PRESETS = [
         "init_graze_boost": 1.25,
         "init_split_boost": 1.15
       },
+      "nn_sensing": {
+        "creature_sector_range": 20.0,
+        "grass_sector_range": 20.0,
+        "grass_far_sector_range": 160.0
+      },
       "nn_topology": {
         "hidden_sizes": [
-          48,
-          24
+          48
         ],
         "activations": [
-          "lrelu",
           "lrelu"
         ]
       }
@@ -267,59 +291,57 @@ export const DEFAULT_LIVE_SLIDER_VALUES = {
   "_reserved_legacy_water_movement_penalty": 0.0,
   "bucket_0_rate": 0.0,
   "bucket_0_sigma": 0.0,
-  "bucket_0_weight": 1.0,
-  "bucket_1_rate": 0.05000000074505806,
-  "bucket_1_sigma": 0.05000000074505806,
-  "bucket_1_weight": 1.0,
-  "bucket_2_rate": 0.30000001192092896,
-  "bucket_2_sigma": 0.20000000298023224,
-  "bucket_2_weight": 1.0,
-  "bucket_3_rate": 0.0,
-  "bucket_3_sigma": 0.0,
-  "bucket_3_weight": 0.0,
-  "bucket_4_rate": 0.0,
-  "bucket_4_sigma": 0.0,
-  "bucket_4_weight": 0.0,
-  "bucket_5_rate": 0.0,
-  "bucket_5_sigma": 0.0,
-  "bucket_5_weight": 0.0,
-  "bucket_6_rate": 0.0,
-  "bucket_6_sigma": 0.0,
-  "bucket_6_weight": 0.0,
+  "bucket_0_weight": 16.0,
+  "bucket_1_rate": 0.019999999552965164,
+  "bucket_1_sigma": 0.009999999776482582,
+  "bucket_1_weight": 16.0,
+  "bucket_2_rate": 0.03999999910593033,
+  "bucket_2_sigma": 0.019999999552965164,
+  "bucket_2_weight": 8.0,
+  "bucket_3_rate": 0.07999999821186066,
+  "bucket_3_sigma": 0.03999999910593033,
+  "bucket_3_weight": 4.0,
+  "bucket_4_rate": 0.1599999964237213,
+  "bucket_4_sigma": 0.800000011920929,
+  "bucket_4_weight": 2.0,
+  "bucket_5_rate": 0.3199999928474426,
+  "bucket_5_sigma": 0.15800000727176666,
+  "bucket_5_weight": 1.0,
+  "bucket_6_rate": 0.6399999856948853,
+  "bucket_6_sigma": 0.3199999928474426,
+  "bucket_6_weight": 1.0,
   "bucket_7_rate": 0.0,
   "bucket_7_sigma": 0.0,
   "bucket_7_weight": 0.0,
   "crossover_mode": 1.0,
   "crowding_radius": 20.0,
-  "crowding_strength": 0.009999999776482582,
+  "crowding_strength": 0.10000000149011612,
   "digestion_cooldown": 0.0,
   "eat_bite_fraction": 0.5,
-  "energy_max": 100.0,
-  "founder_count": 32.0,
+  "energy_max": 400.0,
+  "founder_count": 758.0,
   "grass_bites_per_block": 2.0,
-  "grass_capacity_scale": 0.699999988079071,
-  "grass_clump_count": 40.0,
-  "grass_clump_size": 8.0,
-  "grass_decay_amount": 0.00800000037997961,
-  "grass_decay_pct": 0.03999999910593033,
-  "grass_energy_per_bite": 10.0,
+  "grass_clump_count": 2000.0,
+  "grass_clump_size": 40.0,
+  "grass_decay_amount": 0.1459999978542328,
+  "grass_decay_pct": 0.009999999776482582,
+  "grass_energy_per_bite": 15.0,
   "grass_in_cell_growth_r": 0.009999999776482582,
   "grass_initial_seed_count": 8000.0,
   "grass_lod_step": 0.0,
   "grass_multisight": 1.0,
   "grass_propagation_rate_k": 0.003000000026077032,
-  "grass_regrowth_rate": 1.0,
-  "grass_size": 5.0,
-  "grass_spread_amount": 0.05000000074505806,
-  "grass_spread_pct": 0.550000011920929,
+  "grass_size": 20.0,
+  "grass_spread_amount": 0.5,
+  "grass_spread_pct": 0.019999999552965164,
   "grass_spread_ring1_pct": 0.699999988079071,
   "grass_spread_ring2_pct": 0.2199999988079071,
-  "init_graze_boost": 1.0,
-  "init_split_boost": 1.0,
+  "init_graze_boost": 5.0,
+  "init_split_boost": 5.0,
   "lod_bias": 0.0,
   "mate_reach_multiplier": 1.0,
   "mating_cooldown_ticks": 200.0,
-  "max_age": 5000.0,
+  "max_age": 2900.0,
   "max_population": 8000.0,
   "move_cost_multiplier": 1.0,
   "mutation_rate_multiplier": 1.0,
@@ -327,7 +349,7 @@ export const DEFAULT_LIVE_SLIDER_VALUES = {
   "species_mode": 0.0,
   "split_gift": 30.0,
   "split_jitter": 1.0,
-  "split_threshold": 99.0,
+  "split_threshold": 399.0,
   "starting_species_count": 10.0,
   "starting_species_member_count": 10.0,
   "starting_species_member_variance": 3.0,

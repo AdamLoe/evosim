@@ -67,11 +67,8 @@ async function setTargetTps(page: Page, tps: number): Promise<void> {
   }, tps);
 }
 
-// v2.1 P4: the profiler moved from the bottom #perf-box panel into the Settings
-// rail's "Profiler" category pane (#settings-profiler-pane). Open the settings
-// rail and navigate to the Profiler category so profiler-tree assertions work.
+// v2.1 P4 follow-up: the profiler lives in a top-level Profiler rail tab.
 async function ensureProfilerVisible(page: Page): Promise<void> {
-  // Open the settings rail if collapsed.
   const collapsed = await page.evaluate(
     () => document.getElementById("app-shell")?.classList.contains("rail-collapsed") ?? true,
   );
@@ -79,21 +76,16 @@ async function ensureProfilerVisible(page: Page): Promise<void> {
     await page.locator("body").focus();
     await page.keyboard.press("~");
   }
-  await expect(page.locator("#rail-settings")).toBeVisible();
-  // Click the "Profiler" category button to make the profiler pane active.
   await page.evaluate(() => {
-    const btn = document.querySelector<HTMLButtonElement>('.settings-cat-btn[data-cat="profiler"]');
-    btn?.click();
+    const btn = document.querySelector<HTMLButtonElement>('.rail-tab[data-tab="profiler"]');
+    if (btn && !btn.classList.contains("is-active")) btn.click();
   });
+  await expect(page.locator("#rail-profiler")).toBeVisible();
   await expect(page.locator("#settings-profiler-pane")).toBeVisible();
 }
 
-// v1.9/v1.13: the Settings rail (which holds the staged sliders + the
-// `#settings-apply` footer) lives in `#right-rail`, collapsed by default
-// (`#app-shell.rail-collapsed` → `#right-rail { display:none }`). The `~`
-// hotkey toggles it open; Settings is the default-active tab so opening the
-// rail reveals it. Idempotently ensure it's open so #settings-apply is
-// clickable.
+// Settings holds the staged sliders + the `#settings-apply` footer. The rail
+// defaults to General, so explicitly switch to Settings after opening it.
 async function ensureSettingsRailOpen(page: Page): Promise<void> {
   const collapsed = await page.evaluate(
     () =>
@@ -104,6 +96,10 @@ async function ensureSettingsRailOpen(page: Page): Promise<void> {
     await page.locator("body").focus();
     await page.keyboard.press("~");
   }
+  await page.evaluate(() => {
+    const btn = document.querySelector<HTMLButtonElement>('.rail-tab[data-tab="settings"]');
+    if (btn && !btn.classList.contains("is-active")) btn.click();
+  });
   await expect(page.locator("#settings-apply")).toBeVisible();
 }
 
@@ -268,7 +264,7 @@ test("profile toggle — all 4 trees populate within 4 s", async ({ page }) => {
   await page.waitForTimeout(500);
 
   // v1.9.1: the Rust profiler is always-on (the worker enables it at boot).
-  // v2.1 P4: profiler lives in the Settings rail's Profiler category pane.
+  // v2.1 P4 follow-up: profiler lives in the top-level Profiler rail tab.
   // Navigate there so the profiler-trees assertions can find the DOM.
   await ensureProfilerVisible(page);
 

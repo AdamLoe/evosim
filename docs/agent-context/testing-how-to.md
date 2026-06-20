@@ -109,6 +109,10 @@ Conventions:
   (`#profiler-trees` populated, the dev-panel showing a new value).
 - If you need worker-internal state that no UI exposes, plumb it
   through `request_profile_report` — it already round-trips JSON.
+- Settings rail and paused-canvas regressions have a focused smoke in
+  `app/web/tests/e2e/settings-rail.spec.ts`; run it directly with
+  `pnpm test:e2e -- settings-rail.spec.ts` when touching rail tabs, Escape
+  handling, app badge placement, or paused repaint behavior.
 
 ## What to do when a test fails
 

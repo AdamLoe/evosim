@@ -78,6 +78,12 @@ lanes, profiler window, reset/profile-clear epochs, and slider values when
 read happens at the top of the iteration; a value written by main takes effect
 for the next tick the worker starts after observing the epoch.
 
+Target TPS is live-applied through `CTRL_TARGET_TPS_BITS`. Main writes the
+lane and wakes the futex; the worker reads it unconditionally at the top of
+each loop, so changing target TPS does not require restart. A higher requested
+TPS is still a ceiling: if `World::step` is over budget, the loop continues
+immediately and achieved TPS is limited by tick cost.
+
 The paused branch does not tick, but it still serves inspector, telemetry, and
 saved-world artifact requests before parking on the futex. That keeps paused UI
 inspection/export paths responsive without reintroducing `postMessage` or an

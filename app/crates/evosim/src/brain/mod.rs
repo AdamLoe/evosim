@@ -192,14 +192,14 @@ impl NnTopology {
         })
     }
 
-    /// Legacy 32→48→24→5 default. Used when the boot payload omits
+    /// Legacy 32→48→5 default. Used when the boot payload omits
     /// `nn_topology`.
     pub fn legacy() -> Self {
         Self::new(
             LEGACY_HIDDEN_SIZES.to_vec(),
-            vec![Activation::LReLU, Activation::LReLU],
+            vec![Activation::LReLU; LEGACY_HIDDEN_SIZES.len()],
         )
-        .expect("LEGACY_HIDDEN_SIZES + 2 lrelu must be a valid topology")
+        .expect("LEGACY_HIDDEN_SIZES + lrelu activations must be a valid topology")
     }
 
     /// Active runtime input width (first-matmul `fan_in`).
@@ -341,19 +341,39 @@ impl Default for MutationPolicy {
     fn default() -> Self {
         let mut buckets = [Bucket::zero(); MUTATION_BUCKET_COUNT];
         buckets[0] = Bucket {
-            weight: 1.0,
+            weight: 16.0,
             rate: 0.0,
             sigma: 0.0,
         };
         buckets[1] = Bucket {
-            weight: 1.0,
-            rate: 0.05,
-            sigma: 0.05,
+            weight: 16.0,
+            rate: 0.02,
+            sigma: 0.01,
         };
         buckets[2] = Bucket {
+            weight: 8.0,
+            rate: 0.04,
+            sigma: 0.02,
+        };
+        buckets[3] = Bucket {
+            weight: 4.0,
+            rate: 0.08,
+            sigma: 0.04,
+        };
+        buckets[4] = Bucket {
+            weight: 2.0,
+            rate: 0.16,
+            sigma: 0.8,
+        };
+        buckets[5] = Bucket {
             weight: 1.0,
-            rate: 0.30,
-            sigma: 0.20,
+            rate: 0.32,
+            sigma: 0.158,
+        };
+        buckets[6] = Bucket {
+            weight: 1.0,
+            rate: 0.64,
+            sigma: 0.32,
         };
         Self { buckets }
     }
@@ -538,8 +558,7 @@ impl Brain {
         layer_us[hidden_count] = t_end.saturating_sub(t_start);
 
         // Fold per-matmul wall clock into PickTimings using 1-based row
-        // names so the panel's `nn.forward.l1/l2/l3` rows render identically
-        // for the legacy 32→48→24→5 topology.
+        // names so the panel's `nn.forward.l{k}` rows follow the active topology.
         if let Some(t) = timings {
             for k in 0..matmul_count {
                 t.forward_layer_us[k] = t.forward_layer_us[k].saturating_add(layer_us[k]);
@@ -873,11 +892,11 @@ mod tests {
         assert_eq!(b.weights, b2.weights);
     }
 
-    /// Legacy pyramid topology weight count = 32*48 + 48*24 + 24*5 = 2808.
+    /// Legacy pyramid topology weight count = 32*48 + 48*5 = 1776.
     #[test]
     fn nn_weight_count_legacy_pyramid() {
         let t = NnTopology::legacy();
-        assert_eq!(t.weight_count(), 2808);
+        assert_eq!(t.weight_count(), 1776);
     }
 
     /// D9: NN_INPUTS padded to multiple of 8.

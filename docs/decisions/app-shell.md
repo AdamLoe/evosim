@@ -11,8 +11,8 @@ Cross-subsystem decisions that also bind the shell live in
 
 - **Decision**: Sim-affecting settings use staged Apply / Cancel / Reset
   behavior in the Settings panel. Immediate UI controls apply live. The
-  profiler gate follows the same rule: selecting the Profiler category turns
-  recording and polling on; leaving the category turns both off.
+  profiler gate follows the same live rule: selecting the Profiler rail tab
+  turns recording and polling on; leaving the tab turns both off.
 - **Why**: batch sim edits should commit atomically, while display and panel
   visibility changes should preview immediately.
 - **Tradeoffs**: the split adds code compared with a uniform rule, but it
@@ -60,9 +60,9 @@ Cross-subsystem decisions that also bind the shell live in
 ### Settings panel uses a shared navigable surface; the top bar stays compact
 
 - **Decision**: The Settings rail owns the left sub-nav categories. The top
-  bar keeps play/pause, Restart, the rail toggle, and transient worker
-  status / Retry controls. Auto-restart and saved-world actions live in the
-  Menu tab.
+  bar keeps play/pause, Restart, the hamburger rail toggle, and transient
+  worker status / Retry controls. Auto-restart, Export / Import, and autosave
+  status live in the General tab.
 - **Why**: a shared settings surface is easier to scan than separate top-bar
   openers, and the top bar stays focused on run control and failure recovery.
 - **Tradeoffs**: save and auto-run controls are deeper in the rail, but the
@@ -71,6 +71,16 @@ Cross-subsystem decisions that also bind the shell live in
 - **Code anchors**: `app/web/src/main.ts → installTopBarButtons`,
   `installWorkerStatusUi`, `installMenuTab`; `app/web/index.html → #rail-tabs`;
   `app/web/src/rail/index.ts → RailTab`.
+
+### Escape toggles Settings before inspector cleanup
+
+- **Decision**: Escape opens Settings when the rail is closed or another tab is
+  active, closes the rail when Settings is active, and is ignored while focus is
+  inside text inputs or textareas.
+- **Why**: Settings is the primary keyboard-accessible rail action, and text
+  editing should keep normal Escape semantics.
+- **Applies to**: `architecture/app-shell.md`.
+- **Code anchors**: `app/web/src/main.ts → main`.
 
 ### World saves live in IndexedDB; settings remain preferences
 
@@ -98,14 +108,14 @@ Cross-subsystem decisions that also bind the shell live in
 - **Code anchors**: `app/web/src/main.ts → installWorkerStatusUi`,
   `recoverWorker`.
 
-### Profiler activates from the Settings category, not a top-bar toggle
+### Profiler activates from its rail tab, not a top-bar toggle
 
-- **Decision**: Selecting the Profiler category in the Settings panel turns
-  profiler recording on. Navigating to any other category turns it off.
-- **Why**: the profiler lives in Settings now, so category selection is the
-  natural enable/disable affordance.
+- **Decision**: Selecting the top-level Profiler rail tab turns profiler
+  recording on. Navigating to any other rail tab turns it off.
+- **Why**: the profiler is a major inspection surface, but it should still idle
+  its polling when not visible.
 - **Applies to**: `architecture/app-shell.md`, `architecture/profiler.md`.
-- **Code anchors**: `app/web/src/widgets/devpanel.ts → installDevPanel`;
+- **Code anchors**: `app/web/src/rail/index.ts → RailTab`;
   `app/web/src/widgets/perf-panel.ts → setProfilerVisible`.
 
 ### NN editor lives in the Settings rail

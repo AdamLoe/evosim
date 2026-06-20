@@ -22,10 +22,10 @@
       <!-- Left column: top-bar + canvas. The profiler bottom panel (perf-box)
            is kept in the DOM as an empty placeholder so the resize-handle
            logic and any legacy references stay intact; the profiler content
-           is now rendered inside the Settings rail's Profiler category pane. -->
+           is now rendered inside the top-level Profiler rail tab. -->
       <div id="left-col">
-        <!-- Top-bar controls: play/pause, Restart, and the ⚙ settings rail
-             toggle. Auto-restart and the saved-world actions live in the Menu
+        <!-- Top-bar controls: play/pause, Restart, and the hamburger rail
+             toggle. Auto-restart and the saved-world actions live in the General
              rail tab; NN / Inspector / perf-toggle openers removed earlier. -->
         <div id="top-bar">
         </div>
@@ -38,41 +38,54 @@
         </div>
 
         <!-- #perf-box is kept as an empty hidden placeholder. Profiler
-             content now lives in #settings-profiler-pane inside the Settings
-             rail. The resize handle and legacy e2e refs still find this element. -->
+             content now lives in #settings-profiler-pane inside the Profiler
+             rail tab. The resize handle and legacy e2e refs still find this element. -->
         <div id="perf-box" class="perf-widget" style="display:none"></div>
       </div>
 
-      <!-- Right rail: Settings | Inspector (NN folded into Settings; Inspector
-           stays click-to-open). -->
+      <!-- Right rail: General | Inspector | Settings | Profiler. NN remains
+           folded into Settings; Inspector stays click-to-open. -->
       <aside id="right-rail">
         <!-- v1.13 Wave 3: drag handle for the right rail width. -->
         <div id="rail-resize-handle" aria-hidden="true"></div>
         <nav id="rail-tabs" role="tablist">
-          <button data-tab="settings" class="rail-tab is-active" title="Settings" aria-label="Settings">
-            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <circle cx="12" cy="12" r="3"></circle>
-              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
-            </svg>
-          </button>
-          <button data-tab="inspector" class="rail-tab" title="Inspector" aria-label="Inspector">
-            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <circle cx="11" cy="11" r="7"></circle>
-              <path d="M21 21l-5-5"></path>
-            </svg>
-          </button>
-          <button data-tab="menu" class="rail-tab" title="Menu" aria-label="Menu">
-            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <button data-tab="general" class="rail-tab is-active" title="General" aria-label="General">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M4 6h16"></path>
               <path d="M4 12h16"></path>
               <path d="M4 18h16"></path>
             </svg>
+            <span class="rail-tab-label">General</span>
+          </button>
+          <button data-tab="inspector" class="rail-tab" title="Inspector" aria-label="Inspector">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="11" cy="11" r="7"></circle>
+              <path d="M21 21l-5-5"></path>
+            </svg>
+            <span class="rail-tab-label">Inspector</span>
+          </button>
+          <button data-tab="settings" class="rail-tab" title="Settings" aria-label="Settings">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="3"></circle>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+            </svg>
+            <span class="rail-tab-label">Settings</span>
+          </button>
+          <button data-tab="profiler" class="rail-tab" title="Profiler" aria-label="Profiler">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M4 19V5"></path>
+              <path d="M8 19v-8"></path>
+              <path d="M12 19V8"></path>
+              <path d="M16 19v-5"></path>
+              <path d="M20 19V4"></path>
+            </svg>
+            <span class="rail-tab-label">Profiler</span>
           </button>
         </nav>
 
         <!-- Settings tab: left sub-nav categories + right category pane +
              Apply / Cancel / Reset footer. -->
-        <section id="rail-settings" class="rail-panel is-active">
+        <section id="rail-settings" class="rail-panel">
           <!-- Settings inner: sub-nav on the left, active category pane on right. -->
           <div id="settings-inner">
             <!-- Left vertical category sub-nav -->
@@ -81,9 +94,7 @@
               <button class="settings-cat-btn" data-cat="grass">Grass</button>
               <button class="settings-cat-btn" data-cat="lifecycle">Lifecycle</button>
               <button class="settings-cat-btn" data-cat="world">World</button>
-              <button class="settings-cat-btn" data-cat="equilibrium">Equilibrium</button>
               <button class="settings-cat-btn" data-cat="display">Display</button>
-              <button class="settings-cat-btn" data-cat="profiler">Profiler</button>
               <button class="settings-cat-btn" data-cat="nn">NN</button>
             </nav>
             <!-- Right category pane area: only the is-active pane is visible -->
@@ -104,19 +115,9 @@
               <div id="settings-world-pane" class="settings-pane">
                 <div id="devpanel-world"></div>
               </div>
-              <!-- Equilibrium: stable mount point for P3 equilibrium sliders.
-                   Intentionally sparse now — a later phase wires rows here. -->
-              <div id="settings-equilibrium-pane" class="settings-pane">
-                <div id="devpanel-equilibrium"></div>
-              </div>
               <!-- Display: grass visuals, theme, render/LOD -->
               <div id="settings-display-pane" class="settings-pane">
                 <div id="devpanel-display"></div>
-              </div>
-              <!-- Profiler: relocated from #perf-box; stable mount point for
-                   installProfilerPanel. -->
-              <div id="settings-profiler-pane" class="settings-pane">
-                <!-- installProfilerPanel mounts here -->
               </div>
               <!-- NN: topology + mutation-bucket editors (folded from rail-nn tab).
                    Stable mount point for installNnTab. -->
@@ -187,12 +188,17 @@
           </div>
         </section>
 
-        <!-- Menu tab: game options relocated off the top bar — run control
+        <!-- General tab: game options relocated off the top bar — run control
              (auto-restart) and the saved-world actions (Save / Resume / Fork /
              Export / Import) plus the save-status line. Populated by
              installMenuTab. -->
-        <section id="rail-menu" class="rail-panel">
+        <section id="rail-general" class="rail-panel is-active">
           <div id="menu-inner"></div>
+        </section>
+        <section id="rail-profiler" class="rail-panel">
+          <div id="settings-profiler-pane">
+            <!-- installProfilerPanel mounts here -->
+          </div>
         </section>
       </aside>
     </div>

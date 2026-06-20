@@ -6,6 +6,7 @@ import {
   type WorldConfig,
   type WorldConfigPreset,
 } from "./generated/world-config";
+import { DEFAULT_MAX_ZOOM_OUT_MAPS } from "./render/scene";
 
 export type { WorldConfig, WorldConfigPreset };
 export { WORLD_CONFIG_PRESETS, WORLD_CONFIG_SCHEMA_VERSION };
@@ -47,7 +48,7 @@ const SCHEMA_MAJOR = 3;
 // with default 0.0 → MINOR bump 3 → 4. Existing v2 blobs keep their values.
 // v2.0.4 S6: added `grassMultisight` construction toggle (same MINOR bump 3 → 4).
 // Existing v2 blobs keep their values and pick up the new key from DEFAULTS.
-// v2.0.4 S2: added `grassSize` construction knob (cell size, default 5.0) →
+// v2.0.4 S2: added `grassSize` construction knob (cell size) →
 // MINOR bump 4 → 5. Existing v2 blobs keep their values.
 // v2.0.6 S3: added `grassClumpCount` + `grassClumpSize` construction knobs, and
 // fixed `grassDecayPct` from 0.02 → 0.04 to match Rust GRASS_DECAY_PCT_DEFAULT
@@ -76,11 +77,18 @@ const SCHEMA_MAJOR = 3;
 // v2.1 P3 MINOR 0 → 1: added `crowdingStrength`, `crowdingRadius`,
 // `starvationThreshold`, `starvationDrainRate`, `grassCapacityScale`,
 // `grassRegrowthRate` (all six P3 equilibrium knobs) → minor bump within v3.
+// MINOR 4 → 5: removed `grassCapacityScale` + `grassRegrowthRate` (grass now
+// regrows to full biome capacity). Removal is reset-free — `pickKnown` drops the
+// now-unknown stored keys and the `{...DEFAULTS, ...stored}` merge is unaffected.
 // WorldConfig migration: construction defaults now come from generated Rust
 // output; existing user values are preserved by name where semantics still match.
 // Deterministic science mode: added `scienceMode` as an additive
 // construction-only setting.
-const SCHEMA_MINOR = 4;
+// Repeat camera / survey LOD: added `visualRepeats`,
+// `creatureSurveyDotMinPx`, `creatureSurveyDotScale`, and repeat border LOD
+// keys as live Display settings. Added `noGrassZones` as a next-world setting.
+// Added `maxZoomOutMaps` as a live Display camera constraint.
+const SCHEMA_MINOR = 8;
 
 export const APP_FPS_CHOICES = [15, 30, 60, 120] as const;
 export type AppFPS = (typeof APP_FPS_CHOICES)[number];
@@ -163,6 +171,18 @@ export interface Settings {
   grassShadeVariation: number;
   // Grass blade size in world-units (fine detail noise wavelength; patch = 6x).
   grassBladeSize: number;
+  // Render-only repeated visual tiling. Independent of sim-side `wrapWorld`.
+  visualRepeats: boolean;
+  // Maximum zoom-out as map widths visible on the limiting viewport axis.
+  // Higher values allow farther survey zoom without changing sim snapshots.
+  maxZoomOutMaps: number;
+  // Survey-zoom creature dot formula. Default min=1px, scale=1 preserves the
+  // old bottom-band point behavior.
+  creatureSurveyDotMinPx: number;
+  creatureSurveyDotScale: number;
+  repeatBorderMinPx: number;
+  repeatBorderScale: number;
+  repeatBorderOpacity: number;
   // Intensity ramp: density floor (0..0.5). Below this reads empty; rest rescales.
   grassDensityFloor: number;
   // Intensity ramp: contrast/gamma on density. 1 = linear (original).
@@ -259,11 +279,16 @@ export interface Settings {
   // (16 grass NN inputs); OFF = near band only (8 inputs, legacy). Default ON.
   // Must match Rust GRASS_MULTISIGHT_DEFAULT (true).
   grassMultisight: boolean;
+  creatureSectorRange: number;
+  grassSectorRange: number;
+  grassFarSectorRange: number;
+  // Construction-only no-grass-zone effect. When false, new worlds use normal
+  // grass capacity everywhere and publish a plain zone texture.
+  noGrassZones: boolean;
   // v2.0.4 S2: construction-only grass cell size in world-units. Larger cells
   // → fewer cells → less grass_step work (cell count ∝ 1/size²). Restart-
   // required (resizes grass_dim, capacity[], biome grid, snapshot slot).
-  // Default 5.0 (= Rust GRASS_CELL_SIZE_DEFAULT). Valid range: 5–20u.
-  // Must match Rust GRASS_CELL_SIZE_DEFAULT (5.0).
+  // Must match Rust GRASS_CELL_SIZE_DEFAULT.
   grassSize: number;
   // v2.0.6 S3: construction-only seeded grass clumps. Both knobs ride the
   // explicit boot param (same rule as grassSize). clumpCount=0 falls back to
@@ -289,38 +314,43 @@ export interface Settings {
   // v2.1 P3: food-limited equilibrium knobs (all live-tunable).
   // Must match Rust CROWDING_STRENGTH_DEFAULT (0.010), CROWDING_RADIUS_DEFAULT
   // (20.0), STARVATION_THRESHOLD_DEFAULT (15.0), STARVATION_DRAIN_RATE_DEFAULT
-  // (0.30), GRASS_CAPACITY_SCALE_DEFAULT (0.7), GRASS_REGROWTH_RATE_DEFAULT (1.0).
+  // (0.30). (The grass capacity-scale + regrowth-rate knobs were removed.)
   crowdingStrength: number;
   crowdingRadius: number;
   starvationThreshold: number;
   starvationDrainRate: number;
-  grassCapacityScale: number;
-  grassRegrowthRate: number;
 }
 
 export const DEFAULTS: Settings = {
   vMajor: SCHEMA_MAJOR,
   vMinor: SCHEMA_MINOR,
-  targetTPS: 180,
+  targetTPS: 500,
   appFPS: 60,
   autoRun: false,
   showProfiler: false,
   showGrass: true,
-  grassOpacity: 1.0,
-  biomeOpacity: 1.0,
+  grassOpacity: 0.3,
+  biomeOpacity: 0.0,
   grassSmoothing: 0.0,
   grassSoftness: 0.0,
-  grassTexture: 0.0,
-  grassEdgeErosion: 0.5,
-  grassShadeVariation: 0.5,
-  grassBladeSize: 4.0,
+  grassTexture: 1.0,
+  grassEdgeErosion: 0.4,
+  grassShadeVariation: 0.65,
+  grassBladeSize: 14.5,
+  visualRepeats: true,
+  maxZoomOutMaps: DEFAULT_MAX_ZOOM_OUT_MAPS,
+  creatureSurveyDotMinPx: 1.0,
+  creatureSurveyDotScale: 1.0,
+  repeatBorderMinPx: 1.0,
+  repeatBorderScale: 0.0,
+  repeatBorderOpacity: 0.25,
   grassDensityFloor: 0.0,
   grassContrast: 1.0,
-  grassBrightness: 1.0,
+  grassBrightness: 1.15,
   profilerWindowMs: 10_000,
   railOpen: false,
   theme: "midnight",
-  railW: 420,
+  railW: 512,
   profilerH: 240,
   upkeepMultiplier: DEFAULT_LIVE_SLIDER_VALUES.upkeep_multiplier,
   moveCostMultiplier: DEFAULT_LIVE_SLIDER_VALUES.move_cost_multiplier,
@@ -365,8 +395,8 @@ export const DEFAULTS: Settings = {
   // MATING_COOLDOWN_TICKS_DEFAULT (200).
   matingCooldownTicks: DEFAULT_LIVE_SLIDER_VALUES.mating_cooldown_ticks,
   // v2.0.2 Stream 1d: scatter kernel defaults. Must match Rust constants:
-  // GRASS_DECAY_PCT_DEFAULT (0.04), GRASS_DECAY_AMOUNT_DEFAULT (0.008),
-  // GRASS_SPREAD_PCT_DEFAULT (0.55), GRASS_SPREAD_AMOUNT_DEFAULT (0.05),
+  // GRASS_DECAY_PCT_DEFAULT, GRASS_DECAY_AMOUNT_DEFAULT,
+  // GRASS_SPREAD_PCT_DEFAULT, GRASS_SPREAD_AMOUNT_DEFAULT,
   // GRASS_SPREAD_RING1_PCT_DEFAULT (0.70), GRASS_SPREAD_RING2_PCT_DEFAULT (0.22).
   // v2.0.6 S3: grassDecayPct corrected from 0.02 → 0.04 to match Rust
   // GRASS_DECAY_PCT_DEFAULT (raised in v2.0.2 S4 tuning, TS side lagged).
@@ -380,29 +410,29 @@ export const DEFAULTS: Settings = {
   lodBias: DEFAULT_LIVE_SLIDER_VALUES.lod_bias,
   // v2.0.4 S6: multi-band grass sight. Must match Rust GRASS_MULTISIGHT_DEFAULT (true).
   grassMultisight: DEFAULT_WORLD_CONFIG.grass.multisight,
-  // v2.0.4 S2: grass cell size. Must match Rust GRASS_CELL_SIZE_DEFAULT (5.0).
+  creatureSectorRange: DEFAULT_WORLD_CONFIG.nn_sensing.creature_sector_range,
+  grassSectorRange: DEFAULT_WORLD_CONFIG.nn_sensing.grass_sector_range,
+  grassFarSectorRange: DEFAULT_WORLD_CONFIG.nn_sensing.grass_far_sector_range,
+  noGrassZones: DEFAULT_WORLD_CONFIG.grass.no_grass_zones,
+  // v2.0.4 S2: grass cell size. Must match Rust GRASS_CELL_SIZE_DEFAULT.
   grassSize: DEFAULT_WORLD_CONFIG.grass.cell_size,
-  // v2.0.6 S3: seeded grass clumps. Must match Rust GRASS_CLUMP_COUNT_DEFAULT (40)
-  // and GRASS_CLUMP_SIZE_DEFAULT (8). clumpCount=0 → old uniform-scatter fallback.
+  // v2.0.6 S3: seeded grass clumps. Must match Rust GRASS_CLUMP_* defaults.
+  // clumpCount=0 → old uniform-scatter fallback.
   grassClumpCount: DEFAULT_WORLD_CONFIG.grass.clump_count,
   grassClumpSize: DEFAULT_WORLD_CONFIG.grass.clump_size,
   // v2.0.6 S10: discrete LOD stepper. Default 0 (Auto = use formula + lodBias).
   grassLodStep: DEFAULT_LIVE_SLIDER_VALUES.grass_lod_step,
-  // Mating reach + founder action-output boosts. All default 1.0 (neutral) so
-  // behaviour is unchanged until dialed. Must match the Rust *_DEFAULT consts.
+  // Mating reach + founder action-output boosts. Must match Rust *_DEFAULT consts.
   mateReachMultiplier: DEFAULT_LIVE_SLIDER_VALUES.mate_reach_multiplier,
   initGrazeBoost: DEFAULT_WORLD_CONFIG.founders.init_graze_boost,
   initSplitBoost: DEFAULT_WORLD_CONFIG.founders.init_split_boost,
   // v2.1 P3: food-limited equilibrium knobs. Must match Rust *_DEFAULT consts:
-  // CROWDING_STRENGTH_DEFAULT (0.010), CROWDING_RADIUS_DEFAULT (20.0),
-  // STARVATION_THRESHOLD_DEFAULT (15.0), STARVATION_DRAIN_RATE_DEFAULT (0.30),
-  // GRASS_CAPACITY_SCALE_DEFAULT (0.7), GRASS_REGROWTH_RATE_DEFAULT (1.0).
+  // CROWDING_STRENGTH_DEFAULT, CROWDING_RADIUS_DEFAULT (20.0),
+  // STARVATION_THRESHOLD_DEFAULT (15.0), STARVATION_DRAIN_RATE_DEFAULT (0.30).
   crowdingStrength: DEFAULT_LIVE_SLIDER_VALUES.crowding_strength,
   crowdingRadius: DEFAULT_LIVE_SLIDER_VALUES.crowding_radius,
   starvationThreshold: DEFAULT_LIVE_SLIDER_VALUES.starvation_threshold,
   starvationDrainRate: DEFAULT_LIVE_SLIDER_VALUES.starvation_drain_rate,
-  grassCapacityScale: DEFAULT_LIVE_SLIDER_VALUES.grass_capacity_scale,
-  grassRegrowthRate: DEFAULT_LIVE_SLIDER_VALUES.grass_regrowth_rate,
 };
 
 export const SETTINGS_KEYS = Object.freeze(Object.keys(DEFAULTS)) as readonly (keyof Settings)[];

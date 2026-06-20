@@ -76,7 +76,7 @@ Notable coverage by file:
 | `crates/evosim/src/wasm_api/mod.rs` | `write_snapshot_to_native` layout matches the documented byte stride; `max_pop_for_sim()` mirrors the constant; `creature_at` returns stable ids; `set_slider` dispatch round-trip; telemetry sample cadence/export shape/worst-jank/reset behavior; saved-world artifact round-trip and fork identity semantics. |
 | `crates/evosim/src/world/mod.rs` | Tick step body, slider effects on world construction, multi-founder spawn placement, deterministic science-mode default-off and exact fixture hash. |
 | `crates/evosim/src/world/tick.rs` | Per-phase invariants — graze energy conservation, eat per-bite math, repulsion clamping, death/birth bookkeeping. |
-| `crates/evosim/src/world/nn.rs` | NN input layout, slot offsets, threaded NN matches sequential NN bit-for-bit (when seeded), chunk-range partition invariants. |
+| `crates/evosim/src/world/nn.rs` | NN input layout, slot offsets, sector-search sensing ranges for `CreatureSectors`, `GrassSectors`, and `GrassBandsFar`, threaded NN matches sequential NN bit-for-bit (when seeded), chunk-range partition invariants. |
 | `crates/evosim/src/world/proximity.rs` | Sector LUT correctness, wall proximity edges, grass density bilinear seam wrap. |
 | `crates/evosim/src/brain/mod.rs` | Forward-pass shape, Leaky ReLU sign behaviour, mutation produces finite values. |
 | `crates/evosim/src/grass/mod.rs` | Density init, in-cell growth, scatter/blur propagation coverage, deterministic science scatter across tile boundaries/wrap seams, active-tile path equivalence to full-grid reference, wrapped `viewport_window` extraction, bilinear sample, row-has-density bitset rebuild. Tests live in the `grass/tests/` subdir. |
@@ -156,6 +156,9 @@ Key coverage:
   `Settings` key loads/saves/reloads, asserts `currentSliderState()` emits
   every persisted Rust slider setting needed to seed worker boot, and asserts
   persisted construction settings build a complete boot `WorldConfig`.
+- `settings-rail.spec.ts` verifies paused Settings rail open/close keeps the
+  canvas painted, Escape toggles Settings while ignoring focused text inputs,
+  General omits Save / Resume / Fork, and the app badge stays bottom-left.
 - `grass-size-restart.spec.ts` verifies `grass_size` changes `grass_dim` only
   after restart.
 - `grass-lod-smoke.spec.ts` verifies the default grass window/LOD metadata and
@@ -198,6 +201,8 @@ If you touch `simLoop()` in `app/web/src/sim/worker.ts`, run it.
 - `web/tests/e2e/defaults-drift.spec.ts` → generated Rust↔TS config/default drift guard.
 - `web/tests/e2e/settings-persistence.spec.ts` → Settings localStorage and
   boot slider-state / WorldConfig persistence guard.
+- `web/tests/e2e/settings-rail.spec.ts` → Settings rail Escape/canvas repaint,
+  General-tab controls, and app-badge placement.
 - `web/tests/README.md` → onboarding pointer; the authoritative
   command/coverage list lives here and in
   [`../agent-context/testing-how-to.md`](../agent-context/testing-how-to.md).

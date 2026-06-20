@@ -225,6 +225,19 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   `crates/evosim/src/world/nn.rs → dynamic_chunks`,
   `crates/evosim/src/constants.rs → MIN_CHUNKS`, `MAX_CHUNKS`.
 
+### NN sector-search ranges are construction settings
+
+- **Decision**: `CreatureSectors`, `GrassSectors`, and `GrassBandsFar` ranges
+  live in `WorldConfig.nn_sensing` and apply on the next world, not through
+  live `set_slider` updates.
+- **Why**: the ranges define the constructed sensing contract and interact with
+  cached lookup/pyramid behavior; applying them at boot keeps saved worlds,
+  inspectors, and tick-time NN inputs aligned.
+- **Applies to**: `architecture/simulation-core.md`.
+- **Code anchors**: `crates/evosim/src/wasm_api/mod.rs → WorldConfig`,
+  `crates/evosim/src/world/nn.rs → build_nn_input`,
+  `crates/evosim/src/world/proximity.rs → compute_grass_far_band_sectors`.
+
 ### Brain is `32 → 48 → 24 → 5` Leaky ReLU pyramid, no biases
 
 - **Decision**: Three matmul layers with per-layer He init ranges
@@ -440,14 +453,15 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 - **Revisit when**: deterministic science mode needs bit-for-bit cross-version
   replay, or telemetry history should be deliberately bundled with saved worlds.
 
-### Biome map: a few large blobs from `world_seed` via a dedicated PRNG
+### No-grass zones are generated from `world_seed` via a dedicated PRNG
 
-- **Decision**: The static biome grid is generated from a **dedicated
-  SplitMix64 PRNG seeded by `world_seed`**, independent of the
-  string/XxHash64 sim RNG. The generator scatters a few **large blobs**
-  (2..4 water + 2..4 desert, radius `0.13..0.18 × world_size`) over a
-  Plains background; water wins overlaps; distance is toroidal when
-  `wrap_world`. Tuned to ~plains 60% / water 20% / desert 20%.
+- **Decision**: The static grass/no-grass-zone grid is generated from a
+  **dedicated SplitMix64 PRNG seeded by `world_seed`**, independent of the
+  string/XxHash64 sim RNG. The generator scatters a few large low-capacity
+  blobs over a Plains background; distance is toroidal when `wrap_world`.
+  The internal byte tags remain for saved-world and capacity compatibility, but
+  the product model is binary: normal grass capacity vs no-grass/dead-grass
+  zones.
 - **Why**: A separate stream lets the map pin to `world_seed` alone (so
   it is reproducible / shareable) while the live run still varies on the
   sim RNG. Large blobs (not noise speckle) give creatures a navigable,
@@ -459,43 +473,43 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 - **Tradeoffs**: Blob count/radius are balance knobs (constants in
   `biome.rs`); proportions are statistical, not exact per seed. The grid
   is `grass_cell_count` u8 — same size as the snapshot grass region.
-- **Revisit when**: biomes need finer structure (rivers, gradients) or a
-  third+ biome kind, or the target proportions change.
+- **Revisit when**: no-grass zones need finer structure, gradients, or more
+  than one user-visible no-grass behavior.
 
-### Biomes are food-only: no movement/energy penalties
+### No-grass zones are food-only and construction-disableable
 
-- **Decision**: Water and Desert biomes carry **no movement, cost, or upkeep
-  penalties**. The `K_BIOME_SPEED/COST/UPKEEP` constants, the
-  `water_movement_penalty` / `desert_movement_penalty` sliders, and the
-  `movement_penalty_for` function are all removed. The only surviving biome
-  effect is the **grass-capacity cap** on scatter writes (Plains ×1.0,
-  Desert ×0.30, Water ×0.04). Water/Desert are dead-grass avoidance zones:
-  the brain learns to avoid them because there is no food, not because
-  crossing them is expensive.
+- **Decision**: No-grass zones carry **no movement, cost, or upkeep
+  penalties**. The only surviving zone effect is the grass-capacity cap on
+  scatter writes. The next-world setting `WorldConfig.grass.no_grass_zones`
+  can disable the effect; disabled worlds construct an all-plains capacity and
+  visual grid, so grass can grow normally everywhere and opacity cannot reveal
+  a dead-zone pattern.
 - **Why**: Movement tax + genome modulation coupled biome selection and body
   evolution, muddying the learning signal. With the genome gone and no penalty,
-  biomes do exactly one thing — absence of food — which is the cleanest
-  possible selection pressure. Avoidance remains learnable through grass-sector
-  and current-grass inputs.
+  zones do exactly one thing — absence of food — which is the cleanest possible
+  selection pressure. Avoidance remains learnable through grass-sector and
+  current-grass inputs. Disabling the zones is construction-only because
+  capacity arrays, zone bytes, and snapshot pyramid state are built from world
+  dimensions at construction.
 - **Applies to**: `architecture/biome.md`, `architecture/simulation-core.md`.
 - **Code anchors**: `crates/evosim/src/world/biome.rs → capacity_factor_from_u8`;
   `crates/evosim/src/grass/mod.rs → compute_propagation_scatter` (the cap write);
   `crates/evosim/src/constants.rs → GRASS_CAPACITY_PLAINS`,
   `GRASS_CAPACITY_WATER`, `GRASS_CAPACITY_DESERT`.
 
-### Biomes have no direct NN type input
+### No-grass zones have no direct NN type input
 
-- **Decision**: The active NN layout has no direct biome-type input. Biomes
+- **Decision**: The active NN layout has no direct zone-type input. Zones
   influence the brain only through grass-sector, far-grass, and current-grass
   density inputs.
-- **Why**: Biomes now only change grass carrying capacity. A raw biome id is a
+- **Why**: Zones now only change grass carrying capacity. A raw zone id is a
   redundant proxy for the food signal and makes the learning surface wider
   without adding an effect the creature can act on directly.
 - **Applies to**: `architecture/simulation-core.md`.
 - **Code anchors**: `crates/evosim/src/world/nn.rs → NnInputLayout::for_settings`,
   `build_nn_input`; `crates/evosim/src/world/proximity.rs →
   compute_grass_density_sectors`, `compute_grass_far_band_sectors`.
-- **Revisit when**: a new biome effect other than grass capacity is added.
+- **Revisit when**: a new zone effect other than grass capacity is added.
 
 ### Species + sexual mating is an opt-in mode, not a replacement
 
@@ -676,11 +690,11 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 ### Child spawns at parent midpoint, no habitable-cell check
 
 - **Decision**: A mated child spawns at the wrap-aware midpoint of the two
-  parents' positions, even if that cell is hostile (deep water / desert). No
-  retry, no nearest-habitable search.
+  parents' positions, even if that cell is a food-poor no-grass zone. No retry,
+  no nearest-habitable search.
 - **Why**: Simple, and honest selection — a child spawning in a food-poor zone
   is exposed to the same selection pressure as any other creature. A
-  habitable-cell search would add a scan and quietly mask cross-biome mating
+  habitable-cell search would add a scan and quietly mask cross-zone mating
   as a failure mode.
 - **Applies to**: `architecture/simulation-core.md`.
 - **Code anchors**: `crates/evosim/src/world/mod.rs → World::handle_mating`.
@@ -744,8 +758,8 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 - **Alternatives**: keep a constant action-set-indicator input for
   "portability" (rejected — a brain selected against one `action[2]` semantic
   doesn't transfer just because one constant signal says which mode it's in);
-  directional biome penalty sectors (rejected — penalties are gone and grass
-  density carries the remaining biome effect).
+  directional zone/penalty sectors (rejected — penalties are gone and grass
+  density carries the remaining zone effect).
 
 ### Body radius and repulsion: constants; sprite/repulsion not collision
 
@@ -873,12 +887,12 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   classified EMPTY and above `cap − EPS` is classified SATURATED) is
   `1.0 / 255.0` — exactly one u8 quantization step.
 - **Why**: The original value of `1e-4` was 39× smaller than one u8
-  quantum (1/255 ≈ 3.92e-3). Water-cap cells (cap=0.04, byte 10/255 ≈
-  0.0392) never classified SATURATED because `0.0392 < 0.04 − 1e-4 =
-  0.0399`. All Water tiles remained permanently MIXED, preventing the
-  frontier skip. Raising to exactly one u8 step means any cell whose f32
-  value round-trips to within one quantum of `cap − EPS` is correctly
-  classified saturated, restoring the frontier skip for biome-capped cells.
+  quantum (1/255 ≈ 3.92e-3). Low-capacity zone cells could round-trip below
+  their f32 cap without classifying SATURATED, leaving those tiles permanently
+  MIXED and preventing the frontier skip. Raising to exactly one u8 step means
+  any cell whose f32 value round-trips to within one quantum of `cap − EPS` is
+  correctly classified saturated, restoring the frontier skip for
+  zone-capped cells.
 - **Applies to**: `architecture/simulation-core.md`,
   `crates/evosim/src/grass/mod.rs → GRASS_EQ_EPS`.
 
@@ -909,7 +923,7 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   pyramid). L1+ are owned, MEAN-downsampled, edge-clamped u8 buffers.
   Each Lk cell is the arithmetic mean of its (up to) 4 in-bounds Lk-1
   parent cells: `(sum + count/2) / count` (round-before-truncate). At the
-  default `grass_dim = 1920` this yields ~11 levels before reaching 1×1
+  default runtime `grass_dim = 480` this yields enough levels before reaching 1×1
   (well under the `GRASS_PYRAMID_MAX_LEVELS = 16` cap). L1+ refresh as a
   full recompute every `GRASS_PYRAMID_REFRESH_PERIOD` ticks in `World::step`
   at step 7b. Serves render LOD + snapshot windowing and far-grass NN sensing;
@@ -951,7 +965,7 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   Creatures sensing grass at 160u radius can navigate toward distant patches
   before local exhaustion. Shipping default ON keeps all born creatures on the
   same layout as the rest of the world; the toggle is for the A/B and debugging.
-- **Constraint**: without direct biome-type inputs, all
+- **Constraint**: without direct zone-type inputs, all
   wrap×species×multisight combinations fit within `MAX_NN_INPUTS`; no
   fallback is needed. The widest current layout is walled+species+multisight
   at 46 real slots → 48 padded.
@@ -990,8 +1004,8 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
   that density weighting produces refill their centers, so decay headroom improves
   and a higher decay rate produces living-noise without global collapse.
 - **Why**: Denser source cells push harder → self-reinforcing patch centers →
-  tighter, more organic-looking clumps. The persistence invariant (plains
-  super-critical, water sub-critical at shoreline) is preserved (tested in
+  tighter, more organic-looking clumps. The persistence invariant (normal zones
+  super-critical, low-capacity zones sub-critical at edges) is preserved (tested in
   `crates/evosim/src/grass/tests/fertility.rs`). The 0.04 decay default is **feel-tunable** —
   the lead should confirm it reads well in the browser.
 - **Applies to**: `architecture/simulation-core.md`.
@@ -1099,20 +1113,18 @@ considered`, `Tradeoffs`, `Code anchors`, `Revisit when`.
 
 ### Seeded grass clumps: initial-budget choice
 
-- **Decision**: Boot grass with **40 clump centres** (`GRASS_CLUMP_COUNT_DEFAULT`),
-  each a **radius-8-cell disc** (`GRASS_CLUMP_SIZE_DEFAULT`), centres derived
-  deterministically from `world_seed` via the position-addressable hash RNG
-  (independent of the sim RNG so creature draw order is unaffected).
-- **Budget**: Disc area ≈ π × 8² ≈ 201 cells/clump × 40 clumps ≈ **8,040
-  occupied cells** — matching the old uniform-scatter budget of
-  `GRASS_INITIAL_SEED_COUNT_DEFAULT = 8000` (≤ 0.22% of a 1920² grid). Clumps
-  may overlap; actual count is ≤ 8040. The value was chosen deliberately to
-  preserve the old budget so existing perf/behaviour baselines are not silently
-  disrupted.
-- **Why**: Uniform single-cell scatter at density ~0.2% looks like dust — no
-  visible patches, no spatial texture for creatures to navigate. Clumps of radius
-  8 (≈16×16 cell bounding box, ≈11% of a 32-cell tile side) produce visually
-  legible patches without changing the starting occupied-cell count.
+- **Decision**: Boot grass with dense seeded clumps using
+  `GRASS_CLUMP_COUNT_DEFAULT` centres and `GRASS_CLUMP_SIZE_DEFAULT` radius,
+  with centres derived deterministically from `world_seed` via the
+  position-addressable hash RNG (independent of the sim RNG so creature draw
+  order is unaffected).
+- **Budget**: The current defaults are intended to cover most of the default
+  runtime grass grid. Clumps may overlap and are capped by the runtime grid; the
+  old `GRASS_INITIAL_SEED_COUNT_DEFAULT = 8000` path remains the fallback when
+  `grass_clump_count = 0`.
+- **Why**: Uniform single-cell scatter looks like dust — no visible patches, no
+  spatial texture for creatures to navigate. Dense clumps start the default world
+  with visible contiguous grass patches.
 - **Reproducibility**: Clump centres are derived from
   `grass_hash_u64(world_seed, clump_index, tick=0, salt=0/1)` — the same hash
   used by the scatter kernel but never during propagation. Same `world_seed`

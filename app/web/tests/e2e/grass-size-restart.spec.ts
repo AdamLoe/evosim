@@ -6,8 +6,8 @@
 // boot path ignore it?"
 //
 // Observable: the `boot_ready` message carries `grass_dim` (cells per axis).
-// At default cell_size=5 and world_size=9600: grass_dim = round(9600/5) = 1920.
-// At cell_size=10:                             grass_dim = round(9600/10) = 960.
+// At default cell_size=20 and world_size=9600: grass_dim = round(9600/20) = 480.
+// At cell_size=10:                              grass_dim = round(9600/10) = 960.
 // We intercept the Worker.onmessage to capture successive grass_dim values.
 //
 // Root-cause recap (proved by this spec):
@@ -23,7 +23,7 @@
 //   computing `WorldDims`. Hence grass_dim now differs on restart.
 //
 // What this spec asserts:
-//   (a) Default boot: grass_dim = 1920 (cell_size=5, world_size=9600).
+//   (a) Default boot: grass_dim = 480 (cell_size=20, world_size=9600).
 //   (b) After changing grass_size to 10 and restarting: grass_dim = 960.
 //   (c) grass_dim(a) ≠ grass_dim(b) — the change is observable end-to-end.
 
@@ -117,16 +117,20 @@ test("grass_dim changes on restart when grass_size is changed", async ({ page })
   );
   console.log(`[grass-size-restart] first boot grass_dim=${grassDimAfterFirstBoot}`);
 
-  // (a) At default cell_size=5, world_size=9600: grass_dim = round(9600/5) = 1920.
+  // (a) At default cell_size=20, world_size=9600: grass_dim = round(9600/20) = 480.
   expect(
     grassDimAfterFirstBoot,
-    "first boot grass_dim must be 1920 (default cell_size=5, world_size=9600)",
-  ).toBe(1920);
+    "first boot grass_dim must be 480 (default cell_size=20, world_size=9600)",
+  ).toBe(480);
 
   // ── 2. Open Settings, change grass_size to 10, Apply, Restart ────────────
-  // Open the settings rail via the ~ key.
+  // Open the rail and switch to Settings.
   await page.locator("body").focus();
   await page.keyboard.press("~");
+  await page.evaluate(() => {
+    const btn = document.querySelector<HTMLButtonElement>('.rail-tab[data-tab="settings"]');
+    if (btn && !btn.classList.contains("is-active")) btn.click();
+  });
   await expect(page.locator("#settings-apply")).toBeVisible();
 
   // Find the "Grass cell size" slider row by its label text and set value to 10.

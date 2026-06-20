@@ -115,24 +115,32 @@
   `web/src/settings.ts → APP_FPS_CHOICES`,
   `web/src/widgets/devpanel.ts → makeAppFpsRow`.
 
-### Zoom-out survey: `MIN_ZOOM = 0.04` + radial-shaded min-1px survey points
+### Repeat camera survey is display-only and coverage-derived
 
-- **Decision**: Camera zoom clamps to `[MIN_ZOOM = 0.04, MAX_ZOOM]`; center
-  clamps to the runtime `[0, world_size]`. Below ~1px on-screen radius a body
-  is drawn as a radial-shaded min-1px point in its display color (the
-  `inner_px = -1` sentinel takes the bottom-band branch in `DISC_FS`) instead
-  of vanishing. The floor is tuned so the whole runtime-sized world frames from
-  one view.
-- **Why**: With editable/large worlds (default 9600u) you need *some* way to
-  survey the whole map and see *where the factions are*, not just terrain. A
-  minimap / species heatmap is the right long-term answer; zoom-out +
-  1px points is nearly free and good enough now. Center clamp still prevents
-  pan-into-the-void.
+- **Decision**: The camera can render repeated visual map tiles through the
+  Display setting `visualRepeats`, independent of sim-side `wrapWorld`
+  physics. Repeat mode derives tile offsets from the camera frustum and renders
+  every tile needed to cover the supported viewport at the live
+  `maxZoomOutMaps` zoom-out floor; bounded mode keeps a single `{0,0}` tile
+  and clamps camera center to the runtime map. Survey-zoom bodies use
+  formula-based radial points
+  (`creatureSurveyDotMinPx`, `creatureSurveyDotScale`) with defaults that
+  preserve the old 1px bottom-band point, and repeat borders have live
+  min/scale/opacity controls.
+- **Why**: Users need to inspect one-map, multi-map, and max-survey views
+  without changing simulation topology or adding per-repeat-count controls.
+  A display-only repeat camera gives an unbounded wrapped viewer for rendering
+  while leaving saved worlds, physics, and snapshot layout unchanged.
+- **Tradeoffs**: The worker still receives the camera center folded into the
+  base map for clipmap windowing, so the visual camera can pan across repeated
+  tiles without asking Rust to understand visual tile identity.
 - **Applies to**: `architecture/render-pipeline.md`.
-- **Code anchors**: `web/src/render/scene.ts → clampCamera`, `MIN_ZOOM` / `MAX_ZOOM`,
-  `PX_PER_SIZE`; `web/src/render/gl.ts → renderWorldImpl`, `DISC_FS`.
-- **Revisit when**: a real minimap / species heatmap lands and a hard zoom-out
-  floor is no longer the survey mechanism.
+- **Code anchors**: `web/src/render/scene.ts → visibleRepeatTiles`,
+  `clampCamera`, `initialCameraZoom`; `web/src/render/gl.ts →
+  renderWorldImpl`; `web/src/main.ts → frame`.
+- **Revisit when**: a minimap / species heatmap becomes the primary survey
+  mechanism or repeat drawing needs an explicit GPU-budget guard that is still
+  proven to cover every supported viewport/zoom combination.
 
 ### Snapshot carries render-only fields, packed compactly — stride stays 32 B
 
@@ -384,9 +392,9 @@
 ### Default-scale window equals the full field (byte-identical to pre-LOD path)
 
 - **Decision**: The LOD and window logic is designed so that at the shipping
-  default (world_size=9600, zoom=1.0, grass_dim=1920, grass_cell_size=5.0,
+  default (world_size=9600, zoom=1.0, grass_dim=480, grass_cell_size=20,
   `GRASS_LOD_BUDGET_AXIS=4096`):
-  mip_level=0, window=(0,0,1920,1920), win_w×win_h = 1920² = grass_cell_count.
+  mip_level=0, window=(0,0,480,480), win_w×win_h = 480² = grass_cell_count.
   The slot grass bytes are byte-identical to the pre-pyramid path.
 - **Why**: The default-scale invariant keeps the common path full-resolution and
   validates the LOD formula: the `max(1.0)` pre-clamp before `log2` keeps
@@ -412,22 +420,22 @@
   `crates/evosim/src/grass/mod.rs → GrassPyramid::viewport_window`;
   `web/src/render/gl.ts → renderWorldImpl`, `windowUvWrap`.
 
-### Biomes render as flat per-cell color under the grass, fed from the snapshot biome channel
+### No-grass zones render as flat per-cell color under the grass
 
-- **Decision**: The biome layer is a second full-screen world-quad drawn
-  **under** the grass, sampling an R8 biome-id texture (one u8 `Biome`
-  tag per grass cell) with NEAREST filtering — each cell a flat color
-  (Plains/Water/Desert). The texture data comes from the per-slot windowed
-  biome channel in the snapshot (mode-downsampled, same `win_w × win_h` as
-  the grass window), uploaded via `texSubImage2D` into the `(0,0)` corner of
-  a fixed `GRASS_LOD_BUDGET_AXIS² = 4096²` R8 texture each frame. The UV
+- **Decision**: The no-grass-zone layer is a second full-screen world-quad
+  drawn **under** the grass, sampling an R8 zone-id texture with NEAREST
+  filtering. The internal bytes are still `Biome` tags for compatibility, but
+  the visible model is normal grass capacity vs no-grass/dead-grass zones. The
+  texture data comes from the per-slot windowed zone channel in the snapshot
+  (mode-downsampled, same `win_w × win_h` as the grass window), uploaded via
+  `texSubImage2D` into the `(0,0)` corner of a fixed
+  `GRASS_LOD_BUDGET_AXIS² = 4096²` R8 texture when metadata changes. The UV
   transform is identical to the grass channel (same `u_uv_scale/u_uv_offset`
   uniforms).
 - **Why**: Feeding biome from the snapshot slot (rather than a separate static
   SAB view) keeps biome tint locked to the grass clipmap window at every LOD
   level — no UV mismatch when zoomed out. Drawing under the grass lets grass
-  density brighten green on top of terrain. Textured / height-shaded biomes are
-  a future concern.
+  density brighten green on top of no-grass-zone tint.
 - **Applies to**: `architecture/render-pipeline.md`,
   `architecture/shared-memory-and-protocol.md`.
 - **Code anchors**: `web/src/render/gl.ts → BIOME_VS`, `BIOME_FS`,

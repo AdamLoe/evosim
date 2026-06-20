@@ -10,7 +10,10 @@
 //! Attached via `#[path]` in `lib.rs` (see below) per the project convention
 //! (new tests go in their OWN file — never appended to a shared `mod tests`).
 
-use crate::constants::{WorldDims, GRASS_CLUMP_COUNT_DEFAULT, GRASS_CLUMP_SIZE_DEFAULT, GRASS_MAX};
+use crate::constants::{
+    WorldDims, GRASS_CELL_SIZE_DEFAULT, GRASS_CLUMP_COUNT_DEFAULT, GRASS_CLUMP_SIZE_DEFAULT,
+    GRASS_MAX,
+};
 use crate::grass::GrassGrid;
 use crate::rng::SimRng;
 
@@ -24,13 +27,13 @@ fn occupied_count(grid: &GrassGrid) -> usize {
 
 /// A small world dims useful for fast unit tests.
 fn small_dims() -> WorldDims {
-    // 200u world / 5u cell = 40 cells/axis → 1600 cells total.
+    // 200u world / default cell size = 10 cells/axis → 100 cells total.
     WorldDims::from_world_size(200.0, true)
 }
 
-/// A default-scale world dims (9600u, 5u cell → 1920² = 3,686,400 cells).
+/// A default-scale world dims (9600u, default cell size → 480² = 230,400 cells).
 fn default_dims() -> WorldDims {
-    WorldDims::from_world_size(9600.0, true)
+    WorldDims::from_world_size_with_cell_size(9600.0, true, GRASS_CELL_SIZE_DEFAULT)
 }
 
 /// Seed a fresh GrassGrid with clumps using the given parameters.
@@ -77,11 +80,9 @@ fn clumps_differ_on_different_seeds() {
 
 // ─── Budget ───────────────────────────────────────────────────────────────────
 
-/// Default defaults (40 clumps, radius 8) on a 1920² grid must produce an
-/// occupied-cell count between 1,000 and 15,000 (generous range to tolerate
-/// clump overlap at edges), and roughly matching the old 8000-cell budget.
+/// Default clumps on the default grid now produce broad initial coverage.
 #[test]
-fn default_clumps_budget_near_8000() {
+fn default_clumps_cover_most_of_default_grid() {
     let dims = default_dims();
     let g = make_grid_with_clumps(
         dims,
@@ -91,8 +92,8 @@ fn default_clumps_budget_near_8000() {
     );
     let occupied = occupied_count(&g);
     assert!(
-        (1_000..=15_000).contains(&occupied),
-        "expected occupied cell count ~8000 (within [1000, 15000]); got {occupied}"
+        (150_000..=230_400).contains(&occupied),
+        "expected broad default clump coverage (within [150000, 230400]); got {occupied}"
     );
 }
 

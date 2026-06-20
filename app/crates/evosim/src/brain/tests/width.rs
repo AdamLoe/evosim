@@ -18,16 +18,15 @@ fn scratch_for(t: &NnTopology) -> (Vec<f32>, Vec<f32>) {
     (vec![0.0; w], vec![0.0; w])
 }
 
-/// The exact legacy weight count must be unchanged by the refactor:
-/// 32*48 + 48*24 + 24*5 = 2808 for the default 32-input topology.
+/// The exact legacy weight count for the default 32-input topology.
 #[test]
 fn legacy_weight_count_unchanged() {
     let t = NnTopology::legacy();
     assert_eq!(t.input_width(), NN_INPUTS, "legacy width must stay 32");
     assert_eq!(
         t.weight_count(),
-        2808,
-        "legacy weight_count must equal the pre-refactor value 32*48 + 48*24 + 24*5"
+        1776,
+        "legacy weight_count must equal 32*48 + 48*5"
     );
 }
 

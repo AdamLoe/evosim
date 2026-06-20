@@ -33,6 +33,10 @@ async function ensureDisplaySettings(page: Page): Promise<void> {
     await page.locator("body").focus();
     await page.keyboard.press("~");
   }
+  await page.evaluate(() => {
+    const btn = document.querySelector<HTMLButtonElement>('.rail-tab[data-tab="settings"]');
+    if (btn && !btn.classList.contains("is-active")) btn.click();
+  });
   await expect(page.locator("#rail-settings")).toBeVisible();
   await page.evaluate(() => {
     document.querySelector<HTMLButtonElement>('.settings-cat-btn[data-cat="display"]')?.click();

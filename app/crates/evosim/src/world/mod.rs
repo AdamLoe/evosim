@@ -94,6 +94,22 @@ use serde::{Deserialize, Serialize};
 
 const WORLD_RUNTIME_STATE_SCHEMA_VERSION: u32 = 1;
 
+fn default_no_grass_zones() -> bool {
+    true
+}
+
+fn default_creature_sector_range() -> f32 {
+    CREATURE_SECTOR_RANGE_DEFAULT
+}
+
+fn default_grass_sector_range() -> f32 {
+    GRASS_SECTOR_RANGE_DEFAULT
+}
+
+fn default_grass_far_sector_range() -> f32 {
+    GRASS_FAR_SECTOR_RANGE_DEFAULT
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorldDimsStateV1 {
     pub world_size: f32,
@@ -392,6 +408,12 @@ pub struct DevSliders {
     /// v2.0 Wave 3a live: initiator-only post-mating cooldown (ticks). The
     /// initiator pays this after a successful `Mate`; the partner is unaffected.
     pub mating_cooldown_ticks: u32,
+    #[serde(default = "default_creature_sector_range")]
+    pub creature_sector_range: f32,
+    #[serde(default = "default_grass_sector_range")]
+    pub grass_sector_range: f32,
+    #[serde(default = "default_grass_far_sector_range")]
+    pub grass_far_sector_range: f32,
     // ── v2.0.4 S6: multi-band NN grass sight ─────────────────────────────────
     /// Construction-only: when true the NN input vector includes a second (far)
     /// grass-density band sampled from the LOD pyramid at mip level
@@ -400,6 +422,11 @@ pub struct DevSliders {
     /// layout, discards old brains). Falls back to single-band automatically
     /// when walled+species fills the MAX_NN_INPUTS budget — see nn.rs.
     pub grass_multisight: bool,
+    /// Construction-only: enables generated no-grass zones. When false the
+    /// world uses normal grass capacity everywhere and publishes an all-plains
+    /// zone texture, so visuals cannot show dead zones for that run.
+    #[serde(default = "default_no_grass_zones")]
+    pub no_grass_zones: bool,
 
     // ── v2.0.2 Stream 1d: scatter kernel live-tuning sliders ─────────────────
     // Six parameters for the stochastic u8 scatter propagation kernel. All live
@@ -466,13 +493,6 @@ pub struct DevSliders {
     /// Extra per-tick drain while below `starvation_threshold`.  Stacks on top
     /// of idle upkeep; death at energy ≤ 0 as normal.  Live-tunable.
     pub starvation_drain_rate: f32,
-    /// Multiplier on every grass cell's carrying-capacity cap.  1.0 = unchanged
-    /// (Plains 1.0, Desert 0.30, Water 0.04).  Scaling down permanently caps
-    /// total food → lowers equilibrium population.  Live-tunable.
-    pub grass_capacity_scale: f32,
-    /// Multiplier on grass-scatter spread probability and in-cell growth rate.
-    /// Values < 1.0 slow regrowth; > 1.0 enrich the world.  Live-tunable.
-    pub grass_regrowth_rate: f32,
     /// Construction-only opt-in deterministic science/replay mode. Off by
     /// default; when on, threaded scatter uses deterministic reduction instead
     /// of relaxed cross-tile RMW races.
@@ -491,7 +511,7 @@ impl Default for DevSliders {
             eat_bite_fraction: EAT_BITE_FRACTION_DEFAULT,
             upkeep_multiplier: 1.0,
             move_cost_multiplier: 1.0,
-            energy_max: 100.0,
+            energy_max: 400.0,
             grass_energy_per_bite: GRASS_ENERGY_PER_BITE_DEFAULT,
             grass_bites_per_block: GRASS_BITES_PER_BLOCK_DEFAULT,
             max_age: MAX_AGE_DEFAULT,
@@ -514,8 +534,12 @@ impl Default for DevSliders {
             starting_species_member_count: STARTING_SPECIES_MEMBER_COUNT_DEFAULT,
             starting_species_member_variance: STARTING_SPECIES_MEMBER_VARIANCE_DEFAULT,
             mating_cooldown_ticks: MATING_COOLDOWN_TICKS_DEFAULT,
+            creature_sector_range: CREATURE_SECTOR_RANGE_DEFAULT,
+            grass_sector_range: GRASS_SECTOR_RANGE_DEFAULT,
+            grass_far_sector_range: GRASS_FAR_SECTOR_RANGE_DEFAULT,
             // v2.0.4 S6: multi-band grass sight — default ON.
             grass_multisight: GRASS_MULTISIGHT_DEFAULT,
+            no_grass_zones: true,
             // v2.0.2 Stream 1d: scatter kernel defaults — must match the Stream 1b
             // working constants so behavior is byte-identical before sliders move.
             grass_decay_pct: GRASS_DECAY_PCT_DEFAULT,
@@ -540,8 +564,6 @@ impl Default for DevSliders {
             crowding_radius: CROWDING_RADIUS_DEFAULT,
             starvation_threshold: STARVATION_THRESHOLD_DEFAULT,
             starvation_drain_rate: STARVATION_DRAIN_RATE_DEFAULT,
-            grass_capacity_scale: GRASS_CAPACITY_SCALE_DEFAULT,
-            grass_regrowth_rate: GRASS_REGROWTH_RATE_DEFAULT,
             deterministic_science_mode: false,
         }
     }
@@ -740,6 +762,7 @@ impl World {
                 founder_count: 1,
                 world_size: 1200.0,
                 wrap_world: false,
+                grass_cell_size: GRASS_CELL_SIZE,
                 ..Default::default()
             },
         )
@@ -765,9 +788,14 @@ impl World {
             sliders.grass_cell_size,
         );
         let world_seed = sliders.world_seed;
-        // v2.0 Wave 1b: static biome map from `world_seed` (independent of the
-        // sim RNG above). Built once; read O(1) per tick via `biome_at`.
-        let biome_grid = biome::generate_biome_grid(world_seed, &dims);
+        // Static no-grass-zone map from `world_seed` (independent of the sim
+        // RNG above). When disabled, publish an all-plains map so capacity and
+        // visuals both lose the no-grass-zone effect for this world.
+        let biome_grid = if sliders.no_grass_zones {
+            biome::generate_biome_grid(world_seed, &dims)
+        } else {
+            vec![Biome::Plains as u8; dims.grass_cell_count]
+        };
         // v2.0 Wave 1: thread the biome grid into grass so per-cell carrying
         // capacity (Plains ×1.0, Desert ×0.30, Water ×0.04) scales BOTH the
         // initial seeding and the logistic regrowth cap.
@@ -1047,23 +1075,15 @@ impl World {
     /// v2.0.2 Stream 1d: extract the six scatter DevSliders fields into a
     /// `ScatterParams` struct, which the caller passes to
     /// `GrassGrid::apply_scatter_params` before each propagation step.
-    /// v2.1 P3: also threads `grass_capacity_scale` and `grass_regrowth_rate`
-    /// into the kernel (capacity_scale = direct; regrowth_rate multiplied into
-    /// spread_pct).
     #[inline]
     fn scatter_params_from_sliders(&self) -> crate::grass::ScatterParams {
-        let regrowth = self.sliders.grass_regrowth_rate.max(0.0);
         crate::grass::ScatterParams {
             decay_pct: self.sliders.grass_decay_pct,
             decay_amount: self.sliders.grass_decay_amount,
-            // v2.1 P3: multiply spread_pct by regrowth_rate so a single knob
-            // scales food throughput without touching the other scatter params.
-            spread_pct: (self.sliders.grass_spread_pct * regrowth).clamp(0.0, 1.0),
+            spread_pct: self.sliders.grass_spread_pct,
             spread_amount: self.sliders.grass_spread_amount,
             ring1_pct: self.sliders.grass_spread_ring1_pct,
             ring2_pct: self.sliders.grass_spread_ring2_pct,
-            // v2.1 P3: carrying-capacity scale (1.0 = unchanged).
-            capacity_scale: self.sliders.grass_capacity_scale,
         }
     }
 
@@ -1092,10 +1112,8 @@ impl World {
                     .apply_scatter_params(self.scatter_params_from_sliders());
                 // C2: gate per-tile profiling clocks off the profiler enabled-state.
                 self.grass.set_profile_scatter(self.profile.enabled());
-                // v2.1 P3: multiply in-cell growth rate by grass_regrowth_rate.
-                let regrowth = self.sliders.grass_regrowth_rate.max(0.0);
                 self.grass.compute_propagation(
-                    self.sliders.grass_in_cell_growth_r * regrowth,
+                    self.sliders.grass_in_cell_growth_r,
                     self.sliders.grass_propagation_rate_k,
                 );
                 self.grass.rebuild_row_bitset();
@@ -1179,10 +1197,8 @@ impl World {
                 .apply_scatter_params(self.scatter_params_from_sliders());
             // C2: gate per-tile profiling clocks off the profiler enabled-state.
             self.grass.set_profile_scatter(self.profile.enabled());
-            // v2.1 P3: multiply in-cell growth rate by grass_regrowth_rate.
-            let regrowth = self.sliders.grass_regrowth_rate.max(0.0);
             self.grass.compute_propagation(
-                self.sliders.grass_in_cell_growth_r * regrowth,
+                self.sliders.grass_in_cell_growth_r,
                 self.sliders.grass_propagation_rate_k,
             );
             use std::sync::atomic::Ordering;

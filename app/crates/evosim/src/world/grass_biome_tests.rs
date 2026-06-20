@@ -83,6 +83,38 @@ fn full_grass_on_init_respects_biome_capacity() {
     );
 }
 
+#[test]
+fn disabling_no_grass_zones_uses_plain_capacity_everywhere() {
+    let w = World::new_with_sliders(
+        "no-grass-zones-disabled",
+        DevSliders {
+            founder_count: 1,
+            world_size: 1000.0,
+            wrap_world: false,
+            world_seed: 4242,
+            no_grass_zones: false,
+            full_grass_on_init: true,
+            ..Default::default()
+        },
+    );
+
+    assert!(
+        w.biome_grid.iter().all(|&tag| tag == Biome::Plains as u8),
+        "disabled no-grass zones must publish an all-plains zone grid"
+    );
+    for (idx, &cap) in w.grass.capacity.iter().enumerate() {
+        assert!(
+            (cap - GRASS_CAPACITY_PLAINS * GRASS_MAX).abs() < 1e-6,
+            "cell {idx} must use normal grass capacity when zones are disabled"
+        );
+        assert_eq!(
+            w.grass.dget_u8(idx),
+            255,
+            "cell {idx} should fill to normal capacity"
+        );
+    }
+}
+
 /// A seeded cell is filled to its OWN capacity at init (water near 0.04, desert
 /// near 0.30) — never above. Cross-check against the biome grid for every
 /// non-empty cell after a normal (sparse) seed.

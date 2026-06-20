@@ -1,6 +1,6 @@
 /* ───────────────────────────────────────────────────────────────────────────
    evosim app shell — left column (top-bar + canvas + optional profiler)
-   and right rail (Inspector / Monitor / Settings tabs).
+   and right rail (General / Inspector / Settings / Profiler tabs).
    ─────────────────────────────────────────────────────────────────────────── */
 
 :root {
@@ -80,7 +80,7 @@ button {
   background: var(--bg-app);
 }
 
-/* v1.9.1: the Settings ⚙ button / `~` hotkey collapse the rail to a zero
+/* v1.9.1: the hamburger button / `~` hotkey collapse the rail to a zero
  * grid track so the canvas fills the viewport. `display: none` on the rail
  * itself keeps its contents from rendering (and stops the tab-bar from
  * trapping focus). */
@@ -159,11 +159,17 @@ button {
 }
 .app-badge {
   position: absolute;
-  top: 8px;
+  bottom: 8px;
   left: 8px;
   z-index: 5;
   pointer-events: none;
   cursor: default;
+  border-radius: 0;
+  padding: 2px 6px;
+  min-height: 0;
+  height: auto;
+  font-size: 11px;
+  line-height: 1.25;
   font-variant-numeric: tabular-nums;
 }
 
@@ -554,25 +560,28 @@ button {
 
 /* v1.13 Wave 3: drag handles for resizing the right rail width and the
    bottom profiler panel height. Both use Pointer Events + pointer capture
-   (see installResizeHandles in main.ts). The handles are 6 px strips that
-   sit ABOVE neighbouring content (canvas, perf-box, rail tabs) so pointer
-   events on the strip never reach the underlying interactive surface. */
+   (see installResizeHandles in main.ts). */
 #rail-resize-handle {
   position: absolute;
-  top: 0;
-  bottom: 0;
-  left: -3px;
-  width: 6px;
+  top: 50%;
+  left: -5px;
+  width: 10px;
+  height: 76px;
+  transform: translateY(-50%);
   cursor: ew-resize;
   z-index: 5;
-  background: transparent;
-  transition: background 0.12s ease;
+  background: color-mix(in srgb, var(--fg-muted) 28%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border-strong) 70%, transparent);
+  border-radius: 4px;
+  box-sizing: border-box;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+  transition: background 0.12s ease, border-color 0.12s ease;
   touch-action: none;
 }
 #rail-resize-handle:hover,
 #rail-resize-handle.is-dragging {
   background: var(--accent);
-  opacity: 0.6;
+  border-color: var(--accent);
 }
 #app-shell.rail-collapsed #rail-resize-handle { display: none; }
 
@@ -610,15 +619,28 @@ button {
 }
 .rail-tab {
   flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-width: 0;
   background: transparent;
   color: var(--fg-muted);
   border: 0;
   border-right: 1px solid var(--border);
   cursor: pointer;
-  font-size: 13px;
-  font-weight: 400;
+  font-size: 11px;
+  font-weight: 500;
   height: 100%;
   position: relative;
+  overflow: hidden;
+}
+.rail-tab svg { flex: 0 0 auto; width: 15px; height: 15px; }
+.rail-tab-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .rail-tab.is-hidden { display: none; }
 .rail-tab:last-child { border-right: 0; }
@@ -650,18 +672,21 @@ button {
   text-align: center;
 }
 
-/* Menu tab: stacked groups of full-width action buttons (the game options
-   relocated off the top bar). */
+/* General tab: grouped run and saved-world controls. */
 #menu-inner {
   display: flex;
   flex-direction: column;
-  gap: 18px;
-  padding: 14px 16px;
+  gap: 14px;
+  padding: 14px;
 }
 .menu-section {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--bg-panel-alt) 55%, transparent);
 }
 .menu-section-title {
   color: var(--fg-faint);
@@ -669,17 +694,39 @@ button {
   font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  margin-bottom: 2px;
 }
 #menu-inner .topbar-btn {
-  display: block;
+  box-shadow: none;
+  min-width: 0;
+}
+.general-toggle-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 10px;
+}
+.general-toggle-label {
+  min-width: 0;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+.general-action-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.general-action-grid .topbar-btn {
   width: 100%;
-  text-align: left;
+  padding: 0 8px;
 }
 #menu-inner #save-status {
   margin-top: 4px;
+  justify-content: flex-start;
+  height: auto;
+  min-height: 28px;
   color: var(--fg-muted);
   cursor: default;
+  overflow-wrap: anywhere;
 }
 
 /* Inspector */
@@ -937,12 +984,16 @@ button {
    its own DOM inside this container.
    Stable mount-point id: #settings-profiler-pane */
 #settings-profiler-pane {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
   box-sizing: border-box;
   padding: 8px 10px 12px;
   scroll-padding-top: 8px;
 }
+#rail-profiler { padding: 0; }
+#rail-profiler.is-active { display: flex; flex-direction: column; }
 
 /* NN pane: hosts #nn-tab-host which the NN installer fills.
    Stable mount-point id: #settings-nn-pane */
@@ -951,14 +1002,6 @@ button {
 }
 #settings-nn-pane #nn-tab-host {
   flex: 1 1 auto;
-}
-
-/* Equilibrium pane: intentionally sparse now; P3 wires rows into #devpanel-equilibrium.
-   Stable mount-point id: #settings-equilibrium-pane */
-#settings-equilibrium-pane #devpanel-equilibrium {
-  color: var(--fg-faint);
-  font-style: italic;
-  font-size: 12px;
 }
 
 /* Legacy #devpanel-box: no longer used for rendering (rows now go into

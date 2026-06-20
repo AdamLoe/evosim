@@ -224,6 +224,7 @@ fn render_world_config() -> String {
     out.push_str("  clump_count: number;\n");
     out.push_str("  clump_size: number;\n");
     out.push_str("  multisight: boolean;\n");
+    out.push_str("  no_grass_zones: boolean;\n");
     out.push_str("}\n\n");
     out.push_str("export interface PopulationConstructionConfig {\n");
     out.push_str("  founder_count: number;\n");
@@ -240,6 +241,11 @@ fn render_world_config() -> String {
     out.push_str("  init_graze_boost: number;\n");
     out.push_str("  init_split_boost: number;\n");
     out.push_str("}\n\n");
+    out.push_str("export interface NnSensingConfig {\n");
+    out.push_str("  creature_sector_range: number;\n");
+    out.push_str("  grass_sector_range: number;\n");
+    out.push_str("  grass_far_sector_range: number;\n");
+    out.push_str("}\n\n");
     out.push_str("export interface NnTopologyConstructionConfig {\n");
     out.push_str("  hidden_sizes: number[];\n");
     out.push_str("  activations: string[];\n");
@@ -253,6 +259,7 @@ fn render_world_config() -> String {
     out.push_str("  population: PopulationConstructionConfig;\n");
     out.push_str("  species: SpeciesConstructionConfig;\n");
     out.push_str("  founders: FounderConstructionConfig;\n");
+    out.push_str("  nn_sensing: NnSensingConfig;\n");
     out.push_str("  nn_topology: NnTopologyConstructionConfig;\n");
     out.push_str("}\n\n");
     out.push_str("export interface WorldConfigPreset {\n");

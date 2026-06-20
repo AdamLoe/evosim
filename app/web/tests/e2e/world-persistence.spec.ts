@@ -3,6 +3,10 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
+interface E2EHarness {
+  requestWorldArtifact?: () => Promise<string | null>;
+}
+
 async function readStatus(page: Page): Promise<string> {
   return await page.evaluate(
     () => document.getElementById("perf-status-line")?.textContent ?? "",
@@ -15,14 +19,16 @@ async function readTick(page: Page): Promise<number> {
   return m ? Number(m[1]) : NaN;
 }
 
-// v2.1: the saved-world actions moved from the always-visible top bar into the
-// Menu rail tab. The rail starts collapsed (its tab buttons are display:none
-// until it opens), so open the rail via the ⚙ top-bar button first, then
-// switch to the Menu tab and wait for its buttons to be actionable.
+// The saved-world actions moved into the General rail tab. The rail starts
+// collapsed, so open it via the top-bar hamburger, switch to General, and
+// wait for the Export button to be actionable.
 async function openMenuTab(page: Page): Promise<void> {
   await page.locator("#settings-rail-btn").click();
-  await page.locator('.rail-tab[data-tab="menu"]').click();
-  await expect(page.locator("#world-save-btn")).toBeVisible();
+  await page.evaluate(() => {
+    const btn = document.querySelector<HTMLButtonElement>('.rail-tab[data-tab="general"]');
+    if (btn && !btn.classList.contains("is-active")) btn.click();
+  });
+  await expect(page.locator("#world-export-btn")).toBeVisible();
 }
 
 async function waitForBoot(page: Page): Promise<void> {
@@ -91,41 +97,55 @@ test.afterEach(async ({ page }) => {
   expect(fatal, "no fatal console errors during test").toEqual([]);
 });
 
-test("save, resume, fork, export, and import world artifacts", async ({ page }) => {
+test("export and import world artifacts", async ({ page }) => {
   await page.waitForTimeout(500);
   await openMenuTab(page);
-  await page.locator("#world-save-btn").click();
-  await expect(page.locator("#save-status")).toContainText(/saved t\d+/, { timeout: 10_000 });
-  const saved = await latestSave(page);
-  expect(saved.tick).toBeGreaterThan(0);
-  expect(saved.identity.lineage).toBe("original");
 
+  // Capture current world artifact via the e2e hook (same underlying call as
+  // the Export button, bypassing the file-download UI).
+  const artifactJson = await page.evaluate(async () => {
+    const ns = (window as unknown as { __evosimE2E?: E2EHarness }).__evosimE2E;
+    if (!ns?.requestWorldArtifact) throw new Error("requestWorldArtifact e2e hook not installed");
+    return await ns.requestWorldArtifact();
+  });
+  expect(artifactJson, "world artifact must be non-null").not.toBeNull();
+
+  const savedMeta = await page.evaluate((json: string) => {
+    const parsed = JSON.parse(json) as {
+      state?: { tick?: number };
+      identity?: { lineage?: string; run_id?: string };
+    };
+    return {
+      tick: Number(parsed.state?.tick ?? 0),
+      lineage: parsed.identity?.lineage ?? "",
+      run_id: parsed.identity?.run_id ?? "",
+    };
+  }, artifactJson!);
+  expect(savedMeta.tick).toBeGreaterThan(0);
+  expect(savedMeta.lineage).toBe("original");
+
+  // Export via the Export button (downloads + updates the save-status line).
   await page.locator("#world-export-btn").click();
   await expect(page.locator("#save-status")).toContainText(/exported t\d+/, { timeout: 10_000 });
 
+  // Let the world run further so the tick advances past the captured snapshot.
   await page.waitForTimeout(500);
-  expect(await readTick(page)).toBeGreaterThan(saved.tick);
+  expect(await readTick(page)).toBeGreaterThan(savedMeta.tick);
+
+  // Pause and import the captured artifact — the sim should resume at the
+  // saved tick (within a small tolerance for the boot handshake step).
   await page.locator("#playpause-btn").click();
-  await page.locator("#world-resume-btn").click();
-  await expect(page.locator("#save-status")).toContainText("resumed", { timeout: 15_000 });
-  await waitForBoot(page);
-  expect(await readTick(page)).toBeLessThanOrEqual(saved.tick + 2);
-
-  await page.locator("#world-fork-btn").click();
-  await expect(page.locator("#save-status")).toContainText("forked", { timeout: 15_000 });
-  await page.locator("#world-save-btn").click();
-  await expect(page.locator("#save-status")).toContainText(/saved t\d+/, { timeout: 10_000 });
-  const forked = await latestSave(page);
-  expect(forked.identity.lineage).toBe("fork");
-  expect(forked.identity.parent_run_id).toBe(saved.identity.run_id);
-  expect(forked.identity.run_id).not.toBe(saved.identity.run_id);
-
   const tmp = path.join(os.tmpdir(), `evosim-import-${Date.now()}.json`);
-  await fs.writeFile(tmp, saved.artifactJson, "utf8");
+  await fs.writeFile(tmp, artifactJson!, "utf8");
   await page.locator("#world-import-input").setInputFiles(tmp);
   await expect(page.locator("#save-status")).toContainText(/imported t\d+|resumed/, {
     timeout: 15_000,
   });
   await waitForBoot(page);
-  expect(await readTick(page)).toBeLessThanOrEqual(saved.tick + 3);
+  expect(await readTick(page)).toBeLessThanOrEqual(savedMeta.tick + 3);
+
+  // The import should have written a record to IndexedDB (kind="imported").
+  const imported = await latestSave(page);
+  expect(imported.tick).toBeGreaterThan(0);
+  expect(imported.identity.lineage).toBe("original");
 });

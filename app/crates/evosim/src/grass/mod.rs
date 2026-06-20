@@ -237,7 +237,7 @@ impl DiscTable {
 }
 
 /// v2.0.1 §2: side length (in cells) of an active-frontier tile. 32×32 = 1024
-/// cells/tile; at `grass_dim = 1920` that is 60×60 = 3600 tiles. Chosen to
+/// cells/tile. Chosen to
 /// amortize per-tile bookkeeping while keeping the frontier-only active set small.
 pub const GRASS_TILE_SIZE: usize = 32;
 
@@ -386,11 +386,6 @@ pub struct ScatterParams {
     /// Ring-2 (distance 1.5–2.5 cells) weight. Ring-3 is the remainder
     /// (the disc table normalizes all three, so ring3 need not be stored).
     pub ring2_pct: f32,
-    /// v2.1 P3: live multiplier on every cell's carrying-capacity cap.  At 1.0
-    /// the per-biome caps are unchanged.  Values < 1.0 reduce the effective cap
-    /// so cells saturate at a lower density → less total food → lower equilibrium
-    /// population.  Applied in the scatter kernel as `cap_byte * capacity_scale`.
-    pub capacity_scale: f32,
 }
 
 impl Default for ScatterParams {
@@ -402,8 +397,6 @@ impl Default for ScatterParams {
             spread_amount: GRASS_SPREAD_AMOUNT_DEFAULT,
             ring1_pct: GRASS_SPREAD_RING1_PCT_DEFAULT,
             ring2_pct: GRASS_SPREAD_RING2_PCT_DEFAULT,
-            // v2.1 P3: default 1.0 = unchanged behaviour.
-            capacity_scale: crate::constants::GRASS_CAPACITY_SCALE_DEFAULT,
         }
     }
 }
@@ -1033,10 +1026,7 @@ impl GrassGrid {
     /// resync. [`World::new_with_sliders_topology`] is the authoritative call site.
     ///
     /// # Budget note
-    ///   Default clump_count=40, clump_size=8 cells:
-    ///   disc area ≈ π×8² ≈ 201 cells × 40 clumps = ~8,040 occupied cells,
-    ///   matching the old `GRASS_INITIAL_SEED_COUNT_DEFAULT = 8000` uniform-scatter
-    ///   budget (≤0.22% of a 1920² grid). Clumps that overlap count once.
+    ///   Defaults are intentionally dense; clumps that overlap count once.
     pub fn seed_clumps(&mut self, world_seed: u32, clump_count: u32, clump_size: u32) {
         if clump_count == 0 || clump_size == 0 {
             return;
@@ -1751,9 +1741,6 @@ impl GrassGrid {
         // is byte-identical when no slider has been changed.
         let decay_pct = self.scatter_params.decay_pct;
         let spread_pct = self.scatter_params.spread_pct;
-        // v2.1 P3: carrying-capacity scale.  Applied per-cell in the spread
-        // path: effective_cap = cap[cell] * capacity_scale, clamped [0, 1].
-        let capacity_scale = self.scatter_params.capacity_scale.clamp(0.0, 1.0);
         // Stage-3 fix (zero-amount gate): do NOT apply .max(1) here. A slider at
         // 0.0 encodes to byte 0; the tile_body gates the roll when decay_byte==0
         // or spread_byte==0 so a zero-amount setting fires NO effect. The .max(1)
@@ -1804,7 +1791,6 @@ impl GrassGrid {
                 tick,
                 decay_pct,
                 spread_pct,
-                capacity_scale,
                 decay_byte,
                 spread_byte,
             );
@@ -1919,9 +1905,7 @@ impl GrassGrid {
                             };
                             if gx >= 0 {
                                 let tcell = gy as usize * dim + gx as usize;
-                                // v2.1 P3: apply capacity_scale to limit effective cap.
-                                let cap_byte =
-                                    encode_density((cap[tcell] * capacity_scale).clamp(0.0, 1.0));
+                                let cap_byte = encode_density(cap[tcell].clamp(0.0, 1.0));
                                 // S4: density-scaled add (variant A). Scales the add
                                 // amount by the source cell's byte fraction (s/255).
                                 // Floor to 1 once the effect is active (same as
@@ -2069,7 +2053,6 @@ impl GrassGrid {
         tick: u32,
         decay_pct: f32,
         spread_pct: f32,
-        capacity_scale: f32,
         decay_byte: u8,
         spread_byte: u8,
     ) {
@@ -2147,9 +2130,7 @@ impl GrassGrid {
                             };
                             if gx >= 0 {
                                 let tcell = gy as usize * dim + gx as usize;
-                                let cap_byte = encode_density(
-                                    (self.capacity[tcell] * capacity_scale).clamp(0.0, 1.0),
-                                );
+                                let cap_byte = encode_density(self.capacity[tcell].clamp(0.0, 1.0));
                                 if cap_byte > 0 {
                                     let density_add_byte =
                                         ((spread_byte as u32 * s as u32 + 127) / 255).max(1) as u16;
@@ -2190,7 +2171,7 @@ impl GrassGrid {
             let base = prev[c];
             let after_decay = base.saturating_sub(decay);
             let next = if add > 0 {
-                let cap_byte = encode_density((self.capacity[c] * capacity_scale).clamp(0.0, 1.0));
+                let cap_byte = encode_density(self.capacity[c].clamp(0.0, 1.0));
                 after_decay.saturating_add(add).min(cap_byte)
             } else {
                 after_decay

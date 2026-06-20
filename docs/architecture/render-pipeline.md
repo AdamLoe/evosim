@@ -7,10 +7,10 @@ The WebGL2 renderer, the camera, and the per-frame SAB snapshot read.
 A single instanced WebGL2 draw call for every creature body (plus a
 second instanced pass for the rare highlight rings), one full-screen
 quad sampling an **R8 grass density** texture, one full-screen quad
-sampling an **R8 biome-id** texture drawn UNDER the grass, and one
-`LINE_LOOP` for the world-bounds frame. The render loop runs on the main
-thread, owns no wasm handle, and reads the live snapshot SAB slot directly
-via typed arrays — no copy, no postMessage.
+sampling an **R8 no-grass-zone id** texture drawn UNDER the grass, and
+triangle-rectangle map borders for every visible repeat tile. The render
+loop runs on the main thread, owns no wasm handle, and reads the live
+snapshot SAB slot directly via typed arrays — no copy, no postMessage.
 
 Both the grass and biome textures are fixed **4096×4096 R8** allocations
 (`GRASS_LOD_BUDGET_AXIS = 4096`, single-sourced in Rust via `gen_bindings` →
@@ -20,8 +20,8 @@ via `texSubImage2D`, then applies a UV transform (`u_uv_scale`/`u_uv_offset`)
 to map the world-space quad into that window. The sim worker selects the
 pyramid LOD level and window origin and publishes them in the snapshot header
 (bytes [32..64)); the renderer reads them as `WindowMetadata` each frame. At
-the default scale (`grass_dim = 1920 < 4096`) the window equals the full
-field and the upload is byte-identical to a full-field path.
+the default construction scale (`grass_dim = 480 < 4096`) the window equals
+the full field and the upload is byte-identical to a full-field path.
 
 **LOD selection in `write_snapshot`** happens in one of two paths keyed on
 `grass_lod_step` (slider idx 63, live, default 0 = Auto):
@@ -58,8 +58,9 @@ is correctly aspect-matched.
   copying.
 - The outer `frame` RAII span and the inner `frame.render_world`,
   `frame.render_world.grass`, `frame.render_world.creatures` spans.
-- The camera helpers (`makeCamera`, `clampCamera`, `worldToScreen`,
-  `PX_PER_SIZE`) and pointer-driven pan/zoom controls.
+- The camera helpers (`makeCamera`, `clampCamera`, `visibleRepeatTiles`,
+  `wrapWorldCoord`, `worldToScreen`, `PX_PER_SIZE`) and pointer-driven
+  pan/zoom controls.
 - The `grass_cell_size` parameter in the UV transform (`cellSizeL =
   grass_cell_size × 2^mipLevel`). This value comes from `boot_ready` so the
   renderer correctly handles non-default `grass_size` settings without
@@ -90,7 +91,11 @@ RAF callback (wrapped in `span("frame")`):
   1. early-return if SAB handles aren't bound yet OR slotLayout is null
      (e.g., during restart). `slotLayout` is built once per boot from the
      boot-time `grass_dim` (see shared-memory-and-protocol.md).
-  2. write camera SAB lanes, then read `CTRL_SEQ`.
+  2. clamp the camera for the current Display repeat mode, write camera SAB
+     lanes, then read `CTRL_SEQ`. When visual repeats are enabled, main writes
+     the camera center folded into `[0, world_size)` so the worker's clipmap
+     window tracks the base map while the renderer keeps the absolute camera
+     center for tile drawing.
      If no new seq, repaint only for paused camera movement.
      If there is a new seq but the configured App FPS interval has not elapsed,
      skip snapshot read/render and do not ack the seq yet.
@@ -165,33 +170,48 @@ source that fills the word changed (from genome-derived to
 lineage-hue-derived). No renderer change is needed or expected.
 
 Then one `gl.drawArraysInstanced(TRIANGLE_STRIP, 0, 4, bodyCount)` call
-covers every visible body (including wrapped ghost copies). Bodies are
+covers every visible body instance, including repeated visual tile copies.
+Bodies are
 filled discs; the `disc` fragment shader switches to an annulus when
 `v_inner_px > 0` (highlight pass), and to a **radial-shaded ~1px point** when
 `v_inner_px < 0`.
 
-### Survey camera, sub-pixel points, wrap-aware draw
+### Repeat camera, survey points, tile-aware draw
 
-- **Sub-pixel → radial-shaded dot.** At survey zoom a body's on-screen
-  radius drops below 1px. When `radiusWorld × PX_PER_SIZE × zoom < 1`
-  (raw radius < `POINT_THRESHOLD_PX = 1.0`) the pack emits `radiusPx = 1`
-  and the `inner_px = -1` sentinel; `DISC_FS` renders a radial gradient
-  (`shade = mix(1.3, 0.6, r)`, bright centre → dark edge, alpha hardcoded 1.0)
-  — no AA, no outline ring. Action-tint blends the dot color toward the active
-  flash action color when `flashTicks > 0` (using existing `packed_u32` data).
-  No halo on bottom-band dots (`HALO_ALPHA_BOTTOM = 0.0`).
-- **Wrap-aware cull + draw.** When `wrap_world` is on and the camera
-  frustum straddles a seam (`minX < 0`, `maxX > world_size`, and the y
-  equivalents), the pack builds the small per-axis offset set
-  `{-W, 0, +W}` and emits each in-frustum ghost copy. A creature near
-  `x = 0` thus also renders at `x = world_size + δ`. The trail pass uses
-  the same offsets and skips any segment whose displacement exceeds
-  `world_size / 2` (a wrapped step) so a seam crossing doesn't streak the
-  whole world. The highlight-ring pass mirrors the same offset logic.
-- **Min-zoom + default zoom.** `clampCamera` floors zoom at `MIN_ZOOM =
-  0.04` (px/world-unit) so a ~384px viewport frames the entire 9600u
-  world from one view; `makeCamera` opens at `zoom = 1.0` (≈1500u across
-  a typical ~1500px viewport), centered on `world_size / 2`.
+- **Survey dots.** At survey zoom the pack emits radial-shaded dots with
+  `inner_px = -1`. The formula is
+  `max(creatureSurveyDotMinPx, rawRadiusPx × creatureSurveyDotScale)`,
+  clamped in the renderer to the Settings ranges (`0.1..8px` and `1..32x`).
+  Defaults (`1.0px`, `1.0x`) preserve the old 1px bottom-band behavior. From
+  raw radius 1px to 4px, the rendered radius blends back to true body radius
+  before the full body-disc branch takes over, so zooming through the
+  point/disc boundary has no hard size jump. Action-tint blends the dot color
+  toward the active flash action color when `flashTicks > 0`; bottom-band dots
+  have no halo (`HALO_ALPHA_BOTTOM = 0.0`).
+- **Frustum-derived visual tiles.** The Display setting `visualRepeats`
+  controls repeated rendering independently of the sim-side `wrapWorld`
+  physics setting. When it is on, `visibleRepeatTiles` derives every map tile
+  offset intersecting the current camera frustum; there is no fixed 7x7 crop.
+  When it is off, the tile list is only `{0,0}` and `clampCamera` keeps the
+  center inside the runtime map.
+- **Shared tile offsets.** Biome, grass, map borders, bodies, trails, action
+  flashes, and inspector highlight rings all consume the same tile list.
+  The terrain passes draw the same world quad per tile; creature/trail/ring
+  passes add the tile offset to each instance. Trail streak suppression still
+  keys off sim-side `wrap_world` so a wrapped physics step does not draw a
+  full-world trail line.
+- **Initial fit + min zoom.** `makeCamera` starts centered on the runtime map
+  with one full map occupying about 80% of the limiting viewport axis. With
+  visual repeats enabled, this leaves adjacent tiles visible at first paint.
+  The live Display setting `maxZoomOutMaps` controls the zoom-out floor as the
+  number of map widths visible on the limiting viewport axis (default 8,
+  clamped 2..64). Repeat coverage still comes from the tile list; the slider
+  only controls how far the camera may zoom out.
+- **Repeat borders.** Map borders are drawn for every visible tile as four
+  triangle rectangles, not WebGL line primitives, so pixel thickness is stable
+  across browsers. Live Display settings control `repeatBorderMinPx`,
+  `repeatBorderScale`, and `repeatBorderOpacity`; defaults (`1px`, `0x`,
+  `0.25`) preserve the old thin outline.
 
 ## Creature appearance
 
@@ -206,9 +226,11 @@ the `inner_px` sentinel (packed as `v_radii_px.y`):
   (`MID_THRESHOLD_PX = 4 px` to `NEAR`) → slim ring (`0.993..1.0`); below mid →
   ring suppressed.
 - **Radial-shaded dot branch** (`inner_px = -1`, bottom band: raw radius < 1 px):
-  a radial gradient (`shade = mix(1.3, 0.6, r)`, bright centre → dark edge),
-  alpha hardcoded to 1.0, no AA disc and no outline ring, so faction
-  territories stay legible at survey zoom.
+  a radial gradient (`shade = mix(1.3, 0.6, r)`, bright centre -> dark edge),
+  alpha hardcoded to 1.0, no AA disc and no outline ring. The JS pack chooses
+  the dot radius from `creatureSurveyDotMinPx` and
+  `creatureSurveyDotScale`, so faction territories stay tunable at survey
+  zoom without changing the snapshot layout.
 
 **Halo (per-instance LOD multiplier).** A separate `HALO_VS`/`HALO_FS` program
 issues a second instanced draw against the SAME body instance buffer. Peak
@@ -334,15 +356,15 @@ guard against `UNPACK_ROW_LENGTH` latent footguns). `UNPACK_ALIGNMENT` is
 set to 1 at init; R8 is a normalized unorm format so the shader's
 `texture(...).r` returns 0..1 with no shader rescale.
 
-**Biome.** The per-slot biome window (mode-downsampled, same `win_w × win_h`
+**No-grass-zone layer.** The per-slot zone window (mode-downsampled, same `win_w × win_h`
 as grass) is appended immediately after the grass region in the slot
 (`biomeWinOffset`). The renderer uploads it with `texSubImage2D` only
-when the biome upload key changes: mip/window origin and dimensions,
+when the upload key changes: mip/window origin and dimensions,
 published texture dimensions, wrap mode, budget axis, or wasm-memory
-buffer identity after restart. The biome grid is static, so identical
+buffer identity after restart. The zone grid is static, so identical
 metadata means the already-uploaded texture bytes are still valid. The
-biome texture uses `NEAREST` filtering so each cell renders as a flat
-color. For biome semantics (id-to-type mapping), see
+texture uses `NEAREST` filtering so each cell renders as a flat
+color. For no-grass-zone semantics (id-to-capacity mapping), see
 [`architecture/biome.md`](biome.md).
 
 **LOD level.** The sim's Rust worker computes the pyramid level and window
@@ -350,9 +372,10 @@ origin each tick (`write_snapshot` reads the camera SAB lanes and publishes
 the window via `budget_axis = 4096`, margin 1.5×,
 `level = floor(log2(visible_cell_span / budget_axis))`). After computing the
 float level, `lod_bias` (clamped ≥ 0) is subtracted to allow finer-detail
-nudging. At default scale (`grass_dim = 1920`) the window equals the full
-field and the upload is byte-identical to a full-field path (1920² bytes ≈
-3.7 MB). The LOD level is carried in `windowMeta.mipLevel` (snapshot header
+nudging. At default construction scale (`world_size = 9600`,
+`grass_cell_size = 20`, `grass_dim = 480`) the window equals the full field
+and the upload is byte-identical to a full-field path. The LOD level is
+carried in `windowMeta.mipLevel` (snapshot header
 bytes [32..36)).
 
 **UV transform.** Both grass and biome programs receive the same two uniforms
@@ -364,8 +387,8 @@ u_uv_scale  = world_size / (grass_cell_size × 2^mipLevel × BUDGET_AXIS)
 u_uv_offset = -vec2(winOriginX, winOriginY) / BUDGET_AXIS
 ```
 
-At default scale (mip=0, origin=(0,0), win=1920, grass_cell_size=5.0):
-`scale = 9600 / (5 × 1 × 4096) ≈ 0.46875` and `offset = (0,0)`.
+At default scale (mip=0, origin=(0,0), win=480, grass_cell_size=20):
+`scale = 9600 / (20 × 1 × 4096) ≈ 0.1171875` and `offset = (0,0)`.
 Toroidal seam windows use signed logical `winOriginX/Y`; the Rust copy path
 normalizes that origin modulo the level dimensions before uploading bytes.
 `u_uv_offset` is **constant across all ghost copies** — only the camera
@@ -389,7 +412,7 @@ the upload is a complete toroidal period — the fragment shader wraps the
 sample UV with `mod(v_uv, win_dim / BUDGET_AXIS)` before every tap (crisp,
 bicubic, and blur for grass; the single fetch for biome). Slice windows
 (zoomed in, never tiled) pass `u_uv_wrap = 0` and keep the plain clamp path,
-which is correct inside a single world view. Without this wrap, biome lakes
+which is correct inside a single world view. Without this wrap, zone patches
 and grass clamp into hard rectangular blocks at each world-tile boundary when
 zoomed out and panned (the centered case happened to have `winOrigin = 0` and
 hid the bug).
@@ -436,24 +459,25 @@ fixed level to avoid it.) Per-mip trilinear density blending is still reserved v
 If `settings.showGrass === false` the grass upload + draw is skipped
 entirely — at high cell counts this is a real perf win.
 
-## Biome layer
+## No-grass-zone layer
 
 A second full-screen world-quad drawn **UNDER the grass**, before it, so
-grass density brightens green on top. It samples an **R8 biome-id texture**
+grass density brightens green on top. It samples an **R8 zone-id texture**
 with **NEAREST** filtering so each cell is a flat color. The biome data is
 carried as a windowed clipmap in the per-slot biome window (mode-downsampled, same
 `win_w × win_h` as the grass window); the renderer uploads it via
 `texSubImage2D` when the biome metadata key or wasm-memory buffer changes,
-using the same UV transform as grass. Biome tint therefore tracks the grass
-window at every LOD level. For biome id-to-color mapping and semantics, see
+using the same UV transform as grass. Zone tint therefore tracks the grass
+window at every LOD level. For zone id-to-capacity mapping and semantics, see
 [`architecture/biome.md`](biome.md).
 
 The fragment alpha is the `u_opacity` uniform (the live **`biomeOpacity`**
-"World opacity" Display setting, default 1.0). The biome quad is the bottom
+"Zone opacity" Display setting, default 0.0). The zone quad is the bottom
 layer drawn over the cleared canvas with the standard `SRC_ALPHA,
-ONE_MINUS_SRC_ALPHA` blend, so `biomeOpacity < 1` fades the terrain toward
-the canvas background; grass (with its own `grassOpacity`) still paints
-fully on top.
+ONE_MINUS_SRC_ALPHA` blend; grass (with its own `grassOpacity`) still paints
+on top. If the world was constructed with no-grass zones disabled, the
+published zone texture is all plains, so opacity cannot reveal a disabled
+dead-zone pattern.
 
 ### Grass shading
 
@@ -466,11 +490,11 @@ fully on top.
   `getComputedStyle` and cached against the previous string so we
   re-parse only on theme swap.
 - `u_time` (float) = `performance.now() / 1000`. Drives a procedural
-  sin-wave term `wave = 0.08 * sin(uv.x * 18 + t * 0.6) + 0.06 *
-  sin(uv.y * 22 - t * 0.4)`. The wave multiplies the sampled density
-  before the alpha output (`d2 = clamp(d + wave * d, 0, 1)`) so empty
-  cells stay empty — the discard early-out and the multiplication
-  guarantee the wave term can't paint outside grass.
+  sin-wave term. When the clipmap window is reused as a full-world repeat
+  period, the wave and optional grass texture noise use tile-periodic UVs
+  rather than raw world coordinates so repeated terrain does not show a
+  shader-generated seam. The wave multiplies the sampled density before alpha
+  output, so empty cells stay empty.
 
 ## Code anchors
 
@@ -482,8 +506,8 @@ fully on top.
   `readWindowMetadata`, `makeSlotLayout`, `grassOffset`, `biomeWinOffset`,
   `SNAPSHOT_HEADER_BYTES`, `CTRL_CAMERA_CX_BITS`/`CTRL_CAMERA_CY_BITS`/
   `CTRL_CAMERA_ZOOM_BITS`/`CTRL_CAMERA_VIEWPORT_W`/`CTRL_CAMERA_VIEWPORT_H`.
-- `render/scene.ts` → `Camera`, `PX_PER_SIZE`, `MIN_ZOOM`/`MAX_ZOOM`,
-  `makeCamera`, `clampCamera`, `worldToScreen`.
+- `render/scene.ts` → `Camera`, `PX_PER_SIZE`, `DEFAULT_MAX_ZOOM_OUT_MAPS`,
+  `MAX_ZOOM`, `makeCamera`, `clampCamera`, `minCameraZoom`, `worldToScreen`.
 - `render/camera.ts` → `attachCameraControls`.
 - `web/src/main.ts` → the RAF `frame` callback, camera SAB lane writes,
   `getLatestWindowMetadata`, and `spawnSimWorker`'s SAB binding.

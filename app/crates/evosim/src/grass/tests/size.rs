@@ -118,7 +118,7 @@ fn world_rebuilds_cleanly_at_multiple_cell_sizes() {
     }
 }
 
-/// Default cell size (5.0) produces the historically-documented 1920² grid at 9600u.
+/// The fallback cell size produces the canonical 1920² grid at 9600u.
 #[test]
 fn default_cell_size_produces_canonical_grid() {
     let dims = WorldDims::from_world_size(WORLD_SIZE_DEFAULT, true);
@@ -128,7 +128,7 @@ fn default_cell_size_produces_canonical_grid() {
         1920 * 1920,
         "default cell count must be 1920²"
     );
-    assert_eq!(dims.grass_cell_size, 5.0, "default cell size must be 5.0");
+    assert_eq!(dims.grass_cell_size, 5.0, "fallback cell size must be 5.0");
 }
 
 /// Changing `grass_size` at construction yields a different `grass_dim` and

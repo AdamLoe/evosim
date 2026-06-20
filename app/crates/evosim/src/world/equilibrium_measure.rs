@@ -49,8 +49,6 @@ fn measure_world(seed: &str) -> World {
             crowding_radius: CROWDING_RADIUS_DEFAULT,
             starvation_threshold: STARVATION_THRESHOLD_DEFAULT,
             starvation_drain_rate: STARVATION_DRAIN_RATE_DEFAULT,
-            grass_capacity_scale: GRASS_CAPACITY_SCALE_DEFAULT,
-            grass_regrowth_rate: GRASS_REGROWTH_RATE_DEFAULT,
             ..Default::default()
         },
     )

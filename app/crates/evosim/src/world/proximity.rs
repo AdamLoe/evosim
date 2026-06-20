@@ -27,47 +27,22 @@ use crate::creature::CreatureSoA;
 use crate::grass::GrassGrid;
 use crate::grid::SpatialGrid;
 
-/// Precomputed cell-offset starburst for `compute_creature_proximity_sectors`.
-///
-/// Each entry is `(dxo, dyo, min_dist_sq)` where:
-///   - `(dxo, dyo)` is an integer cell offset from the creature's home hash
-///     cell, both in `[-MAX_OFFSET, MAX_OFFSET]`.
-///   - `min_dist_sq` is the squared *lower bound* on the world-unit distance
-///     from the creature to anything in that cell. Specifically:
-///     min_dist = sqrt((max(0, |dxo|-1) * HASH_CELL)² +
-///     (max(0, |dyo|-1) * HASH_CELL)²)
-///     The `-1` accounts for the creature sitting anywhere inside its home
-///     cell — the home cell and any 8-neighbor overlap on at least one axis.
-///
-/// The list is sorted by `min_dist_sq` ascending, with `(|dxo|, |dyo|, dxo,
-/// dyo)` as the deterministic tiebreak. Cells whose `min_dist >= PROXIMITY_RANGE`
-/// are excluded — they can't contribute.
-///
-/// The walk consumer (creature proximity) iterates this list in order,
-/// maintains per-sector `best_intensity`, and breaks when every sector has
-/// been touched and the current cell's max possible intensity (`1 -
-/// min_dist/range`) is `≤ min(best_intensity)`.
 fn proximity_starburst() -> &'static [(i32, i32, f32)] {
     static CELL: OnceLock<Vec<(i32, i32, f32)>> = OnceLock::new();
     CELL.get_or_init(|| {
         let range = PROXIMITY_RANGE;
-        // Max cell offset whose lower-bound min_dist can still be < range.
-        // min_dist ≥ (|dxo| - 1) * HASH_CELL when on-axis, so the largest
-        // useful |dxo| is `ceil(range / HASH_CELL) + 1`.
         let max_off = ((range / HASH_CELL).ceil() as i32) + 1;
         let mut out: Vec<(i32, i32, f32)> =
             Vec::with_capacity(((2 * max_off + 1) * (2 * max_off + 1)) as usize);
-        let cell = HASH_CELL;
         let range2 = range * range;
         for dyo in -max_off..=max_off {
             for dxo in -max_off..=max_off {
-                let mdx = (dxo.unsigned_abs() as i32 - 1).max(0) as f32 * cell;
-                let mdy = (dyo.unsigned_abs() as i32 - 1).max(0) as f32 * cell;
+                let mdx = (dxo.unsigned_abs() as i32 - 1).max(0) as f32 * HASH_CELL;
+                let mdy = (dyo.unsigned_abs() as i32 - 1).max(0) as f32 * HASH_CELL;
                 let min_dist_sq = mdx * mdx + mdy * mdy;
-                if min_dist_sq >= range2 {
-                    continue;
+                if min_dist_sq < range2 {
+                    out.push((dxo, dyo, min_dist_sq));
                 }
-                out.push((dxo, dyo, min_dist_sq));
             }
         }
         out.sort_by(|a, b| {
@@ -82,12 +57,113 @@ fn proximity_starburst() -> &'static [(i32, i32, f32)] {
     })
 }
 
+fn compute_creature_proximity_sectors_default(
+    x: f32,
+    y: f32,
+    self_id: usize,
+    grid: &SpatialGrid,
+    creatures: &CreatureSoA,
+    out: &mut [f32; 8],
+) {
+    *out = [0.0f32; 8];
+    let range = PROXIMITY_RANGE;
+    let inv_range = 1.0 / range;
+    let range2 = range * range;
+    let inv_cell = 1.0 / HASH_CELL;
+    let dim = grid.dims.hash_dim as i32;
+    let wrap = grid.dims.wrap_world;
+    let world_size = grid.dims.world_size;
+    let half_world = world_size * 0.5;
+    let ix0 = (x * inv_cell).floor() as i32;
+    let iy0 = (y * inv_cell).floor() as i32;
+    let mut best = [0.0f32; 8];
+    let mut sectors_hit: u32 = 0;
+    let mut min_best: f32 = 0.0;
+
+    for &(dxo, dyo, min_dist_sq) in proximity_starburst() {
+        let max_intensity = 1.0 - min_dist_sq.sqrt() * inv_range;
+        if max_intensity <= 0.0 {
+            break;
+        }
+        if sectors_hit == 8 && max_intensity <= min_best {
+            break;
+        }
+        let ix_raw = ix0 + dxo;
+        let iy_raw = iy0 + dyo;
+        let (ix, iy) = if wrap {
+            (ix_raw.rem_euclid(dim), iy_raw.rem_euclid(dim))
+        } else {
+            if ix_raw < 0 || ix_raw >= dim || iy_raw < 0 || iy_raw >= dim {
+                continue;
+            }
+            (ix_raw, iy_raw)
+        };
+        let c = iy as usize * grid.dims.hash_dim + ix as usize;
+        let s = grid.starts[c] as usize;
+        let e = grid.starts[c + 1] as usize;
+        for &idx_u32 in &grid.indices[s..e] {
+            let j = idx_u32 as usize;
+            if j == self_id {
+                continue;
+            }
+            let mut dx = creatures.x[j] - x;
+            let mut dy = creatures.y[j] - y;
+            if wrap {
+                if dx > half_world {
+                    dx -= world_size;
+                } else if dx < -half_world {
+                    dx += world_size;
+                }
+                if dy > half_world {
+                    dy -= world_size;
+                } else if dy < -half_world {
+                    dy += world_size;
+                }
+            }
+            let d2 = dx * dx + dy * dy;
+            if d2 > range2 {
+                continue;
+            }
+            let intensity = 1.0 - d2.sqrt() * inv_range;
+            if intensity <= 0.0 {
+                continue;
+            }
+            let (primary, w) = sector_of(dx, dy);
+            let adj = adjacent_sector(dx, dy, primary);
+            let p_idx = primary as usize;
+            let a_idx = adj as usize;
+            let p_val = intensity * w;
+            let a_val = intensity * (1.0 - w);
+            if p_val > best[p_idx] {
+                if best[p_idx] == 0.0 {
+                    sectors_hit += 1;
+                }
+                best[p_idx] = p_val;
+            }
+            if a_val > best[a_idx] {
+                if best[a_idx] == 0.0 {
+                    sectors_hit += 1;
+                }
+                best[a_idx] = a_val;
+            }
+        }
+        if sectors_hit == 8 {
+            min_best = best
+                .iter()
+                .copied()
+                .fold(best[0], |acc, v| if v < acc { v } else { acc });
+        }
+    }
+
+    *out = best;
+}
+
 /// Half-cell offset window used by `build_sector_lut`. The LUT covers integer
 /// cell offsets in `-LUT_RADIUS..=+LUT_RADIUS` along each axis.
 ///
-/// v2.0 Wave 1a: recomputed for the 5u grass cell + the raised
-/// `GRASS_PROXIMITY_RANGE = 20`: `ceil(20 / 5) = 4` cells. (Was 16 at the old
-/// 1.25u cell + 8u range.) The grass-sector scan asserts `r_cells <= LUT_RADIUS`.
+/// v2.0 Wave 1a: recomputed from the fallback grass cell + proximity range.
+/// With `GRASS_PROXIMITY_RANGE = 20` and `GRASS_CELL_SIZE = 5`, this is
+/// `ceil(20 / 5) = 4` cells.
 /// `f32::ceil` isn't const, so the value is pinned literally and checked below.
 pub(crate) const LUT_RADIUS: i32 = 4;
 // Keep the literal in lockstep with the proximity range / cell size it derives
@@ -96,7 +172,7 @@ const _: () = assert!(
     LUT_RADIUS as usize == (GRASS_PROXIMITY_RANGE as usize).div_ceil(GRASS_CELL_SIZE as usize),
     "LUT_RADIUS must equal ceil(GRASS_PROXIMITY_RANGE / GRASS_CELL_SIZE)"
 );
-/// LUT side length (`2*LUT_RADIUS + 1 = 33`).
+/// LUT side length (`2*LUT_RADIUS + 1`).
 pub(crate) const LUT_DIM: usize = (LUT_RADIUS as usize) * 2 + 1;
 
 /// Saturation constant for `compute_grass_density_sectors`. Tuned so a full
@@ -223,123 +299,63 @@ pub(crate) fn compute_creature_proximity_sectors(
     self_id: usize,
     grid: &SpatialGrid,
     creatures: &CreatureSoA,
+    range: f32,
     out: &mut [f32; 8],
 ) {
+    if (range - PROXIMITY_RANGE).abs() <= f32::EPSILON {
+        compute_creature_proximity_sectors_default(x, y, self_id, grid, creatures, out);
+        return;
+    }
     *out = [0.0f32; 8];
-    let range = PROXIMITY_RANGE;
+    let range = range.max(1.0).min(grid.dims.world_size * 0.49);
     let inv_range = 1.0 / range;
     let range2 = range * range;
-    let cell = HASH_CELL;
-    let inv_cell = 1.0 / cell;
-    let dim = grid.dims.hash_dim as i32;
     let wrap = grid.dims.wrap_world;
     let world_size = grid.dims.world_size;
     let half_world = world_size * 0.5;
 
-    let ix0 = (x * inv_cell).floor() as i32;
-    let iy0 = (y * inv_cell).floor() as i32;
-
     // Per-sector best intensity found so far.
     let mut best = [0.0f32; 8];
-    // Count of sectors with best > 0. The early-bail condition needs every
-    // sector to have at least one hit before it can fire.
-    let mut sectors_hit: u32 = 0;
-    // Smallest best[] value among sectors we've already lit; any cell whose
-    // max-achievable intensity is ≤ this can't improve any sector once all 8
-    // are lit. Maintained incrementally so the per-cell test is one f32 cmp.
-    let mut min_best: f32 = 0.0;
-
-    for &(dxo, dyo, min_dist_sq) in proximity_starburst() {
-        // Max intensity achievable from any creature in this cell.
-        // = 1 - min_dist/range; once that ≤ 0 the rest of the starburst is
-        // also out of range (offsets are sorted ascending by min_dist).
-        let min_dist = min_dist_sq.sqrt();
-        let max_intensity = 1.0 - min_dist * inv_range;
-        if max_intensity <= 0.0 {
-            break;
+    grid.for_each_in_radius(x, y, range, |j| {
+        if j == self_id {
+            return;
         }
-        // Once every sector is lit AND no further cell can beat the worst
-        // sector, we're done.
-        if sectors_hit == 8 && max_intensity <= min_best {
-            break;
-        }
-
-        let ix_raw = ix0 + dxo;
-        let iy_raw = iy0 + dyo;
-        // Walled: skip out-of-bounds cells. Toroidal: fold the cell across the
-        // seam so the home-cell-relative starburst still lands in a real cell.
-        let (ix, iy) = if wrap {
-            (ix_raw.rem_euclid(dim), iy_raw.rem_euclid(dim))
-        } else {
-            if ix_raw < 0 || ix_raw >= dim || iy_raw < 0 || iy_raw >= dim {
-                continue;
+        let mut dx = creatures.x[j] - x;
+        let mut dy = creatures.y[j] - y;
+        if wrap {
+            if dx > half_world {
+                dx -= world_size;
+            } else if dx < -half_world {
+                dx += world_size;
             }
-            (ix_raw, iy_raw)
-        };
-        let c = iy as usize * grid.dims.hash_dim + ix as usize;
-        let s = grid.starts[c] as usize;
-        let e = grid.starts[c + 1] as usize;
-        for &idx_u32 in &grid.indices[s..e] {
-            let j = idx_u32 as usize;
-            if j == self_id {
-                continue;
-            }
-            let mut dx = creatures.x[j] - x;
-            let mut dy = creatures.y[j] - y;
-            // Toroidal minimum-image: take the short way around each axis so a
-            // neighbor just over the seam reads as close, not a full world away.
-            if wrap {
-                if dx > half_world {
-                    dx -= world_size;
-                } else if dx < -half_world {
-                    dx += world_size;
-                }
-                if dy > half_world {
-                    dy -= world_size;
-                } else if dy < -half_world {
-                    dy += world_size;
-                }
-            }
-            let d2 = dx * dx + dy * dy;
-            if d2 > range2 {
-                continue;
-            }
-            let d = d2.sqrt();
-            let intensity = 1.0 - d * inv_range;
-            if intensity <= 0.0 {
-                continue;
-            }
-            let (primary, w) = sector_of(dx, dy);
-            let adj = adjacent_sector(dx, dy, primary);
-            let p_val = intensity * w;
-            let a_val = intensity * (1.0 - w);
-            let p_idx = primary as usize;
-            let a_idx = adj as usize;
-            if p_val > best[p_idx] {
-                if best[p_idx] == 0.0 {
-                    sectors_hit += 1;
-                }
-                best[p_idx] = p_val;
-            }
-            if a_val > best[a_idx] {
-                if best[a_idx] == 0.0 {
-                    sectors_hit += 1;
-                }
-                best[a_idx] = a_val;
+            if dy > half_world {
+                dy -= world_size;
+            } else if dy < -half_world {
+                dy += world_size;
             }
         }
-
-        // Recompute min_best lazily: only matters once we're trying to bail.
-        if sectors_hit == 8 {
-            let mut mb = best[0];
-            for &v in &best[1..] {
-                if v < mb {
-                    mb = v;
-                }
-            }
-            min_best = mb;
+        let d2 = dx * dx + dy * dy;
+        if d2 > range2 {
+            return;
         }
-    }
+        let d = d2.sqrt();
+        let intensity = 1.0 - d * inv_range;
+        if intensity <= 0.0 {
+            return;
+        }
+        let (primary, w) = sector_of(dx, dy);
+        let adj = adjacent_sector(dx, dy, primary);
+        let p_val = intensity * w;
+        let a_val = intensity * (1.0 - w);
+        let p_idx = primary as usize;
+        let a_idx = adj as usize;
+        if p_val > best[p_idx] {
+            best[p_idx] = p_val;
+        }
+        if a_val > best[a_idx] {
+            best[a_idx] = a_val;
+        }
+    });
 
     *out = best;
 }
@@ -353,10 +369,11 @@ pub(crate) fn compute_grass_density_sectors(
     y: f32,
     grass: &GrassGrid,
     sector_lut: &[(u8, u8, f32)],
+    range: f32,
     out: &mut [f32; 8],
 ) {
     *out = [0.0f32; 8];
-    let range = GRASS_PROXIMITY_RANGE;
+    let range = range.max(1.0).min(grass.dims.world_size * 0.49);
     let range2 = range * range;
     // v2.0.4 S2: use the construction-time cell size from dims.
     let cell = grass.dims.grass_cell_size;
@@ -370,15 +387,8 @@ pub(crate) fn compute_grass_density_sectors(
 
     let cx_cell = (x * inv_cell).floor() as i32;
     let cy_cell = (y * inv_cell).floor() as i32;
-    // The farthest in-range cell is at offset ≤ LUT_RADIUS; offsets beyond are
-    // strictly past `range` and culled by `d2 > range2`. Walked by *relative*
-    // offset (dyo, dxo) so the LUT index is the offset itself; wrap folds the
-    // real cell index across the seam, and the displacement uses minimum-image.
     let r_cells = (range * inv_cell).ceil() as i32;
-    debug_assert!(
-        r_cells <= LUT_RADIUS,
-        "r_cells={r_cells} > LUT_RADIUS={LUT_RADIUS}: bump LUT_RADIUS or shrink range"
-    );
+    let use_lut = (range - GRASS_PROXIMITY_RANGE).abs() <= f32::EPSILON && r_cells <= LUT_RADIUS;
 
     for dyo in -r_cells..=r_cells {
         let iy_raw = cy_cell + dyo;
@@ -435,11 +445,14 @@ pub(crate) fn compute_grass_density_sectors(
             if d2 > range2 {
                 continue;
             }
-            // LUT is indexed by the relative offset; r_cells <= LUT_RADIUS so the
-            // index is always in the ±LUT_RADIUS window.
-            let lut_x = (dxo + LUT_RADIUS) as usize;
-            debug_assert!(lut_x < LUT_DIM && lut_y < LUT_DIM);
-            let (primary, adj, w) = sector_lut[lut_y * LUT_DIM + lut_x];
+            let (primary, adj, w) = if use_lut {
+                let lut_x = (dxo + LUT_RADIUS) as usize;
+                sector_lut[lut_y * LUT_DIM + lut_x]
+            } else {
+                let (primary, w) = sector_of(dx, dy);
+                let adj = adjacent_sector(dx, dy, primary);
+                (primary, adj, w)
+            };
             // 1/d² weight, with a small floor to avoid singularity at d=0.
             let inv_d2 = 1.0 / d2.max(0.25);
             let contribution = d * cell_area * inv_d2;
@@ -479,9 +492,10 @@ pub(crate) fn compute_grass_far_band_sectors(
     x: f32,
     y: f32,
     grass: &GrassGrid,
+    range: f32,
     out: &mut [f32; 8],
 ) {
-    use crate::constants::{GRASS_CELL_SIZE, GRASS_FAR_MIP_LEVEL, GRASS_FAR_SIGHT_RADIUS};
+    use crate::constants::GRASS_FAR_MIP_LEVEL;
     *out = [0.0f32; 8];
 
     let wrap = grass.dims.wrap_world;
@@ -490,7 +504,7 @@ pub(crate) fn compute_grass_far_band_sectors(
     let pyramid = &grass.pyramid;
 
     // The effective cell size at this mip level (each halving doubles cell size).
-    let mip_cell = GRASS_CELL_SIZE * (1usize << GRASS_FAR_MIP_LEVEL) as f32;
+    let mip_cell = grass.dims.grass_cell_size * (1usize << GRASS_FAR_MIP_LEVEL) as f32;
     let (lw, lh) = pyramid.level_dims[GRASS_FAR_MIP_LEVEL];
 
     // The 8 sector sample directions (clockwise from N):
@@ -520,7 +534,7 @@ pub(crate) fn compute_grass_far_band_sectors(
         ), // NW
     ];
 
-    let r = GRASS_FAR_SIGHT_RADIUS;
+    let r = range.max(1.0).min(world_size * 0.49);
 
     for (s, &(dx, dy)) in DIRS.iter().enumerate() {
         // Sample point in world space.
@@ -563,6 +577,7 @@ pub(crate) fn compute_grass_far_band_sectors(
 /// mono-species clump simply never lights the other-species block — the bail
 /// then waits until `max_intensity` falls below the lit same-species sectors,
 /// which it does at range, so the walk still terminates.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn compute_creature_proximity_sectors_species(
     x: f32,
     y: f32,
@@ -570,116 +585,64 @@ pub(crate) fn compute_creature_proximity_sectors_species(
     self_species: u16,
     grid: &SpatialGrid,
     creatures: &CreatureSoA,
+    range: f32,
     out: &mut [f32; 16],
 ) {
     *out = [0.0f32; 16];
-    let range = PROXIMITY_RANGE;
+    let range = range.max(1.0).min(grid.dims.world_size * 0.49);
     let inv_range = 1.0 / range;
     let range2 = range * range;
-    let cell = HASH_CELL;
-    let inv_cell = 1.0 / cell;
-    let dim = grid.dims.hash_dim as i32;
     let wrap = grid.dims.wrap_world;
     let world_size = grid.dims.world_size;
     let half_world = world_size * 0.5;
 
-    let ix0 = (x * inv_cell).floor() as i32;
-    let iy0 = (y * inv_cell).floor() as i32;
-
     // Per-sector best intensity, per block (same / other). 16 channels total.
     let mut best = [0.0f32; 16];
-    let mut sectors_hit: u32 = 0;
-    let mut min_best: f32 = 0.0;
-
-    for &(dxo, dyo, min_dist_sq) in proximity_starburst() {
-        let min_dist = min_dist_sq.sqrt();
-        let max_intensity = 1.0 - min_dist * inv_range;
-        if max_intensity <= 0.0 {
-            break;
+    grid.for_each_in_radius(x, y, range, |j| {
+        if j == self_id {
+            return;
         }
-        // Bail only once ALL 16 sectors are lit AND no further cell can beat the
-        // worst lit sector.
-        if sectors_hit == 16 && max_intensity <= min_best {
-            break;
+        let mut dx = creatures.x[j] - x;
+        let mut dy = creatures.y[j] - y;
+        if wrap {
+            if dx > half_world {
+                dx -= world_size;
+            } else if dx < -half_world {
+                dx += world_size;
+            }
+            if dy > half_world {
+                dy -= world_size;
+            } else if dy < -half_world {
+                dy += world_size;
+            }
         }
-
-        let ix_raw = ix0 + dxo;
-        let iy_raw = iy0 + dyo;
-        let (ix, iy) = if wrap {
-            (ix_raw.rem_euclid(dim), iy_raw.rem_euclid(dim))
+        let d2 = dx * dx + dy * dy;
+        if d2 > range2 {
+            return;
+        }
+        let d = d2.sqrt();
+        let intensity = 1.0 - d * inv_range;
+        if intensity <= 0.0 {
+            return;
+        }
+        let block = if creatures.species_id[j] == self_species {
+            0
         } else {
-            if ix_raw < 0 || ix_raw >= dim || iy_raw < 0 || iy_raw >= dim {
-                continue;
-            }
-            (ix_raw, iy_raw)
+            8
         };
-        let c = iy as usize * grid.dims.hash_dim + ix as usize;
-        let s = grid.starts[c] as usize;
-        let e = grid.starts[c + 1] as usize;
-        for &idx_u32 in &grid.indices[s..e] {
-            let j = idx_u32 as usize;
-            if j == self_id {
-                continue;
-            }
-            let mut dx = creatures.x[j] - x;
-            let mut dy = creatures.y[j] - y;
-            if wrap {
-                if dx > half_world {
-                    dx -= world_size;
-                } else if dx < -half_world {
-                    dx += world_size;
-                }
-                if dy > half_world {
-                    dy -= world_size;
-                } else if dy < -half_world {
-                    dy += world_size;
-                }
-            }
-            let d2 = dx * dx + dy * dy;
-            if d2 > range2 {
-                continue;
-            }
-            let d = d2.sqrt();
-            let intensity = 1.0 - d * inv_range;
-            if intensity <= 0.0 {
-                continue;
-            }
-            // Same-species → block 0 ([0..8)); other-species → block 1 ([8..16)).
-            let block = if creatures.species_id[j] == self_species {
-                0
-            } else {
-                8
-            };
-            let (primary, w) = sector_of(dx, dy);
-            let adj = adjacent_sector(dx, dy, primary);
-            let p_val = intensity * w;
-            let a_val = intensity * (1.0 - w);
-            let p_idx = block + primary as usize;
-            let a_idx = block + adj as usize;
-            if p_val > best[p_idx] {
-                if best[p_idx] == 0.0 {
-                    sectors_hit += 1;
-                }
-                best[p_idx] = p_val;
-            }
-            if a_val > best[a_idx] {
-                if best[a_idx] == 0.0 {
-                    sectors_hit += 1;
-                }
-                best[a_idx] = a_val;
-            }
+        let (primary, w) = sector_of(dx, dy);
+        let adj = adjacent_sector(dx, dy, primary);
+        let p_val = intensity * w;
+        let a_val = intensity * (1.0 - w);
+        let p_idx = block + primary as usize;
+        let a_idx = block + adj as usize;
+        if p_val > best[p_idx] {
+            best[p_idx] = p_val;
         }
-
-        if sectors_hit == 16 {
-            let mut mb = best[0];
-            for &v in &best[1..] {
-                if v < mb {
-                    mb = v;
-                }
-            }
-            min_best = mb;
+        if a_val > best[a_idx] {
+            best[a_idx] = a_val;
         }
-    }
+    });
 
     *out = best;
 }

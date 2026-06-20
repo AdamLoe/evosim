@@ -32,7 +32,7 @@ import {
 } from "../settings";
 import { showToast } from "../toast";
 import { THEMES, applyTheme } from "../themes";
-import { setProfilerVisible } from "./perf-panel";
+import { MAX_MAX_ZOOM_OUT_MAPS, MIN_MAX_ZOOM_OUT_MAPS } from "../render/scene";
 
 // Construction-only sim slider names. Edits land in DevSliders via
 // set_slider so they round-trip through restart, but the active world keeps
@@ -140,6 +140,20 @@ export function getGrassMultisight(): boolean {
   if (v !== undefined) return v !== 0;
   return getSettings().grassMultisight;
 }
+export function getCreatureSectorRange(): number {
+  return settingReaders.get("creatureSectorRange")?.() ?? getSettings().creatureSectorRange;
+}
+export function getGrassSectorRange(): number {
+  return settingReaders.get("grassSectorRange")?.() ?? getSettings().grassSectorRange;
+}
+export function getGrassFarSectorRange(): number {
+  return settingReaders.get("grassFarSectorRange")?.() ?? getSettings().grassFarSectorRange;
+}
+export function getNoGrassZones(): boolean {
+  const v = settingReaders.get("noGrassZones")?.();
+  if (v !== undefined) return v !== 0;
+  return getSettings().noGrassZones;
+}
 // v2.0.4 S2: grass cell size accessor for the boot payload (construction-only).
 export function getGrassSize(): number {
   return widgetReaders.get("grass_size")?.() ?? getSettings().grassSize;
@@ -183,6 +197,7 @@ export function currentWorldConfig(masterSeed: number): WorldConfig {
       clump_count: getGrassClumpCount(),
       clump_size: getGrassClumpSize(),
       multisight: getGrassMultisight(),
+      no_grass_zones: getNoGrassZones(),
     },
     population: {
       founder_count: getFounderCount(),
@@ -198,6 +213,11 @@ export function currentWorldConfig(masterSeed: number): WorldConfig {
     founders: {
       init_graze_boost: getInitGrazeBoost(),
       init_split_boost: getInitSplitBoost(),
+    },
+    nn_sensing: {
+      creature_sector_range: getCreatureSectorRange(),
+      grass_sector_range: getGrassSectorRange(),
+      grass_far_sector_range: getGrassFarSectorRange(),
     },
     nn_topology: {
       hidden_sizes: settings.nnTopology.layerSizes.slice(),
@@ -245,20 +265,9 @@ export function currentSliderState(): Record<string, number> {
   if (!("grass_in_cell_growth_r" in out)) {
     out.grass_in_cell_growth_r = getSettings().grassGrowthR;
   }
-  if (!("crowding_strength" in out)) out.crowding_strength = getSettings().crowdingStrength;
-  if (!("crowding_radius" in out)) out.crowding_radius = getSettings().crowdingRadius;
-  if (!("starvation_threshold" in out)) {
-    out.starvation_threshold = getSettings().starvationThreshold;
-  }
-  if (!("starvation_drain_rate" in out)) {
-    out.starvation_drain_rate = getSettings().starvationDrainRate;
-  }
-  if (!("grass_capacity_scale" in out)) {
-    out.grass_capacity_scale = getSettings().grassCapacityScale;
-  }
-  if (!("grass_regrowth_rate" in out)) {
-    out.grass_regrowth_rate = getSettings().grassRegrowthRate;
-  }
+  // crowding_strength / crowding_radius / starvation_threshold /
+  // starvation_drain_rate are now staged Energy-tab widgets, so they
+  // self-register in `widgetReaders` above — no manual injection needed.
 
   // v1.12: fan persisted mutation buckets into bucket_k_<field> sliders so
   // boot/respawn re-applies the most-recently-saved policy. NN tab widgets
@@ -909,8 +918,8 @@ export function installDevPanel(getBridge: () => SimBridge): void {
   // live at #settings-footer and wire the same Apply/Cancel/Reset semantics.
 
   // ── Display (live) — mounts into #devpanel-display ──
-  // (autoRun moved to top bar's auto-restart icon button in v1.13 Wave 1.)
-  // Profiler visibility: profiler is now a Settings category; no checkbox here.
+  // autoRun lives in the General tab; profiler visibility is owned by the
+  // top-level Profiler rail tab.
   const displayBox = categoryBox("devpanel-display");
   const displaySec = section("Display");
   displaySec.appendChild(makeLiveToggle(
@@ -991,7 +1000,7 @@ export function installDevPanel(getBridge: () => SimBridge): void {
     formatValue: (v) => `${v.toFixed(1)}u`,
   }));
   displaySec.appendChild(makeLiveSlider({
-    label: "World opacity",
+    label: "Zone opacity",
     simName: null,
     settingKey: "biomeOpacity",
     min: 0, max: 1, step: 0.05,
@@ -1012,6 +1021,57 @@ export function installDevPanel(getBridge: () => SimBridge): void {
   //
   // `lodBias` is retained as a secondary nudge knob (active only in Auto mode).
   const lodSec = section("Render / LOD");
+  lodSec.appendChild(makeLiveToggle(
+    {
+      label: "Visual repeats",
+      simName: null,
+      settingKey: "visualRepeats",
+      tooltip: "Repeat the rendered map as camera tiles. Does not change wrap-world physics.",
+    },
+    () => { /* camera + renderer read getSettings() each frame */ },
+  ));
+  lodSec.appendChild(makeLiveSlider({
+    label: "Max zoom out",
+    simName: null,
+    settingKey: "maxZoomOutMaps",
+    min: MIN_MAX_ZOOM_OUT_MAPS, max: MAX_MAX_ZOOM_OUT_MAPS, step: 1,
+    formatValue: (v) => `${v.toFixed(0)} maps`,
+  }));
+  lodSec.appendChild(makeLiveSlider({
+    label: "Survey dot min",
+    simName: null,
+    settingKey: "creatureSurveyDotMinPx",
+    min: 0.1, max: 8, step: 0.1,
+    formatValue: (v) => `${v.toFixed(1)}px`,
+  }));
+  lodSec.appendChild(makeLiveSlider({
+    label: "Survey dot scale",
+    simName: null,
+    settingKey: "creatureSurveyDotScale",
+    min: 1, max: 32, step: 0.5,
+    formatValue: (v) => `${v.toFixed(1)}x`,
+  }));
+  lodSec.appendChild(makeLiveSlider({
+    label: "Border min",
+    simName: null,
+    settingKey: "repeatBorderMinPx",
+    min: 0.1, max: 8, step: 0.1,
+    formatValue: (v) => `${v.toFixed(1)}px`,
+  }));
+  lodSec.appendChild(makeLiveSlider({
+    label: "Border scale",
+    simName: null,
+    settingKey: "repeatBorderScale",
+    min: 0, max: 32, step: 0.5,
+    formatValue: (v) => `${v.toFixed(1)}x`,
+  }));
+  lodSec.appendChild(makeLiveSlider({
+    label: "Border opacity",
+    simName: null,
+    settingKey: "repeatBorderOpacity",
+    min: 0, max: 1, step: 0.05,
+    formatValue: (v) => v.toFixed(2),
+  }));
   // v2.0.6 S10: discrete stepper — select effective grass resolution.
   // Maps to mip levels: 1→L0, 2→L1, 3→L2, 4→L3, 5→L4. Auto uses formula.
   lodSec.appendChild(makeStagedDropdown({
@@ -1076,6 +1136,38 @@ export function installDevPanel(getBridge: () => SimBridge): void {
     nextWorld: true,
   }, {
     onInput: () => updateSplitThresholdCap(),
+  }));
+
+  // v2.1 P3 equilibrium mortality knobs (relocated here from the retired
+  // Equilibrium category). Both crowding and starvation act through extra
+  // per-tick energy drain, so they live with the rest of the energy economy.
+  energySec.appendChild(makeStagedSlider({
+    label: "Crowding strength",
+    simName: "crowding_strength",
+    settingKey: "crowdingStrength",
+    min: 0, max: 0.1, step: 0.001,
+    formatValue: (v) => v.toFixed(3),
+  }));
+  energySec.appendChild(makeStagedSlider({
+    label: "Crowding radius",
+    simName: "crowding_radius",
+    settingKey: "crowdingRadius",
+    min: 0, max: 20, step: 1,
+    formatValue: (v) => v.toFixed(0),
+  }));
+  energySec.appendChild(makeStagedSlider({
+    label: "Starvation threshold",
+    simName: "starvation_threshold",
+    settingKey: "starvationThreshold",
+    min: 0, max: 50, step: 0.5,
+    formatValue: (v) => v.toFixed(1),
+  }));
+  energySec.appendChild(makeStagedSlider({
+    label: "Starvation drain rate",
+    simName: "starvation_drain_rate",
+    settingKey: "starvationDrainRate",
+    min: 0, max: 2.0, step: 0.01,
+    formatValue: (v) => v.toFixed(2),
   }));
   energyBox.appendChild(energySec);
 
@@ -1187,6 +1279,30 @@ export function installDevPanel(getBridge: () => SimBridge): void {
     settingKey: "grassMultisight",
     nextWorld: true,
   }));
+  grassSec.appendChild(makeStagedSlider({
+    label: "Creature sight range",
+    simName: null,
+    settingKey: "creatureSectorRange",
+    min: 5, max: 80, step: 1,
+    formatValue: (v) => `${Math.round(v)}u`,
+    nextWorld: true,
+  }));
+  grassSec.appendChild(makeStagedSlider({
+    label: "Near grass sight range",
+    simName: null,
+    settingKey: "grassSectorRange",
+    min: 5, max: 80, step: 1,
+    formatValue: (v) => `${Math.round(v)}u`,
+    nextWorld: true,
+  }));
+  grassSec.appendChild(makeStagedSlider({
+    label: "Far grass sight range",
+    simName: null,
+    settingKey: "grassFarSectorRange",
+    min: 40, max: 400, step: 5,
+    formatValue: (v) => `${Math.round(v)}u`,
+    nextWorld: true,
+  }));
   // v2.0.4 S2: grass cell size (construction-only — resizes grass_dim + snapshot).
   // Larger cells ⇒ fewer cells ⇒ less grass_step work (cell count ∝ 1/size²).
   // Default 5.0 (1920² at world 9600u). At 10u → 960², at 20u → 480².
@@ -1203,8 +1319,7 @@ export function installDevPanel(getBridge: () => SimBridge): void {
 
   // ── World — mounts into #devpanel-world ──
   const worldBox = categoryBox("devpanel-world");
-  // Construction-only world shape (restart-required, toast on apply) + the
-  // two live biome movement-penalty sliders.
+  // Construction-only world shape and no-grass-zone settings.
   const worldSec = section("World");
   worldSec.appendChild(makeStagedSlider({
     label: "World size",
@@ -1227,6 +1342,13 @@ export function installDevPanel(getBridge: () => SimBridge): void {
     simName: "wrap_world",
     settingKey: "wrapWorld",
     nextWorld: true,
+  }));
+  worldSec.appendChild(makeStagedToggle({
+    label: "No-grass zones",
+    simName: null,
+    settingKey: "noGrassZones",
+    nextWorld: true,
+    tooltip: "Build no-grass capacity zones in the next world.",
   }));
   worldSec.appendChild(makeStagedToggle({
     label: "Deterministic science mode",
@@ -1483,71 +1605,6 @@ export function installDevPanel(getBridge: () => SimBridge): void {
   speciesGatingSync = refreshSpeciesGating;
   refreshSpeciesGating();
 
-  // ── Equilibrium (v2.1 P3) — mounts into #devpanel-equilibrium ──
-  // All six knobs are live sliders (take effect on the next tick; no restart).
-  // They appear under the dedicated Equilibrium sub-nav category.
-  const equilibriumBox = categoryBox("devpanel-equilibrium");
-  const equilibriumSec = section("Equilibrium");
-
-  // Prominent reproduction energy cost (existing split_gift slider).
-  equilibriumSec.appendChild(makeLiveSlider({
-    label: "Reproduction cost",
-    simName: "split_gift",
-    settingKey: "splitGift",
-    min: 0, max: 100, step: 1,
-    formatValue: (v) => v.toFixed(0),
-  }));
-
-  // Crowding mortality.
-  equilibriumSec.appendChild(makeLiveSlider({
-    label: "Crowding strength",
-    simName: "crowding_strength",
-    settingKey: "crowdingStrength",
-    min: 0, max: 0.1, step: 0.001,
-    formatValue: (v) => v.toFixed(3),
-  }));
-  equilibriumSec.appendChild(makeLiveSlider({
-    label: "Crowding radius",
-    simName: "crowding_radius",
-    settingKey: "crowdingRadius",
-    min: 0, max: 20, step: 1,
-    formatValue: (v) => v.toFixed(0),
-  }));
-
-  // Starvation drain.
-  equilibriumSec.appendChild(makeLiveSlider({
-    label: "Starvation threshold",
-    simName: "starvation_threshold",
-    settingKey: "starvationThreshold",
-    min: 0, max: 50, step: 0.5,
-    formatValue: (v) => v.toFixed(1),
-  }));
-  equilibriumSec.appendChild(makeLiveSlider({
-    label: "Starvation drain rate",
-    simName: "starvation_drain_rate",
-    settingKey: "starvationDrainRate",
-    min: 0, max: 2.0, step: 0.01,
-    formatValue: (v) => v.toFixed(2),
-  }));
-
-  // Grass carrying-capacity / regrowth.
-  equilibriumSec.appendChild(makeLiveSlider({
-    label: "Grass capacity scale",
-    simName: "grass_capacity_scale",
-    settingKey: "grassCapacityScale",
-    min: 0.1, max: 2.0, step: 0.05,
-    formatValue: (v) => v.toFixed(2),
-  }));
-  equilibriumSec.appendChild(makeLiveSlider({
-    label: "Grass regrowth rate",
-    simName: "grass_regrowth_rate",
-    settingKey: "grassRegrowthRate",
-    min: 0.1, max: 3.0, step: 0.05,
-    formatValue: (v) => v.toFixed(2),
-  }));
-
-  equilibriumBox.appendChild(equilibriumSec);
-
   // ── Footer wiring ──
   footerApply = document.getElementById("settings-apply") as HTMLButtonElement | null;
   footerCancel = document.getElementById("settings-cancel") as HTMLButtonElement | null;
@@ -1561,11 +1618,6 @@ export function installDevPanel(getBridge: () => SimBridge): void {
   // Wire the left-column category buttons so clicking a button activates its
   // corresponding pane. This runs once at install; no re-install needed.
   //
-  // v2.1 P4 fix: couple the Profiler category to the profiler recording state.
-  // Selecting "profiler" enables recording (setProfilerVisible(true) + persists
-  // showProfiler=true); navigating away idles it (setProfilerVisible(false) +
-  // showProfiler=false). This restores the enable path that the now-removed
-  // top-bar toggle button used to own.
   const catBtns = document.querySelectorAll<HTMLButtonElement>(".settings-cat-btn");
   const catPanes = document.querySelectorAll<HTMLElement>(".settings-pane");
   catBtns.forEach((btn) => {
@@ -1576,11 +1628,6 @@ export function installDevPanel(getBridge: () => SimBridge): void {
         const paneId = pane.id; // e.g. "settings-energy-pane"
         pane.classList.toggle("is-active", paneId === `settings-${cat}-pane`);
       });
-      // Enable profiler recording when the Profiler category becomes active;
-      // idle it when the user navigates to any other category.
-      const profilerActive = cat === "profiler";
-      setSetting("showProfiler", profilerActive);
-      setProfilerVisible(profilerActive);
     });
   });
 }

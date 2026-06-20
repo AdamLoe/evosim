@@ -9,7 +9,7 @@ use std::collections::VecDeque;
 use wasm_bindgen::prelude::*;
 
 /// v1.12: parse the boot payload's `nn_topology_json`. Empty string → legacy
-/// 32→48→24→5 default. Otherwise expects
+/// 32→48→5 default. Otherwise expects
 /// `{"hidden_sizes":[…],"activations":[…]}`.
 fn parse_nn_topology(json: &str) -> Result<NnTopology, String> {
     if json.is_empty() {
@@ -53,6 +53,8 @@ pub struct WorldConfig {
     pub population: PopulationConstructionConfig,
     pub species: SpeciesConstructionConfig,
     pub founders: FounderConstructionConfig,
+    #[serde(default)]
+    pub nn_sensing: NnSensingConfig,
     pub nn_topology: NnTopologyConstructionConfig,
 }
 
@@ -76,6 +78,12 @@ pub struct GrassConstructionConfig {
     pub clump_count: u32,
     pub clump_size: u32,
     pub multisight: bool,
+    #[serde(default = "default_no_grass_zones")]
+    pub no_grass_zones: bool,
+}
+
+fn default_no_grass_zones() -> bool {
+    true
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -97,6 +105,38 @@ pub struct SpeciesConstructionConfig {
 pub struct FounderConstructionConfig {
     pub init_graze_boost: f32,
     pub init_split_boost: f32,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct NnSensingConfig {
+    #[serde(default = "default_creature_sector_range")]
+    pub creature_sector_range: f32,
+    #[serde(default = "default_grass_sector_range")]
+    pub grass_sector_range: f32,
+    #[serde(default = "default_grass_far_sector_range")]
+    pub grass_far_sector_range: f32,
+}
+
+impl Default for NnSensingConfig {
+    fn default() -> Self {
+        Self {
+            creature_sector_range: CREATURE_SECTOR_RANGE_DEFAULT,
+            grass_sector_range: GRASS_SECTOR_RANGE_DEFAULT,
+            grass_far_sector_range: GRASS_FAR_SECTOR_RANGE_DEFAULT,
+        }
+    }
+}
+
+fn default_creature_sector_range() -> f32 {
+    CREATURE_SECTOR_RANGE_DEFAULT
+}
+
+fn default_grass_sector_range() -> f32 {
+    GRASS_SECTOR_RANGE_DEFAULT
+}
+
+fn default_grass_far_sector_range() -> f32 {
+    GRASS_FAR_SECTOR_RANGE_DEFAULT
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -214,6 +254,7 @@ fn validate_artifact_config_matches_state(
         || config.grass.clump_count != s.grass_clump_count
         || config.grass.clump_size != s.grass_clump_size
         || config.grass.multisight != s.grass_multisight
+        || config.grass.no_grass_zones != s.no_grass_zones
         || config
             .population
             .founder_count
@@ -228,6 +269,9 @@ fn validate_artifact_config_matches_state(
             != s.starting_species_member_variance
         || config.founders.init_graze_boost.max(0.0) != s.init_graze_boost
         || config.founders.init_split_boost.max(0.0) != s.init_split_boost
+        || config.nn_sensing.creature_sector_range.max(1.0) != s.creature_sector_range
+        || config.nn_sensing.grass_sector_range.max(1.0) != s.grass_sector_range
+        || config.nn_sensing.grass_far_sector_range.max(1.0) != s.grass_far_sector_range
         || config.science.deterministic != s.deterministic_science_mode
     {
         return Err("embedded WorldConfig construction fields do not match runtime state".into());
@@ -289,6 +333,7 @@ impl WorldConfig {
                 clump_count: sliders.grass_clump_count,
                 clump_size: sliders.grass_clump_size,
                 multisight: sliders.grass_multisight,
+                no_grass_zones: sliders.no_grass_zones,
             },
             population: PopulationConstructionConfig {
                 founder_count: sliders.founder_count,
@@ -305,9 +350,14 @@ impl WorldConfig {
                 init_graze_boost: sliders.init_graze_boost,
                 init_split_boost: sliders.init_split_boost,
             },
+            nn_sensing: NnSensingConfig {
+                creature_sector_range: sliders.creature_sector_range,
+                grass_sector_range: sliders.grass_sector_range,
+                grass_far_sector_range: sliders.grass_far_sector_range,
+            },
             nn_topology: NnTopologyConstructionConfig {
                 hidden_sizes: LEGACY_HIDDEN_SIZES.to_vec(),
-                activations: vec!["lrelu".to_string(), "lrelu".to_string()],
+                activations: vec!["lrelu".to_string(); LEGACY_HIDDEN_SIZES.len()],
             },
         }
     }
@@ -563,13 +613,11 @@ pub const SLIDER_NAMES: &[&str] = &[
     "init_graze_boost",      // 65 f32 construction — founder Graze-output boost
     "init_split_boost",      // 66 f32 construction — founder Split/Mate-output boost
     // v2.1 P3: food-limited equilibrium knobs. APPEND-ONLY (idx 67+).
-    // All six are live sliders (take effect next tick).
+    // All four are live sliders (take effect next tick).
     "crowding_strength",     // 67 f32 live — extra upkeep per neighbour per tick
     "crowding_radius",       // 68 f32 live — radius (world-units) for neighbour count
     "starvation_threshold",  // 69 f32 live — energy floor below which extra drain fires
     "starvation_drain_rate", // 70 f32 live — extra per-tick drain while below threshold
-    "grass_capacity_scale",  // 71 f32 live — multiplier on per-cell carrying-cap
-    "grass_regrowth_rate",   // 72 f32 live — multiplier on spread_pct + in-cell growth
 ];
 
 /// First mutation-bucket slider slot. v2.0 Wave 3a (shifted from 24 to 30 after
@@ -977,7 +1025,7 @@ impl WorldHandle {
     /// `nn_topology_json` accepts `{"hidden_sizes":[…],"activations":[…]}`
     /// where activation strings are `"lrelu"|"relu"|"tanh"|"sigmoid"|"linear"`
     /// and `activations.len() == hidden_sizes.len() + 1`. Pass an empty string
-    /// for the legacy 32→48→24→5 default. Returns `Err` (throws on JS side)
+    /// for the legacy 32→48→5 default. Returns `Err` (throws on JS side)
     /// if the JSON is malformed or fails `NnTopology::new` validation —
     /// surfaces a typo immediately instead of silently falling back.
     #[wasm_bindgen(js_name = newWithConfigJson)]
@@ -1023,10 +1071,14 @@ impl WorldHandle {
                 .max(0.0),
             grass_cell_size: config.grass.cell_size.max(1.0),
             grass_multisight: config.grass.multisight,
+            no_grass_zones: config.grass.no_grass_zones,
             grass_clump_count: config.grass.clump_count,
             grass_clump_size: config.grass.clump_size,
             init_graze_boost: config.founders.init_graze_boost.max(0.0),
             init_split_boost: config.founders.init_split_boost.max(0.0),
+            creature_sector_range: config.nn_sensing.creature_sector_range.max(1.0),
+            grass_sector_range: config.nn_sensing.grass_sector_range.max(1.0),
+            grass_far_sector_range: config.nn_sensing.grass_far_sector_range.max(1.0),
             deterministic_science_mode: config.science.deterministic,
             ..Default::default()
         };
@@ -2036,14 +2088,6 @@ impl WorldHandle {
     fn apply_starvation_drain_rate(&mut self, value: f32) {
         self.inner.sliders.starvation_drain_rate = value.max(0.0);
     }
-    /// Grass carrying-capacity scale multiplier, clamped [0, 10].
-    fn apply_grass_capacity_scale(&mut self, value: f32) {
-        self.inner.sliders.grass_capacity_scale = value.clamp(0.0, 10.0);
-    }
-    /// Grass regrowth rate multiplier, floored at 0.
-    fn apply_grass_regrowth_rate(&mut self, value: f32) {
-        self.inner.sliders.grass_regrowth_rate = value.max(0.0);
-    }
     /// Apply a dev-panel slider live by name. JS console workflow
     /// (BUILD-REPORT Known Issue #4). Returns `Err` on unknown name so a
     /// console typo is visible instead of silently ignored.
@@ -2148,8 +2192,6 @@ impl WorldHandle {
             68 => self.apply_crowding_radius(value),
             69 => self.apply_starvation_threshold(value),
             70 => self.apply_starvation_drain_rate(value),
-            71 => self.apply_grass_capacity_scale(value),
-            72 => self.apply_grass_regrowth_rate(value),
             _ => {} // out-of-range: silently ignore (forward-compat with newer TS).
         }
     }
@@ -2329,6 +2371,9 @@ impl WorldHandle {
             w.sliders.energy_max,
             w.sliders.max_age,
             w.dims.world_size,
+            w.sliders.creature_sector_range,
+            w.sliders.grass_sector_range,
+            w.sliders.grass_far_sector_range,
         );
 
         // Decode action from the logit outputs.
@@ -2540,14 +2585,6 @@ impl WorldHandle {
         obj.insert(
             "starvation_drain_rate".into(),
             serde_json::json!(d.starvation_drain_rate),
-        );
-        obj.insert(
-            "grass_capacity_scale".into(),
-            serde_json::json!(d.grass_capacity_scale),
-        );
-        obj.insert(
-            "grass_regrowth_rate".into(),
-            serde_json::json!(d.grass_regrowth_rate),
         );
         serde_json::to_string(&json).unwrap_or_else(|_| "{}".into())
     }
@@ -2968,6 +3005,10 @@ mod tests {
         .unwrap();
         handle.try_set_slider("upkeep_multiplier", 0.0);
         handle.try_set_slider("move_cost_multiplier", 0.0);
+        // Energy economy fully off so telemetry tests don't depend on emergent
+        // creature survival: with the starvation drain at its default the tiny
+        // world can starve to extinction before the 120-tick sample cadence.
+        handle.try_set_slider("starvation_drain_rate", 0.0);
         handle
     }
 

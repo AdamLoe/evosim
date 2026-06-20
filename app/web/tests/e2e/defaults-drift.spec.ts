@@ -22,6 +22,7 @@ function completeWorldConfigShape(config: WorldConfig): unknown {
     population: Object.keys(config.population).sort(),
     species: Object.keys(config.species).sort(),
     founders: Object.keys(config.founders).sort(),
+    nn_sensing: Object.keys(config.nn_sensing).sort(),
     nn_topology: Object.keys(config.nn_topology).sort(),
   };
 }
@@ -76,6 +77,21 @@ test("settings defaults are derived from generated world config and live default
   expect(DEFAULTS.grassClumpCount).toBe(DEFAULT_WORLD_CONFIG.grass.clump_count);
   expect(DEFAULTS.grassClumpSize).toBe(DEFAULT_WORLD_CONFIG.grass.clump_size);
   expect(DEFAULTS.grassMultisight).toBe(DEFAULT_WORLD_CONFIG.grass.multisight);
+  expect(DEFAULTS.creatureSectorRange).toBe(
+    DEFAULT_WORLD_CONFIG.nn_sensing.creature_sector_range,
+  );
+  expect(DEFAULTS.grassSectorRange).toBe(DEFAULT_WORLD_CONFIG.nn_sensing.grass_sector_range);
+  expect(DEFAULTS.grassFarSectorRange).toBe(
+    DEFAULT_WORLD_CONFIG.nn_sensing.grass_far_sector_range,
+  );
+  expect(DEFAULTS.noGrassZones).toBe(DEFAULT_WORLD_CONFIG.grass.no_grass_zones);
+  expect(DEFAULTS.visualRepeats).toBe(true);
+  expect(DEFAULTS.maxZoomOutMaps).toBe(8);
+  expect(DEFAULTS.creatureSurveyDotMinPx).toBe(1.0);
+  expect(DEFAULTS.creatureSurveyDotScale).toBe(1.0);
+  expect(DEFAULTS.repeatBorderMinPx).toBe(1.0);
+  expect(DEFAULTS.repeatBorderScale).toBe(0.0);
+  expect(DEFAULTS.repeatBorderOpacity).toBe(0.25);
   expect(DEFAULTS.founderCount).toBe(DEFAULT_WORLD_CONFIG.population.founder_count);
   expect(DEFAULTS.energyMax).toBe(DEFAULT_WORLD_CONFIG.population.energy_max);
   expect(DEFAULTS.speciesMode).toBe(DEFAULT_WORLD_CONFIG.species.enabled);
