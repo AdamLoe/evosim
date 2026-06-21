@@ -553,4 +553,4 @@ unaccounted RAF overhead is visible.
 - [`worker-runtime.md`](worker-runtime.md)
 - [`profiler.md`](profiler.md)
 - [`../decisions/render.md`](../decisions/render.md)
-- [Agent-docs authoring rules](~/agent-docs/v1/rules/authoring-rules.md)
+- [Agent-docs authoring rules](~/.agentdocs/rules/authoring-rules.md)

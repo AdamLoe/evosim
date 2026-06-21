@@ -4,7 +4,7 @@ This tree is the canonical, current-state snapshot of the project. It is
 optimized for LLM consumption: start small, route by task, and load only
 the subtree that matches the work. It follows **agent-docs v1** — the
 generic doc-authoring rules and the workflow/maintenance commands live in
-the global kit (`~/agent-docs/v1/` and `~/.claude/skills/`); this
+the global kit (`~/.agentdocs/` and `~/.claude/skills/`); this
 tree holds only what's specific to **this** app.
 
 If you are a fresh AI chat: run the **`/fresh-chat`** skill. It routes you

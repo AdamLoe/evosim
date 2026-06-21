@@ -1,7 +1,7 @@
 # Coding style — evosim
 
 The universal principles and the generic per-language idioms live in
-`~/agent-docs/v1/rules/coding-style.md` — read that first. This
+`~/.agentdocs/rules/coding-style.md` — read that first. This
 file lists only this app's specific values, named patterns, and footguns.
 
 ## When does this apply

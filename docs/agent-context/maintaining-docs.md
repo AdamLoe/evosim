@@ -2,7 +2,7 @@
 
 The doc-authoring **rules** are generic (agent-docs v1) and live in the
 global kit:
-[`~/agent-docs/v1/rules/authoring-rules.md`](~/agent-docs/v1/rules/authoring-rules.md).
+[`~/.agentdocs/rules/authoring-rules.md`](~/.agentdocs/rules/authoring-rules.md).
 Read them when you ship a change that touches a surface in the ownership
 map, or when migrating plan context. They cover: explicit ownership,
 "describe what IS not what changed," the recoverability test + banned
@@ -30,13 +30,13 @@ Ownership itself is data: [`../_meta/ownership.json`](../_meta/ownership.json)
 
 ## See also
 
-- [`~/agent-docs/v1/rules/authoring-rules.md`](~/agent-docs/v1/rules/authoring-rules.md)
+- [`~/.agentdocs/rules/authoring-rules.md`](~/.agentdocs/rules/authoring-rules.md)
   — the rules.
 - [`../_meta/manifest.md`](../_meta/manifest.md) — the app slot-data.
 - [`../plans/index.md`](../plans/index.md) — where this app's live plans
   land.
-- [`~/agent-docs/v1/plan-lifecycle.md`](~/agent-docs/v1/plan-lifecycle.md)
+- [`~/.agentdocs/plan-lifecycle.md`](~/.agentdocs/plan-lifecycle.md)
   — plan lifecycle and status metadata (generic).
-- [`~/agent-docs/v1/plan-template.md`](~/agent-docs/v1/plan-template.md)
+- [`~/.agentdocs/plan-template.md`](~/.agentdocs/plan-template.md)
   — plan creation skeleton (generic).
 - [`coding-style.md`](coding-style.md), [`repo-rules.md`](repo-rules.md).

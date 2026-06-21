@@ -328,4 +328,4 @@ TS-side `frame` mirror.
 - [`app-shell.md`](app-shell.md) — the `#settings-profiler-pane` mount and category-select activation wiring.
 - [`../decisions/profiler.md`](../decisions/profiler.md)
 - [`../agent-context/maintaining-docs.md`](../agent-context/maintaining-docs.md)
-- [Agent-docs authoring rules](~/agent-docs/v1/rules/authoring-rules.md)
+- [Agent-docs authoring rules](~/.agentdocs/rules/authoring-rules.md)

@@ -2,7 +2,7 @@
 
 Universal git discipline (commit hygiene, cadence, destructive-command
 checklist) lives in
-[`~/agent-docs/v1/rules/repo-rules.md`](~/agent-docs/v1/rules/repo-rules.md).
+[`~/.agentdocs/rules/repo-rules.md`](~/.agentdocs/rules/repo-rules.md).
 This file covers only what is specific to this repo.
 
 ## When does this apply

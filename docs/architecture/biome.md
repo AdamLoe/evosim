@@ -101,4 +101,4 @@ far-grass, and current-grass NN inputs.
 - [`shared-memory-and-protocol.md`](shared-memory-and-protocol.md) — per-slot biome window in wasm memory
 - [`../decisions/sim.md`](../decisions/sim.md) — rationale for static no-grass zones and the food-only effect
 - [`../agent-context/maintaining-docs.md`](../agent-context/maintaining-docs.md)
-- Global authoring rules: `~/agent-docs/v1/rules/authoring-rules.md`
+- Global authoring rules: `~/.agentdocs/rules/authoring-rules.md`

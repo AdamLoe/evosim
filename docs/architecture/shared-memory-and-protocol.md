@@ -232,4 +232,4 @@ still answer UI requests.
 - [`../decisions/sim.md`](../decisions/sim.md)
 - [`../decisions/cross-cutting.md`](../decisions/cross-cutting.md)
 - [`../agent-context/maintaining-docs.md`](../agent-context/maintaining-docs.md)
-- [Doc authoring rules](~/agent-docs/v1/rules/authoring-rules.md)
+- [Doc authoring rules](~/.agentdocs/rules/authoring-rules.md)

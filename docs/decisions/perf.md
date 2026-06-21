@@ -264,4 +264,4 @@ drove the choice — so future optimization passes start from facts, not guesses
 - [`sim.md`](sim.md) — sim-domain decisions (grass scatter, BiomePyramid, fused RNG entries).
 - [`index.md`](index.md) — decisions index and domain map.
 - [`../agent-context/testing-how-to.md`](../agent-context/testing-how-to.md) — bench procedure for before/after perf comparison.
-- [`~/agent-docs/v1/rules/authoring-rules.md`](~/agent-docs/v1/rules/authoring-rules.md) — doc maintenance rules.
+- [`~/.agentdocs/rules/authoring-rules.md`](~/.agentdocs/rules/authoring-rules.md) — doc maintenance rules.

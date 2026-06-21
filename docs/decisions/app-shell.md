@@ -134,5 +134,5 @@ Cross-subsystem decisions that also bind the shell live in
 - [`index.md`](index.md) - decisions index and domain map.
 - [`cross-cutting.md`](cross-cutting.md) - decisions that bind the shell and
   other subsystems.
-- [`~/agent-docs/v1/rules/authoring-rules.md`](~/agent-docs/v1/rules/authoring-rules.md)
+- [`~/.agentdocs/rules/authoring-rules.md`](~/.agentdocs/rules/authoring-rules.md)
   - doc maintenance rules.

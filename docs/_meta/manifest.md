@@ -76,7 +76,7 @@ pre-migration `agent-context/maintaining-docs.md`; `web/` paths updated to
 | A new/removed/re-routed decisions domain | `decisions/index.md`, and `_meta/ownership.json` if ownership changes |
 | A new procedural workflow doc, or a changed condition for when one applies | `agent-context/index.md` and `docs/index.md` |
 | A workflow command's behaviour (a global skill) changes | the global skill in `~/.claude/skills/`, and `agent-context/index.md` if routing changes |
-| Plan lifecycle or status-metadata shape | `~/agent-docs/v1/plan-lifecycle.md` + `plan-template.md` (generic, in the kit); `plans/index.md` only if the app's landing/routing changes |
+| Plan lifecycle or status-metadata shape | `~/.agentdocs/plan-lifecycle.md` + `plan-template.md` (generic, in the kit); `plans/index.md` only if the app's landing/routing changes |
 | A concept gets a new canonical owner, or a new cross-doc ownership conflict appears | `_meta/ownership.json` |
 
 ## Slot: drift-verification (high-risk surfaces for fix-docs-drift-all)
@@ -109,7 +109,7 @@ symbol's existence:
 ## Notes
 
 - The generic agent-docs kit (authoring rules, coding-style, repo-rules,
-  orchestrating rules) lives at `~/agent-docs/v1/rules/`. The
+  orchestrating rules) lives at `~/.agentdocs/rules/`. The
   workflow commands are global skills in `~/.claude/skills/`. This
   manifest is the only app-specific binding the kit reads.
 - `agent-context/maintaining-docs.md` and `ownership.md` are thin in-repo

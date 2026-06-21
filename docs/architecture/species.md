@@ -157,4 +157,4 @@ The logit order is stable across modes.
 - [`render-pipeline.md`](render-pipeline.md) — how species colors appear on canvas
 - [`../decisions/sim.md`](../decisions/sim.md) — rationale for the mode-switch design and seeding choices
 - [`../agent-context/maintaining-docs.md`](../agent-context/maintaining-docs.md)
-- Global authoring rules: `~/agent-docs/v1/rules/authoring-rules.md`
+- Global authoring rules: `~/.agentdocs/rules/authoring-rules.md`

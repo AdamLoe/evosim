@@ -407,4 +407,4 @@ pure neuroevolution rationale, and the single-`set_slider`-entry-point rule.
 - [`../decisions/sim.md`](../decisions/sim.md)
 - [`../decisions/cross-cutting.md`](../decisions/cross-cutting.md)
 - [`../agent-context/maintaining-docs.md`](../agent-context/maintaining-docs.md)
-- Global authoring rules: `~/agent-docs/v1/rules/authoring-rules.md`
+- Global authoring rules: `~/.agentdocs/rules/authoring-rules.md`

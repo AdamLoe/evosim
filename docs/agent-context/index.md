@@ -9,7 +9,7 @@ doc opens with a "when does this apply" framing so you can decide
 quickly whether to read it.
 
 Under **agent-docs v1**, the generic workflow discipline lives in the
-global kit (`~/agent-docs/v1/rules/`); the in-repo docs below
+global kit (`~/.agentdocs/rules/`); the in-repo docs below
 hold what's specific to **evosim** and link up to the matching global
 rule. App-independent commands and templates are exposed as global
 **skills** (`/fresh-chat`, `/grand-orchestrator`, `/fix-docs-drift-all`,
@@ -26,7 +26,7 @@ prompt files.
 | Git commits, staging, drift gates, things to never do | [`repo-rules.md`](repo-rules.md) | `rules/repo-rules.md` |
 | Updating docs after a code change | [`maintaining-docs.md`](maintaining-docs.md) | `rules/authoring-rules.md` |
 | Orchestrating multi-stream work via sub-agents | [`orchestrating.md`](orchestrating.md) | `rules/orchestrating.md` |
-| Creating, updating, or shipping a plan | [`../plans/index.md`](../plans/index.md) (landing); [`~/agent-docs/v1/plan-lifecycle.md`](~/agent-docs/v1/plan-lifecycle.md) (lifecycle) + [`~/agent-docs/v1/plan-template.md`](~/agent-docs/v1/plan-template.md) (skeleton); [`maintaining-docs.md`](maintaining-docs.md) | `rules/authoring-rules.md` §workflow |
+| Creating, updating, or shipping a plan | [`../plans/index.md`](../plans/index.md) (landing); [`~/.agentdocs/plan-lifecycle.md`](~/.agentdocs/plan-lifecycle.md) (lifecycle) + [`~/.agentdocs/plan-template.md`](~/.agentdocs/plan-template.md) (skeleton); [`maintaining-docs.md`](maintaining-docs.md) | `rules/authoring-rules.md` §workflow |
 
 For a multi-stream effort driven via sub-agents (audit → plan →
 implement → verify → doc-migrate), bootstrap with the `/grand-orchestrator`

@@ -136,4 +136,4 @@ the grass/no-grass-zone enable flag.
 - [`../architecture/index.md`](../architecture/index.md)
 - [`../ownership.md`](../ownership.md)
 - [`../agent-context/maintaining-docs.md`](../agent-context/maintaining-docs.md)
-- Global authoring rules: `~/agent-docs/v1/rules/authoring-rules.md`
+- Global authoring rules: `~/.agentdocs/rules/authoring-rules.md`
