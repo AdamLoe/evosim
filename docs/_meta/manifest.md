@@ -1,7 +1,7 @@
 # Agent-docs manifest — evosim
 
 App-specific bindings for the global agent-docs kit. The generic skills
-and rules in `~/agent-docs/<agent_docs_version>/` read the slots
+and rules in `~/.agentdocs/` read the slots
 below; everything app-specific lives here, nothing generic does.
 
 ```yaml
