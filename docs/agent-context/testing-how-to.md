@@ -142,6 +142,77 @@ Conventions:
    isn't accepting `boot` on the new instance. Look at `app/web/src/main.ts →
    restart` sequence and the worker's `handleBoot`.
 
+## Perf bench procedure (before/after comparison)
+
+Use this when measuring the impact of a sim performance change. The
+canonical fixed scenario: `world_size=9600`, `grass_cell_size=5.0`,
+`world_seed=42`, `?seed=bench-v2.0.5`, all other sliders at
+defaults (see `crates/evosim/src/constants.rs`). This scenario yields
+`grass_dim=1920` cells/axis, `hash_dim=480` cells/axis.
+
+### Seed policy
+
+| Field | Value |
+|---|---|
+| `world_seed` | **42** — pins biome and grass-clump layout (via SplitMix64 in `world/biome.rs`). |
+| URL string seed | **`?seed=bench-v2.0.5`** — pins founder brains/genomes and the sim RNG stream. |
+
+**Threading note:** the threaded scatter kernel uses lossy relaxed
+cross-tile writes; trajectories can still diverge after tick 0 even with
+both seeds pinned. Use warmup + windowed averaging rather than
+exact-output matching.
+
+### TPS methodology
+
+Set `targetTPS = 9999` (uncapped) before measuring. The default 180 TPS
+cap causes the worker to sleep for the remainder of each time slice — a
+fast tick still pads to 5.6 ms, making improvements invisible in the
+profiler. Uncapped, the profiler reports raw compute cost; the achieved
+TPS counter is the primary perf number.
+
+### Run procedure (copy-pasteable)
+
+```
+BEFORE EACH RUN:
+  1. Open /?seed=bench-v2.0.5, then DevTools → Application → Storage →
+     Clear site data (or press "Reset settings"). Reload the same seeded
+     URL after clearing — this pins the string RNG seed while resetting
+     localStorage to defaults.
+  2. Set world_seed = 42 in the dev panel. All other construction-only
+     sliders should be at defaults (world_size=9600, grass_size=5.0,
+     wrap_world=true, founder_count=32, species_mode=false, etc.).
+  3. Click Apply, then hard-reload /?seed=bench-v2.0.5.
+     Do NOT click Restart: Restart clears the URL string seed.
+  4. Set targetTPS = 9999 (uncapped) via the TPS slider.
+  5. Fix the browser viewport to 1920 × 1080 CSS px (DevTools device
+     emulation). This pins the snapshot LOD path to mip level 0.
+
+WARMUP:
+  6. Wait until the population counter is no longer in rapid exponential
+     growth (typically tick 1000–3000 at these settings).
+  7. Click "Reset profiler + jank" to clear accumulated samples.
+  8. Wait for ≥ 500 more ticks within the 10 s profiler window.
+
+RECORD:
+  9. Capture achieved TPS, current population, current tick, and the
+     mean durations for the tick and sim_worker span subtrees listed in
+     architecture/profiler.md.
+  10. In DevTools console: copy(window.__lastProfilerReport) to capture
+      the full Rust profile tree.
+```
+
+### Limitations
+
+- Per-tick trajectory is not pinnable under threaded scatter.
+- Rayon thread count is not directly pinnable from the UI; note the
+  machine's core count in any before/after table.
+- Canvas physical pixel count depends on `devicePixelRatio`; the
+  `write_snapshot` LOD path uses CSS viewport dimensions, so DPR does
+  not affect snapshot cost.
+
+See [`../architecture/profiler.md`](../architecture/profiler.md) for the
+full profiler span tree and what each span measures.
+
 ## Per-commit gate suite (no code changes)
 
 For doc-only commits, the heavy gates can stay skipped, but a sanity

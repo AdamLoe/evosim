@@ -23,10 +23,6 @@ ls docs/plans/
 
 The long-lived plans (frontmatter `long_lived: true`) are:
 
-- **`perf-optimization-ideas.md`** — a running backlog of performance ideas
-  discussed but not committed. A menu, not a plan. Never deleted.
-- **`v2.0.5-bench-recipe.md`** — the canonical bench recipe used across
-  waves; retained as a long-lived reference.
 - **`open-bugs.md`** — triage list of open or unconfirmed bugs collected
   during plans-cleanup; never deleted until all items are resolved or moved.
 

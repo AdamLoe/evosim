@@ -70,8 +70,8 @@ drove the choice — so future optimization passes start from facts, not guesses
   not be revisited unless the underlying architecture changes. At 6.25% fill it
   adds +0.49 ns/cell; at ~90% fill it adds +18.7 ns/cell (25.1 vs 6.42 total).
   The only path where skip pays is restructuring the entire freeze loop around an
-  event list (event-sampling, perf-optimization-ideas.md idea #3), which requires
-  a compact live-cell index — a separate, larger decision.
+  event list (event-sampling via a compact live-cell index), which requires
+  a separate, larger architectural change.
 - **Why**: The compact-list build is O(grassy cells), and the freeze+decay O(tile)
   floor is untouched by skip — skip only removes the spread-gate hash, not the
   freeze read of every cell. At high fill the compact-list overhead dominates.
@@ -237,9 +237,9 @@ drove the choice — so future optimization passes start from facts, not guesses
 
 ### Grass `grass_step` cadence/visibility gating: deferred as the next 10× lever
 
-- **Decision**: Cadence/visibility-gated `grass_step` (idea #1 in
-  `perf-optimization-ideas.md`) is explicitly **deferred**. It is the identified
-  next 10× lever for grass propagation at scale and is not yet built.
+- **Decision**: Cadence/visibility-gated `grass_step` is explicitly
+  **deferred**. It is the identified next 10× lever for grass propagation
+  at scale and is not yet built.
 - **Why**: At 14.7M fully-grassed cells, `grass_step` is memory-bandwidth-bound
   touching every occupied cell; the per-cell path is already optimal (fused RNG,
   stack freeze, active-tile frontier). The active-tile frontier gives little relief
@@ -263,5 +263,5 @@ drove the choice — so future optimization passes start from facts, not guesses
 - [`../architecture/worker-runtime.md`](../architecture/worker-runtime.md) — worker loop and snapshot write path.
 - [`sim.md`](sim.md) — sim-domain decisions (grass scatter, BiomePyramid, fused RNG entries).
 - [`index.md`](index.md) — decisions index and domain map.
-- [`../plans/perf-optimization-ideas.md`](../plans/perf-optimization-ideas.md) — the long-lived perf backlog (parked ideas, measured verdicts).
+- [`../agent-context/testing-how-to.md`](../agent-context/testing-how-to.md) — bench procedure for before/after perf comparison.
 - [`~/agent-docs/v1/rules/authoring-rules.md`](~/agent-docs/v1/rules/authoring-rules.md) — doc maintenance rules.
