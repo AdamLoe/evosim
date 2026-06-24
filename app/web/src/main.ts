@@ -13,6 +13,9 @@ import {
   resetPanelSamples,
   setPanelBridge,
   setProfilerVisible,
+  buildTpsSelector,
+  buildMaxPopSelector,
+  buildPopChart,
 } from "./widgets/perf-panel";
 import {
   installDevPanel,
@@ -445,6 +448,7 @@ async function main(): Promise<void> {
   // before installTopBarButtons so #save-status exists for autosave reporting.
   const persistenceUi = installMenuTab(
     () => simBridge,
+    () => { void restart(); },
     (artifact, mode) => loadWorldArtifact(artifact, mode),
   );
 
@@ -1031,10 +1035,13 @@ function downloadText(filename: string, mime: string, text: string): void {
   URL.revokeObjectURL(url);
 }
 
-// General rail tab. Holds auto-restart, world Export / Import, and the
-// save-status line. Mounts into #menu-inner.
+// General rail tab. Demo cockpit: TPS, population graph, max population,
+// auto-restart, restart, export/import, autosave/status. Mounts into #menu-inner.
+// TPS/max-pop selectors and pop chart are built via perf-panel exports so they
+// share the same sample data and sync state as any Profiler-pane widgets.
 function installMenuTab(
   getBridge: () => SimBridge,
+  onRestart: () => void,
   loadArtifact: (artifactJson: string, mode: "resume" | "fork") => Promise<void>,
 ): { setStatus: (message: string) => void } {
   const mount = document.getElementById("menu-inner");
@@ -1102,13 +1109,14 @@ function installMenuTab(
       });
   });
 
-  // Run control: auto-restart toggle (relocated from the top bar). Reflects
-  // and writes the `autoRun` setting, whose only other reader is the
-  // world-end auto-restart path.
-  const autoBtn = makeTextBtn("auto-restart-btn", "Auto-restart", "Auto-restart on world end");
+  // Run controls: Restart + auto-restart toggle.
+  const restartBtn = makeTextBtn("general-restart-btn", "Restart", "Restart simulation (r)");
+  restartBtn.addEventListener("click", onRestart);
+
+  const autoBtn = makeTextBtn("auto-restart-btn", "Auto", "Auto-restart on world end");
   const refreshAutoBtn = (): void => {
     const enabled = getSettings().autoRun;
-    autoBtn.textContent = enabled ? "On" : "Off";
+    autoBtn.textContent = enabled ? "Auto: On" : "Auto: Off";
     autoBtn.classList.toggle("is-active", enabled);
   };
   refreshAutoBtn();
@@ -1119,25 +1127,39 @@ function installMenuTab(
   });
 
   if (mount) {
-    const runRow = document.createElement("div");
-    runRow.className = "general-toggle-row";
-    const runLabel = document.createElement("span");
-    runLabel.className = "general-toggle-label";
-    runLabel.textContent = "Auto-restart";
-    runRow.append(runLabel, autoBtn);
+    // Sim section: TPS + max population selectors (shared with Profiler).
+    // installProfilerPanel has not run yet, so these are the first registered
+    // instances — they get the stable #target-tps-input id.
+    const tpsRow = buildTpsSelector(() => getBridge());
+    const maxPopRow = buildMaxPopSelector(() => getBridge());
+    const simControls = document.createElement("div");
+    simControls.className = "general-selector-stack";
+    simControls.append(tpsRow, maxPopRow);
 
+    // Population graph (shared canvas, same sample ring as Profiler).
+    const popChartContainer = document.createElement("div");
+    buildPopChart(popChartContainer);
+
+    // Run controls row: Restart + Auto buttons side by side.
+    const runGrid = document.createElement("div");
+    runGrid.className = "general-action-grid";
+    runGrid.append(restartBtn, autoBtn);
+
+    // World saves section.
     const saveGrid = document.createElement("div");
     saveGrid.className = "general-action-grid";
     saveGrid.append(exportBtn, importBtn);
 
     mount.append(
-      menuSection("Run", runRow),
+      menuSection("Simulation", simControls, popChartContainer),
+      menuSection("Run", runGrid),
       menuSection("World saves", saveGrid, status),
       importInput,
     );
   }
   return { setStatus };
 }
+
 
 // One labelled group inside the General tab.
 function menuSection(title: string, ...children: HTMLElement[]): HTMLElement {

@@ -38,7 +38,7 @@
   --creature-ring: rgba(0, 0, 0, 0.6);
   --creature-halo: rgba(0, 0, 0, 0.18);
 
-  --rail-w: 420px;
+  --rail-w: 372px;
   --tab-h: 36px;
   /* v1.13 Wave 1: top-bar is now an absolute overlay over the canvas (see
      `#top-bar` rule below). Its grid track collapses to 0 so the canvas
@@ -727,6 +727,13 @@ button {
   color: var(--fg-muted);
   cursor: default;
   overflow-wrap: anywhere;
+}
+
+/* General tab simulation section: compact selector stack. */
+.general-selector-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 /* Inspector */

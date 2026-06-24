@@ -122,8 +122,10 @@ const paintedFrameTimestamps: number[] = [];
 interface PopSample { tick: number; population: number; }
 const popSamples: PopSample[] = [];
 let lastPopSampledTick = -1;
-let popCanvas: HTMLCanvasElement | null = null;
-let popResizeObserver: ResizeObserver | null = null;
+// All mounted population-chart canvases (General tab may add one before the
+// Profiler installer runs; Profiler no longer mounts its own pop chart).
+const popCanvases: HTMLCanvasElement[] = [];
+const popResizeObservers: ResizeObserver[] = [];
 const CHART_HEIGHT_CSS = 120;
 
 // ─── v2.0 Wave 5: per-species population time series ───────────────────────
@@ -154,10 +156,11 @@ interface SpeciesTableEntry { id: number; color_u32: number; name: string; count
 interface SpeciesTableJson { tick: number; species: SpeciesTableEntry[]; }
 
 // TPS / max-pop selector references (for live syncing).
-let tpsNumInput: HTMLInputElement | null = null;
-let tpsPillButtons: HTMLButtonElement[] = [];
-let maxPopNumInput: HTMLInputElement | null = null;
-let maxPopPillButtons: HTMLButtonElement[] = [];
+// Multiple widgets can register here (e.g. General tab + Profiler tab).
+const tpsNumInputs: HTMLInputElement[] = [];
+const tpsPillButtonSets: HTMLButtonElement[][] = [];
+const maxPopNumInputs: HTMLInputElement[] = [];
+const maxPopPillButtonSets: HTMLButtonElement[][] = [];
 let telemetryExportStatus: HTMLDivElement | null = null;
 
 // CPU Process Monitor teardown.
@@ -186,8 +189,10 @@ export function setProfilerVisible(visible: boolean): void {
   if (visible && pane) {
     if (lastBundle) pollAndRenderTrees(lastBundle);
     redrawFpsTpsChart();
-    redrawPopChart();
   }
+  // Pop chart canvases may be mounted in General (always reachable); redraw on
+  // any visibility change so they fill in correctly when the pane opens.
+  if (popCanvases.length > 0) redrawPopChart();
   // Legacy: keep #perf-open sync if it exists (no-op if removed from DOM).
   const openBtn = document.getElementById("perf-open");
   if (openBtn) openBtn.classList.toggle("is-active", visible);
@@ -236,7 +241,9 @@ export function setPanelStatus(args: {
       popSamples.push({ tick, population: args.pop });
       if (popSamples.length > POP_SAMPLE_CAP) popSamples.shift();
       lastPopSampledTick = tick;
-      if (panelVisible) redrawPopChart();
+      // Always redraw pop chart — it may be mounted in General (always reachable)
+      // or in the Profiler pane. Skip if no canvases are mounted yet.
+      if (popCanvases.length > 0) redrawPopChart();
     }
   }
 
@@ -284,7 +291,7 @@ function sampleSpeciesTable(): void {
   }
   speciesSamples.push({ tick: table.tick, counts });
   if (speciesSamples.length > SPECIES_SAMPLE_CAP) speciesSamples.shift();
-  if (panelVisible) redrawPopChart();
+  if (popCanvases.length > 0) redrawPopChart();
 }
 
 /** Drop all recorded samples so charts start fresh after a world restart. */
@@ -300,10 +307,8 @@ export function resetPanelSamples(): void {
   speciesRegistry.clear();
   speciesMode = false;
   lastSpeciesSampledTick = -1;
-  if (panelVisible) {
-    redrawFpsTpsChart();
-    redrawPopChart();
-  }
+  if (panelVisible) redrawFpsTpsChart();
+  if (popCanvases.length > 0) redrawPopChart();
 }
 
 /**
@@ -418,26 +423,9 @@ function buildPanelDom(box: HTMLDivElement, simBridge: SimBridge): void {
   fpsTpsCard.appendChild(fpsTpsLegend);
   graphsRow.appendChild(fpsTpsCard);
 
-  const popCard = document.createElement("div");
-  popCard.className = "perf-graph-card";
-  const popTitle = document.createElement("div");
-  popTitle.className = "perf-graph-title";
-  popTitle.textContent = "Population";
-  popCard.appendChild(popTitle);
-  popCanvas = document.createElement("canvas");
-  popCanvas.className = "perf-chart";
-  popCanvas.id = "chart-pop";
-  popCanvas.width = 380;
-  popCanvas.height = 120;
-  popCard.appendChild(popCanvas);
-  graphsRow.appendChild(popCard);
-
-  // 3. Selectors row.
-  const selectorsRow = document.createElement("div");
-  selectorsRow.className = "perf-selectors";
-  band.appendChild(selectorsRow);
-  selectorsRow.appendChild(buildTpsSelector(simBridge));
-  selectorsRow.appendChild(buildMaxPopSelector(simBridge));
+  // Population graph and TPS/MaxPop selectors live in the General tab
+  // (installed by main.ts → installMenuTab via the exported builders below).
+  // Profiler keeps only the FPS/TPS performance chart.
 
   const telemetrySec = document.createElement("div");
   telemetrySec.className = "perf-section";
@@ -564,21 +552,14 @@ function buildPanelDom(box: HTMLDivElement, simBridge: SimBridge): void {
 
   clearTrees();
 
-  // Resize observers for the two charts.
+  // Resize observer for the FPS/TPS chart only (pop chart is in General).
   if (fpsTpsResizeObserver) fpsTpsResizeObserver.disconnect();
-  if (popResizeObserver) popResizeObserver.disconnect();
   fpsTpsResizeObserver = new ResizeObserver(() => {
     resizeChartCanvas(fpsTpsCanvas);
     redrawFpsTpsChart();
   });
-  popResizeObserver = new ResizeObserver(() => {
-    resizeChartCanvas(popCanvas);
-    redrawPopChart();
-  });
   fpsTpsResizeObserver.observe(fpsTpsCanvas);
-  popResizeObserver.observe(popCanvas);
   resizeChartCanvas(fpsTpsCanvas);
-  resizeChartCanvas(popCanvas);
 }
 
 async function exportTelemetry(simBridge: SimBridge, format: "csv" | "json"): Promise<void> {
@@ -669,9 +650,59 @@ function downloadText(filename: string, mime: string, text: string): void {
   URL.revokeObjectURL(url);
 }
 
+// ─── Population chart builder (exported for General tab) ─────────────────
+
+/**
+ * Build and mount a population chart card into the given container. The chart
+ * shares the same sample buffer as the Profiler pane's pop chart (there is
+ * one sample ring; multiple canvases can be registered). Returns a teardown
+ * function that disconnects the resize observer.
+ */
+export function buildPopChart(container: HTMLElement): () => void {
+  const card = document.createElement("div");
+  card.className = "perf-graph-card";
+  const title = document.createElement("div");
+  title.className = "perf-graph-title";
+  title.textContent = "Population";
+  card.appendChild(title);
+  const canvas = document.createElement("canvas");
+  canvas.className = "perf-chart";
+  canvas.id = "chart-pop";
+  canvas.width = 380;
+  canvas.height = 120;
+  card.appendChild(canvas);
+  container.appendChild(card);
+
+  popCanvases.push(canvas);
+
+  const observer = new ResizeObserver(() => {
+    resizeChartCanvas(canvas);
+    redrawPopChart();
+  });
+  popResizeObservers.push(observer);
+  observer.observe(canvas);
+  resizeChartCanvas(canvas);
+  redrawPopChart();
+
+  return () => {
+    observer.disconnect();
+    const idx = popCanvases.indexOf(canvas);
+    if (idx !== -1) popCanvases.splice(idx, 1);
+    const oidx = popResizeObservers.indexOf(observer);
+    if (oidx !== -1) popResizeObservers.splice(oidx, 1);
+  };
+}
+
 // ─── Selector builders ────────────────────────────────────────────────────
 
-function buildTpsSelector(simBridge: SimBridge): HTMLDivElement {
+/**
+ * Build a TPS selector row (pills + numeric input). Exported so the General
+ * tab can mount a copy that stays in sync with any other mounted instance.
+ * The first mounted instance gets the stable `#target-tps-input` id for e2e.
+ * `getBridge` is a getter so pill/input clicks always reach the current bridge
+ * (not a stale bridge from before a restart).
+ */
+export function buildTpsSelector(getBridge: () => SimBridge): HTMLDivElement {
   const row = document.createElement("div");
   row.className = "perf-selector-row";
   const lbl = document.createElement("span");
@@ -681,37 +712,40 @@ function buildTpsSelector(simBridge: SimBridge): HTMLDivElement {
 
   const pillGroup = document.createElement("div");
   pillGroup.className = "perf-pill-group";
-  tpsPillButtons = [];
+  const pills: HTMLButtonElement[] = [];
   for (const v of TPS_PILLS) {
     const b = document.createElement("button");
     b.type = "button";
     b.className = "perf-pill";
     b.textContent = String(v);
     b.dataset.tpsValue = String(v);
-    b.addEventListener("click", () => applyTpsValue(v, simBridge, "pill"));
+    b.addEventListener("click", () => applyTpsValue(v, getBridge(), "pill"));
     pillGroup.appendChild(b);
-    tpsPillButtons.push(b);
+    pills.push(b);
   }
+  tpsPillButtonSets.push(pills);
   row.appendChild(pillGroup);
 
-  tpsNumInput = document.createElement("input");
-  tpsNumInput.type = "number";
-  tpsNumInput.min = "1";
-  tpsNumInput.step = "1";
-  tpsNumInput.className = "perf-num-input";
-  // Stable e2e hook. v1.13 moved the TPS control from a top-bar <select> to this
-  // perf-panel numeric input; the suite drives it by id + a "change" event.
-  tpsNumInput.id = "target-tps-input";
-  tpsNumInput.value = String(getTargetTPS());
-  tpsNumInput.addEventListener("change", () => {
-    const v = Number(tpsNumInput!.value);
-    if (Number.isFinite(v) && v >= 1) applyTpsValue(Math.round(v), simBridge, "input");
+  const numInput = document.createElement("input");
+  numInput.type = "number";
+  numInput.min = "1";
+  numInput.step = "1";
+  numInput.className = "perf-num-input";
+  // Stable e2e hook: the first mounted TPS input gets the well-known id.
+  if (tpsNumInputs.length === 0) numInput.id = "target-tps-input";
+  numInput.value = String(getTargetTPS());
+  numInput.addEventListener("change", () => {
+    const v = Number(numInput.value);
+    if (Number.isFinite(v) && v >= 1) applyTpsValue(Math.round(v), getBridge(), "input");
   });
-  row.appendChild(tpsNumInput);
+  tpsNumInputs.push(numInput);
+  row.appendChild(numInput);
 
-  // External TPS changes (e.g. URL boot, future keyboard shortcuts) should
-  // refresh the widget. main.ts wires this through setTpsChangeListener.
-  setTpsChangeListener((v) => syncTpsWidget(v));
+  // Register a change listener once (idempotent: subsequent calls just add
+  // another listener, but syncTpsWidget fans out to all registered inputs).
+  if (tpsNumInputs.length === 1) {
+    setTpsChangeListener((v) => syncTpsWidget(v));
+  }
   syncTpsWidget(getTargetTPS());
   return row;
 }
@@ -725,14 +759,20 @@ function applyTpsValue(v: number, simBridge: SimBridge, _source: "pill" | "input
 }
 
 function syncTpsWidget(v: number): void {
-  if (tpsNumInput) tpsNumInput.value = String(v);
-  for (const b of tpsPillButtons) {
-    const isMatch = Number(b.dataset.tpsValue) === v;
-    b.classList.toggle("is-active", isMatch);
+  for (const inp of tpsNumInputs) inp.value = String(v);
+  for (const buttons of tpsPillButtonSets) {
+    for (const b of buttons) {
+      b.classList.toggle("is-active", Number(b.dataset.tpsValue) === v);
+    }
   }
 }
 
-function buildMaxPopSelector(simBridge: SimBridge): HTMLDivElement {
+/**
+ * Build a max-population selector row (pills + numeric input). Exported so
+ * the General tab can mount a copy that stays in sync with any other instance.
+ * `getBridge` is a getter so interactions always reach the current bridge.
+ */
+export function buildMaxPopSelector(getBridge: () => SimBridge): HTMLDivElement {
   const row = document.createElement("div");
   row.className = "perf-selector-row";
   const lbl = document.createElement("span");
@@ -742,30 +782,32 @@ function buildMaxPopSelector(simBridge: SimBridge): HTMLDivElement {
 
   const pillGroup = document.createElement("div");
   pillGroup.className = "perf-pill-group";
-  maxPopPillButtons = [];
+  const pills: HTMLButtonElement[] = [];
   for (const v of MAX_POP_PILLS) {
     const b = document.createElement("button");
     b.type = "button";
     b.className = "perf-pill";
     b.textContent = String(v);
     b.dataset.maxPopValue = String(v);
-    b.addEventListener("click", () => applyMaxPopValue(v, simBridge));
+    b.addEventListener("click", () => applyMaxPopValue(v, getBridge()));
     pillGroup.appendChild(b);
-    maxPopPillButtons.push(b);
+    pills.push(b);
   }
+  maxPopPillButtonSets.push(pills);
   row.appendChild(pillGroup);
 
-  maxPopNumInput = document.createElement("input");
-  maxPopNumInput.type = "number";
-  maxPopNumInput.min = "1";
-  maxPopNumInput.step = "100";
-  maxPopNumInput.className = "perf-num-input";
-  maxPopNumInput.value = String(getSettings().maxPopulation);
-  maxPopNumInput.addEventListener("change", () => {
-    const v = Number(maxPopNumInput!.value);
-    if (Number.isFinite(v) && v >= 1) applyMaxPopValue(Math.round(v), simBridge);
+  const numInput = document.createElement("input");
+  numInput.type = "number";
+  numInput.min = "1";
+  numInput.step = "100";
+  numInput.className = "perf-num-input";
+  numInput.value = String(getSettings().maxPopulation);
+  numInput.addEventListener("change", () => {
+    const v = Number(numInput.value);
+    if (Number.isFinite(v) && v >= 1) applyMaxPopValue(Math.round(v), getBridge());
   });
-  row.appendChild(maxPopNumInput);
+  maxPopNumInputs.push(numInput);
+  row.appendChild(numInput);
 
   syncMaxPopWidget(getSettings().maxPopulation);
   return row;
@@ -779,10 +821,11 @@ function applyMaxPopValue(v: number, simBridge: SimBridge): void {
 }
 
 function syncMaxPopWidget(v: number): void {
-  if (maxPopNumInput) maxPopNumInput.value = String(v);
-  for (const b of maxPopPillButtons) {
-    const isMatch = Number(b.dataset.maxPopValue) === v;
-    b.classList.toggle("is-active", isMatch);
+  for (const inp of maxPopNumInputs) inp.value = String(v);
+  for (const buttons of maxPopPillButtonSets) {
+    for (const b of buttons) {
+      b.classList.toggle("is-active", Number(b.dataset.maxPopValue) === v);
+    }
   }
 }
 
@@ -899,13 +942,16 @@ function colorU32ToCss(packed: number): string {
 }
 
 function redrawPopChart(): void {
-  // Species mode: one line per live species, fed by the polled species table.
-  if (speciesMode) {
-    redrawSpeciesChart();
-    return;
+  for (const canvas of popCanvases) {
+    if (speciesMode) {
+      redrawSpeciesChartOnCanvas(canvas);
+    } else {
+      redrawPopChartOnCanvas(canvas);
+    }
   }
-  const canvas = popCanvas;
-  if (!canvas) return;
+}
+
+function redrawPopChartOnCanvas(canvas: HTMLCanvasElement): void {
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -977,9 +1023,7 @@ function redrawPopChart(): void {
 // appearing/disappearing: each sample is a sparse `id → count` map, so a line
 // only spans the ticks where its species was alive (a missing id breaks the
 // line, leaving a gap rather than a drop to zero).
-function redrawSpeciesChart(): void {
-  const canvas = popCanvas;
-  if (!canvas) return;
+function redrawSpeciesChartOnCanvas(canvas: HTMLCanvasElement): void {
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
   const dpr = Math.min(window.devicePixelRatio || 1, 2);

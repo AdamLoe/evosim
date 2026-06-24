@@ -350,7 +350,7 @@ export const DEFAULTS: Settings = {
   profilerWindowMs: 10_000,
   railOpen: false,
   theme: "midnight",
-  railW: 512,
+  railW: 372,
   profilerH: 240,
   upkeepMultiplier: DEFAULT_LIVE_SLIDER_VALUES.upkeep_multiplier,
   moveCostMultiplier: DEFAULT_LIVE_SLIDER_VALUES.move_cost_multiplier,

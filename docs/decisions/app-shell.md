@@ -57,20 +57,24 @@ Cross-subsystem decisions that also bind the shell live in
   `app/web/src/main.ts → spawnSimWorker`.
 - **Revisit when**: a feature needs the world to resize after boot.
 
-### Settings panel uses a shared navigable surface; the top bar stays compact
+### General tab is the demo cockpit; Settings rail is the full tuning surface
 
-- **Decision**: The Settings rail owns the left sub-nav categories. The top
-  bar keeps play/pause, Restart, the hamburger rail toggle, and transient
-  worker status / Retry controls. Auto-restart, Export / Import, and autosave
-  status live in the General tab.
-- **Why**: a shared settings surface is easier to scan than separate top-bar
-  openers, and the top bar stays focused on run control and failure recovery.
-- **Tradeoffs**: save and auto-run controls are deeper in the rail, but the
-  rail remains the app configuration surface.
+- **Decision**: General owns TPS, max population, the population graph, Restart,
+  auto-restart, Export / Import, and autosave status. Settings owns the staged
+  sim sliders and the full category sub-nav. The top bar keeps only play/pause,
+  Restart, and the hamburger. Profiler owns the FPS/TPS performance chart, CPU
+  monitor, profile trees, and telemetry export.
+- **Why**: a fresh viewer reaches all demo-critical controls in one place
+  (General) without opening Settings or Profiler. The top bar stays compact.
+- **Tradeoffs**: TPS and max-population share sample data and sync state via
+  exported builders from `perf-panel.ts`; one sample ring, multiple widget
+  instances that all stay in sync via the same arrays.
 - **Applies to**: `architecture/app-shell.md`.
 - **Code anchors**: `app/web/src/main.ts → installTopBarButtons`,
   `installWorkerStatusUi`, `installMenuTab`; `app/web/index.html → #rail-tabs`;
-  `app/web/src/rail/index.ts → RailTab`.
+  `app/web/src/rail/index.ts → RailTab`;
+  `app/web/src/widgets/perf-panel.ts → buildTpsSelector`,
+  `buildMaxPopSelector`, `buildPopChart`.
 
 ### Escape toggles Settings before inspector cleanup
 

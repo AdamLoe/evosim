@@ -25,9 +25,13 @@ splits staged sim controls from live-apply UI controls.
 - Cross-widget profiler gating: `showProfiler` is the source of truth for
   profiler recording state. Selecting the top-level Profiler tab enables
   recording and polling; leaving the tab disables both.
-- The General tab: `main.ts → installMenuTab` mounts auto-restart, world
-  Export / Import, and the autosave status line. Named Save / Resume / Fork
-  controls are not exposed in the General tab.
+- The General tab (demo cockpit): `main.ts → installMenuTab` mounts the TPS
+  selector, max-population selector, population graph, Restart, auto-restart
+  toggle, Export / Import, and the autosave status line. These controls share
+  sample state and sync logic with the Profiler pane via exports from
+  `widgets/perf-panel.ts → buildTpsSelector`, `buildMaxPopSelector`,
+  `buildPopChart`. Named Save / Resume / Fork controls are not exposed in the
+  General tab.
 - The app badge: `main.ts → installAppBadge` mounts `evosim v<APP_VERSION>` as
   a small sharp rectangle in the bottom-left corner of `#canvas-wrap`.
 - Theme application: `app/web/src/themes.ts → applyTheme` writes the active
@@ -57,10 +61,10 @@ splits staged sim controls from live-apply UI controls.
 | `#rail-tabs` | General, Inspector, Settings, and Profiler rail tabs. | `rail/index.ts`. |
 | `#rail-settings` | Settings panel with the left sub-nav and category panes. | `widgets/devpanel.ts → installDevPanel`. |
 | `#settings-<cat>-pane` | Category pane mounted by `categoryBox(id)`. | `widgets/devpanel.ts → categoryBox`. |
-| `#rail-profiler` → `#settings-profiler-pane` | Profiler panel: status line, charts, telemetry export, CPU monitor, profile trees. | `widgets/perf-panel.ts → installProfilerPanel`. |
+| `#rail-profiler` → `#settings-profiler-pane` | Profiler panel: FPS/TPS chart, status line, telemetry export, CPU monitor, profile trees. Population chart and TPS/max-pop selectors live in General. | `widgets/perf-panel.ts → installProfilerPanel`. |
 | `#settings-nn-pane` | NN topology and mutation-bucket editors. | `rail/nn-tab.ts → installNnTab`. |
 | `#rail-inspector` | Creature inspector body and empty state. | `rail/inspector.ts`. |
-| `#rail-general` → `#menu-inner` | General tab body for auto-restart, Export / Import, and autosave status. | `main.ts → installMenuTab`. |
+| `#rail-general` → `#menu-inner` | General tab body: TPS selector, max-population selector, population graph, Restart, auto-restart, Export / Import, autosave status. | `main.ts → installMenuTab`. |
 | `#toast-host` | Transient notice slot. | `toast.ts → showToast`. |
 
 ## Tab routing rules
@@ -99,9 +103,10 @@ The Settings panel separates staged sim controls from live-apply UI controls.
   symbols. The no-grass-zone toggle is in this group: it changes world
   construction capacity/zone bytes and therefore requires a restarted world.
 - `currentSliderState()` includes staged widget values plus the live controls
-  that sit outside the staged Settings widgets, such as the perf-panel
-  `max_population` selector, the legacy grass wave sliders, and the mutation
-  buckets until the NN tab registers its own readers.
+  that sit outside the staged Settings widgets, such as the General-tab
+  `max_population` selector (via `perf-panel.ts` shared state), the legacy
+  grass wave sliders, and the mutation buckets until the NN tab registers its
+  own readers.
 - Paused worlds repaint every RAF frame from the latest snapshot while
   `seq === lastPaintedSeq` and a slot layout is ready. This keeps the canvas
   filled across pause, rail toggles, and camera pan/zoom — avoiding blank-canvas
@@ -110,6 +115,15 @@ The Settings panel separates staged sim controls from live-apply UI controls.
 The Settings sub-nav is wired from the category buttons in
 `app/web/index.html`; the corresponding pane visibility is managed by
 `installDevPanel`.
+
+## Rail geometry
+
+The right rail is a drag-resizable column. The fresh-user default width is
+372 px (persisted in `settings.ts → DEFAULTS.railW`; clamped `[280, 720]` by
+the drag handle in `main.ts → installResizeHandles`). Existing stored widths
+are not reset — only sessions without a persisted `railW` key start at 372 px.
+The CSS `--rail-w` variable drives the grid column and is set from the stored
+value at boot by `applyLayoutSizes`.
 
 ## Theming
 
