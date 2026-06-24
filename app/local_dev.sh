@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 WEB_DIR="$ROOT/web"
+PORT=47821
 
 run() {
   printf '\n==> %s\n' "$*"
@@ -14,6 +15,46 @@ require_cmd() {
     printf 'missing required command: %s\n' "$1" >&2
     exit 127
   fi
+}
+
+# Kill any process currently listening on PORT so `pnpm preview --strictPort`
+# does not fail when a previous run was left behind.
+free_port() {
+  local port="$1"
+  local pids
+
+  if command -v lsof >/dev/null 2>&1; then
+    pids="$(lsof -ti "tcp:${port}" -sTCP:LISTEN 2>/dev/null)" || true
+  elif command -v fuser >/dev/null 2>&1; then
+    pids="$(fuser "${port}/tcp" 2>/dev/null | tr -s ' ' '\n' | grep -E '^[0-9]+$')" || true
+  else
+    pids=""
+  fi
+
+  [[ -z "$pids" ]] && return 0
+
+  printf '\n==> port %s held by PID(s) %s — sending SIGTERM\n' "$port" "$pids"
+  # shellcheck disable=SC2086
+  kill -TERM $pids 2>/dev/null || true
+
+  # Poll up to 3 s for the port to free; escalate to SIGKILL if needed.
+  local i
+  for i in 1 2 3; do
+    sleep 1
+    if command -v lsof >/dev/null 2>&1; then
+      pids="$(lsof -ti "tcp:${port}" -sTCP:LISTEN 2>/dev/null)" || true
+    elif command -v fuser >/dev/null 2>&1; then
+      pids="$(fuser "${port}/tcp" 2>/dev/null | tr -s ' ' '\n' | grep -E '^[0-9]+$')" || true
+    else
+      pids=""
+    fi
+    [[ -z "$pids" ]] && return 0
+  done
+
+  printf '==> port %s still held — escalating to SIGKILL\n' "$port"
+  # shellcheck disable=SC2086
+  kill -KILL $pids 2>/dev/null || true
+  sleep 1
 }
 
 require_cmd cargo
@@ -65,5 +106,6 @@ fi
 cd "$WEB_DIR"
 run pnpm build
 
-printf '\n==> serving built app at http://localhost:47821/ (Ctrl-C to stop)\n'
+free_port "$PORT"
+printf '\n==> serving built app at http://localhost:%s/ (Ctrl-C to stop)\n' "$PORT"
 exec pnpm preview --host 0.0.0.0
