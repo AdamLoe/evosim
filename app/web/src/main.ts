@@ -779,7 +779,6 @@ async function main(): Promise<void> {
       lastPaintedSeq = seq;
       Atomics.store(controlI32, CTRL_CONSUMED_SEQ, seq);
       lastPaintedAtMs = now;
-
       setPanelStatus({
         seed: cachedSeed,
         tick: header.tick,

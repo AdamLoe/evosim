@@ -115,15 +115,39 @@ test("simulated unpaused worker freeze is detected and recovered", async ({ page
   await setTargetTps(page, 1000);
   await page.waitForTimeout(300);
 
+  // Install a freeze-after-boot fault on the next worker and trigger a restart.
+  // The spawned frozen worker (W2) boots (tick=1), posts boot_ready, then parks
+  // inside Atomics.wait on its own fresh SAB — it never enters simLoop.  From
+  // the main thread's perspective W2 looks alive until the stall watchdog fires
+  // after WORKER_STALL_TIMEOUT_MS (~3.5 s).  The watchdog spawns a clean
+  // replacement (W3) whose simLoop advances tick beyond 1.
+  //
+  // The recovery cycle can be faster than the Playwright CDP poll interval
+  // (~100 ms): the watchdog fires, W3 boots, and W3 is already "running" before
+  // the next poll.  A two-step "not running" → "running" sequence would miss
+  // the transient entirely in that case.
+  //
+  // Instead, poll a single combined condition: workerState="running" AND
+  // tick > 1.  W2 is frozen at tick=1, so tick > 1 is only true once W3 is
+  // running its simLoop.  Timeout covers the full cycle:
+  //   W2 boot (~0.5 s) + WORKER_STALL_TIMEOUT_MS (3.5 s) + W3 boot (~0.5 s) + margin.
   await simulateWorkerFreeze(page);
 
   await expect
-    .poll(async () => workerState(page), { timeout: 8_000 })
-    .toMatch(/^(stalled|restarting)$/);
-  await expect
-    .poll(async () => workerState(page), { timeout: 15_000 })
-    .toBe("running");
+    .poll(
+      async () => {
+        const state = await workerState(page);
+        if (state !== "running") return false;
+        const tick = await readTick(page);
+        // W2 is frozen at tick 1; tick > 1 confirms the replacement worker is live.
+        return tick > 1;
+      },
+      { timeout: 15_000 },
+    )
+    .toBe(true);
 
+  // The replacement worker is live and already ticking.  Verify simLoop continues
+  // to advance (not just a single one-shot tick from boot).
   const recoveredTick = await readTick(page);
   await expect
     .poll(async () => readTick(page), { timeout: 5_000 })
