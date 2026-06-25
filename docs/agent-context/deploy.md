@@ -11,7 +11,8 @@ Production is Cloudflare Pages, auto-deploying from the `main` branch on every
 push. Cloudflare runs `bash app/cf-build.sh` and serves the static bundle.
 The script compiles everything from source: it bootstraps a nightly Rust
 toolchain, builds the threaded WASM via wasm-pack, asserts the
-threaded-bundle invariants, then runs `pnpm build` in `app/web/`. Nothing
+threaded-bundle invariants, provisions pnpm via `corepack` (CF's image ships
+Node 20 but not pnpm), then runs `pnpm build` in `app/web/`. Nothing
 prebuilt is committed — `app/web/wasm/` and `app/web/dist/` are gitignored.
 
 `app/web/public/_headers` is copied to `dist/_headers` by Vite so Cloudflare

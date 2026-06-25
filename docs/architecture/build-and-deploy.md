@@ -185,7 +185,8 @@ on every push to the production branch and builds everything from source:
 3. Installs wasm-pack (if absent).
 4. Runs the threaded wasm build: `rustup run nightly wasm-pack build crates/evosim --target web --out-dir ../../web/wasm --release --features threads` (from `app/`).
 5. Asserts the threaded-bundle invariants (`initThreadPool` ×2, `shared:true` ×1) — fails hard if not met.
-6. Runs `pnpm install --frozen-lockfile && pnpm build` in `app/web/`.
+6. Provisions pnpm via `corepack` (CF's image ships Node 20 but not pnpm; a stale asdf shim shadows the missing binary — `corepack prepare pnpm@10.33.4 --activate` writes the real shim after putting Node's own bin dir first on PATH; skipped when pnpm is already present, as on the dev box).
+7. Runs `pnpm install --frozen-lockfile && pnpm build` in `app/web/`.
 
 **Cloudflare Pages dashboard settings:**
 
