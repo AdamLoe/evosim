@@ -78,14 +78,20 @@ echo "==> Threaded-bundle checks passed (initThreadPool: $INIT_COUNT, shared:tru
 
 # ── pnpm (Cloudflare's image has Node but no pnpm; a stale asdf shim shadows it) ──
 # corepack ships with Node 20 and is the official provisioning mechanism.
-# Put Node's own bin dir AHEAD of the stale asdf shim so the corepack-written
-# pnpm shim wins. Guard makes this a no-op on the dev box (pnpm already present).
+# corepack writes the pnpm shim into Node's REAL install bin dir; we must put that
+# dir ahead of asdf's stale `pnpm` shim so the corepack shim wins. Guard makes this
+# a no-op on the dev box (pnpm already present).
 export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 if ! pnpm --version >/dev/null 2>&1; then
   echo "==> Provisioning pnpm via corepack..."
+  # Cloudflare manages Node via asdf, so `command -v node` is the asdf shim
+  # (~/.asdf/shims/node), NOT the real bin. process.execPath resolves the real
+  # node binary (asdf's shim execs into it); its dir is where corepack writes the
+  # pnpm shim. Prepend it BEFORE invoking corepack so asdf's stale `pnpm` shim
+  # (which errors "No preset version installed for command pnpm", exit 126) loses.
+  NODE_BIN_DIR="$(dirname "$(node -e 'process.stdout.write(process.execPath)')")"
+  export PATH="$NODE_BIN_DIR:$PATH"
   corepack enable
-  # Put Node's bin (where corepack writes the pnpm shim) ahead of asdf's stale shim.
-  export PATH="$(dirname "$(command -v node)"):$PATH"
   corepack prepare pnpm@10.33.4 --activate
   pnpm --version
 fi
