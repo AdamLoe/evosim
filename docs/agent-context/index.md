@@ -23,6 +23,7 @@ prompt files.
 | Editing Rust in `app/crates/evosim/src/` or TypeScript in `app/web/` | [`coding-style.md`](coding-style.md) | `rules/coding-style.md` |
 | Running the app, rebuilding wasm, checking the dev server, hard-reloading | [`dev-loop.md`](dev-loop.md) | — (app-specific) |
 | Running or adding tests, triaging test failures | [`testing-how-to.md`](testing-how-to.md) | — (app-specific) |
+| Shipping to production (Cloudflare Pages), deploy settings, previewing the bundle | [`deploy.md`](deploy.md) | — (app-specific) |
 | Git commits, staging, drift gates, things to never do | [`repo-rules.md`](repo-rules.md) | `rules/repo-rules.md` |
 | Updating docs after a code change | [`maintaining-docs.md`](maintaining-docs.md) | `rules/authoring-rules.md` |
 | Orchestrating multi-stream work via sub-agents | [`orchestrating.md`](orchestrating.md) | `rules/orchestrating.md` |

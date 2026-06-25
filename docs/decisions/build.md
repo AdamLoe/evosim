@@ -72,18 +72,25 @@
 - **Code anchors**: `web/vite.config.ts → crossOriginIsolationHeaders`,
   `web/public/_headers`.
 
-### GitHub Pages deploy sets `VITE_BASE` and uses the COI shim
+### Cloudflare Pages — cold compile-all on every deploy; GitHub Pages + COI shim retired
 
-- **Decision**: `.github/workflows/deploy-pages.yml` sets
-  `VITE_BASE=/evosim/` for the Pages build. GitHub Pages cannot serve the
-  `_headers` COOP/COEP file, so `web/index.html` loads the COI
-  service-worker shim before the app module.
-- **Why**: Built asset URLs must resolve under the repository path on
-  Pages, and threaded wasm still needs cross-origin isolation on hosts that
-  cannot set response headers.
+- **Decision**: Production deploy is **Cloudflare Pages** using
+  `app/cf-build.sh`. Every CF deploy compiles Rust → WASM from source
+  (nightly, threaded) and runs `pnpm build`. No prebuilt artifacts are
+  committed; `app/web/wasm/` and `app/web/dist/` remain gitignored.
+  The GitHub Pages deploy workflow and the COI service-worker shim
+  (`coi-serviceworker.min.js`) are retired and deleted.
+  `VITE_BASE` is no longer set at build time; Vite base defaults to `/`.
+- **Why**: Cloudflare Pages serves `_headers` natively so COOP/COEP/CORP
+  + `frame-ancestors` are set at the edge on first load — no service-worker
+  shim, no first-load isolation gap. Cold compile-all keeps the deploy
+  model simple (no committed binaries, no cache to invalidate) at the cost
+  of longer build times, which CF's free tier handles without issue. The
+  `VITE_BASE=/evosim/` sub-path requirement from GH Pages is gone; all
+  asset URLs resolve at `/` on CF.
 - **Applies to**: `architecture/build-and-deploy.md`.
-- **Code anchors**: `.github/workflows/deploy-pages.yml`,
-  `web/vite.config.ts → base`, `web/index.html`.
+- **Code anchors**: `app/cf-build.sh`, `app/web/public/_headers`,
+  `app/web/vite.config.ts → base`.
 
 ### `web/wasm/` artifacts are gitignored and never auto-rebuilt
 

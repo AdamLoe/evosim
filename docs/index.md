@@ -51,6 +51,7 @@ subtree index.
 | Plan status rules or active plans | [`plans/index.md`](plans/index.md) |
 | Canonical owner for a concept | [`_meta/ownership.json`](_meta/ownership.json) |
 | Building / running the app, rebuilding wasm, dev loop | [`agent-context/dev-loop.md`](agent-context/dev-loop.md) |
+| Shipping to production (Cloudflare Pages), deploy settings, previewing the bundle | [`agent-context/deploy.md`](agent-context/deploy.md) |
 | Main-thread UI shell (DOM, right-rail tabs, Settings stage-then-apply) | [`architecture/app-shell.md`](architecture/app-shell.md) |
 
 ## See also

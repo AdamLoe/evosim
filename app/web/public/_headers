@@ -1,9 +1,12 @@
 /*
   Cross-Origin-Opener-Policy: same-origin
   Cross-Origin-Embedder-Policy: require-corp
+  Cross-Origin-Resource-Policy: cross-origin
+  X-Content-Type-Options: nosniff
   Cache-Control: public, max-age=0, must-revalidate
   # 'unsafe-inline' for style-src is required because index.html ships inline styles.
-  Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'
+  # frame-ancestors allows embedding on adamloe.com only (self + all subdomains).
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'self' https://adamloe.com https://www.adamloe.com https://*.adamloe.com
 
 /assets/*
   Cache-Control: public, max-age=31536000, immutable

@@ -10,9 +10,9 @@ const crossOriginIsolationHeaders = {
   "Cross-Origin-Embedder-Policy": "require-corp",
 };
 
-// Base path for built asset URLs. Defaults to "/" for local dev/preview,
-// Cloudflare Pages, Netlify, etc. The GitHub Pages workflow sets
-// VITE_BASE=/evosim/ so assets resolve under https://<user>.github.io/evosim/.
+// Base path for built asset URLs. Defaults to "/" for local dev/preview and
+// Cloudflare Pages (the only supported deploy target). VITE_BASE is unset in
+// normal use; override only when experimenting with sub-path hosting.
 const base = process.env.VITE_BASE ?? "/";
 
 export default defineConfig({

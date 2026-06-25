@@ -17,12 +17,12 @@ code_root: app/
 > `app/web/src/sim/worker.ts`). Every code path written in the docs is relative
 > to `app/`.
 
-## Slot: decisions-domains
+## decisions-domains
 
 `sim`, `render`, `profiler`, `build`, `app-shell`, `perf`, `cross-cutting`.
 (Authoritative list: `ls docs/decisions/`.)
 
-## Slot: drift-gates
+## drift-gates
 
 Per-commit gates (full commands + triage in
 [`agent-context/testing-how-to.md`](../agent-context/testing-how-to.md);
@@ -45,7 +45,7 @@ gate philosophy in [`architecture/testing.md`](../architecture/testing.md)):
   `cd app && rustup run nightly wasm-pack build crates/evosim --target web --out-dir ../../web/wasm --dev --features threads`
   (omitting `--features threads` silently single-threads the sim).
 
-## Slot: change-to-doc
+## change-to-doc
 
 The table to consult before declaring a commit "done." (Lifted from the
 pre-migration `agent-context/maintaining-docs.md`; `web/` paths updated to
@@ -68,7 +68,7 @@ pre-migration `agent-context/maintaining-docs.md`; `web/` paths updated to
 | `app/web/src/perf.ts` API | `architecture/profiler.md` |
 | `app/web/src/widgets/perf-panel.ts` (`TREE_ORDER`, poll cadence) | `architecture/profiler.md`, `decisions/profiler.md` |
 | `app/web/src/widgets/devpanel.ts` (`currentSliderState`, slider list) | `architecture/worker-runtime.md` (boot payload section) |
-| `app/web/vite.config.ts`, `app/web/public/_headers`, `Cargo.toml` profile, `.cargo/config.toml` | `architecture/build-and-deploy.md`, `decisions/build.md` |
+| `app/web/vite.config.ts`, `app/web/public/_headers`, `Cargo.toml` profile, `.cargo/config.toml`, `app/cf-build.sh` | `architecture/build-and-deploy.md`, `decisions/build.md` |
 | `app/web/tests/e2e/*` | `architecture/testing.md`, `agent-context/testing-how-to.md` |
 | Repository directory layout (new dir, renamed dir) | `repository-layout.md` |
 | Anything that introduces a new cross-language constant | `decisions/cross-cutting.md` (add a "constant duplicated in X + Y, asserted at Z" entry) |
@@ -76,10 +76,11 @@ pre-migration `agent-context/maintaining-docs.md`; `web/` paths updated to
 | A new/removed/re-routed decisions domain | `decisions/index.md`, and `_meta/ownership.json` if ownership changes |
 | A new procedural workflow doc, or a changed condition for when one applies | `agent-context/index.md` and `docs/index.md` |
 | A workflow command's behaviour (a global skill) changes | the global skill in `~/.claude/skills/`, and `agent-context/index.md` if routing changes |
+| `docs/_meta/execution.yaml` (execution commands, path checks, services, Q9 layers, pack routes) | `docs/_meta/execution.yaml` |
 | Plan lifecycle or status-metadata shape | `~/.agentdocs/plan-lifecycle.md` + `plan-template.md` (generic, in the kit); `plans/index.md` only if the app's landing/routing changes |
 | A concept gets a new canonical owner, or a new cross-doc ownership conflict appears | `_meta/ownership.json` |
 
-## Slot: drift-verification (high-risk surfaces for fix-docs-drift-all)
+## drift-verification
 
 The doc-fix sweep verifies code-path pointers still resolve and
 spot-checks these high-risk facts against code. evosim's checks are more
@@ -104,7 +105,11 @@ symbol's existence:
   both `panic = "abort"`; `.cargo/config.toml` still has `--shared-memory`,
   `--max-memory`, `--import-memory`, TLS exports; COOP **and** COEP set in
   both `app/web/vite.config.ts` and `app/web/public/_headers`;
-  `worker: { format: "es" }` in the vite config.
+  `worker: { format: "es" }` in the vite config. `app/web/public/_headers`
+  also carries `Cross-Origin-Resource-Policy: cross-origin`,
+  `X-Content-Type-Options: nosniff`, and `frame-ancestors 'self'
+  https://adamloe.com https://www.adamloe.com https://*.adamloe.com` appended
+  to the CSP directive.
 
 ## Notes
 

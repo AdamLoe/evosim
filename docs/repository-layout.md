@@ -14,9 +14,10 @@ before grepping.
 | `app/.cargo/config.toml` | Compile + link flags for `wasm32-unknown-unknown`: atomics, bulk-memory, shared memory, `__heap_base` / TLS exports. Native builds unaffected. |
 | `README.md` | Brief project intro and a pointer into `docs/`. |
 | `app/` | Rust workspace root: `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `clippy.toml`, `.cargo/config.toml`, `crates/`, `web/`. |
+| `app/cf-build.sh` | Cloudflare Pages compile-all deploy script. Bootstraps nightly Rust + wasm-pack on CI, builds the threaded wasm bundle, asserts threaded-bundle invariants, then runs `pnpm install --frozen-lockfile && pnpm build`. Run as `bash app/cf-build.sh` from repo root. |
 | `app/web/` | TypeScript + Vite shell. |
 | `docs/` | This tree. App bindings + ownership data for the global agent-docs kit live in `docs/_meta/` (`manifest.md`, `ownership.json`). |
-| `.github/workflows/` | CI and deploy workflows: Rust fmt/clippy/test gates, docs lint + web build, release threaded wasm build, and GitHub Pages deploy with `VITE_BASE=/evosim/`. |
+| `.github/workflows/` | CI workflow (`ci.yml`): Rust fmt/clippy/test gates, docs lint + web build, release threaded wasm build. GitHub Pages deploy is retired; Cloudflare Pages auto-deploys via `app/cf-build.sh`. |
 
 ## `app/crates/evosim/` — Rust simulation engine
 

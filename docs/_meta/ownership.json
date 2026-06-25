@@ -1,6 +1,28 @@
 {
   "agent_docs_version": "v1",
-  "note": "Ownership map as structured data. LAYER A only: concept -> owner doc (+ allowed referencers). Holds NO code anchors (path -> symbol) -- those are Layer B, they live inside the docs themselves and feed the separate freshness/certification ledger (Layer C). Ownership answers 'who owns this concept'; it does not track code. The prose guidance ('edit the owner; link, don't redefine') is GENERIC and lives in the global authoring-rules. Owner/reference paths are relative to docs/.",
+  "note": "Ownership map as structured data. concepts preserves app concept -> owner doc (+ allowed referencers), with owner/reference paths relative to docs/. owners is the scaffold surface inventory, with paths relative to the repo root. Holds NO code anchors (path -> symbol) -- those are Layer B, they live inside the docs themselves and feed the separate freshness/certification ledger (Layer C). Ownership answers 'who owns this concept'; it does not track code. The prose guidance ('edit the owner; link, don't redefine') is GENERIC and lives in the global authoring-rules.",
+  "owners": [
+    {
+      "surface": "repository-layout",
+      "paths": ["docs/repository-layout.md"],
+      "owns": ["repo path inventory", "top-level directory purposes"]
+    },
+    {
+      "surface": "agent-docs-bindings",
+      "paths": ["docs/_meta/manifest.md", "docs/_meta/ownership.json"],
+      "owns": ["manifest bindings", "concept ownership data", "scaffold surface inventory"]
+    },
+    {
+      "surface": "execution-binding",
+      "paths": ["docs/_meta/execution.yaml"],
+      "owns": ["per-repo execution binding", "operational commands", "path checks", "Q9 layers", "quality pack routes"]
+    },
+    {
+      "surface": "docs-routing",
+      "paths": ["docs/index.md", "docs/overview.md"],
+      "owns": ["top-level docs routing", "one-screen repo overview"]
+    }
+  ],
   "concepts": [
     {
       "id": "simulation-core",
@@ -67,6 +89,12 @@
       "summary": "Which procedural doc an agent should read for a workflow",
       "owner": "agent-context/index.md",
       "references": ["agent-context/*"]
+    },
+    {
+      "id": "execution-binding",
+      "summary": "Per-repo execution binding: operational commands, path-to-check coverage, quality pack routes, services, protected/generated paths, and Q9 environment layers",
+      "owner": "_meta/execution.yaml",
+      "references": ["_meta/manifest.md", "agent-context/testing-how-to.md", "agent-context/dev-loop.md", "architecture/build-and-deploy.md"]
     },
     {
       "id": "species",

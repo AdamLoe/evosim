@@ -10,10 +10,10 @@ A Cargo workspace (`Cargo.toml` at `app/`) with a single member crate
 feature flag that pulls in `rayon` + `wasm-bindgen-rayon`. The web shell
 (Vite + TS) imports the wasm output from `app/web/wasm/`. The dev server pins
 port 47821 and sets COOP/COEP so `SharedArrayBuffer` is available.
-Production deploys static `app/web/dist/`. Hosts that support `_headers`
-read `app/web/public/_headers`; the GitHub Pages workflow builds with
-`VITE_BASE=/evosim/` and relies on the checked-in COI service-worker shim
-for cross-origin isolation.
+Production deploys to **Cloudflare Pages** via `app/cf-build.sh`, which
+compiles everything from source on every deploy (no prebuilt artifacts
+committed). Static output lands in `app/web/dist/`. `app/web/public/_headers`
+provides COOP/COEP + CORP + frame-ancestors + CSP natively at the edge.
 
 ## What it owns
 
@@ -36,7 +36,7 @@ for cross-origin isolation.
 
 - The COOP/COEP headers, set in two places that must stay in sync:
   `app/web/vite.config.ts` for dev + preview, `app/web/public/_headers` for
-  Cloudflare Pages and any other static host.
+  Cloudflare Pages.
 - The `panic = "abort"` setting on both `dev` and `release` profiles —
   required when building `--features threads` for wasm32. Without it,
   the linker silently emits non-shared `WebAssembly.Memory` and
@@ -46,8 +46,14 @@ for cross-origin isolation.
 - The Vite `worker: { format: "es" }` config — `wasm-bindgen-rayon`
   spawns workers via `new URL('./workerHelpers.js', import.meta.url)`;
   Vite must bundle them as ES modules, not the default IIFE.
-- The CSP header in `app/web/public/_headers` (allows `'wasm-unsafe-eval'`
-  for wasm instantiation).
+- The CSP + security headers in `app/web/public/_headers`: allows
+  `'wasm-unsafe-eval'` for wasm instantiation, `frame-ancestors` limiting
+  embedding to `adamloe.com`, `Cross-Origin-Resource-Policy: cross-origin`,
+  and `X-Content-Type-Options: nosniff`.
+- The Cloudflare Pages compile-all deploy script (`app/cf-build.sh`):
+  bootstraps nightly Rust + wasm-pack on CI, builds the threaded wasm
+  bundle, asserts the threaded-bundle invariants, then runs
+  `pnpm install --frozen-lockfile && pnpm build`.
 
 ## What it does NOT own
 
@@ -169,16 +175,39 @@ for wasm instantiation and the standard caching rules for
 - `app/web/wasm/` is gitignored and **not** auto-rebuilt by `pnpm dev` —
   every Rust change requires manual `wasm-pack build ...`.
 
-## Production deploy
+## Production deploy (Cloudflare Pages)
 
-`pnpm build` in `app/web/` runs `tsc --noEmit && vite build` and emits
-`app/web/dist/`. The GitHub Pages workflow sets `VITE_BASE=/evosim/` before
-that build and uploads `app/web/dist/`; Cloudflare Pages and other hosts that
-respect `_headers` read `app/web/public/_headers` directly.
+`app/cf-build.sh` is the single deploy entry point. Cloudflare Pages runs it
+on every push to the production branch and builds everything from source:
+
+1. Bootstraps rustup + nightly toolchain (if absent on the CI image).
+2. Ensures `wasm32-unknown-unknown` target and `rust-src` component for nightly.
+3. Installs wasm-pack (if absent).
+4. Runs the threaded wasm build: `rustup run nightly wasm-pack build crates/evosim --target web --out-dir ../../web/wasm --release --features threads` (from `app/`).
+5. Asserts the threaded-bundle invariants (`initThreadPool` ×2, `shared:true` ×1) — fails hard if not met.
+6. Runs `pnpm install --frozen-lockfile && pnpm build` in `app/web/`.
+
+**Cloudflare Pages dashboard settings:**
+
+| Field | Value |
+|---|---|
+| Root directory | *(leave blank — repo root)* |
+| Build command | `bash app/cf-build.sh` |
+| Build output directory | `app/web/dist` |
+
+`app/web/public/_headers` is copied to `dist/_headers` by Vite so Cloudflare
+serves the COOP/COEP/CORP + frame-ancestors + CSP headers natively at the edge.
+No `VITE_BASE` is set — Vite base defaults to `/`.
 
 The release wasm goes through `wasm-opt -O4 --enable-bulk-memory
 --enable-mutable-globals` via
 `package.metadata.wasm-pack.profile.release` in `crates/evosim/Cargo.toml`.
+
+**Preview the production bundle locally:**
+
+```bash
+bash app/cf-build.sh && ( cd app/web && pnpm preview )
+```
 
 ## CI
 
@@ -192,6 +221,10 @@ The release wasm goes through `wasm-opt -O4 --enable-bulk-memory
 - `rustup run nightly wasm-pack build crates/evosim --target web --out-dir ../../web/wasm --release --features threads`
 - (Web job, depends on Rust job) `pnpm docs:lint` + `pnpm build`
 
+The GitHub Pages deploy workflow has been **deleted** — GitHub Pages is retired.
+Cloudflare Pages auto-deploys from the production branch via its own build
+trigger using `app/cf-build.sh`.
+
 ## Code anchors
 
 - `Cargo.toml` (workspace, at `app/`) → `[profile.dev] panic = "abort"`,
@@ -203,9 +236,9 @@ The release wasm goes through `wasm-opt -O4 --enable-bulk-memory
 - `rust-toolchain.toml` → pinned `1.95.0` stable.
 - `web/vite.config.ts` → `crossOriginIsolationHeaders`, port `47821`,
   `worker: { format: "es" }`.
-- `web/public/_headers` → COOP/COEP, CSP, caching rules.
+- `web/public/_headers` → COOP/COEP, CORP, CSP + frame-ancestors, caching rules.
+- `app/cf-build.sh` → Cloudflare Pages compile-all deploy script.
 - `.github/workflows/ci.yml` → gate matrix.
-- `.github/workflows/deploy-pages.yml` → GitHub Pages `VITE_BASE` deploy.
 
 ## Update when
 
