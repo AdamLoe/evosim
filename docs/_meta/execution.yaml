@@ -1,0 +1,199 @@
+# execution.yaml - per-repo execution binding for evosim.
+#
+# Human-authored operational map for agent-docs execution workers. Commands run
+# from the repository root unless the command itself changes directory.
+
+schema_version: 1
+
+language:
+  - rust
+  - typescript
+  - webassembly
+
+roots:
+  repo: .
+  docs: docs/
+  app: app/
+  rust_workspace: app/
+  rust_crate: app/crates/evosim/
+  web: app/web/
+  web_source: app/web/src/
+
+commands:
+  format: "cd app && cargo fmt --all --check"
+  lint: >-
+    cd app && cargo clippy --all-targets -- -D warnings &&
+    cargo clippy --all-targets --features threads -- -D warnings &&
+    cd web && pnpm docs:lint
+  typecheck: "cd app/web && pnpm typecheck"
+  targeted_test: "cd app && cargo test --lib"
+  full_test: >-
+    cd app &&
+    cargo fmt --all --check &&
+    cargo test --lib &&
+    cargo test --lib --features threads &&
+    cargo clippy --all-targets -- -D warnings &&
+    cargo clippy --all-targets --features threads -- -D warnings &&
+    cargo bench --no-run &&
+    rustup run nightly wasm-pack build crates/evosim --target web --out-dir ../../web/wasm --dev --features threads &&
+    cd web &&
+    pnpm docs:lint &&
+    pnpm typecheck &&
+    pnpm build &&
+    pnpm test:e2e
+  build: >-
+    cd app &&
+    rustup run nightly wasm-pack build crates/evosim --target web --out-dir ../../web/wasm --dev --features threads &&
+    cd web &&
+    pnpm build
+  smoke: "cd app/web && pnpm test:e2e -- sim-bridge.spec.ts"
+
+path_to_check:
+  - path: docs/_meta/
+    check: "bash ~/.agentdocs/verify-agent-docs.sh --scaffold . && cd app/web && pnpm docs:lint"
+  - path: docs/
+    check: "cd app/web && pnpm docs:lint"
+  - path: scripts/docs-lint.mjs
+    check: "cd app/web && pnpm docs:lint"
+  - path: app/crates/evosim/src/
+    check: >-
+      cd app &&
+      cargo fmt --all --check &&
+      cargo test --lib &&
+      cargo test --lib --features threads &&
+      cargo clippy --all-targets -- -D warnings &&
+      cargo clippy --all-targets --features threads -- -D warnings
+  - path: app/crates/evosim/benches/
+    check: "cd app && cargo bench --no-run"
+  - path: app/crates/evosim/Cargo.toml
+    check: >-
+      cd app &&
+      cargo test --lib &&
+      cargo test --lib --features threads &&
+      cargo clippy --all-targets -- -D warnings &&
+      cargo clippy --all-targets --features threads -- -D warnings &&
+      cargo bench --no-run
+  - path: app/Cargo.toml
+    check: >-
+      cd app &&
+      cargo fmt --all --check &&
+      cargo test --lib &&
+      cargo test --lib --features threads &&
+      cargo clippy --all-targets -- -D warnings &&
+      cargo clippy --all-targets --features threads -- -D warnings &&
+      cargo bench --no-run &&
+      rustup run nightly wasm-pack build crates/evosim --target web --out-dir ../../web/wasm --dev --features threads
+  - path: app/.cargo/config.toml
+    check: >-
+      cd app &&
+      cargo test --lib --features threads &&
+      rustup run nightly wasm-pack build crates/evosim --target web --out-dir ../../web/wasm --dev --features threads
+  - path: app/web/src/
+    check: "cd app/web && pnpm docs:lint && pnpm typecheck && pnpm build && pnpm test:e2e"
+  - path: app/web/index.html
+    check: "cd app/web && pnpm typecheck && pnpm build && pnpm test:e2e"
+  - path: app/web/tests/e2e/
+    check: "cd app/web && pnpm test:e2e"
+  - path: app/web/package.json
+    check: "cd app/web && pnpm typecheck && pnpm build && pnpm test:e2e"
+  - path: app/web/vite.config.ts
+    check: "cd app/web && pnpm docs:lint && pnpm typecheck && pnpm build && pnpm test:e2e"
+  - path: app/web/public/_headers
+    check: "cd app/web && pnpm docs:lint && pnpm build && pnpm test:e2e"
+  - path: .github/workflows/
+    check: "cd app/web && pnpm docs:lint"
+
+services:
+  - name: vite-dev
+    startup: "cd app/web && pnpm dev --host 0.0.0.0"
+    health: "curl -fsS http://localhost:47821/ -o /dev/null"
+    ports: [47821]
+
+browser:
+  base_url: "http://localhost:47821/"
+  workflow: "cd app/web && pnpm dev --host 0.0.0.0"
+  screenshot: "cd app/web && pnpm exec playwright screenshot http://localhost:47821/ /tmp/evosim-screenshot.png"
+
+database: {}
+
+protected_paths:
+  - app/Cargo.lock
+  - app/web/pnpm-lock.yaml
+  - app/web/src/generated/
+
+forbidden_paths:
+  - .git/
+  - .env
+  - .env.local
+  - app/web/.env
+  - app/web/.env.local
+  - app/web/node_modules/
+
+generated_paths:
+  - app/target/
+  - app/pkg/
+  - app/web/dist/
+  - app/web/wasm/
+  - app/web/.vite/
+  - app/web/test-results/
+  - app/web/playwright-report/
+  - app/web/.playwright/
+  - app/web/src/generated/
+
+scarce_resources:
+  - "Port 47821 is shared by Vite, Playwright webServer, and preview workflows."
+  - "Playwright runs serially against one Chromium-backed dev server."
+  - "Performance and benchmark runs are CPU-throughput sensitive; serialize them with other perf measurements."
+
+pack_routes:
+  - path: app/web/src/
+    pack: frontend
+  - path: app/web/index.html
+    pack: frontend
+  - path: app/web/tests/e2e/
+    pack: frontend
+  - risk: a11y
+    pack: accessibility
+  - path: app/crates/evosim/src/
+    pack: testing-reliability
+  - path: app/web/tests/
+    pack: testing-reliability
+  - path: app/crates/evosim/src/world/
+    pack: performance-concurrency
+  - path: app/crates/evosim/src/grass/
+    pack: performance-concurrency
+  - path: app/web/src/sim/worker.ts
+    pack: performance-concurrency
+  - path: app/web/src/render/
+    pack: performance-concurrency
+  - path: app/.cargo/config.toml
+    pack: deployment-ops
+  - path: app/Cargo.toml
+    pack: deployment-ops
+  - path: app/web/vite.config.ts
+    pack: deployment-ops
+  - path: app/web/public/_headers
+    pack: deployment-ops
+  - path: .github/workflows/
+    pack: deployment-ops
+
+bootstrap:
+  toolchain: "Rust 1.95.0 via app/rust-toolchain.toml; nightly for threaded wasm; Node.js/pnpm for the Vite shell; wasm-pack; Playwright Chromium."
+  install: "cd app && cargo fetch && cd web && pnpm install"
+  notes: "The repo does not pin a Node version. pnpm is the supported package manager. Threaded wasm builds must use rustup run nightly wasm-pack with --features threads."
+
+secrets:
+  required: []
+  provisioning: null
+
+observability:
+  logs: "Browser main console, attached sim-worker DevTools console, Vite output, or /tmp/vite.log when using the background dev-loop command."
+  metrics: "In-app profiler panel, worker stats table, jank summary, and window.__lastProfilerReport."
+
+test_data:
+  fixtures: "Seeded URLs, localStorage-backed settings, and Playwright specs under app/web/tests/e2e/; no checked-in data fixture directory."
+  seed: null
+
+network:
+  external_services: []
+  boundaries: "Runtime and tests target localhost:47821. Dependency/bootstrap commands may reach crates.io, npm/pnpm registries, rustup, wasm-pack dependencies, or Playwright browser downloads only when local caches are missing."
